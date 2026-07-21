@@ -519,6 +519,37 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
   });
 
+  it('renders project sessions with the same card outline as task sessions', async () => {
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', isDefault: false },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        directory: '/tmp/labs',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    const sessionTitle = await screen.findByText('Original Session');
+    const sessionCard = sessionTitle.closest('[class*="cursor-pointer"]');
+    expect(sessionCard).not.toBeNull();
+    expect(sessionCard).toHaveClass('border-gray-100');
+  });
+
   it('groups legacy sessions by the effective project returned by the backend', async () => {
     client.get.mockResolvedValue({
       data: [{
@@ -786,6 +817,76 @@ describe('SessionPage session actions menu', () => {
     });
     const renamedProject = await screen.findByText('Renamed Project');
     expect(renamedProject.closest('[class*="group/project"]')).toHaveTextContent('8');
+  });
+
+  it('shares and unshares a project from the sidebar', async () => {
+    const user = userEvent.setup();
+    const defaultProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
+    let projectRows = [
+      defaultProject,
+      {
+        id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs',
+        canWrite: true, canDelete: true, isShared: false,
+      },
+    ];
+    client.get.mockImplementation(() => Promise.resolve({ data: projectRows }));
+    client.post.mockImplementation((url: string) => {
+      if (url === '/api/project/prj_project2/share-local') {
+        projectRows = projectRows.map((project) => (
+          project.id === 'prj_project2' ? { ...project, isShared: true } : project
+        ));
+      }
+      if (url === '/api/project/prj_project2/unshare-local') {
+        projectRows = projectRows.map((project) => (
+          project.id === 'prj_project2' ? { ...project, isShared: false } : project
+        ));
+      }
+      return Promise.resolve({ data: true });
+    });
+
+    renderSessionPage();
+
+    let projectRow = (await screen.findByText('Labs')).closest('[class*="group/project"]');
+    expect(projectRow).not.toBeNull();
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
+    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'shareAction' }));
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/project/prj_project2/share-local');
+      expect(screen.getByText('sharedTag')).toBeInTheDocument();
+    });
+
+    projectRow = screen.getByText('Labs').closest('[class*="group/project"]');
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
+    await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'unshareAction' }));
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/project/prj_project2/unshare-local');
+      expect(screen.queryByText('sharedTag')).not.toBeInTheDocument();
+    });
+  });
+
+  it('keeps a shared project read-only for non-owners', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        {
+          id: 'prj_shared', worktree: '/tmp/shared', name: 'Shared Labs',
+          canWrite: false, canDelete: false, isShared: true,
+        },
+      ],
+    });
+
+    renderSessionPage();
+
+    const projectRow = (await screen.findByText('Shared Labs')).closest('[class*="group/project"]');
+    expect(projectRow).not.toBeNull();
+    expect(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' })).toBeDisabled();
+    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
+    expect(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.copyPathAction' })).toBeInTheDocument();
+    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'shareAction' })).not.toBeInTheDocument();
+    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'unshareAction' })).not.toBeInTheDocument();
+    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.renameAction' })).not.toBeInTheDocument();
+    expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'projectDialog.deleteAction' })).not.toBeInTheDocument();
   });
 
   it('ignores stale project results after the search changes', async () => {

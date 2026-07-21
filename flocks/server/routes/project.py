@@ -60,10 +60,11 @@ class FolderBrowserResponse(BaseModel):
 
 async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List[ProjectInfo]:
     owner_id = user.id
-    projects = await Project.list(
+    projects = await Project.list_visible(
         owner_id=owner_id,
         default_worktree=Project.default_worktree_candidate(),
     )
+    shared_project_ids = Project.shared_project_ids()
     term = search.strip().casefold() if search else None
     stats = Project.get_session_stats_cache(owner_id, term or "")
     if stats is None:
@@ -73,7 +74,11 @@ async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List
         last_activity: dict[str, int] = {}
 
         for session in await Session.list_all_unfiltered():
-            if not SessionPolicy.can_read(session, user):
+            if not SessionPolicy.can_read(
+                session,
+                user,
+                shared_project_ids=shared_project_ids,
+            ):
                 continue
             metadata = session.metadata if isinstance(session.metadata, dict) else {}
             if metadata.get("hideFromSessionManager"):
@@ -249,6 +254,48 @@ async def update_project(project_id: str, payload: ProjectUpdateRequest, request
         return await Project.update(project_id, owner_id=user.id, name=payload.name)
     except ProjectNameConflictError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{project_id}/share-local",
+    response_model=ProjectInfo,
+    summary="Share project locally",
+)
+async def share_project_local(project_id: str, request: Request):
+    """Share a project and all of its sessions as read-only."""
+
+    user = require_user(request)
+    try:
+        return await Project.set_local_shared(
+            project_id,
+            owner_id=user.id,
+            shared=True,
+        )
+    except ProjectDeletionError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post(
+    "/{project_id}/unshare-local",
+    response_model=ProjectInfo,
+    summary="Unshare project locally",
+)
+async def unshare_project_local(project_id: str, request: Request):
+    """Cancel local sharing for a project and all of its sessions."""
+
+    user = require_user(request)
+    try:
+        return await Project.set_local_shared(
+            project_id,
+            owner_id=user.id,
+            shared=False,
+        )
     except ProjectDeletionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

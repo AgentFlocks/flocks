@@ -59,6 +59,10 @@ type ProjectSummary = {
   sessionCount?: number;
   matchedSessionCount?: number;
   lastActivityAt?: number | null;
+  ownerUserID?: string | null;
+  canWrite?: boolean;
+  canDelete?: boolean;
+  isShared?: boolean;
 };
 type ProjectDialogMode = 'create' | 'rename';
 type ProjectSessionGroup = {
@@ -69,6 +73,9 @@ type ProjectSessionGroup = {
   sessionCount: number;
   isDefault: boolean;
   pathStatus: 'available' | 'missing' | 'unreadable';
+  canWrite: boolean;
+  canDelete: boolean;
+  isShared: boolean;
 };
 type FolderEntry = { name: string; path: string };
 type FolderBrowserResponse = {
@@ -218,7 +225,7 @@ function SessionSidebarItemInner({
           : selectMode && checked
           ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
           : nested
-            ? 'border-transparent hover:bg-gray-50 dark:hover:bg-zinc-900'
+            ? 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 dark:border-zinc-800 dark:hover:bg-zinc-900'
             : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
       }`}
     >
@@ -581,6 +588,9 @@ export default function SessionPage() {
           : project.sessionCount ?? projectSessions.length,
         isDefault,
         pathStatus: project.pathStatus ?? 'available',
+        canWrite: project.canWrite ?? true,
+        canDelete: project.canDelete ?? true,
+        isShared: project.isShared ?? false,
       };
     })
       .filter((group) => {
@@ -1160,6 +1170,24 @@ export default function SessionPage() {
     }
   }, [t, toast]);
 
+  const handleShareProject = useCallback(async (
+    project: ProjectSessionGroup,
+    nextShared: boolean,
+  ) => {
+    setOpenProjectMenuId(null);
+    try {
+      const action = nextShared ? 'share-local' : 'unshare-local';
+      await client.post(`/api/project/${project.id}/${action}`);
+      toast.success(t(nextShared ? 'shareEnabled' : 'shareDisabled'));
+      await Promise.all([
+        fetchProjects(undefined, searchQuery),
+        refetchSessions(),
+      ]);
+    } catch (err: any) {
+      toast.error(t('shareUpdateFailed'), err.message);
+    }
+  }, [fetchProjects, refetchSessions, searchQuery, t, toast]);
+
   const handleOpenDeleteProject = useCallback((project: ProjectSessionGroup) => {
     setOpenProjectMenuId(null);
     setProjectPendingDelete(project);
@@ -1574,6 +1602,11 @@ export default function SessionPage() {
                         >
                           <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
                           <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                          {group.isShared && (
+                            <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
+                              {t('sharedTag')}
+                            </span>
+                          )}
                           {group.pathStatus !== 'available' && (
                             <AlertTriangle
                               className="h-3.5 w-3.5 shrink-0 text-amber-500"
@@ -1587,7 +1620,7 @@ export default function SessionPage() {
                             event.stopPropagation();
                             handleCreateSessionInProject(group.id);
                           }}
-                          disabled={creating || group.pathStatus !== 'available'}
+                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
                           className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                           title={t('createSessionInProject', { project: group.label })}
                           aria-label={t('createSessionInProject', { project: group.label })}
@@ -1628,7 +1661,18 @@ export default function SessionPage() {
                             <Copy className="h-3.5 w-3.5" />
                             {t('projectDialog.copyPathAction')}
                           </button>
-                          {!isDefaultProject && (
+                          {!isDefaultProject && group.canWrite && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => void handleShareProject(group, !group.isShared)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <Share2 className="h-3.5 w-3.5" />
+                            {t(group.isShared ? 'unshareAction' : 'shareAction')}
+                          </button>
+                          )}
+                          {!isDefaultProject && group.canWrite && (
                           <button
                             type="button"
                             role="menuitem"
@@ -1639,10 +1683,10 @@ export default function SessionPage() {
                             {t('projectDialog.renameAction')}
                           </button>
                           )}
-                          {!isDefaultProject && (
+                          {!isDefaultProject && group.canDelete && (
                           <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
                           )}
-                          {!isDefaultProject && (
+                          {!isDefaultProject && group.canDelete && (
                           <button
                             type="button"
                             role="menuitem"
