@@ -126,6 +126,10 @@ class ProjectInfo(BaseModel):
     session_count: int = Field(0, alias="sessionCount")
     matched_session_count: int = Field(0, alias="matchedSessionCount")
     last_activity_at: Optional[int] = Field(None, alias="lastActivityAt")
+    owner_user_id: Optional[str] = Field(None, alias="ownerUserID")
+    can_write: bool = Field(True, alias="canWrite")
+    can_delete: bool = Field(True, alias="canDelete")
+    is_shared: bool = Field(False, alias="isShared")
 
 
 class ProjectRegistryEntry(BaseModel):
@@ -138,6 +142,8 @@ class ProjectRegistryEntry(BaseModel):
     worktree: str
     created_at: int = Field(alias="createdAt")
     updated_at: int = Field(alias="updatedAt")
+    owner_user_id: Optional[str] = Field(None, alias="ownerUserID")
+    shared_local: bool = Field(False, alias="sharedLocal")
 
 
 class ProjectRegistry(BaseModel):
@@ -375,7 +381,12 @@ class Project:
             raise
 
     @classmethod
-    def _entry_to_info(cls, entry: ProjectRegistryEntry) -> ProjectInfo:
+    def _entry_to_info(
+        cls,
+        entry: ProjectRegistryEntry,
+        *,
+        can_write: bool = True,
+    ) -> ProjectInfo:
         return ProjectInfo(
             id=entry.id,
             worktree=entry.worktree,
@@ -383,6 +394,10 @@ class Project:
             vcs="git" if (Path(entry.worktree) / ".git").exists() else None,
             time=ProjectTime(created=entry.created_at, updated=entry.updated_at),
             pathStatus=cls._path_status(entry.worktree),
+            ownerUserID=entry.owner_user_id,
+            canWrite=can_write,
+            canDelete=can_write,
+            isShared=entry.shared_local,
         )
 
     @classmethod
@@ -396,6 +411,7 @@ class Project:
             time=ProjectTime(created=now, updated=now),
             isDefault=True,
             pathStatus=cls._path_status(registry.default_worktree),
+            canDelete=False,
         )
 
     @classmethod
@@ -457,6 +473,7 @@ class Project:
                     worktree=normalized_worktree,
                     createdAt=now,
                     updatedAt=now,
+                    ownerUserID=owner_id,
                 )
                 registry.projects.append(entry)
                 cls._write_registry(owner_id, registry)
@@ -475,6 +492,89 @@ class Project:
         projects = [cls._entry_to_info(entry) for entry in registry.projects]
         projects.sort(key=lambda item: item.time.updated, reverse=True)
         return [cls._default_to_info(registry), *projects]
+
+    @classmethod
+    def _all_registry_entries(cls) -> List[ProjectRegistryEntry]:
+        """Return valid entries across local user registries."""
+
+        registry_dir = cls._flocks_root() / "projects"
+        if not registry_dir.is_dir():
+            return []
+        entries: List[ProjectRegistryEntry] = []
+        for path in registry_dir.glob("*.json"):
+            registry = cls._read_registry_file(path)
+            if registry is not None:
+                entries.extend(registry.projects)
+        return entries
+
+    @classmethod
+    def shared_project_ids(cls) -> set[str]:
+        """Return IDs of all projects shared to local accounts."""
+
+        return {entry.id for entry in cls._all_registry_entries() if entry.shared_local}
+
+    @classmethod
+    async def list_visible(
+        cls,
+        *,
+        owner_id: str,
+        default_worktree: Optional[str] = None,
+    ) -> List[ProjectInfo]:
+        """List owned projects plus projects shared by other local users."""
+
+        owned = await cls.list(owner_id=owner_id, default_worktree=default_worktree)
+        owned_ids = {project.id for project in owned}
+        shared = [
+            cls._entry_to_info(entry, can_write=False)
+            for entry in cls._all_registry_entries()
+            if entry.shared_local and entry.owner_user_id != owner_id and entry.id not in owned_ids
+        ]
+        shared.sort(key=lambda item: item.time.updated, reverse=True)
+        return [*owned, *shared]
+
+    @classmethod
+    def visible_project_ids(cls, owner_id: str) -> set[str]:
+        """Return project IDs visible to a local user."""
+
+        return cls.registered_project_ids(owner_id) | cls.shared_project_ids()
+
+    @classmethod
+    def is_local_shared(cls, owner_id: Optional[str], project_id: Optional[str]) -> bool:
+        """Return whether an owner's registered project is locally shared."""
+
+        if not owner_id or not project_id or project_id == DEFAULT_PROJECT_ID:
+            return False
+        registry = cls._read_registry(owner_id)
+        return any(entry.id == project_id and entry.shared_local for entry in registry.projects)
+
+    @classmethod
+    async def set_local_shared(
+        cls,
+        project_id: str,
+        *,
+        owner_id: str,
+        shared: bool,
+    ) -> ProjectInfo:
+        """Share or unshare an owned project with all local accounts."""
+
+        if project_id == DEFAULT_PROJECT_ID:
+            raise ProjectDeletionError("The default project cannot be shared")
+        async with cls._lock:
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                entry = next((item for item in registry.projects if item.id == project_id), None)
+                if entry is None:
+                    raise ValueError(f"Project {project_id} not found")
+                entry.owner_user_id = owner_id
+                entry.shared_local = shared
+                entry.updated_at = cls._now_ms()
+                cls._write_registry(owner_id, registry)
+            cls.invalidate_session_stats()
+            log.info(
+                "project.sharing.updated",
+                {"id": project_id, "owner": cls._owner_hash(owner_id), "shared": shared},
+            )
+            return cls._entry_to_info(entry)
 
     @classmethod
     async def get(
@@ -546,7 +646,7 @@ class Project:
 
     @classmethod
     def effective_project_id(cls, owner_id: str, stored_project_id: Optional[str]) -> str:
-        if stored_project_id and stored_project_id in cls.registered_project_ids(owner_id):
+        if stored_project_id and stored_project_id in cls.visible_project_ids(owner_id):
             return stored_project_id
         return DEFAULT_PROJECT_ID
 

@@ -59,6 +59,10 @@ type ProjectSummary = {
   sessionCount?: number;
   matchedSessionCount?: number;
   lastActivityAt?: number | null;
+  ownerUserID?: string | null;
+  canWrite?: boolean;
+  canDelete?: boolean;
+  isShared?: boolean;
 };
 type ProjectDialogMode = 'create' | 'rename';
 type ProjectSessionGroup = {
@@ -69,6 +73,9 @@ type ProjectSessionGroup = {
   sessionCount: number;
   isDefault: boolean;
   pathStatus: 'available' | 'missing' | 'unreadable';
+  canWrite: boolean;
+  canDelete: boolean;
+  isShared: boolean;
 };
 type FolderEntry = { name: string; path: string };
 type FolderBrowserResponse = {
@@ -170,6 +177,7 @@ function getProjectLabel(project?: ProjectSummary, fallbackDirectory?: string): 
 
 interface SessionSidebarItemProps {
   session: Session;
+  nested?: boolean;
   selected: boolean;
   selectMode: boolean;
   checked: boolean;
@@ -189,6 +197,7 @@ interface SessionSidebarItemProps {
 
 function SessionSidebarItemInner({
   session,
+  nested = false,
   selected,
   selectMode,
   checked,
@@ -208,12 +217,16 @@ function SessionSidebarItemInner({
   return (
     <div
       onClick={() => onSelect(session.id)}
-      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+      className={`group relative mb-1 cursor-pointer border px-3 transition-all duration-150 ${
+        nested ? 'ml-7 mr-2 rounded-lg py-2' : 'mx-2 rounded-xl py-2.5'
+      } ${
         !selectMode && selected
-          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          ? 'border-gray-300 bg-gray-100 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
           : selectMode && checked
           ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+          : nested
+            ? 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 dark:border-zinc-800 dark:hover:bg-zinc-900'
+            : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
       }`}
     >
       <div className="flex items-center gap-1.5 min-w-0 pr-7">
@@ -293,6 +306,7 @@ function SessionSidebarItemInner({
 
 const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.session.id === next.session.id &&
+  prev.nested === next.nested &&
   prev.session.title === next.session.title &&
   prev.session.category === next.session.category &&
   prev.session.isShared === next.session.isShared &&
@@ -373,6 +387,8 @@ export default function SessionPage() {
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
+  const folderBrowserRequestIdRef = useRef(0);
+  const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
@@ -574,6 +590,9 @@ export default function SessionPage() {
           : project.sessionCount ?? projectSessions.length,
         isDefault,
         pathStatus: project.pathStatus ?? 'available',
+        canWrite: project.canWrite ?? true,
+        canDelete: project.canDelete ?? true,
+        isShared: project.isShared ?? false,
       };
     })
       .filter((group) => {
@@ -1090,15 +1109,13 @@ export default function SessionPage() {
   }, [renameValue, sessions, t, toast, updateSessionTitle]);
 
   const handleOpenCreateProject = useCallback(() => {
-    const defaultProject = projects.find((project) => project.isDefault)
-      ?? projects.find((project) => project.id === defaultProjectId);
     setProjectDialogMode('create');
     setEditingProjectId(null);
-    setProjectWorktreeValue(defaultProject?.worktree ?? '');
-    setProjectNameValue(defaultProject?.worktree ? getPathBasename(defaultProject.worktree) : '');
+    setProjectWorktreeValue('');
+    setProjectNameValue('');
     setProjectNameManuallyEdited(false);
     setFolderBrowser(null);
-  }, [defaultProjectId, projects]);
+  }, []);
 
   const handleOpenRenameProject = useCallback((project: ProjectSessionGroup) => {
     const persistedName = projects.find((item) => item.id === project.id)?.name?.trim();
@@ -1123,19 +1140,50 @@ export default function SessionPage() {
     setFolderBrowser(null);
   }, [projectSubmitting]);
 
-  const loadFolderBrowser = useCallback(async (path?: string) => {
+  const loadFolderBrowser = useCallback(async (
+    path?: string,
+    options?: { preserveInput?: boolean; silent?: boolean },
+  ) => {
+    const requestId = ++folderBrowserRequestIdRef.current;
     setFolderBrowserLoading(true);
     try {
       const response = await client.get('/api/project/folders', {
         params: { path: path?.trim() || undefined },
       });
-      setFolderBrowser(response.data as FolderBrowserResponse);
+      if (requestId !== folderBrowserRequestIdRef.current) return;
+      const browser = response.data as FolderBrowserResponse;
+      setFolderBrowser(browser);
+      if (options?.preserveInput) {
+        folderBrowserInputPathRef.current = path?.trim() || browser.path;
+      } else {
+        folderBrowserInputPathRef.current = browser.path;
+        setProjectWorktreeValue(browser.path);
+      }
     } catch (err: any) {
-      toast.error(t('projectDialog.folderBrowseFailed'), err.message);
+      if (requestId === folderBrowserRequestIdRef.current && !options?.silent) {
+        toast.error(t('projectDialog.folderBrowseFailed'), err.message);
+      }
     } finally {
-      setFolderBrowserLoading(false);
+      if (requestId === folderBrowserRequestIdRef.current) {
+        setFolderBrowserLoading(false);
+      }
     }
   }, [t, toast]);
+
+  useEffect(() => {
+    if (!folderBrowser) return undefined;
+    const path = projectWorktreeValue.trim();
+    if (
+      !path
+      || path === folderBrowser.path
+      || path === folderBrowserInputPathRef.current
+    ) return undefined;
+
+    const timer = window.setTimeout(() => {
+      void loadFolderBrowser(path, { preserveInput: true, silent: true });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [folderBrowser, loadFolderBrowser, projectWorktreeValue]);
 
   const handleSelectProjectFolder = useCallback((path: string) => {
     setProjectWorktreeValue(path);
@@ -1154,6 +1202,24 @@ export default function SessionPage() {
       toast.error(t('projectDialog.copyPathFailed'), err.message);
     }
   }, [t, toast]);
+
+  const handleShareProject = useCallback(async (
+    project: ProjectSessionGroup,
+    nextShared: boolean,
+  ) => {
+    setOpenProjectMenuId(null);
+    try {
+      const action = nextShared ? 'share-local' : 'unshare-local';
+      await client.post(`/api/project/${project.id}/${action}`);
+      toast.success(t(nextShared ? 'shareEnabled' : 'shareDisabled'));
+      await Promise.all([
+        fetchProjects(undefined, searchQuery),
+        refetchSessions(),
+      ]);
+    } catch (err: any) {
+      toast.error(t('shareUpdateFailed'), err.message);
+    }
+  }, [fetchProjects, refetchSessions, searchQuery, t, toast]);
 
   const handleOpenDeleteProject = useCallback((project: ProjectSessionGroup) => {
     setOpenProjectMenuId(null);
@@ -1190,12 +1256,17 @@ export default function SessionPage() {
 
   const handleSubmitProject = useCallback(async () => {
     if (!projectDialogMode || projectSubmitInFlightRef.current) return;
-    const nextName = projectNameValue.trim();
+    const nextWorktree = projectWorktreeValue.trim() || folderBrowser?.path.trim() || '';
+    const nextName = projectNameValue.trim() || (
+      projectDialogMode === 'create' && !projectNameManuallyEdited && nextWorktree
+        ? getPathBasename(nextWorktree)
+        : ''
+    );
     if (!nextName) {
       toast.error(t('projectDialog.saveFailed'), t('projectDialog.nameEmpty'));
       return;
     }
-    if (projectDialogMode === 'create' && !projectWorktreeValue.trim()) {
+    if (projectDialogMode === 'create' && !nextWorktree) {
       toast.error(t('projectDialog.saveFailed'), t('projectDialog.folderEmpty'));
       return;
     }
@@ -1206,7 +1277,7 @@ export default function SessionPage() {
       if (projectDialogMode === 'create') {
         const response = await client.post('/api/project', {
           name: nextName,
-          worktree: projectWorktreeValue.trim(),
+          worktree: nextWorktree,
         });
         const createdProject = response.data as ProjectSummary;
         setProjects(prev => (
@@ -1241,7 +1312,7 @@ export default function SessionPage() {
       projectSubmitInFlightRef.current = false;
       setProjectSubmitting(false);
     }
-  }, [editingProjectId, fetchProjects, projectDialogMode, projectNameValue, projectWorktreeValue, t, toast]);
+  }, [editingProjectId, fetchProjects, folderBrowser?.path, projectDialogMode, projectNameManuallyEdited, projectNameValue, projectWorktreeValue, t, toast]);
 
   const handleDownloadSession = useCallback(async (sessionId: string, title: string) => {
     setOpenMenuSessionId(null);
@@ -1533,7 +1604,7 @@ export default function SessionPage() {
                   </button>
                 </div>
                 {!projectsSectionCollapsed && (
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                 {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
                   const isDefaultProject = group.isDefault;
@@ -1554,26 +1625,21 @@ export default function SessionPage() {
                       >
                         <button
                           type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleProjectCollapsed(group.id);
-                          }}
-                          className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-                          aria-label={t('toggleProject', { project: group.label })}
-                        >
-                          {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-                        </button>
-                        <button
-                          type="button"
                           onClick={() => {
                             setSelectedProjectId(group.id);
                             toggleProjectCollapsed(group.id);
                           }}
                           className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
                           aria-label={t('selectProject', { project: group.label })}
+                          aria-expanded={!collapsed}
                         >
                           <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
                           <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                          {group.isShared && (
+                            <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
+                              {t('sharedTag')}
+                            </span>
+                          )}
                           {group.pathStatus !== 'available' && (
                             <AlertTriangle
                               className="h-3.5 w-3.5 shrink-0 text-amber-500"
@@ -1587,7 +1653,7 @@ export default function SessionPage() {
                             event.stopPropagation();
                             handleCreateSessionInProject(group.id);
                           }}
-                          disabled={creating || group.pathStatus !== 'available'}
+                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
                           className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
                           title={t('createSessionInProject', { project: group.label })}
                           aria-label={t('createSessionInProject', { project: group.label })}
@@ -1609,7 +1675,7 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
+                        <span className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] tabular-nums text-gray-400 dark:bg-zinc-800 dark:text-zinc-500">
                           {group.sessionCount}
                         </span>
                       </div>
@@ -1628,7 +1694,18 @@ export default function SessionPage() {
                             <Copy className="h-3.5 w-3.5" />
                             {t('projectDialog.copyPathAction')}
                           </button>
-                          {!isDefaultProject && (
+                          {!isDefaultProject && group.canWrite && (
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => void handleShareProject(group, !group.isShared)}
+                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                          >
+                            <Share2 className="h-3.5 w-3.5" />
+                            {t(group.isShared ? 'unshareAction' : 'shareAction')}
+                          </button>
+                          )}
+                          {!isDefaultProject && group.canWrite && (
                           <button
                             type="button"
                             role="menuitem"
@@ -1639,10 +1716,10 @@ export default function SessionPage() {
                             {t('projectDialog.renameAction')}
                           </button>
                           )}
-                          {!isDefaultProject && (
+                          {!isDefaultProject && group.canDelete && (
                           <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
                           )}
-                          {!isDefaultProject && (
+                          {!isDefaultProject && group.canDelete && (
                           <button
                             type="button"
                             role="menuitem"
@@ -1656,12 +1733,13 @@ export default function SessionPage() {
                         </div>
                       )}
                       {!collapsed && (
-                        <div className="mt-1">
+                        <div className="mt-1.5">
                           {group.sessions.length > 0 ? (
                             group.sessions.map((session) => (
                               <SessionSidebarItem
                                 key={session.id}
                                 session={session}
+                                nested
                                 selected={selectedSessionId === session.id}
                                 selectMode={selectMode}
                                 checked={checkedIds.has(session.id)}
@@ -1680,12 +1758,12 @@ export default function SessionPage() {
                               />
                             ))
                           ) : (
-                            <div className="mx-4 py-1 text-xs text-gray-400 dark:text-zinc-600">
+                            <div className="ml-7 mr-2 rounded-lg px-3 py-2 text-xs text-gray-400 dark:text-zinc-600">
                               {t('noProjectSessions')}
                             </div>
                           )}
                           {hasMoreProjectSessions && (
-                            <div className="mx-4 py-1">
+                            <div className="ml-7 mr-2 py-1">
                               <button
                                 type="button"
                                 onClick={() => void loadMoreSessions(group.id)}
@@ -2138,6 +2216,14 @@ export default function SessionPage() {
                 onKeyDown={(event) => {
                   if (event.key === 'Enter') {
                     event.preventDefault();
+                    if (
+                      event.nativeEvent.isComposing
+                      || (projectDialogMode === 'create'
+                        && !projectWorktreeValue.trim()
+                        && !folderBrowser?.path.trim())
+                    ) {
+                      return;
+                    }
                     void handleSubmitProject();
                   }
                   if (event.key === 'Escape') {
@@ -2152,21 +2238,17 @@ export default function SessionPage() {
               />
               {projectDialogMode === 'create' && (
                 <>
-                  <div className="flex items-center justify-between pt-1">
-                    <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
-                      {t('projectDialog.folderLabel')}
-                    </label>
-                    <span className="max-w-64 truncate text-[11px] text-zinc-400 dark:text-zinc-600" title={projects.find((project) => project.isDefault)?.worktree}>
-                      {t('projectDialog.defaultFolder', {
-                        path: projects.find((project) => project.isDefault)?.worktree ?? '',
-                      })}
-                    </span>
-                  </div>
+                  <label className="block pt-1 text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
+                    {t('projectDialog.folderLabel')}
+                  </label>
                   <div className="flex gap-2">
                     <input
                       id="session-project-worktree"
                       value={projectWorktreeValue}
                       onChange={(event) => {
+                        folderBrowserRequestIdRef.current += 1;
+                        folderBrowserInputPathRef.current = null;
+                        setFolderBrowserLoading(false);
                         setProjectWorktreeValue(event.target.value);
                         if (!projectNameManuallyEdited) {
                           setProjectNameValue(getPathBasename(event.target.value));
@@ -2250,7 +2332,7 @@ export default function SessionPage() {
               <button
                 type="button"
                 onClick={handleCloseProjectDialog}
-                disabled={projectSubmitting || (projectDialogMode === 'create' && !projectWorktreeValue.trim())}
+                disabled={projectSubmitting}
                 className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
               >
                 {t('cancel')}
@@ -2332,14 +2414,14 @@ export default function SessionPage() {
         if (!session) return null;
         return (
           <div
-            className="fixed z-50 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
+            className="fixed z-50 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
             style={{ top: menuAnchor.top, right: menuAnchor.right }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <PencilLine className="w-3.5 h-3.5" />
               <span>{t('rename')}</span>
@@ -2347,7 +2429,7 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               disabled={downloadingSessionId === session.id}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
@@ -2355,16 +2437,16 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
               disabled={session.canWrite === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
             >
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
-            <div className="mx-2.5 my-1 border-t border-gray-100 dark:border-zinc-800" />
+            <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
               disabled={session.canDelete === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
+              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>{t('deleteAction')}</span>

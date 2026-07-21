@@ -222,6 +222,7 @@ class SessionListItem(BaseModel):
 def _session_to_response(
     session: SessionModel,
     effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
 ) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
@@ -229,7 +230,7 @@ def _session_to_response(
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_shared(session)
+    is_shared = SessionPolicy.is_shared(session, shared_project_ids)
     from flocks.project.project import Project
 
     if effective_project_id is None:
@@ -271,6 +272,7 @@ def _session_to_response(
 def _session_to_list_item(
     session: SessionModel,
     effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
 ) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
@@ -300,16 +302,17 @@ def _session_to_list_item(
         model_pinned=session.model_pinned,
         canWrite=SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
-        isShared=SessionPolicy.is_shared(session),
+        isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
 
 
 async def _session_to_response_with_goal(
     session: SessionModel,
     effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
 ) -> SessionResponse:
     """Convert SessionModel to SessionResponse and attach persisted goal state."""
-    response = _session_to_response(session, effective_project_id)
+    response = _session_to_response(session, effective_project_id, shared_project_ids)
     try:
         from flocks.session.goal import GoalManager
 
@@ -539,7 +542,8 @@ async def list_sessions(
     list_started_at = time.perf_counter()
     all_sessions = await Session.list_all_unfiltered()
     list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
-    registered_project_ids = Project.registered_project_ids(current_user.id)
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
     
     filtered = []
     effective_project_ids: Dict[str, str] = {}
@@ -548,7 +552,11 @@ async def list_sessions(
     skip_remaining = offset or 0
     
     for session in all_sessions:
-        if not SessionPolicy.can_read(session, current_user):
+        if not SessionPolicy.can_read(
+            session,
+            current_user,
+            shared_project_ids=shared_project_ids,
+        ):
             continue
         if _is_hidden_from_session_manager(session):
             continue
@@ -556,7 +564,7 @@ async def list_sessions(
             continue
         effective_project_id = (
             session.project_id
-            if session.project_id in registered_project_ids
+            if session.project_id in visible_project_ids
             else DEFAULT_PROJECT_ID
         )
         if projectID is not None and effective_project_id != projectID:
@@ -589,7 +597,7 @@ async def list_sessions(
 
     if view == "list":
         response = [
-            _session_to_list_item(s, effective_project_ids[s.id])
+            _session_to_list_item(s, effective_project_ids[s.id], shared_project_ids)
             for s in filtered
         ]
         log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
@@ -607,7 +615,11 @@ async def list_sessions(
         return response
 
     response = [
-        await _session_to_response_with_goal(s, effective_project_ids[s.id])
+        await _session_to_response_with_goal(
+            s,
+            effective_project_ids[s.id],
+            shared_project_ids,
+        )
         for s in filtered
     ]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
