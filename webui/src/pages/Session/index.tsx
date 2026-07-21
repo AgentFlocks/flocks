@@ -170,6 +170,7 @@ function getProjectLabel(project?: ProjectSummary, fallbackDirectory?: string): 
 
 interface SessionSidebarItemProps {
   session: Session;
+  nested?: boolean;
   selected: boolean;
   selectMode: boolean;
   checked: boolean;
@@ -189,6 +190,7 @@ interface SessionSidebarItemProps {
 
 function SessionSidebarItemInner({
   session,
+  nested = false,
   selected,
   selectMode,
   checked,
@@ -208,12 +210,16 @@ function SessionSidebarItemInner({
   return (
     <div
       onClick={() => onSelect(session.id)}
-      className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+      className={`group relative mb-1 cursor-pointer border px-3 transition-all duration-150 ${
+        nested ? 'ml-7 mr-2 rounded-lg py-2' : 'mx-2 rounded-xl py-2.5'
+      } ${
         !selectMode && selected
-          ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          ? 'border-gray-300 bg-gray-100 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
           : selectMode && checked
           ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-          : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+          : nested
+            ? 'border-transparent hover:bg-gray-50 dark:hover:bg-zinc-900'
+            : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
       }`}
     >
       <div className="flex items-center gap-1.5 min-w-0 pr-7">
@@ -293,6 +299,7 @@ function SessionSidebarItemInner({
 
 const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.session.id === next.session.id &&
+  prev.nested === next.nested &&
   prev.session.title === next.session.title &&
   prev.session.category === next.session.category &&
   prev.session.isShared === next.session.isShared &&
@@ -1533,7 +1540,7 @@ export default function SessionPage() {
                   </button>
                 </div>
                 {!projectsSectionCollapsed && (
-                  <div className="space-y-1">
+                  <div className="space-y-2">
                 {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
                   const isDefaultProject = group.isDefault;
@@ -1554,23 +1561,13 @@ export default function SessionPage() {
                       >
                         <button
                           type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            toggleProjectCollapsed(group.id);
-                          }}
-                          className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-                          aria-label={t('toggleProject', { project: group.label })}
-                        >
-                          {collapsed ? <ChevronRight className="h-3.5 w-3.5 shrink-0" /> : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-                        </button>
-                        <button
-                          type="button"
                           onClick={() => {
                             setSelectedProjectId(group.id);
                             toggleProjectCollapsed(group.id);
                           }}
                           className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
                           aria-label={t('selectProject', { project: group.label })}
+                          aria-expanded={!collapsed}
                         >
                           <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
                           <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
@@ -1609,7 +1606,7 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <span className="w-5 shrink-0 text-right text-xs tabular-nums text-gray-400 dark:text-zinc-600">
+                        <span className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] tabular-nums text-gray-400 dark:bg-zinc-800 dark:text-zinc-500">
                           {group.sessionCount}
                         </span>
                       </div>
@@ -1656,12 +1653,13 @@ export default function SessionPage() {
                         </div>
                       )}
                       {!collapsed && (
-                        <div className="mt-1">
+                        <div className="mt-1.5">
                           {group.sessions.length > 0 ? (
                             group.sessions.map((session) => (
                               <SessionSidebarItem
                                 key={session.id}
                                 session={session}
+                                nested
                                 selected={selectedSessionId === session.id}
                                 selectMode={selectMode}
                                 checked={checkedIds.has(session.id)}
@@ -1680,12 +1678,12 @@ export default function SessionPage() {
                               />
                             ))
                           ) : (
-                            <div className="mx-4 py-1 text-xs text-gray-400 dark:text-zinc-600">
+                            <div className="ml-7 mr-2 rounded-lg px-3 py-2 text-xs text-gray-400 dark:text-zinc-600">
                               {t('noProjectSessions')}
                             </div>
                           )}
                           {hasMoreProjectSessions && (
-                            <div className="mx-4 py-1">
+                            <div className="ml-7 mr-2 py-1">
                               <button
                                 type="button"
                                 onClick={() => void loadMoreSessions(group.id)}
@@ -2152,7 +2150,9 @@ export default function SessionPage() {
               />
               {projectDialogMode === 'create' && (
                 <>
-                  <div className="flex items-center justify-between pt-1">
+                  {!folderBrowser && (
+                    <>
+                      <div className="flex items-center justify-between pt-1">
                     <label className="text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
                       {t('projectDialog.folderLabel')}
                     </label>
@@ -2183,9 +2183,11 @@ export default function SessionPage() {
                       className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
                     >
                       {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
-                      {t('projectDialog.chooseFolder')}
-                    </button>
-                  </div>
+                          {t('projectDialog.chooseFolder')}
+                        </button>
+                      </div>
+                    </>
+                  )}
                   {folderBrowser && (
                     <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
                       <div className="flex items-center gap-1 border-b border-zinc-100 bg-zinc-50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">

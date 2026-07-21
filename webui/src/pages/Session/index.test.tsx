@@ -435,7 +435,7 @@ describe('SessionPage session actions menu', () => {
     const firstRender = renderSessionPage();
 
     await screen.findByText('Labs');
-    await user.click(screen.getByRole('button', { name: 'toggleProject' }));
+    await user.click(screen.getByRole('button', { name: 'selectProject' }));
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
 
     firstRender.unmount();
@@ -503,14 +503,17 @@ describe('SessionPage session actions menu', () => {
     renderSessionPage();
 
     await screen.findByText('Labs');
-    const toggle = screen.getByRole('button', { name: 'toggleProject' });
     const projectRow = screen.getByRole('button', { name: 'selectProject' });
+    expect(screen.queryByRole('button', { name: 'toggleProject' })).not.toBeInTheDocument();
+    expect(projectRow).toHaveAttribute('aria-expanded', 'true');
 
-    await user.click(toggle);
+    await user.click(projectRow);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
+    expect(projectRow).toHaveAttribute('aria-expanded', 'false');
 
     await user.click(projectRow);
     expect(screen.getByText('Original Session')).toBeInTheDocument();
+    expect(projectRow).toHaveAttribute('aria-expanded', 'true');
 
     await user.click(projectRow);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
@@ -587,6 +590,35 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
+  it('shows only the browser path while choosing a project folder', async () => {
+    const user = userEvent.setup();
+    const defaultProject = {
+      id: 'default',
+      worktree: '/tmp/project',
+      name: '默认',
+      isDefault: true,
+    };
+    client.get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/project/folders'
+        ? {
+            path: '/tmp/project/child',
+            parent: '/tmp/project',
+            roots: [],
+            entries: [],
+          }
+        : [defaultProject],
+    }));
+
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
+    expect(screen.getByLabelText('projectDialog.folderLabel')).toHaveValue('/tmp/project');
+
+    await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
+
+    expect(await screen.findByText('/tmp/project/child')).toBeInTheDocument();
+    expect(screen.queryByLabelText('projectDialog.folderLabel')).not.toBeInTheDocument();
+  });
   it('shows the backend detail when project creation fails', async () => {
     const user = userEvent.setup();
     client.post.mockRejectedValue({

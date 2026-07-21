@@ -268,7 +268,6 @@
   "toggleTasks": "展开或收起任务",
   "selectTasks": "选择任务",
   "createTaskSession": "新建任务",
-  "toggleProject": "展开或收起项目 {{project}}",
   "selectProject": "选择项目 {{project}}",
   "createSessionInProject": "在项目 {{project}} 中新建会话",
   "projectActions": "项目操作",

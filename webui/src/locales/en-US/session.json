@@ -268,7 +268,6 @@
   "toggleTasks": "Expand or collapse tasks",
   "selectTasks": "Select tasks",
   "createTaskSession": "New task",
-  "toggleProject": "Expand or collapse project {{project}}",
   "selectProject": "Select project {{project}}",
   "createSessionInProject": "New session in project {{project}}",
   "projectActions": "Project actions",
