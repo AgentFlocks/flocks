@@ -30,6 +30,7 @@ from flocks.workflow.store import WorkflowStore
 from flocks.utils.log import Log
 from flocks.workflow.models import Workflow
 from flocks.workflow.requirements import resolve_python_package_index_url
+from flocks.workflow.service_port import collect_service_ports, resolve_service_port
 from flocks.workflow.visibility import is_hidden_workflow
 
 log = Log.create(service="workflow.center")
@@ -67,6 +68,10 @@ class WorkflowNotFoundError(WorkflowCenterError):
 
 class WorkflowNotPublishedError(WorkflowCenterError):
     """Raised when invoking a workflow that is not published."""
+
+
+class WorkflowPortUnavailableError(WorkflowCenterError):
+    """Raised when a requested workflow service port cannot be used."""
 
 
 def _key_to_string(key: Any) -> str:
@@ -188,37 +193,7 @@ def _is_port_available(port: int) -> bool:
             return False
 
 
-def _port_from_service_url(value: Any) -> Optional[int]:
-    if not value:
-        return None
-    try:
-        parsed = urlparse(str(value))
-        return parsed.port
-    except (TypeError, ValueError):
-        return None
-
-
-def _ports_from_service_record(record: Any) -> set[int]:
-    if not isinstance(record, dict):
-        return set()
-
-    ports: set[int] = set()
-    for key in ("hostPort", "port"):
-        try:
-            port = int(record.get(key) or 0)
-        except (TypeError, ValueError):
-            port = 0
-        if 1 <= port <= 65535:
-            ports.add(port)
-
-    for key in ("serviceUrl", "invokeUrl"):
-        port = _port_from_service_url(record.get(key))
-        if port is not None:
-            ports.add(port)
-    return ports
-
-
-async def _reserved_service_ports() -> set[int]:
+async def _reserved_service_ports(*, exclude_workflow_id: Optional[str] = None) -> set[int]:
     ports: set[int] = set()
     for prefix in (_RUNTIME_PREFIX, _API_SERVICE_PREFIX, _REGISTRY_PREFIX):
         try:
@@ -233,7 +208,12 @@ async def _reserved_service_ports() -> set[int]:
             except Exception as exc:
                 log.warning("workflow.port.read_reserved_failed", {"key": _key_to_string(key), "error": str(exc)})
                 continue
-            ports.update(_ports_from_service_record(record))
+            if exclude_workflow_id and isinstance(record, dict):
+                record_workflow_id = str(record.get("workflowId") or "")
+                key_value = _key_to_string(key)
+                if record_workflow_id == exclude_workflow_id or key_value.endswith(f"/{exclude_workflow_id}"):
+                    continue
+            ports.update(collect_service_ports(record))
     return ports
 
 
@@ -250,14 +230,43 @@ def _release_port_reservation(port: Optional[int]) -> None:
         _IN_FLIGHT_PORT_RESERVATIONS.pop(port, None)
 
 
-async def _allocate_port() -> int:
+def _select_publish_port(
+    requested_port: Optional[int],
+    registry: Dict[str, Any],
+    previous_instance: Any,
+) -> tuple[Optional[int], Optional[int]]:
+    """Return the desired port and the port currently bound by this workflow."""
+    current_port = resolve_service_port(previous_instance, keys=("hostPort", "port", "servicePort"))
+    configured_port = resolve_service_port(registry, keys=("servicePort", "port", "hostPort"))
+    desired_port = requested_port if requested_port is not None else configured_port or current_port
+    return desired_port, current_port
+
+
+async def _allocate_port(
+    preferred_port: Optional[int] = None,
+    *,
+    workflow_id: Optional[str] = None,
+    allow_bound_port: Optional[int] = None,
+) -> int:
     start = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_PORT_START", str(_DEFAULT_PORT_START)))
     end = int(os.getenv("FLOCKS_WORKFLOW_SERVICE_PORT_END", str(_DEFAULT_PORT_END)))
     if start > end:
         raise WorkflowCenterError("Invalid workflow service port range")
     async with _PORT_ALLOCATION_LOCK:
-        reserved_ports = await _reserved_service_ports()
+        reserved_ports = await _reserved_service_ports(exclude_workflow_id=workflow_id)
         reserved_ports.update(_reserved_in_flight_ports())
+        if preferred_port is not None:
+            if isinstance(preferred_port, bool) or not 1 <= preferred_port <= 65535:
+                raise WorkflowCenterError("Workflow service port must be between 1 and 65535")
+            bound_by_current_runtime = preferred_port == allow_bound_port
+            if preferred_port in reserved_ports or (
+                not bound_by_current_runtime and not _is_port_available(preferred_port)
+            ):
+                raise WorkflowPortUnavailableError(
+                    f"Workflow service port {preferred_port} is already reserved or in use"
+                )
+            _IN_FLIGHT_PORT_RESERVATIONS[preferred_port] = time.time() + _PORT_RESERVATION_TTL_S
+            return preferred_port
         for port in range(start, end + 1):
             if port not in reserved_ports and _is_port_available(port):
                 _IN_FLIGHT_PORT_RESERVATIONS[port] = time.time() + _PORT_RESERVATION_TTL_S
@@ -332,6 +341,7 @@ async def _scan_workflow_dir(
             "activeReleaseId": existing.get("activeReleaseId"),
             "serviceKey": existing.get("serviceKey"),
             "serviceUrl": existing.get("serviceUrl"),
+            "servicePort": existing.get("servicePort"),
         }
         await WorkflowStore.kv_put(_registry_key(workflow_id), entry)
         by_id[logical_workflow_id] = entry
@@ -812,22 +822,58 @@ async def _stop_runtime_record(
     }
 
 
-async def _stop_existing_runtime_for_publish(workflow_id: str) -> None:
-    """Best-effort cleanup before starting a replacement service."""
+async def _stop_existing_runtime_for_publish(workflow_id: str) -> bool:
+    """Stop the current runtime and report whether an old process existed."""
     runtime = await WorkflowStore.kv_get(_runtime_key(workflow_id))
     if isinstance(runtime, dict) and runtime:
         await _stop_runtime_record(workflow_id, runtime, update_registry=False)
-    else:
+        return True
+    legacy_pid = await WorkflowStore.kv_get(_local_pid_key(workflow_id))
+    if legacy_pid:
         await _stop_local_service(workflow_id)
+        return True
+    return False
 
 
-async def publish_workflow_local(workflow_id: str, *, api_key: Optional[str] = None) -> Dict[str, Any]:
+async def _remove_runtime_records_for_release(workflow_id: str, release_id: str) -> None:
+    """Remove only runtime pointers created by the failed release."""
+    for key in (_runtime_key(workflow_id), _active_release_key(workflow_id)):
+        record = await WorkflowStore.kv_get(key)
+        if isinstance(record, dict) and record.get("releaseId") == release_id:
+            await WorkflowStore.kv_remove(key)
+
+
+async def _restore_registry_after_publish_failure(
+    workflow_id: str,
+    previous_registry: Dict[str, Any],
+    *,
+    previous_runtime_survived: bool,
+) -> None:
+    registry = dict(previous_registry)
+    if not previous_runtime_survived:
+        registry.update(
+            {
+                "publishStatus": "failed",
+                "serviceUrl": None,
+                "updatedAt": _now_ms(),
+            }
+        )
+    await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+
+
+async def publish_workflow_local(
+    workflow_id: str,
+    *,
+    api_key: Optional[str] = None,
+    port: Optional[int] = None,
+) -> Dict[str, Any]:
     """Publish a workflow as a local subprocess using the current Python env.
 
     This is the default driver for development: no Docker, instant startup,
     uses the same .venv as the main server.
     """
     registry = await _read_registry(workflow_id)
+    previous_registry = dict(registry)
     workflow_path = Path(str(registry["workflowPath"]))
     if not workflow_path.exists():
         raise WorkflowCenterError(f"Workflow file not found: {workflow_path}")
@@ -836,22 +882,31 @@ async def publish_workflow_local(workflow_id: str, *, api_key: Optional[str] = N
     Workflow.from_dict(workflow_json)
 
     release_id = uuid.uuid4().hex
-    now_ms = _now_ms()
-    registry["publishStatus"] = "publishing"
-    registry["updatedAt"] = now_ms
-    await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
-
-    release_snapshot_file = await _write_release_snapshot(workflow_id, release_id, workflow_json)
-
-    await _stop_existing_runtime_for_publish(workflow_id)
-
-    host_port = await _allocate_port()
-    service_url = _host_service_url(host_port)
     service_key = workflow_id
     runtime_api_key = api_key or _generate_api_key()
+    previous_runtime = await WorkflowStore.kv_get(_runtime_key(workflow_id)) or await WorkflowStore.kv_get(
+        _active_release_key(workflow_id)
+    )
+    preferred_port, previous_port = _select_publish_port(port, registry, previous_runtime)
 
+    host_port: Optional[int] = None
     proc: asyncio.subprocess.Process | None = None
+    previous_runtime_stopped = False
     try:
+        host_port = await _allocate_port(
+            preferred_port,
+            workflow_id=workflow_id,
+            allow_bound_port=previous_port,
+        )
+        release_snapshot_file = await _write_release_snapshot(workflow_id, release_id, workflow_json)
+        registry["publishStatus"] = "publishing"
+        registry["updatedAt"] = _now_ms()
+        await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+
+        previous_runtime_stopped = await _stop_existing_runtime_for_publish(workflow_id)
+        if not _is_port_available(host_port):
+            raise WorkflowPortUnavailableError(f"Workflow service port {host_port} is still in use after restart")
+        service_url = _host_service_url(host_port)
         env = os.environ.copy()
         env[_SERVICE_API_KEY_ENV] = runtime_api_key
         proc = await asyncio.create_subprocess_exec(
@@ -913,28 +968,34 @@ async def publish_workflow_local(workflow_id: str, *, api_key: Optional[str] = N
         }
         await WorkflowStore.kv_put(_active_release_key(workflow_id), active_record)
         await WorkflowStore.kv_put(_runtime_key(workflow_id), active_record)
-        _release_port_reservation(host_port)
-    except Exception as exc:
-        _release_port_reservation(host_port)
-        if proc is not None:
-            try:
-                _signal_local_process(proc.pid, signal.SIGTERM, proc.pid)
-                await _wait_for_pid_exit(proc.pid, 1.0)
-            except Exception:
-                pass
-        registry["publishStatus"] = "failed"
+
+        registry["publishStatus"] = "active"
+        registry["activeReleaseId"] = release_id
+        registry["serviceKey"] = service_key
+        registry["serviceUrl"] = service_url
+        registry["servicePort"] = host_port
         registry["updatedAt"] = _now_ms()
         await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+    except Exception as exc:
+        if proc is not None:
+            try:
+                await _stop_local_service(workflow_id)
+            except Exception:
+                pass
+            if _pid_is_running(proc.pid):
+                _signal_local_process(proc.pid, signal.SIGTERM, proc.pid)
+                await _wait_for_pid_exit(proc.pid, 1.0)
+            await _remove_runtime_records_for_release(workflow_id, release_id)
+        await _restore_registry_after_publish_failure(
+            workflow_id,
+            previous_registry,
+            previous_runtime_survived=bool(previous_runtime) and not previous_runtime_stopped,
+        )
         if isinstance(exc, WorkflowCenterError):
             raise
         raise WorkflowCenterError(str(exc)) from exc
-
-    registry["publishStatus"] = "active"
-    registry["activeReleaseId"] = release_id
-    registry["serviceKey"] = service_key
-    registry["serviceUrl"] = service_url
-    registry["updatedAt"] = _now_ms()
-    await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+    finally:
+        _release_port_reservation(host_port)
 
     log.info("workflow.local.published", {"id": workflow_id, "port": host_port, "pid": proc.pid})
     return active_record
@@ -967,14 +1028,15 @@ async def publish_workflow(
     image: Optional[str] = None,
     driver: Optional[str] = None,
     api_key: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Publish a workflow using the configured service driver (local or docker)."""
     resolved_driver = (driver or _service_driver()).strip().lower()
     if resolved_driver == "docker":
-        return await _publish_workflow_docker(workflow_id, image=image, api_key=api_key)
+        return await _publish_workflow_docker(workflow_id, image=image, api_key=api_key, port=port)
     if resolved_driver != "local":
         raise WorkflowCenterError(f"Unsupported workflow service driver: {resolved_driver}")
-    return await publish_workflow_local(workflow_id, api_key=api_key)
+    return await publish_workflow_local(workflow_id, api_key=api_key, port=port)
 
 
 async def stop_workflow_service(workflow_id: str) -> Dict[str, Any]:
@@ -995,9 +1057,11 @@ async def _publish_workflow_docker(
     image: Optional[str] = None,
     *,
     api_key: Optional[str] = None,
+    port: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Publish a registered workflow as a Docker service container."""
     registry = await _read_registry(workflow_id)
+    previous_registry = dict(registry)
     workflow_path = Path(str(registry["workflowPath"]))
     if not workflow_path.exists():
         raise WorkflowCenterError(f"Workflow file not found: {workflow_path}")
@@ -1007,10 +1071,6 @@ async def _publish_workflow_docker(
 
     release_id = uuid.uuid4().hex
     now_ms = _now_ms()
-    registry["publishStatus"] = "publishing"
-    registry["updatedAt"] = now_ms
-    await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
-
     release_snapshot_file = await _write_release_snapshot(workflow_id, release_id, workflow_json)
     release_runtime_dir = release_snapshot_file.parent
     has_requirements_snapshot = await _write_requirements_snapshot(release_runtime_dir)
@@ -1025,14 +1085,14 @@ async def _publish_workflow_docker(
         "activatedAt": None,
         "deactivatedAt": None,
     }
-    await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
-
     previous_runtime = await WorkflowStore.kv_get(_runtime_key(workflow_id)) or {}
     previous_active = await WorkflowStore.kv_get(_active_release_key(workflow_id)) or {}
-    previous_container_name = previous_active.get("containerName")
-    previous_release_id = previous_active.get("releaseId")
+    previous_instance = previous_runtime or previous_active
+    previous_container_name = previous_instance.get("containerName")
+    previous_release_id = previous_instance.get("releaseId")
+    preferred_port, previous_port = _select_publish_port(port, registry, previous_instance)
 
-    host_port = await _allocate_port()
+    host_port: Optional[int] = None
     container_name = _workflow_container_name(workflow_id, release_id)
     image_name = image or os.getenv("FLOCKS_WORKFLOW_SERVICE_IMAGE", _DEFAULT_IMAGE)
     runtime_install = os.getenv("FLOCKS_WORKFLOW_SERVICE_RUNTIME_INSTALL", "1").strip().lower() not in {
@@ -1056,7 +1116,7 @@ async def _publish_workflow_docker(
         "--name",
         container_name,
         "-p",
-        f"{host_port}:{_SERVICE_CONTAINER_PORT}",
+        "",
         "-v",
         f"{project_root}:/app:ro",
         "-v",
@@ -1160,7 +1220,28 @@ async def _publish_workflow_docker(
             ]
         )
 
+    previous_stopped = False
+    publish_started = False
     try:
+        host_port = await _allocate_port(
+            preferred_port,
+            workflow_id=workflow_id,
+            allow_bound_port=previous_port,
+        )
+        port_binding_index = cmd.index("-p") + 1
+        cmd[port_binding_index] = f"{host_port}:{_SERVICE_CONTAINER_PORT}"
+
+        registry["publishStatus"] = "publishing"
+        registry["updatedAt"] = now_ms
+        await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+        await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
+        publish_started = True
+
+        if previous_instance and host_port == previous_port:
+            await _stop_runtime_record(workflow_id, previous_instance, update_registry=False)
+            previous_stopped = True
+            if not _is_port_available(host_port):
+                raise WorkflowPortUnavailableError(f"Workflow service port {host_port} is still in use after restart")
         stdout, _, _ = await exec_docker(cmd)
         container_id = stdout.strip()
         service_url = _host_service_url(host_port)
@@ -1193,39 +1274,52 @@ async def _publish_workflow_docker(
         }
         await WorkflowStore.kv_put(_active_release_key(workflow_id), active_record)
         await WorkflowStore.kv_put(_runtime_key(workflow_id), active_record)
-        _release_port_reservation(host_port)
 
         registry["publishStatus"] = "active"
         registry["activeReleaseId"] = release_id
         registry["serviceKey"] = service_key
         registry["serviceUrl"] = service_url
+        registry["servicePort"] = host_port
         registry["updatedAt"] = _now_ms()
         await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
+    except Exception as exc:
+        if publish_started:
+            await _stop_and_remove_container(container_name)
+            await _remove_runtime_records_for_release(workflow_id, release_id)
+            release_record["status"] = "failed"
+            release_record["deactivatedAt"] = _now_ms()
+            await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
 
-        if isinstance(previous_runtime, dict) and previous_runtime:
+        await _restore_registry_after_publish_failure(
+            workflow_id,
+            previous_registry,
+            previous_runtime_survived=bool(previous_instance) and not previous_stopped,
+        )
+        if isinstance(exc, WorkflowCenterError):
+            raise
+        raise WorkflowCenterError(str(exc)) from exc
+    finally:
+        _release_port_reservation(host_port)
+
+    if not previous_stopped and isinstance(previous_runtime, dict) and previous_runtime:
+        try:
             await _stop_runtime_record(
                 workflow_id,
                 previous_runtime,
                 update_registry=False,
                 clear_runtime_keys=False,
             )
-        elif previous_container_name and previous_container_name != container_name:
+        except Exception as exc:
+            log.warning("workflow.publish.previous_runtime_cleanup_failed", {"id": workflow_id, "error": str(exc)})
+    elif not previous_stopped and previous_container_name and previous_container_name != container_name:
+        try:
             await _stop_and_remove_container(previous_container_name)
             if previous_release_id:
                 await _mark_release_inactive(workflow_id, previous_release_id)
+        except Exception as exc:
+            log.warning("workflow.publish.previous_container_cleanup_failed", {"id": workflow_id, "error": str(exc)})
 
-        return active_record
-    except Exception as exc:
-        _release_port_reservation(host_port)
-        await _stop_and_remove_container(container_name)
-        release_record["status"] = "failed"
-        release_record["deactivatedAt"] = _now_ms()
-        await WorkflowStore.kv_put(_release_key(workflow_id, release_id), release_record)
-
-        registry["publishStatus"] = "failed"
-        registry["updatedAt"] = _now_ms()
-        await WorkflowStore.kv_put(_registry_key(workflow_id), registry)
-        raise WorkflowCenterError(str(exc)) from exc
+    return active_record
 
 
 async def _stop_workflow_service_docker(workflow_id: str) -> Dict[str, Any]:
