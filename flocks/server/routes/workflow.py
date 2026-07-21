@@ -22,11 +22,13 @@ from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
+from flocks.workflow.service_port import resolve_service_port
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.center import (
     WorkflowCenterError,
     WorkflowNotFoundError,
     WorkflowNotPublishedError,
+    WorkflowPortUnavailableError,
     get_workflow_health,
     invoke_published_workflow,
     list_registry_entries,
@@ -260,6 +262,7 @@ class WorkflowCenterPublishRequest(BaseModel):
         None,
         description="Service driver. Defaults to FLOCKS_WORKFLOW_SERVICE_DRIVER or local.",
     )
+    port: Optional[int] = Field(None, ge=1, le=65535, description="Stable host listening port")
 
 
 class WorkflowCenterInvokeRequest(BaseModel):
@@ -804,6 +807,7 @@ def _publish_for_config(service: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "enabled": bool(service) and status_value not in {"stopped", "unpublished"},
             "status": status_value,
             "driver": service.get("driver") if service else None,
+            "port": resolve_service_port(service) if service else None,
             "serviceUrl": service.get("serviceUrl") if service else None,
             "invokeUrl": service.get("invokeUrl") if service else None,
             "containerName": service.get("containerName") if service else None,
@@ -1782,6 +1786,7 @@ async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenter
             workflow_id,
             image=req.image if req else None,
             driver=req.driver if req else None,
+            port=req.port if req else None,
         )
         return result
     except WorkflowNotFoundError as e:
@@ -2219,9 +2224,13 @@ async def _prepare_workflow_api_registry(workflow_id: str) -> tuple[Dict[str, An
         "sourceType": "main_storage",
         "workflowPath": str(workflow_path),
         "fingerprint": fp,
-        "publishStatus": "unpublished",
+        "publishStatus": existing_registry.get("publishStatus", "unpublished"),
         "registeredAt": existing_registry.get("registeredAt", now_ms),
         "updatedAt": now_ms,
+        "activeReleaseId": existing_registry.get("activeReleaseId"),
+        "serviceKey": existing_registry.get("serviceKey"),
+        "serviceUrl": existing_registry.get("serviceUrl"),
+        "servicePort": existing_registry.get("servicePort"),
     }
     await WorkflowStore.kv_put(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
     return data, now_ms
@@ -2262,6 +2271,7 @@ async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[s
         service["driver"] = runtime.get("driver") or service.get("driver")
         service["containerName"] = runtime.get("containerName") or service.get("containerName", "")
         service["image"] = runtime.get("image") or service.get("image")
+        service["port"] = resolve_service_port(runtime) or resolve_service_port(service)
         return service
 
     status = str(service.get("status") or "").strip().lower()
@@ -2274,6 +2284,33 @@ async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[s
             "reason": "missing_runtime",
         }
     return service
+
+
+async def _record_api_publish_failure(
+    workflow_id: str,
+    existing_service: Dict[str, Any],
+    error: Exception,
+) -> None:
+    """Mark a failed restart only when no prior runtime survived the attempt."""
+    if not existing_service:
+        return
+    try:
+        runtime = await WorkflowStore.kv_get(_runtime_key_main(workflow_id))
+        if isinstance(runtime, dict) and runtime:
+            return
+        failed_service = {
+            **existing_service,
+            "status": "error",
+            "lastStartError": str(error),
+            "lastStartAttemptAt": int(time.time() * 1000),
+            "health": {"ok": False, "reason": "publish_failed"},
+        }
+        await WorkflowStore.kv_put(_api_service_key(workflow_id), failed_service)
+    except Exception as persist_error:
+        log.warning(
+            "workflow.api.publish_failure_persist_failed",
+            {"id": workflow_id, "error": str(persist_error)},
+        )
 
 
 async def reconcile_published_workflow_api_services() -> Dict[str, int]:
@@ -2315,6 +2352,7 @@ async def reconcile_published_workflow_api_services() -> Dict[str, int]:
                 image=service.get("image") or None,
                 driver=_service_driver_from_record(service),
                 api_key=service.get("apiKey") or None,
+                port=resolve_service_port(service),
             )
 
             service_url = active_record.get("serviceUrl", "")
@@ -2329,6 +2367,7 @@ async def reconcile_published_workflow_api_services() -> Dict[str, int]:
                     "containerName": active_record.get("containerName", ""),
                     "driver": active_record.get("driver") or service.get("driver"),
                     "image": active_record.get("image") or service.get("image"),
+                    "port": resolve_service_port(active_record) or resolve_service_port(service),
                     "restartedAt": int(time.time() * 1000),
                 }
             )
@@ -2357,6 +2396,7 @@ class WorkflowServiceResponse(BaseModel):
     containerName: Optional[str] = None
     driver: Optional[Literal["local", "docker"]] = None
     image: Optional[str] = None
+    port: Optional[int] = None
 
 
 class KafkaConfigRequest(BaseModel):
@@ -2450,6 +2490,7 @@ async def publish_workflow_as_api(
     Writes the workflow JSON to disk, registers it with the workflow center,
     starts the selected runtime, and returns the service URL and generated API key.
     """
+    existing_service: Dict[str, Any] = {}
     try:
         data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
@@ -2458,6 +2499,7 @@ async def publish_workflow_as_api(
         # enforce the key returned to callers.
         existing_service = await WorkflowStore.kv_get(_api_service_key(workflow_id)) or {}
         api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
+        requested_port = req.port if req and req.port is not None else resolve_service_port(existing_service)
 
         # Use center.py to publish the selected runtime.
         active_record = await publish_workflow(
@@ -2465,6 +2507,7 @@ async def publish_workflow_as_api(
             image=req.image if req else None,
             driver=req.driver if req else None,
             api_key=api_key,
+            port=requested_port,
         )
 
         service_url = active_record.get("serviceUrl", "")
@@ -2472,6 +2515,7 @@ async def publish_workflow_as_api(
         container_name = active_record.get("containerName", "")
         driver = active_record.get("driver") or (req.driver if req else None)
         image = active_record.get("image") or (req.image if req else None)
+        host_port = resolve_service_port(active_record) or requested_port
 
         service_info = {
             "workflowId": workflow_id,
@@ -2484,6 +2528,7 @@ async def publish_workflow_as_api(
             "containerName": container_name,
             "driver": driver,
             "image": image,
+            "port": host_port,
         }
         await WorkflowStore.kv_put(_api_service_key(workflow_id), service_info)
 
@@ -2491,9 +2536,13 @@ async def publish_workflow_as_api(
         return service_info
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except WorkflowPortUnavailableError as e:
+        await _record_api_publish_failure(workflow_id, existing_service, e)
+        raise HTTPException(status_code=409, detail=str(e))
     except HTTPException:
         raise
     except WorkflowCenterError as e:
+        await _record_api_publish_failure(workflow_id, existing_service, e)
         log.error("workflow.publish.center_error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"发布失败: {str(e)}")
     except Exception as e:
@@ -2536,7 +2585,8 @@ async def get_workflow_service(workflow_id: str):
     Returns null if not published.
     """
     try:
-        return await WorkflowStore.kv_get(_api_service_key(workflow_id))  # None / null if not found
+        service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+        return await _normalize_listed_api_service(_api_service_key(workflow_id), service)
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
@@ -2559,6 +2609,12 @@ async def delete_workflow_service(workflow_id: str):
             await WorkflowStore.kv_remove(_api_service_key(workflow_id))
         except Exception:
             pass
+        else:
+            registry_key = f"{_REGISTRY_PREFIX_MAIN}{workflow_id}"
+            registry = await WorkflowStore.kv_get(registry_key)
+            if isinstance(registry, dict) and "servicePort" in registry:
+                registry.pop("servicePort", None)
+                await WorkflowStore.kv_put(registry_key, registry)
 
         log.info("workflow.api.service_deleted", {"id": workflow_id})
         return {"ok": True, "workflowId": workflow_id}
