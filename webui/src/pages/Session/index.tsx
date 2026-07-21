@@ -1144,7 +1144,9 @@ export default function SessionPage() {
       const response = await client.get('/api/project/folders', {
         params: { path: path?.trim() || undefined },
       });
-      setFolderBrowser(response.data as FolderBrowserResponse);
+      const browser = response.data as FolderBrowserResponse;
+      setFolderBrowser(browser);
+      setProjectWorktreeValue(browser.path);
     } catch (err: any) {
       toast.error(t('projectDialog.folderBrowseFailed'), err.message);
     } finally {
@@ -2205,37 +2207,33 @@ export default function SessionPage() {
               />
               {projectDialogMode === 'create' && (
                 <>
-                  {!folderBrowser && (
-                    <>
-                      <label className="block pt-1 text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
-                        {t('projectDialog.folderLabel')}
-                      </label>
-                      <div className="flex gap-2">
-                        <input
-                          id="session-project-worktree"
-                          value={projectWorktreeValue}
-                          onChange={(event) => {
-                            setProjectWorktreeValue(event.target.value);
-                            if (!projectNameManuallyEdited) {
-                              setProjectNameValue(getPathBasename(event.target.value));
-                            }
-                          }}
-                          disabled={projectSubmitting}
-                          placeholder={t('projectDialog.folderPlaceholder')}
-                          className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
-                        />
-                        <button
-                          type="button"
-                          onClick={() => void loadFolderBrowser(projectWorktreeValue)}
-                          disabled={projectSubmitting || folderBrowserLoading}
-                          className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
-                        >
-                          {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
-                          {t('projectDialog.chooseFolder')}
-                        </button>
-                      </div>
-                    </>
-                  )}
+                  <label className="block pt-1 text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
+                    {t('projectDialog.folderLabel')}
+                  </label>
+                  <div className="flex gap-2">
+                    <input
+                      id="session-project-worktree"
+                      value={projectWorktreeValue}
+                      onChange={(event) => {
+                        setProjectWorktreeValue(event.target.value);
+                        if (!projectNameManuallyEdited) {
+                          setProjectNameValue(getPathBasename(event.target.value));
+                        }
+                      }}
+                      disabled={projectSubmitting}
+                      placeholder={t('projectDialog.folderPlaceholder')}
+                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => void loadFolderBrowser(projectWorktreeValue)}
+                      disabled={projectSubmitting || folderBrowserLoading}
+                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                    >
+                      {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
+                      {t('projectDialog.chooseFolder')}
+                    </button>
+                  </div>
                   {folderBrowser && (
                     <div className="overflow-hidden rounded-lg border border-zinc-200 dark:border-zinc-800">
                       <div className="flex items-center gap-1 border-b border-zinc-100 bg-zinc-50 px-2 py-1.5 dark:border-zinc-800 dark:bg-zinc-900">

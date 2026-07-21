@@ -656,7 +656,7 @@ describe('SessionPage session actions menu', () => {
     expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
       params: { path: undefined },
     });
-    expect(screen.queryByLabelText('projectDialog.folderLabel')).not.toBeInTheDocument();
+    expect(screen.getByLabelText('projectDialog.folderLabel')).toHaveValue('/home/test-user');
 
     await user.click(screen.getByRole('button', { name: 'save' }));
 
@@ -666,6 +666,41 @@ describe('SessionPage session actions menu', () => {
         worktree: '/home/test-user',
       });
     });
+  });
+
+  it('updates the folder input while navigating the folder browser', async () => {
+    const user = userEvent.setup();
+    client.get.mockImplementation((url: string, config?: { params?: { path?: string } }) => {
+      if (url !== '/api/project/folders') {
+        return Promise.resolve({
+          data: [{ id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true }],
+        });
+      }
+      const path = config?.params?.path;
+      if (path === '/home/test-user/labs') {
+        return Promise.resolve({
+          data: { path, parent: '/home/test-user', roots: [], entries: [] },
+        });
+      }
+      return Promise.resolve({
+        data: {
+          path: '/home/test-user',
+          parent: null,
+          roots: [],
+          entries: [{ name: 'labs', path: '/home/test-user/labs' }],
+        },
+      });
+    });
+
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
+    const folderInput = screen.getByLabelText('projectDialog.folderLabel');
+    await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
+    await waitFor(() => expect(folderInput).toHaveValue('/home/test-user'));
+
+    await user.click(screen.getByRole('button', { name: 'labs' }));
+    await waitFor(() => expect(folderInput).toHaveValue('/home/test-user/labs'));
   });
 
   it('does not submit when Enter is pressed before choosing a project folder', async () => {
