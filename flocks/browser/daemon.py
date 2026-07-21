@@ -23,6 +23,12 @@ from . import _ipc as ipc
 from .utils import load_env_file
 
 
+FLOCKS_DEBUG_PROFILE_NAMES = (
+    "chrome-debug-profile",
+    "edge-debug-profile",
+    "chromium-debug-profile",
+    "brave-debug-profile",
+)
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
 BUF = 500
 INTERNAL = INTERNAL_URL_PREFIXES
@@ -53,11 +59,11 @@ def profile_dirs(
     system = system or platform.system()
     home = home or Path.home()
     environ = os.environ if environ is None else environ
-    flocks_debug_profile = home / ".flocks/chrome-debug-profile"
+    flocks_debug_profiles = [home / ".flocks" / name for name in FLOCKS_DEBUG_PROFILE_NAMES]
     if system == "Darwin":
         support = home / "Library/Application Support"
         return [
-            flocks_debug_profile,
+            *flocks_debug_profiles,
             support / "Google/Chrome",
             support / "Google/Chrome Canary",
             support / "Comet",
@@ -72,7 +78,7 @@ def profile_dirs(
     if system == "Windows":
         local = Path(environ.get("LOCALAPPDATA", str(home / "AppData/Local"))).expanduser()
         return [
-            flocks_debug_profile,
+            *flocks_debug_profiles,
             local / "Google/Chrome/User Data",
             local / "Google/Chrome Beta/User Data",
             local / "Google/Chrome Dev/User Data",
@@ -87,7 +93,7 @@ def profile_dirs(
             local / "BraveSoftware/Brave-Browser-Nightly/User Data",
         ]
     return [
-        flocks_debug_profile,
+        *flocks_debug_profiles,
         home / ".config/google-chrome",
         home / ".config/google-chrome-beta",
         home / ".config/google-chrome-unstable",
@@ -204,13 +210,13 @@ def get_ws_url() -> str:
     if profile_errors:
         details = "; ".join(dict.fromkeys(profile_errors))
         raise RuntimeError(
-            "Chrome remote debugging is not reachable for any detected profile: "
-            f"{details} — for manual setup, start Chrome with --remote-debugging-port and a non-default "
+            "Chromium-based browser remote debugging is not reachable for any detected profile: "
+            f"{details} — for manual setup, start the browser with --remote-debugging-port and a non-default "
             "--user-data-dir, then verify http://127.0.0.1:9222/json/version"
         )
     raise RuntimeError(
         "DevToolsActivePort not found in "
-        f"{[str(path) for path in profiles]} — start Chrome with --remote-debugging-port and a non-default "
+        f"{[str(path) for path in profiles]} — start a Chromium-based browser with --remote-debugging-port and a non-default "
         "--user-data-dir, or set BU_CDP_WS for a remote browser"
     )
 
@@ -285,7 +291,9 @@ class Daemon:
                     f"{hint}"
                 ) from error
             raise RuntimeError(
-                f"CDP WS handshake failed: {error} -- click Allow in your browser if prompted, then retry"
+                f"CDP WS handshake failed: {error} -- restart your Chromium-based browser with "
+                "--remote-debugging-port and a non-default --user-data-dir, then verify "
+                "http://127.0.0.1:9222/json/version"
             )
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event
