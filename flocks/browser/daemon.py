@@ -53,9 +53,11 @@ def profile_dirs(
     system = system or platform.system()
     home = home or Path.home()
     environ = os.environ if environ is None else environ
+    flocks_debug_profile = home / ".flocks/chrome-debug-profile"
     if system == "Darwin":
         support = home / "Library/Application Support"
         return [
+            flocks_debug_profile,
             support / "Google/Chrome",
             support / "Google/Chrome Canary",
             support / "Comet",
@@ -70,6 +72,7 @@ def profile_dirs(
     if system == "Windows":
         local = Path(environ.get("LOCALAPPDATA", str(home / "AppData/Local"))).expanduser()
         return [
+            flocks_debug_profile,
             local / "Google/Chrome/User Data",
             local / "Google/Chrome Beta/User Data",
             local / "Google/Chrome Dev/User Data",
@@ -84,6 +87,7 @@ def profile_dirs(
             local / "BraveSoftware/Brave-Browser-Nightly/User Data",
         ]
     return [
+        flocks_debug_profile,
         home / ".config/google-chrome",
         home / ".config/google-chrome-beta",
         home / ".config/google-chrome-unstable",
@@ -125,7 +129,9 @@ def _local_cdp_ws_url(port: int, devtools_path: str | None = None) -> str:
         if not isinstance(payload, dict):
             raise ValueError("invalid CDP version response")
         websocket_url = payload.get("webSocketDebuggerUrl")
-        if not isinstance(websocket_url, str):
+        if not isinstance(websocket_url, str) and devtools_path and devtools_path.startswith("/"):
+            websocket_url = f"ws://127.0.0.1:{port}{devtools_path}"
+        elif not isinstance(websocket_url, str):
             raise ValueError("invalid webSocketDebuggerUrl")
     except urllib.error.HTTPError:
         if not devtools_path or not devtools_path.startswith("/"):
@@ -198,15 +204,14 @@ def get_ws_url() -> str:
     if profile_errors:
         details = "; ".join(dict.fromkeys(profile_errors))
         raise RuntimeError(
-            "The browser's remote-debugging page is open, but DevTools is not live yet for any detected profile: "
-            f"{details} — if the browser opened a profile picker, choose your normal profile first, then tick the "
-            "checkbox and click Allow if shown"
+            "Chrome remote debugging is not reachable for any detected profile: "
+            f"{details} — for manual setup, start Chrome with --remote-debugging-port and a non-default "
+            "--user-data-dir, then verify http://127.0.0.1:9222/json/version"
         )
     raise RuntimeError(
         "DevToolsActivePort not found in "
-        f"{[str(path) for path in profiles]} — enable your browser's remote-debugging page "
-        "(for example chrome://inspect/#remote-debugging or edge://inspect/#remote-debugging), "
-        "or set BU_CDP_WS for a remote browser"
+        f"{[str(path) for path in profiles]} — start Chrome with --remote-debugging-port and a non-default "
+        "--user-data-dir, or set BU_CDP_WS for a remote browser"
     )
 
 

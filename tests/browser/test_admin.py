@@ -57,6 +57,25 @@ def test_generic_remote_debugging_message_triggers_prompt() -> None:
     assert admin._needs_chrome_remote_debugging_prompt(msg)
 
 
+def test_current_remote_debugging_unreachable_message_triggers_prompt() -> None:
+    msg = (
+        "Chrome remote debugging is not reachable for any detected profile: "
+        "/tmp/chrome: 127.0.0.1:9222 (connection refused) — for manual setup, "
+        "start Chrome with --remote-debugging-port and a non-default --user-data-dir"
+    )
+    assert admin._needs_chrome_remote_debugging_prompt(msg)
+
+
+def test_local_debugging_setup_lines_use_windows_user_data_dir() -> None:
+    lines = "\n".join(admin._local_debugging_setup_lines("Windows"))
+
+    assert "chrome://inspect" in lines
+    assert "does not reliably show it" in lines
+    assert "--remote-debugging-port=9222" in lines
+    assert '--user-data-dir="$env:USERPROFILE\\.flocks\\chrome-debug-profile"' in lines
+    assert "http://127.0.0.1:9222/json/version" in lines
+
+
 def test_daemon_endpoint_names_discovers_default_and_named_sessions(tmp_path, monkeypatch) -> None:
     monkeypatch.setattr(admin.ipc, "IS_WINDOWS", False)
     monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
@@ -286,8 +305,7 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     monkeypatch.setattr(admin, "daemon_alive", lambda: False)
     monkeypatch.setattr(admin, "_chrome_running", lambda: True)
     monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
-    open_calls = []
-    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: open_calls.append(True))
+    monkeypatch.setattr(admin, "_local_debugging_setup_lines", lambda: ["debug browser instructions"])
 
     calls = {"count": 0}
 
@@ -304,10 +322,9 @@ def test_run_setup_uses_generic_remote_debugging_wording(monkeypatch, capsys) ->
     assert admin.run_setup() == 0
 
     out = capsys.readouterr().out
-    assert "browser remote debugging is not enabled on the current profile." in out
-    assert "opening your browser's inspect page" in out
-    assert "if the browser shows the profile picker" in out
-    assert open_calls == [True]
+    assert "browser remote debugging is not reachable for the current profile." in out
+    assert "debug browser instructions" in out
+    assert "opening your browser's inspect page" not in out
 
 
 def test_run_setup_restarts_stale_existing_local_daemon(monkeypatch, capsys) -> None:
@@ -400,6 +417,22 @@ def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsy
     assert "[FAIL] browser running" in out
     assert "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`" in out
     assert "next action       start Chrome/Chromium/Edge or provide BU_CDP_URL/BU_CDP_WS" in out
+
+
+def test_run_doctor_points_to_debug_browser_instructions_when_daemon_missing(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
+    monkeypatch.setattr(admin, "_install_mode", lambda: "git")
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "browser_connections", lambda: [])
+    monkeypatch.setattr(admin, "_latest_release_tag", lambda: "0.1.0")
+
+    assert admin.run_doctor() == 1
+
+    out = capsys.readouterr().out
+    assert "follow its debug-browser instructions" in out
+    assert "remote debugging is not reachable" in out
+    assert "inspect-page prompt" not in out
 
 
 def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:

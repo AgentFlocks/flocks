@@ -49,15 +49,62 @@ def _log_tail(name: str | None):
 
 
 def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
-    """Return True when a local browser needs the inspect-page permission flow."""
+    """Return True when a local browser needs remote-debugging setup guidance."""
     lower = (msg or "").lower()
     return (
         "devtoolsactiveport not found" in lower
+        or "chrome remote debugging is not reachable" in lower
         or "remote-debugging page" in lower
         or "inspect/#remote-debugging" in lower
         or "not live yet" in lower
         or ("ws handshake failed" in lower and "403" in lower)
     )
+
+
+def _local_debugging_setup_lines(system: str | None = None) -> list[str]:
+    """Return concise manual setup guidance for local Chrome debugging."""
+    import platform
+
+    system = system or platform.system()
+    lines = [
+        "Do not look for webSocketDebuggerUrl in chrome://inspect; that page does not reliably show it.",
+    ]
+    if system == "Windows":
+        lines.extend(
+            [
+                "On Windows, close Chrome and run this in PowerShell:",
+                '& "$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\\.flocks\\chrome-debug-profile"',
+                "If Chrome is installed elsewhere, replace the chrome.exe path.",
+            ]
+        )
+    elif system == "Darwin":
+        lines.extend(
+            [
+                "On macOS, close Chrome and run:",
+                "/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/chrome-debug-profile\"",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "On Linux, close Chrome and run:",
+                "google-chrome --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/chrome-debug-profile\"",
+            ]
+        )
+    lines.extend(
+        [
+            "Then verify http://127.0.0.1:9222/json/version; Flocks reads the WebSocket URL from that endpoint.",
+        ]
+    )
+    return lines
+
+
+def _print_local_debugging_setup(out=None) -> None:
+    import sys
+
+    out = out or sys.stderr
+    for line in _local_debugging_setup_lines():
+        print(line, file=out)
 
 
 def _configured_cdp_endpoint(env: dict | None = None) -> tuple[str | None, str | None]:
@@ -273,12 +320,8 @@ def ensure_daemon(
                 raise RuntimeError(
                     msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}"
                 )
-            _open_browser_inspect()
-            print(
-                f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
-                "(for example chrome://inspect or edge://inspect), and tick the checkbox if shown",
-                file=sys.stderr,
-            )
+            print(f"{BROWSER_LABEL}: local Chrome remote debugging is not reachable.", file=sys.stderr)
+            _print_local_debugging_setup(sys.stderr)
             continue
         raise RuntimeError(msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}")
 
@@ -385,40 +428,6 @@ def _chrome_running() -> bool:
         return False
 
 
-def _open_browser_inspect() -> None:
-    import platform
-    import subprocess
-    import webbrowser
-
-    inspect_targets = [
-        ("Google Chrome", "chrome://inspect/#remote-debugging"),
-        ("Microsoft Edge", "edge://inspect/#remote-debugging"),
-    ]
-    if platform.system() == "Darwin":
-        for app_name, url in inspect_targets:
-            try:
-                subprocess.run(
-                    [
-                        "osascript",
-                        "-e",
-                        f'tell application "{app_name}" to activate',
-                        "-e",
-                        f'tell application "{app_name}" to open location "{url}"',
-                    ],
-                    timeout=5,
-                    check=False,
-                )
-                return
-            except Exception:
-                continue
-    for _app_name, url in inspect_targets:
-        try:
-            if webbrowser.open(url, new=2):
-                return
-        except Exception:
-            continue
-
-
 def run_setup() -> int:
     """Interactively attach to the running browser."""
     import sys
@@ -450,11 +459,8 @@ def run_setup() -> int:
 
     needs_inspect = _is_local_chrome_mode() and _needs_chrome_remote_debugging_prompt(first_err)
     if needs_inspect:
-        print("browser remote debugging is not enabled on the current profile.")
-        print("opening your browser's inspect page -- in the tab that opens:")
-        print("  1. if the browser shows the profile picker, pick your normal profile;")
-        print("  2. tick 'Discover network targets' and click Allow if prompted.")
-        _open_browser_inspect()
+        print("browser remote debugging is not reachable for the current profile.")
+        _print_local_debugging_setup(sys.stdout)
     else:
         print(f"attach failed: {first_err}")
         print("retrying once (the browser may still be starting up)...")
@@ -529,7 +535,7 @@ def run_doctor() -> int:
         daemon,
         ""
         if daemon
-        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is disabled, follow its inspect-page prompt",
+        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is not reachable, follow its debug-browser instructions",
     )
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:
