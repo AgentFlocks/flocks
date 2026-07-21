@@ -387,6 +387,7 @@ export default function SessionPage() {
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
+  const folderBrowserRequestIdRef = useRef(0);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
@@ -1138,21 +1139,41 @@ export default function SessionPage() {
     setFolderBrowser(null);
   }, [projectSubmitting]);
 
-  const loadFolderBrowser = useCallback(async (path?: string) => {
+  const loadFolderBrowser = useCallback(async (
+    path?: string,
+    options?: { silent?: boolean },
+  ) => {
+    const requestId = ++folderBrowserRequestIdRef.current;
     setFolderBrowserLoading(true);
     try {
       const response = await client.get('/api/project/folders', {
         params: { path: path?.trim() || undefined },
       });
+      if (requestId !== folderBrowserRequestIdRef.current) return;
       const browser = response.data as FolderBrowserResponse;
       setFolderBrowser(browser);
       setProjectWorktreeValue(browser.path);
     } catch (err: any) {
-      toast.error(t('projectDialog.folderBrowseFailed'), err.message);
+      if (requestId === folderBrowserRequestIdRef.current && !options?.silent) {
+        toast.error(t('projectDialog.folderBrowseFailed'), err.message);
+      }
     } finally {
-      setFolderBrowserLoading(false);
+      if (requestId === folderBrowserRequestIdRef.current) {
+        setFolderBrowserLoading(false);
+      }
     }
   }, [t, toast]);
+
+  useEffect(() => {
+    if (!folderBrowser) return undefined;
+    const path = projectWorktreeValue.trim();
+    if (!path || path === folderBrowser.path) return undefined;
+
+    const timer = window.setTimeout(() => {
+      void loadFolderBrowser(path, { silent: true });
+    }, 300);
+    return () => window.clearTimeout(timer);
+  }, [folderBrowser, loadFolderBrowser, projectWorktreeValue]);
 
   const handleSelectProjectFolder = useCallback((path: string) => {
     setProjectWorktreeValue(path);
@@ -2215,6 +2236,8 @@ export default function SessionPage() {
                       id="session-project-worktree"
                       value={projectWorktreeValue}
                       onChange={(event) => {
+                        folderBrowserRequestIdRef.current += 1;
+                        setFolderBrowserLoading(false);
                         setProjectWorktreeValue(event.target.value);
                         if (!projectNameManuallyEdited) {
                           setProjectNameValue(getPathBasename(event.target.value));

@@ -668,7 +668,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('updates the folder input while navigating the folder browser', async () => {
+  it('keeps the folder input and folder browser in sync', async () => {
     const user = userEvent.setup();
     client.get.mockImplementation((url: string, config?: { params?: { path?: string } }) => {
       if (url !== '/api/project/folders') {
@@ -699,8 +699,14 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'projectDialog.chooseFolder' }));
     await waitFor(() => expect(folderInput).toHaveValue('/home/test-user'));
 
-    await user.click(screen.getByRole('button', { name: 'labs' }));
-    await waitFor(() => expect(folderInput).toHaveValue('/home/test-user/labs'));
+    await user.clear(folderInput);
+    await user.type(folderInput, '/home/test-user/labs');
+    await waitFor(() => {
+      expect(client.get).toHaveBeenCalledWith('/api/project/folders', {
+        params: { path: '/home/test-user/labs' },
+      });
+      expect(screen.getByText('/home/test-user/labs')).toBeInTheDocument();
+    });
   });
 
   it('does not submit when Enter is pressed before choosing a project folder', async () => {
