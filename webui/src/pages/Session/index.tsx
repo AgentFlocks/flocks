@@ -1195,12 +1195,17 @@ export default function SessionPage() {
 
   const handleSubmitProject = useCallback(async () => {
     if (!projectDialogMode || projectSubmitInFlightRef.current) return;
-    const nextName = projectNameValue.trim();
+    const nextWorktree = projectWorktreeValue.trim() || folderBrowser?.path.trim() || '';
+    const nextName = projectNameValue.trim() || (
+      projectDialogMode === 'create' && !projectNameManuallyEdited && nextWorktree
+        ? getPathBasename(nextWorktree)
+        : ''
+    );
     if (!nextName) {
       toast.error(t('projectDialog.saveFailed'), t('projectDialog.nameEmpty'));
       return;
     }
-    if (projectDialogMode === 'create' && !projectWorktreeValue.trim()) {
+    if (projectDialogMode === 'create' && !nextWorktree) {
       toast.error(t('projectDialog.saveFailed'), t('projectDialog.folderEmpty'));
       return;
     }
@@ -1211,7 +1216,7 @@ export default function SessionPage() {
       if (projectDialogMode === 'create') {
         const response = await client.post('/api/project', {
           name: nextName,
-          worktree: projectWorktreeValue.trim(),
+          worktree: nextWorktree,
         });
         const createdProject = response.data as ProjectSummary;
         setProjects(prev => (
@@ -1246,7 +1251,7 @@ export default function SessionPage() {
       projectSubmitInFlightRef.current = false;
       setProjectSubmitting(false);
     }
-  }, [editingProjectId, fetchProjects, projectDialogMode, projectNameValue, projectWorktreeValue, t, toast]);
+  }, [editingProjectId, fetchProjects, folderBrowser?.path, projectDialogMode, projectNameManuallyEdited, projectNameValue, projectWorktreeValue, t, toast]);
 
   const handleDownloadSession = useCallback(async (sessionId: string, title: string) => {
     setOpenMenuSessionId(null);

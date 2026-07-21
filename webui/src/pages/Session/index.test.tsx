@@ -590,7 +590,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('shows only the browser path while choosing a project folder', async () => {
+  it('uses the current browser path when saving without selecting the folder', async () => {
     const user = userEvent.setup();
     const defaultProject = {
       id: 'default',
@@ -608,6 +608,9 @@ describe('SessionPage session actions menu', () => {
           }
         : [defaultProject],
     }));
+    client.post.mockResolvedValue({
+      data: { id: 'prj_home', name: 'test-user', worktree: '/home/test-user' },
+    });
 
     renderSessionPage();
 
@@ -623,6 +626,15 @@ describe('SessionPage session actions menu', () => {
       params: { path: undefined },
     });
     expect(screen.queryByLabelText('projectDialog.folderLabel')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'save' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/project', {
+        name: 'test-user',
+        worktree: '/home/test-user',
+      });
+    });
   });
 
   it('shows the backend detail when project creation fails', async () => {
