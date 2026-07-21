@@ -75,6 +75,7 @@ from flocks.workflow.triggers import (
     workflow_json_declares_triggers,
     workflow_trigger_definitions_from_json,
 )
+from flocks.workflow.triggers.models import TriggerType
 from flocks.workflow.triggers.dispatcher import evaluate_trigger_filter
 from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 from flocks.workflow.triggers.compat import (
@@ -193,6 +194,32 @@ class WorkflowUpdateRequest(BaseModel):
     status: Optional[Literal["draft", "active", "archived"]] = Field(None, description="Status")
 
 
+WorkflowCapabilityState = Literal["unconfigured", "starting", "running", "stopped", "error"]
+
+
+class WorkflowCapabilityStatusResponse(BaseModel):
+    configured: bool
+    state: WorkflowCapabilityState
+
+
+class WorkflowTriggerStatusItemResponse(BaseModel):
+    id: str
+    type: TriggerType
+    name: Optional[str] = None
+    state: WorkflowCapabilityState
+    rawState: Optional[str] = None
+
+
+class WorkflowTriggerCapabilityStatusResponse(WorkflowCapabilityStatusResponse):
+    count: int = 0
+    items: List[WorkflowTriggerStatusItemResponse] = Field(default_factory=list)
+
+
+class WorkflowIntegrationStatusResponse(BaseModel):
+    api: WorkflowCapabilityStatusResponse
+    trigger: WorkflowTriggerCapabilityStatusResponse
+
+
 class WorkflowResponse(BaseModel):
     """Workflow response"""
 
@@ -212,8 +239,8 @@ class WorkflowResponse(BaseModel):
     createdAt: int = Field(..., description="Created timestamp (ms)")
     updatedAt: int = Field(..., description="Updated timestamp (ms)")
     stats: Dict[str, Any] = Field(default_factory=dict, description="Statistics")
-    integrationStatus: Dict[str, Any] = Field(
-        default_factory=dict,
+    integrationStatus: Optional[WorkflowIntegrationStatusResponse] = Field(
+        None,
         description="API publishing and trigger runtime summary",
     )
 
@@ -232,7 +259,7 @@ class WorkflowSummaryResponse(BaseModel):
     updatedAt: int
     nodeCount: int = 0
     stats: Dict[str, Any] = Field(default_factory=dict)
-    integrationStatus: Dict[str, Any] = Field(default_factory=dict)
+    integrationStatus: WorkflowIntegrationStatusResponse
 
 
 class WorkflowRunRequest(BaseModel):
@@ -2378,7 +2405,7 @@ async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[s
     return service
 
 
-def _summarize_capability_state(raw_state: Any) -> str:
+def _summarize_capability_state(raw_state: Any) -> WorkflowCapabilityState:
     state = str(raw_state or "").strip().lower()
     if state in {"running", "listening", "ready", "active"}:
         return "running"
@@ -2445,8 +2472,8 @@ def start_workflow_api_health_monitor() -> asyncio.Task[None]:
 async def _get_workflow_integration_status(
     workflow_id: str,
     workflow_data: Dict[str, Any],
-) -> Dict[str, Any]:
-    api_summary: Dict[str, Any] = {"configured": False, "state": "unconfigured"}
+) -> WorkflowIntegrationStatusResponse:
+    api_summary = WorkflowCapabilityStatusResponse(configured=False, state="unconfigured")
     try:
         service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
         if isinstance(service, dict) and service:
@@ -2465,23 +2492,18 @@ async def _get_workflow_integration_status(
                     state = "error"
                 elif cached_health is None:
                     state = "starting"
-            api_summary = {
-                "configured": True,
-                "state": state,
-            }
+            api_summary = WorkflowCapabilityStatusResponse(configured=True, state=state)
     except Exception as exc:
         log.warning("workflow.list.api_status_failed", {"id": workflow_id, "error": str(exc)})
-        api_summary = {"configured": False, "state": "error"}
+        api_summary = WorkflowCapabilityStatusResponse(configured=False, state="error")
 
     try:
         triggers = await _get_workflow_trigger_defs(workflow_id, workflow_data)
         if not triggers:
-            trigger_summary: Dict[str, Any] = {
-                "configured": False,
-                "state": "unconfigured",
-                "count": 0,
-                "items": [],
-            }
+            trigger_summary = WorkflowTriggerCapabilityStatusResponse(
+                configured=False,
+                state="unconfigured",
+            )
         else:
             statuses = await default_trigger_runtime.get_workflow_trigger_statuses(
                 workflow_id,
@@ -2492,20 +2514,20 @@ async def _get_workflow_integration_status(
                 for item in statuses
                 if isinstance(item, dict) and item.get("triggerId")
             }
-            trigger_items = []
+            trigger_items: List[WorkflowTriggerStatusItemResponse] = []
             for trigger in triggers:
                 runtime_status = statuses_by_id.get(trigger.id)
                 raw_state = runtime_status.get("state") if runtime_status else None
                 trigger_items.append(
-                    {
-                        "id": trigger.id,
-                        "type": trigger.type,
-                        "name": trigger.name,
-                        "state": _summarize_capability_state(raw_state) if raw_state else "error",
-                        "rawState": raw_state,
-                    }
+                    WorkflowTriggerStatusItemResponse(
+                        id=trigger.id,
+                        type=trigger.type,
+                        name=trigger.name,
+                        state=_summarize_capability_state(raw_state) if raw_state else "error",
+                        rawState=raw_state,
+                    )
                 )
-            summarized_states = [item["state"] for item in trigger_items]
+            summarized_states = [item.state for item in trigger_items]
             if "error" in summarized_states:
                 state = "error"
             elif "stopped" in summarized_states:
@@ -2514,17 +2536,17 @@ async def _get_workflow_integration_status(
                 state = "running"
             else:
                 state = "starting"
-            trigger_summary = {
-                "configured": True,
-                "state": state,
-                "count": len(triggers),
-                "items": trigger_items,
-            }
+            trigger_summary = WorkflowTriggerCapabilityStatusResponse(
+                configured=True,
+                state=state,
+                count=len(triggers),
+                items=trigger_items,
+            )
     except Exception as exc:
         log.warning("workflow.list.trigger_status_failed", {"id": workflow_id, "error": str(exc)})
-        trigger_summary = {"configured": True, "state": "error", "count": 0, "items": []}
+        trigger_summary = WorkflowTriggerCapabilityStatusResponse(configured=True, state="error")
 
-    return {"api": api_summary, "trigger": trigger_summary}
+    return WorkflowIntegrationStatusResponse(api=api_summary, trigger=trigger_summary)
 
 
 async def reconcile_published_workflow_api_services() -> Dict[str, int]:

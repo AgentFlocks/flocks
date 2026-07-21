@@ -2,6 +2,7 @@ import type { ReactNode } from 'react';
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
+import type { WorkflowSummary } from '@/api/workflow';
 import WorkflowPage from './index';
 
 const { mockNavigate, mockUseWorkflows, mockLanguage } = vi.hoisted(() => ({
@@ -72,12 +73,11 @@ vi.mock('@/components/common/EmptyState', () => ({
   ),
 }));
 
-function makeWorkflow(overrides: Partial<any> = {}) {
+function makeWorkflow(overrides: Partial<WorkflowSummary> = {}): WorkflowSummary {
   return {
     id: 'wf-1',
     name: '默认工作流',
     category: 'default',
-    workflowJson: { start: 'node-1', nodes: [{ id: 'node-1' }], edges: [] },
     status: 'draft' as const,
     source: 'project' as const,
     createdAt: Date.now(),

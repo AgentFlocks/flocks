@@ -46,13 +46,32 @@ const CAPABILITY_STATUS_STYLES: Record<WorkflowCapabilityState, { text: string; 
   error: { text: 'text-red-600', dot: 'bg-red-500' },
 };
 
-function triggerTypeLabelKey(type: WorkflowTriggerType): string {
-  return `integration.triggerType.${type}`;
-}
+const TRIGGER_TYPE_LABEL_KEYS = {
+  manual: 'integration.triggerType.manual',
+  schedule: 'integration.triggerType.schedule',
+  webhook: 'integration.triggerType.webhook',
+  syslog: 'integration.triggerType.syslog',
+  kafka: 'integration.triggerType.kafka',
+  internal_event: 'integration.triggerType.internal_event',
+  custom_webhook: 'integration.triggerType.custom_webhook',
+  custom_adapter: 'integration.triggerType.custom_adapter',
+  plugin: 'integration.triggerType.plugin',
+} as const satisfies Record<WorkflowTriggerType, string>;
 
-function capabilityStatusLabelKey(state: WorkflowCapabilityState): string {
-  return state === 'running' ? 'integration.state.enabled' : 'integration.state.disabled';
-}
+const CAPABILITY_STATUS_LABEL_KEYS = {
+  unconfigured: 'integration.state.disabled',
+  starting: 'integration.state.disabled',
+  running: 'integration.state.enabled',
+  stopped: 'integration.state.disabled',
+  error: 'integration.state.disabled',
+} as const satisfies Record<WorkflowCapabilityState, string>;
+
+const CAPABILITY_DETAIL_LABEL_KEYS = {
+  unconfigured: 'integration.detailState.unconfigured',
+  starting: 'integration.detailState.starting',
+  stopped: 'integration.detailState.stopped',
+  error: 'integration.detailState.error',
+} as const;
 
 // ---------------------------------------------------------------------------
 // WorkflowPage
@@ -402,20 +421,20 @@ function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
             <CapabilityStatus
               label={t('integration.api')}
               state={apiStatus.state}
-              statusLabel={t(capabilityStatusLabelKey(apiStatus.state) as any)}
+              statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[apiStatus.state])}
             />
             {triggerItems.length > 0 ? visibleTriggerItems.map(trigger => (
               <CapabilityStatus
                 key={trigger.id}
-                label={t(triggerTypeLabelKey(trigger.type) as any)}
+                label={t(TRIGGER_TYPE_LABEL_KEYS[trigger.type])}
                 state={trigger.state}
-                statusLabel={t(capabilityStatusLabelKey(trigger.state) as any)}
+                statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[trigger.state])}
               />
             )) : (
               <CapabilityStatus
                 label={t('integration.trigger')}
                 state={triggerStatus.state}
-                statusLabel={t(capabilityStatusLabelKey(triggerStatus.state) as any)}
+                statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[triggerStatus.state])}
               />
             )}
           </div>
@@ -464,7 +483,7 @@ function CapabilityStatus({
   const { t } = useTranslation('workflow');
   const detailLabel = state === 'running'
     ? null
-    : t(`integration.detailState.${state}` as any);
+    : t(CAPABILITY_DETAIL_LABEL_KEYS[state]);
   const accessibleLabel = detailLabel
     ? `${label}：${statusLabel}（${detailLabel}）`
     : `${label}：${statusLabel}`;
@@ -591,9 +610,9 @@ function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }
             {items.map(item => (
               <div key={item.id} className="flex items-center min-w-0">
                 <CapabilityStatus
-                  label={t(triggerTypeLabelKey(item.type) as any)}
+                  label={t(TRIGGER_TYPE_LABEL_KEYS[item.type])}
                   state={item.state}
-                  statusLabel={t(capabilityStatusLabelKey(item.state) as any)}
+                  statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[item.state])}
                 />
               </div>
             ))}

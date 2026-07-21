@@ -201,6 +201,16 @@ export interface WorkflowIntegrationStatus {
   trigger: WorkflowTriggerCapabilityStatus;
 }
 
+export interface WorkflowStats {
+  callCount: number;
+  successCount: number;
+  errorCount: number;
+  totalRuntime: number;
+  avgRuntime: number;
+  thumbsUp: number;
+  thumbsDown: number;
+}
+
 export interface WorkflowSummary {
   id: string;
   name: string;
@@ -212,16 +222,8 @@ export interface WorkflowSummary {
   createdAt: number;
   updatedAt: number;
   nodeCount: number;
-  integrationStatus?: WorkflowIntegrationStatus;
-  stats: {
-    callCount: number;
-    successCount: number;
-    errorCount: number;
-    totalRuntime: number;
-    avgRuntime: number;
-    thumbsUp: number;
-    thumbsDown: number;
-  };
+  integrationStatus?: WorkflowIntegrationStatus | null;
+  stats: WorkflowStats;
 }
 
 export interface Workflow {
@@ -238,16 +240,8 @@ export interface Workflow {
   createdBy?: string;
   createdAt: number;
   updatedAt: number;
-  integrationStatus?: WorkflowIntegrationStatus;
-  stats: {
-    callCount: number;
-    successCount: number;
-    errorCount: number;
-    totalRuntime: number;
-    avgRuntime: number;
-    thumbsUp: number;
-    thumbsDown: number;
-  };
+  integrationStatus?: WorkflowIntegrationStatus | null;
+  stats: WorkflowStats;
 }
 
 export interface WorkflowExecutionStep {
