@@ -24,6 +24,7 @@ from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 from flocks.browser import helpers
+from flocks.browser.admin import ensure_daemon
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
 
@@ -326,6 +327,36 @@ def _open_page(url: str) -> None:
     helpers.wait_for_load(timeout=15)
 
 
+def _ensure_browser_daemon() -> None:
+    """Start the browser daemon or replace a stale/incompatible instance."""
+    ensure_daemon(wait=15.0, _open_inspect=False)
+
+
+def _browser_daemon_result(exc: Exception, auth_state_path: Path) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_daemon_not_ready",
+        "reason": "browser_daemon_not_ready",
+        "error": str(exc),
+        "next_action": "run `flocks browser --setup`, then `flocks browser --doctor`, then retry",
+        "auth_state_path": str(auth_state_path),
+    }
+
+
+def _browser_page_open_result(exc: Exception, cfg: RuntimeConfig) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_login_page_open_failed",
+        "reason": "browser_login_page_open_failed",
+        "error": str(exc),
+        "next_action": "verify base_url and EDR connectivity, then retry",
+        "login_url": _login_url(cfg),
+        "auth_state_path": str(cfg.auth_state_path),
+    }
+
+
 def _page_text() -> str:
     try:
         return str(helpers.js("document.body ? document.body.innerText : ''") or "")
@@ -393,6 +424,13 @@ def _validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
             "reason": "auth_state_not_found",
             "auth_state_path": str(cfg.auth_state_path),
         }
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        result = _browser_daemon_result(exc, cfg.auth_state_path)
+        result["reason"] = "auth_state_load_failed_browser_daemon_not_ready"
+        return result
+
     try:
         loaded = helpers.load_state(cfg.auth_state_path, url=_index_url(cfg))
         helpers.wait_for_load(timeout=15)
@@ -790,7 +828,14 @@ def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "
             "auth_state_path": str(cfg.auth_state_path),
         }
 
-    _open_page(_login_url(cfg))
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        return _browser_daemon_result(exc, cfg.auth_state_path)
+    try:
+        _open_page(_login_url(cfg))
+    except Exception as exc:
+        return _browser_page_open_result(exc, cfg)
     form_state = _wait_for_login_form_ready(cfg)
     last_error = ""
     for attempt in range(1, cfg.max_captcha_retry + 1):
@@ -881,7 +926,11 @@ async def handle(ctx: ToolContext) -> ToolResult:
 
         if action == "validate_auth_state":
             validation = _validate_auth_state(cfg)
-            return ToolResult(success=bool(validation.get("valid")), output=validation)
+            return ToolResult(
+                success=bool(validation.get("valid")),
+                output=validation,
+                error=None if validation.get("valid") else str(validation.get("reason") or "auth_state_invalid"),
+            )
 
         if action not in {"ensure_auth_state", "refresh_auth_state"}:
             return ToolResult(

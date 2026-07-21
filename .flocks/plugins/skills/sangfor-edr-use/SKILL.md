@@ -11,7 +11,7 @@ description: 用于处理深信服 EDR（终端检测与响应）相关任务，
 
 当用户需要打开深信服 EDR 页面，或需要通过 Web2CLI 抓取 EDR 页面请求时，必须按下面顺序处理登录态，不要一开始就要求用户提供账密：
 
-1. 先调用 `sangfor_edr_auth` 的 `action=status_auth_state` 或 `action=validate_auth_state`，检查 `~/.flocks/browser/sangfor-edr/auth-state.json` 是否存在且可用。
+1. 先调用 `sangfor_edr_auth` 的 `action=status_auth_state` 或 `action=validate_auth_state`，检查 `~/.flocks/browser/sangfor-edr/auth-state.json` 是否存在且可用。凡是需要访问浏览器的 action，工具会自动启动 daemon，并替换陈旧或协议不兼容的 daemon 实例。
 2. 如果登录态可用，直接复用该 state，继续打开 EDR 页面或执行 Web2CLI 抓取流程。
 3. 如果 state 不存在或已失效，但本地已经保存了 EDR 地址、用户名和密码，调用 `sangfor_edr_auth` 的 `action=ensure_auth_state` 自动刷新登录态。
 4. 如果没有可用 state，也没有保存账密配置，再引导用户选择：
@@ -21,6 +21,8 @@ description: 用于处理深信服 EDR（终端检测与响应）相关任务，
 无论采用哪种方式，只要获得可用登录态，就继续原有浏览器 / Web2CLI 流程：加载登录态、打开目标 EDR 页面、按需注入 Web2CLI hook、执行页面操作并导出捕获到的请求。后续再次打开页面时，仍必须先校验 `auth-state.json`；若登录态失效且已保存账密，则自动重新走 CDP 登录并刷新 state。
 
 若自动登录过程中出现验证码识别失败、MFA 校验、页面选择器变化、未检测到登录成功或有效 `sessionid` 等情况，立即回退到原有浏览器手动登录流程。
+
+若返回 `browser_daemon_not_ready` 或 `auth_state_load_failed_browser_daemon_not_ready`，依次执行 `flocks browser --setup` 和 `flocks browser --doctor`，然后重试原 action。不要手工创建或修改 `bu.port`：该文件保存的是 Flocks daemon IPC 端口，不是 Chrome remote-debugging 端口。
 
 > ⚠️ **EDR 没有开放 API**，所有操作必须通过浏览器（CDP 直连）完成。
 
@@ -74,6 +76,7 @@ powershell -Command "& '<FLOCKS_VENV>\Scripts\python.exe' '<FLOCKS_PLUGINS>\skil
 |---|---|---|
 | `flocks browser -c js(...)` 返回空文本 | daemon session 指向错误的 tab | 用 Python socket 直连 daemon，通过 `Runtime.evaluate` 在正确 context 执行 |
 | `flocks browser -c new_tab()` 后后续命令无响应 | tab 切换导致 session 错位 | 用 `switch_tab(targetId)` 明确切到 EDR tab |
+| `bu.port` 不存在或端口失效 | daemon 未启动或状态陈旧 | 先重试 `sangfor_edr_auth`；仍失败则运行 `flocks browser --setup` 和 `flocks browser --doctor`，禁止手工改 `bu.port` |
 | 多行代码转义失败 | PowerShell 引号嵌套 | 使用 `fetch_edr_system_state.py` 脚本，无需手动转义 |
 | EDR 页面数据为空 | EDR 内容在跨域 iframe 中 | 用 CDP direct 方式 attach 到 EDR tab，在正确 frame context 执行 JS |
 | 失陷设备数量不匹配 | 读取的是"全部"筛选而非"已失陷"筛选 | 需点击"已失陷终端"标签页获取准确数量 |

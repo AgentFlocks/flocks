@@ -11,11 +11,16 @@
 ## 零、前置条件
 
 ### 1. 确保浏览器 daemon 可用
+
+`sangfor_edr_auth` 在需要浏览器时会自动确保 daemon 运行，并尝试替换陈旧实例。仅在工具返回 `browser_daemon_not_ready` 时执行下列诊断：
+
 ```bash
 flocks browser --doctor
 ```
 
 如果 `active browser connections` 为 0，需用户开启浏览器 remote debugging。
+
+> 禁止手工创建或改写 `~/.flocks/browser/bu.port`。它指向 Flocks browser daemon 的自定义 IPC 端口，不是 Chrome 的 `--remote-debugging-port`。
 
 ### 2. 开启 Chrome Remote Debugging
 
@@ -61,6 +66,9 @@ chromium --remote-debugging-port=9222
 - `https://edr.company.com/`
 
 ### Step 2：检查 daemon
+
+先直接调用 `sangfor_edr_auth`。该工具会自动启动或恢复 daemon。仅当返回 `browser_daemon_not_ready` 或 `auth_state_load_failed_browser_daemon_not_ready` 时，执行：
+
 ```bash
 flocks browser --doctor
 ```
@@ -197,6 +205,7 @@ print(text_result["result"]["result"]["value"])
 | 页面数据为空 | EDR 内容在跨域 iframe 中 | 用 CDP direct 方式 attach 到 EDR tab，在正确 frame context 执行 JS |
 | 页面显示登录框 | 会话已失效 | 若已保存账密，调用 `sangfor_edr_auth` 自动刷新 state；否则提示用户手动登录 EDR |
 | 自动登录失败 | 验证码识别失败、MFA、页面选择器变化或登录成功检测失败 | 回退到浏览器手动登录，登录后保存 state |
+| `browser_daemon_not_ready` | daemon 无法启动或连接 Chrome | 执行 `flocks browser --setup` 和 `flocks browser --doctor`，然后重试；不要修改 `bu.port` |
 
 ---
 
