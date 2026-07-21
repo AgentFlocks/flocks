@@ -444,6 +444,7 @@ async def test_publish_workflow_local_releases_reserved_port_on_spawn_failure(
     monkeypatch.setattr(center, "_stop_existing_runtime_for_publish", fake_stop_existing_runtime_for_publish)
     monkeypatch.setattr(center, "_write_release_snapshot", fake_write_release_snapshot)
     monkeypatch.setattr(center, "_allocate_port", fake_allocate_port)
+    monkeypatch.setattr(center, "_is_port_available", lambda _port: True)
     monkeypatch.setattr(center.asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
 
     try:
