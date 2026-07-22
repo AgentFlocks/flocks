@@ -1089,6 +1089,7 @@ export function getUserAvatarSpacerClassName(_compact: boolean): string {
 const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
+const PENDING_QUESTION_RECONCILE_MS = 2_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
 const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
@@ -2150,6 +2151,19 @@ export default function SessionChat({
     checkStatus();
   }, [sessionId, loading, messages, fetchPendingQuestions]);
 
+  // A remote proxy or a reconnect boundary can delay or lose the one-shot
+  // question.asked event. Reconcile only while the session is active; the
+  // hook ignores responses made stale by a newer SSE update.
+  useEffect(() => {
+    if (!sessionId || (!isStreaming && !sending)) return;
+    const timer = setInterval(() => {
+      fetchPendingQuestions(sessionId).catch((err) => {
+        console.warn('[SessionChat] Failed to reconcile pending questions:', err);
+      });
+    }, PENDING_QUESTION_RECONCILE_MS);
+    return () => clearInterval(timer);
+  }, [sessionId, isStreaming, sending, fetchPendingQuestions]);
+
   // Refetch when page becomes visible again
   useEffect(() => {
     if (!sessionId) return;
@@ -2157,11 +2171,14 @@ export default function SessionChat({
       if (document.visibilityState === 'visible') {
         refetch();
         fetchPromptQueue();
+        fetchPendingQuestions(sessionId).catch((err) => {
+          console.warn('[SessionChat] Failed to recover pending questions after visibility change:', err);
+        });
       }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch, fetchPromptQueue]);
+  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
@@ -3915,6 +3932,12 @@ function ChatMessageBubbleInner({
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    part.type === 'text' && !String(part.text || '').trim()
+  );
+  const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
+    parts.length === 0 || hasOnlyBlankTextParts
+  );
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
@@ -3932,7 +3955,7 @@ function ChatMessageBubbleInner({
     <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
 
       {/* Empty / loading state */}
-      {parts.length === 0 && (
+      {(parts.length === 0 || shouldRenderAssistantErrorState) && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />

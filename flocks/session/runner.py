@@ -26,7 +26,7 @@ import httpx
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
-from flocks.session.message import Message, MessageInfo, MessageRole
+from flocks.session.message import Message, MessageInfo, MessageRole, TextPart
 from flocks.session.prompt import SessionPrompt
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
@@ -362,6 +362,139 @@ class SessionRunner:
             "with the same arguments and kept producing a tool-only turn. Change strategy, "
             "summarize the blocker, or answer directly instead of repeating the exact same call."
         )
+
+    @staticmethod
+    def _build_session_error_dict(
+        message: str,
+        *,
+        name: str = "SessionError",
+        display_message: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        error_data = {"message": message}
+        if data:
+            error_data.update(data)
+        if display_message:
+            error_data["displayMessage"] = display_message
+        return {
+            "name": name,
+            "message": message,
+            "data": error_data,
+        }
+
+    async def _publish_assistant_error_message(
+        self,
+        assistant_msg: MessageInfo,
+        *,
+        agent_name: str,
+        parent_id: str,
+        error_dict: Dict[str, Any],
+        text_part: Optional[TextPart] = None,
+    ) -> None:
+        if not self.callbacks.event_publish_callback:
+            return
+        now_ms = int(time.time() * 1000)
+        await self.callbacks.event_publish_callback("message.updated", {
+            "info": {
+                "id": assistant_msg.id,
+                "sessionID": self.session.id,
+                "role": "assistant",
+                "time": {"created": now_ms, "completed": now_ms},
+                "parentID": parent_id,
+                "modelID": self.model_id,
+                "providerID": self.provider_id,
+                "agent": agent_name,
+                "mode": agent_name,
+                "finish": "error",
+                "error": error_dict,
+                "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            }
+        })
+        if text_part is not None:
+            await self.callbacks.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": text_part.id,
+                    "messageID": text_part.messageID,
+                    "sessionID": text_part.sessionID,
+                    "type": "text",
+                    "text": text_part.text,
+                }
+            })
+
+    async def _create_error_assistant_message(
+        self,
+        *,
+        last_user: MessageInfo,
+        agent: AgentInfo,
+        error_message: str,
+        error_dict: Dict[str, Any],
+        visible_text: Optional[str] = None,
+    ) -> MessageInfo:
+        text = visible_text or error_message
+        part_id = Identifier.ascending("part")
+        now_ms = int(time.time() * 1000)
+        assistant_msg = await Message.create(
+            session_id=self.session.id,
+            role=MessageRole.ASSISTANT,
+            content=text,
+            agent=agent.name,
+            model_id=self.model_id,
+            provider_id=self.provider_id,
+            parent_id=last_user.id,
+            finish="error",
+            error=error_dict,
+            time={"created": now_ms, "completed": now_ms},
+            part_id=part_id,
+        )
+        parts = await Message.parts(assistant_msg.id, self.session.id)
+        text_part = next(
+            (
+                part for part in parts
+                if isinstance(part, TextPart) and part.id == part_id
+            ),
+            TextPart(
+                id=part_id,
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                type="text",
+                text=text,
+            ),
+        )
+        await self._publish_assistant_error_message(
+            assistant_msg,
+            agent_name=agent.name,
+            parent_id=last_user.id,
+            error_dict=error_dict,
+            text_part=text_part,
+        )
+        return assistant_msg
+
+    async def _ensure_visible_error_text(
+        self,
+        assistant_msg: MessageInfo,
+        error_message: str,
+    ) -> Optional[TextPart]:
+        if not error_message:
+            return None
+
+        parts = await Message.parts(assistant_msg.id, self.session.id)
+        for part in parts:
+            if getattr(part, "type", None) == "text" and str(getattr(part, "text", "") or "").strip():
+                return None
+
+        text_part = next((part for part in parts if getattr(part, "type", None) == "text"), None)
+        if isinstance(text_part, TextPart):
+            text_part.text = error_message
+        else:
+            text_part = TextPart(
+                id=Identifier.ascending("part"),
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                type="text",
+                text=error_message,
+            )
+        stored = await Message.store_part(self.session.id, assistant_msg.id, text_part)
+        return stored if isinstance(stored, TextPart) else text_part
 
     def _update_tool_loop_guard(
         self,
@@ -1176,9 +1309,22 @@ class SessionRunner:
                     decision=FailoverDecision(True, "provider_unavailable", 0),
                     attempts=0,
                 )
+            error_dict = self._build_session_error_dict(
+                error,
+                name="ProviderUnavailableError",
+                display_message="Model is unavailable. Please check the provider connection and model configuration.",
+                data={"providerID": self.provider_id, "modelID": self.model_id},
+            )
+            await self._create_error_assistant_message(
+                last_user=last_user,
+                agent=agent,
+                error_message=error,
+                error_dict=error_dict,
+                visible_text=error_dict["data"]["displayMessage"],
+            )
             if self.callbacks.on_error:
-                await self.callbacks.on_error(error)
-            return StepResult(action="stop", error=error)
+                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
+            return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
 
         # Apply config-based provider options (api_key/base_url)
         try:
@@ -1203,9 +1349,22 @@ class SessionRunner:
                     decision=FailoverDecision(True, "provider_unavailable", 0),
                     attempts=0,
                 )
+            error_dict = self._build_session_error_dict(
+                error,
+                name="ProviderConfigurationError",
+                display_message="Model is unavailable. Please check the provider connection and model configuration.",
+                data={"providerID": self.provider_id, "modelID": self.model_id},
+            )
+            await self._create_error_assistant_message(
+                last_user=last_user,
+                agent=agent,
+                error_message=error,
+                error_dict=error_dict,
+                visible_text=error_dict["data"]["displayMessage"],
+            )
             if self.callbacks.on_error:
-                await self.callbacks.on_error(error)
-            return StepResult(action="stop", error=error)
+                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
+            return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
         
         # Build prompts and tools
         tools_started_at = time.perf_counter()
@@ -1525,6 +1684,14 @@ class SessionRunner:
                             error=empty_error_dict,
                             finish="error",
                         )
+                        text_part = await self._ensure_visible_error_text(assistant_msg, empty_error_msg)
+                        await self._publish_assistant_error_message(
+                            assistant_msg,
+                            agent_name=agent.name,
+                            parent_id=last_user.id,
+                            error_dict=empty_error_dict,
+                            text_part=text_part,
+                        )
                         return StepResult(action="stop", error=empty_error_msg)
 
                 tool_loop_guard = self._update_tool_loop_guard(
@@ -1665,6 +1832,14 @@ class SessionRunner:
                         assistant_msg.id,
                         error=error_dict,
                         finish="error",
+                    )
+                    text_part = await self._ensure_visible_error_text(assistant_msg, final_error_message)
+                    await self._publish_assistant_error_message(
+                        assistant_msg,
+                        agent_name=agent.name,
+                        parent_id=last_user.id,
+                        error_dict=error_dict,
+                        text_part=text_part,
                     )
                     
                     return StepResult(action="stop", error=final_error_message)

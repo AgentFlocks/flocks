@@ -1425,6 +1425,35 @@ describe('SessionChat error rendering', () => {
     expect(screen.getByText('Connection error.')).toBeInTheDocument();
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
   });
+
+  it('renders assistant error messages when the only part is blank text', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-error-with-blank-text',
+          role: 'assistant',
+          parts: [{ id: 'blank-text', type: 'text', text: '' }] as Message['parts'],
+          finish: 'error',
+          error: {
+            name: 'EmptyResponseError',
+            data: { message: 'Model returned an empty response.' },
+          } as any,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('Model returned an empty response.')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
 });
 
 describe('SessionChat intermediate process collapse', () => {
@@ -3035,6 +3064,37 @@ describe('streaming activity helpers', () => {
 });
 
 describe('SessionChat fallback polling', () => {
+  it('reconciles pending questions while the session is busy', async () => {
+    vi.useFakeTimers();
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(pendingQuestionsHookMock.fetchPendingQuestions).toHaveBeenCalledWith('sess-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not finish streaming while fetched messages still contain a running tool', async () => {
     vi.useFakeTimers();
     const refetch = vi.fn();

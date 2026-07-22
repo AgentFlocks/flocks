@@ -781,11 +781,30 @@ class McpClient:
         command = _ClientCommand(action=action, payload=payload, response=response)
         await self._command_queue.put(command)
 
-        if owner_task.done() and not response.done():
-            owner_error = self._owner_error or RuntimeError(f"Client not connected: {self.name}")
-            response.set_exception(owner_error)
+        try:
+            done, _ = await asyncio.wait(
+                {response, owner_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            response.cancel()
+            raise
 
-        return await response
+        if response in done:
+            return await response
+
+        response.cancel()
+        try:
+            owner_error = owner_task.exception()
+        except asyncio.CancelledError:
+            owner_error = None
+
+        if owner_error is not None:
+            raise RuntimeError(
+                f"Connection lost: {self.name}: {_extract_root_cause(owner_error)}"
+            ) from owner_error
+
+        raise RuntimeError(f"Connection lost: {self.name}")
 
     async def _await_task(self, task: asyncio.Task[Any]) -> None:
         """Await a task safely from the owner loop or another loop."""

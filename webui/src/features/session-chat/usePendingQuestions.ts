@@ -5,7 +5,7 @@
  * cleanup so SessionChat does not need to own question runtime state.
  */
 
-import { useCallback, useState } from 'react';
+import { useCallback, useRef, useState } from 'react';
 
 import client from '@/api/client';
 import type { QuestionItem } from '@/components/common/QuestionTool';
@@ -34,8 +34,11 @@ function isNotFoundError(error: unknown): boolean {
 
 export function usePendingQuestions() {
   const [pendingQuestions, setPendingQuestions] = useState<Record<string, PendingQuestion>>({});
+  const stateVersionRef = useRef(0);
+  const fetchSequenceRef = useRef(0);
 
   const removeByCallId = useCallback((callID: string) => {
+    stateVersionRef.current += 1;
     setPendingQuestions(prev => {
       const next = { ...prev };
       delete next[callID];
@@ -45,6 +48,7 @@ export function usePendingQuestions() {
 
   const handleQuestionAsked = useCallback(
     (callID: string, requestId: string, questions: QuestionItem[]) => {
+      stateVersionRef.current += 1;
       setPendingQuestions(prev => ({
         ...prev,
         [callID]: { requestId, questions },
@@ -78,6 +82,7 @@ export function usePendingQuestions() {
   );
 
   const removeByRequestId = useCallback((requestId: string) => {
+    stateVersionRef.current += 1;
     setPendingQuestions(prev => {
       const next = { ...prev };
       for (const [callID, pending] of Object.entries(prev)) {
@@ -90,7 +95,15 @@ export function usePendingQuestions() {
   }, []);
 
   const fetchPendingQuestions = useCallback(async (sessionId: string) => {
+    const fetchSequence = ++fetchSequenceRef.current;
+    const stateVersion = stateVersionRef.current;
     const response = await client.get<PendingQuestionApiResponse[]>(`/api/question/session/${sessionId}/pending`);
+    if (
+      fetchSequence !== fetchSequenceRef.current
+      || stateVersion !== stateVersionRef.current
+    ) {
+      return;
+    }
     const next: Record<string, PendingQuestion> = {};
     for (const item of response.data || []) {
       const callID = item.tool?.callID;
@@ -105,6 +118,7 @@ export function usePendingQuestions() {
   }, []);
 
   const clearAll = useCallback(() => {
+    stateVersionRef.current += 1;
     setPendingQuestions({});
   }, []);
 

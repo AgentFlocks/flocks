@@ -66,7 +66,7 @@ vi.mock('@/api/client', () => ({
 
 vi.mock('@/api/workflow', () => ({
   workflowAPI: {
-    list: vi.fn().mockResolvedValue({ data: [] }),
+    listSummaries: vi.fn().mockResolvedValue({ data: [] }),
     get: vi.fn().mockResolvedValue({ data: null }),
   },
 }));
@@ -185,7 +185,7 @@ describe('WorkflowCreate CreateChatTab', () => {
     mockCreateAndSend.mockResolvedValue('session-1');
     mockClientGet.mockResolvedValue({ data: {} });
     mockClientPatch.mockResolvedValue({ data: {} });
-    vi.mocked(workflowAPI.list).mockResolvedValue({ data: [] });
+    vi.mocked(workflowAPI.listSummaries).mockResolvedValue({ data: [] });
     vi.mocked(workflowAPI.get).mockResolvedValue({ data: null as any });
   });
 
@@ -381,7 +381,7 @@ describe('WorkflowCreate CreateChatTab', () => {
         thumbsDown: 0,
       },
     };
-    vi.mocked(workflowAPI.list).mockResolvedValue({ data: [recentKnownWorkflow] });
+    vi.mocked(workflowAPI.listSummaries).mockResolvedValue({ data: [recentKnownWorkflow] });
     const onWorkflowCreated = vi.fn();
 
     renderCreateChatTab({
@@ -391,13 +391,13 @@ describe('WorkflowCreate CreateChatTab', () => {
     });
 
     await waitFor(() => {
-      expect(workflowAPI.list).toHaveBeenCalledTimes(1);
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
     });
 
     capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onStreamingDone?.();
 
     await waitFor(() => {
-      expect(workflowAPI.list).toHaveBeenCalledTimes(2);
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(2);
     });
     expect(onWorkflowCreated).not.toHaveBeenCalled();
   });
@@ -432,7 +432,7 @@ describe('WorkflowCreate CreateChatTab', () => {
     });
 
     await waitFor(() => {
-      expect(workflowAPI.list).toHaveBeenCalledTimes(1);
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
     });
 
     capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onSSEEvent?.({
@@ -467,7 +467,7 @@ describe('WorkflowCreate CreateChatTab', () => {
       },
     };
     let resolveSnapshot: ((value: { data: typeof createdWorkflow[] }) => void) | undefined;
-    vi.mocked(workflowAPI.list).mockReturnValueOnce(new Promise((resolve) => {
+    vi.mocked(workflowAPI.listSummaries).mockReturnValueOnce(new Promise((resolve) => {
       resolveSnapshot = resolve;
     }) as any);
     vi.mocked(workflowAPI.get).mockResolvedValue({ data: createdWorkflow });
@@ -516,7 +516,7 @@ describe('WorkflowCreate CreateChatTab', () => {
         thumbsDown: 0,
       },
     });
-    vi.mocked(workflowAPI.list)
+    vi.mocked(workflowAPI.listSummaries)
       .mockResolvedValueOnce({ data: [] })
       .mockResolvedValueOnce({ data: [makeWorkflow('first'), makeWorkflow('second')] });
     const onWorkflowCreated = vi.fn();
@@ -528,13 +528,13 @@ describe('WorkflowCreate CreateChatTab', () => {
     });
 
     await waitFor(() => {
-      expect(workflowAPI.list).toHaveBeenCalledTimes(1);
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(1);
     });
 
     capturedSessionChatProps[capturedSessionChatProps.length - 1]?.onStreamingDone?.();
 
     await waitFor(() => {
-      expect(workflowAPI.list).toHaveBeenCalledTimes(2);
+      expect(workflowAPI.listSummaries).toHaveBeenCalledTimes(2);
     });
     expect(onWorkflowCreated).not.toHaveBeenCalled();
   });

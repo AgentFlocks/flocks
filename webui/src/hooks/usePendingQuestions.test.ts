@@ -63,4 +63,29 @@ describe('usePendingQuestions', () => {
     await expect(result.current.submitAnswer('call-1', 'req-1', [['yes']])).rejects.toBe(error);
     expect(result.current.pendingQuestions['call-1']).toBeDefined();
   });
+
+  it('does not let stale hydration clear a newer SSE question', async () => {
+    let resolvePendingRequest: ((value: { data: [] }) => void) | undefined;
+    clientGetMock.mockReturnValueOnce(new Promise((resolve) => {
+      resolvePendingRequest = resolve;
+    }));
+    const { result } = renderHook(() => usePendingQuestions());
+
+    let hydration: Promise<void> | undefined;
+    act(() => {
+      hydration = result.current.fetchPendingQuestions('sess-1');
+    });
+    act(() => {
+      result.current.handleQuestionAsked('call-1', 'req-1', [{ question: 'Continue?' }]);
+    });
+    await act(async () => {
+      resolvePendingRequest?.({ data: [] });
+      await hydration;
+    });
+
+    expect(result.current.pendingQuestions['call-1']).toEqual({
+      requestId: 'req-1',
+      questions: [{ question: 'Continue?' }],
+    });
+  });
 });

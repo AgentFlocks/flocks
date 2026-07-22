@@ -742,11 +742,14 @@ function Section({
 const CHANNEL_ICON_SRC: Record<string, string> = {
   feishu: '/channel-feishu.png',
   wecom: '/channel-wecom.png',
-  dingtalk: '/channel-dingtalk.png',
   telegram: '/channel-telegram.png',
   email: '/channel-email.png',
-  weixin: '/channel-weixin.png',
   whatsapp: '/channel-whatsapp.png',
+};
+
+const CHANNEL_MASK_ICON: Record<string, { src: string; color: string }> = {
+  dingtalk: { src: '/channel-dingtalk-transparent.png', color: '#1677ff' },
+  weixin: { src: '/channel-weixin-transparent.png', color: '#07c160' },
 };
 
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
@@ -760,9 +763,29 @@ function getChannelIcon(id: string, size: 'sm' | 'md' = 'sm') {
   const dim = size === 'md' ? 'w-10 h-10' : 'w-9 h-9';
   const imgDim = size === 'md' ? 'w-7 h-7' : 'w-6 h-6';
   const src = CHANNEL_ICON_SRC[id];
-  return src ? (
+  const maskIcon = CHANNEL_MASK_ICON[id];
+  return src || maskIcon ? (
     <div className={`${dim} rounded-xl bg-white border border-gray-100 shadow-sm flex items-center justify-center flex-shrink-0`}>
-      <img src={src} alt={id} className={`${imgDim} object-contain`} />
+      {maskIcon ? (
+        <span
+          role="img"
+          aria-label={id}
+          className={`${imgDim} block`}
+          style={{
+            backgroundColor: maskIcon.color,
+            WebkitMaskImage: `url(${maskIcon.src})`,
+            maskImage: `url(${maskIcon.src})`,
+            WebkitMaskPosition: 'center',
+            maskPosition: 'center',
+            WebkitMaskRepeat: 'no-repeat',
+            maskRepeat: 'no-repeat',
+            WebkitMaskSize: 'contain',
+            maskSize: 'contain',
+          }}
+        />
+      ) : (
+        <img src={src} alt={id} className={`${imgDim} object-contain`} />
+      )}
     </div>
   ) : (
     <div className={`${dim} rounded-xl bg-gray-100 flex items-center justify-center flex-shrink-0`}>
