@@ -366,7 +366,7 @@ describe('SessionPage session actions menu', () => {
     expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
     expect(projectsSection).not.toContainElement(tasksHeading);
     expect(useSessions).toHaveBeenLastCalledWith('', {
-      projectIds: ['default'],
+      projectIds: ['tasks'],
       pageSize: 20,
     });
     expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
@@ -389,7 +389,6 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(client.post).toHaveBeenCalledWith('/api/session', {
         title: 'New Session',
-        projectID: 'default',
       });
     });
   });
@@ -477,7 +476,7 @@ describe('SessionPage session actions menu', () => {
 
     await screen.findByText('Labs');
     expect(useSessions).toHaveBeenLastCalledWith('', {
-      projectIds: ['default', 'prj_labs'],
+      projectIds: ['tasks', 'prj_labs'],
       pageSize: 6,
     });
   });
@@ -2056,7 +2055,6 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(client.post).toHaveBeenCalledWith('/api/session', {
         title: 'New Session',
-        projectID: 'default',
         model_auto: true,
       });
       expect(client.post).toHaveBeenCalledWith(

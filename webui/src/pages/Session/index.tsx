@@ -1,6 +1,6 @@
 import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
-  MessageSquare, Plus, Trash2,
+  Plus, Trash2,
   ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
@@ -53,6 +53,7 @@ const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 const AUTO_MODEL_KEY = '__flocks_auto__';
+const TASK_SESSION_GROUP_ID = 'tasks';
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 type ProjectSummary = {
   id: string;
@@ -76,7 +77,6 @@ type ProjectSessionGroup = {
   worktree: string;
   sessions: Session[];
   sessionCount: number;
-  isDefault: boolean;
   pathStatus: 'available' | 'missing' | 'unreadable';
   canWrite: boolean;
   canDelete: boolean;
@@ -409,7 +409,7 @@ export default function SessionPage() {
   const toast = useToast();
 
   const sessionProjectIds = useMemo(
-    () => projects.map((project) => project.id),
+    () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
     [projects],
   );
   const {
@@ -425,7 +425,7 @@ export default function SessionPage() {
     loadMore: loadMoreSessions,
   } = useSessions(searchQuery, {
     projectIds: sessionProjectIds,
-    pageSize: projects.length >= 2
+    pageSize: projects.length >= 1
       ? MULTI_PROJECT_SESSION_PAGE_SIZE
       : SINGLE_PROJECT_SESSION_PAGE_SIZE,
   });
@@ -602,37 +602,27 @@ export default function SessionPage() {
     }
   }, [projectsSectionCollapsed, projectsSectionCollapsedStorageKey]);
 
-  const defaultProjectId = useMemo(
-    () => projects.find((project) => project.isDefault)?.id ?? projects[0]?.id ?? null,
-    [projects],
-  );
-
   const projectSessionGroups = useMemo<ProjectSessionGroup[]>(() => {
     const registeredIds = new Set(projects.map((project) => project.id));
     const sessionsByProject = new Map<string, Session[]>();
     sessions.forEach((session) => {
       const responseProjectId = session.effectiveProjectID || session.projectID;
-      const projectId = registeredIds.has(responseProjectId)
-        ? responseProjectId
-        : defaultProjectId;
-      if (!projectId) return;
-      const groupSessions = sessionsByProject.get(projectId) ?? [];
+      if (!registeredIds.has(responseProjectId)) return;
+      const groupSessions = sessionsByProject.get(responseProjectId) ?? [];
       groupSessions.push(session);
-      sessionsByProject.set(projectId, groupSessions);
+      sessionsByProject.set(responseProjectId, groupSessions);
     });
 
     return projects.map((project) => {
-      const isDefault = project.isDefault ?? project.id === defaultProjectId;
       const projectSessions = sessionsByProject.get(project.id) ?? [];
       return {
         id: project.id,
-        label: isDefault ? t('defaultProjectName') : getProjectLabel(project),
+        label: getProjectLabel(project),
         worktree: project.worktree,
         sessions: projectSessions,
         sessionCount: searchQuery.trim()
           ? project.matchedSessionCount ?? projectSessions.length
           : project.sessionCount ?? projectSessions.length,
-        isDefault,
         pathStatus: project.pathStatus ?? 'available',
         canWrite: project.canWrite ?? true,
         canDelete: project.canDelete ?? true,
@@ -641,46 +631,49 @@ export default function SessionPage() {
     })
       .filter((group) => {
         if (!searchQuery.trim()) return true;
-        if (group.isDefault) return true;
         const project = projects.find((item) => item.id === group.id);
         return (project?.matchedSessionCount ?? group.sessions.length) > 0 || group.id === selectedProjectId;
       })
       .sort((a, b) => {
-        if (a.isDefault !== b.isDefault) return a.isDefault ? -1 : 1;
         const aLatest = projects.find((project) => project.id === a.id)?.lastActivityAt ?? a.sessions[0]?.time?.updated ?? 0;
         const bLatest = projects.find((project) => project.id === b.id)?.lastActivityAt ?? b.sessions[0]?.time?.updated ?? 0;
         if (aLatest !== bLatest) return bLatest - aLatest;
         return a.label.localeCompare(b.label);
       });
-  }, [defaultProjectId, projects, searchQuery, selectedProjectId, sessions, t]);
+  }, [projects, searchQuery, selectedProjectId, sessions]);
 
-  const managedProjectSessionGroups = useMemo(
-    () => projectSessionGroups.filter((group) => !group.isDefault),
-    [projectSessionGroups],
-  );
+  const managedProjectSessionGroups = projectSessionGroups;
   const taskSessionGroup = useMemo(
-    () => projectSessionGroups.find((group) => group.isDefault) ?? null,
-    [projectSessionGroups],
+    () => {
+      const registeredIds = new Set(projects.map((project) => project.id));
+      const taskSessions = sessions.filter((session) => (
+        !registeredIds.has(session.effectiveProjectID || session.projectID)
+      ));
+      return {
+        id: TASK_SESSION_GROUP_ID,
+        label: t('tasksSection'),
+        worktree: '',
+        sessions: taskSessions,
+        sessionCount: taskSessions.length,
+        pathStatus: 'available' as const,
+      };
+    },
+    [projects, sessions, t],
   );
-  const taskGroupCollapsed = taskSessionGroup
-    ? collapsedProjectIds.has(taskSessionGroup.id)
-    : false;
-  const taskGroupSelected = taskSessionGroup?.id === selectedProjectId;
-  const hasMoreTaskSessions = taskSessionGroup
-    ? projects.length >= 2
-      ? taskSessionGroup.sessions.length < taskSessionGroup.sessionCount
-      : hasMoreByProject[taskSessionGroup.id]
-    : false;
+  const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
+  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
+  const hasMoreTaskSessions = hasMoreByProject[TASK_SESSION_GROUP_ID] ?? false;
 
-  const selectedProjectIDForCreate = selectedProjectId ?? defaultProjectId ?? projectSessionGroups[0]?.id ?? null;
+  const selectedProjectIDForCreate = selectedProjectId && selectedProjectId !== TASK_SESSION_GROUP_ID
+    ? selectedProjectId
+    : null;
 
   useEffect(() => {
-    if (projectSessionGroups.length === 0) {
-      setSelectedProjectId(null);
-      return;
-    }
-
-    if (selectedProjectId && projectSessionGroups.some((group) => group.id === selectedProjectId)) {
+    const selectableProjectIds = new Set([
+      TASK_SESSION_GROUP_ID,
+      ...projectSessionGroups.map((group) => group.id),
+    ]);
+    if (selectedProjectId && selectableProjectIds.has(selectedProjectId)) {
       return;
     }
 
@@ -690,16 +683,18 @@ export default function SessionPage() {
     } catch {
       storedProjectId = null;
     }
-    const fallbackProjectId = storedProjectId && projectSessionGroups.some((group) => group.id === storedProjectId)
+    const fallbackProjectId = storedProjectId && selectableProjectIds.has(storedProjectId)
       ? storedProjectId
-      : defaultProjectId && projectSessionGroups.some((group) => group.id === defaultProjectId)
-        ? defaultProjectId
-        : projectSessionGroups[0].id;
+      : TASK_SESSION_GROUP_ID;
     setSelectedProjectId(fallbackProjectId);
-  }, [activeProjectStorageKey, defaultProjectId, projectSessionGroups, selectedProjectId]);
+  }, [activeProjectStorageKey, projectSessionGroups, selectedProjectId]);
 
   useEffect(() => {
-    if (!selectedProjectId || !projects.some((project) => project.id === selectedProjectId)) return;
+    if (
+      !selectedProjectId
+      || (selectedProjectId !== TASK_SESSION_GROUP_ID
+        && !projects.some((project) => project.id === selectedProjectId))
+    ) return;
     try {
       window.localStorage.setItem(activeProjectStorageKey, selectedProjectId);
     } catch {
@@ -718,7 +713,11 @@ export default function SessionPage() {
       params: { search: query.trim() || undefined },
     });
     if (requestSeq !== projectListRequestSeqRef.current) return;
-    const nextProjects = Array.isArray(listResult.data) ? listResult.data : [];
+    const nextProjects = Array.isArray(listResult.data)
+      ? listResult.data.filter((project: ProjectSummary) => (
+        project.id !== TASK_SESSION_GROUP_ID && !project.isDefault
+      ))
+      : [];
     setProjects((currentProjects) => {
       if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
         return nextProjects;
@@ -955,7 +954,8 @@ export default function SessionPage() {
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
-    const projectID = projectIdOverride ?? selectedProjectIDForCreate;
+    const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
+    const projectID = targetGroupId === TASK_SESSION_GROUP_ID ? null : targetGroupId;
     const carryAutoSelection = !selectedSessionId && selectedModelAuto;
     setCreating(true);
     try {
@@ -967,14 +967,12 @@ export default function SessionPage() {
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
-      if (projectID) {
-        setSelectedProjectId(projectID);
-        setCollapsedProjectIds(prev => {
-          const next = new Set(prev);
-          next.delete(projectID);
-          return next;
-        });
-      }
+      setSelectedProjectId(targetGroupId);
+      setCollapsedProjectIds(prev => {
+        const next = new Set(prev);
+        next.delete(targetGroupId);
+        return next;
+      });
       setSelectedAgent('rex');
       setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(response.data.id);
@@ -983,7 +981,7 @@ export default function SessionPage() {
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectIDForCreate, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
+  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
   const handleCreateSessionInProject = useCallback((projectId: string) => {
     void handleCreateSession(projectId);
@@ -1317,7 +1315,7 @@ export default function SessionPage() {
         return next;
       });
       setSelectedProjectId((current) => (
-        current === projectPendingDelete.id ? defaultProjectId : current
+        current === projectPendingDelete.id ? TASK_SESSION_GROUP_ID : current
       ));
       setProjectPendingDelete(null);
       await Promise.all([
@@ -1330,7 +1328,7 @@ export default function SessionPage() {
     } finally {
       setProjectDeleting(false);
     }
-  }, [defaultProjectId, fetchProjects, projectDeleting, projectPendingDelete, refetchSessions, searchQuery, t, toast]);
+  }, [fetchProjects, projectDeleting, projectPendingDelete, refetchSessions, searchQuery, t, toast]);
 
   const handleSubmitProject = useCallback(async () => {
     if (!projectDialogMode || projectSubmitInFlightRef.current) return;
@@ -1647,18 +1645,8 @@ export default function SessionPage() {
 
         {/* Session list */}
         <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide pb-2">
-          {sessions.length === 0 && projectSessionGroups.length === 0 ? (
-            <div className="text-center py-10 px-4 text-gray-400">
-              <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-40" />
-              <p className="text-sm">{t('noSessions')}</p>
-            </div>
-          ) : projectSessionGroups.length === 0 ? (
-            <div className="text-center py-8 px-4 text-gray-400">
-              <p className="text-sm">{t('noResults', 'No conversations found')}</p>
-            </div>
-          ) : (
-            <div>
-              <section className="group/projects-section">
+          <div>
+            <section className="group/projects-section">
                 <div className="flex items-center justify-between px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
                   <button
                     type="button"
@@ -1685,11 +1673,11 @@ export default function SessionPage() {
                   <div className="space-y-2">
                 {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
-                  const isDefaultProject = group.isDefault;
                   const isSelectedProject = selectedProjectId === group.id;
-                  const hasMoreProjectSessions = projects.length >= 2
-                    ? group.sessions.length < group.sessionCount
-                    : hasMoreByProject[group.id];
+                  const hasMoreProjectSessions = (
+                    group.sessions.length < group.sessionCount
+                    || hasMoreByProject[group.id]
+                  );
                   const persistedProject = projects.find((project) => project.id === group.id);
                   return (
                     <div key={group.id} className="group/project relative">
@@ -1772,41 +1760,41 @@ export default function SessionPage() {
                             <Copy className="h-3.5 w-3.5" />
                             {t('projectDialog.copyPathAction')}
                           </button>
-                          {!isDefaultProject && group.canWrite && (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => void handleShareProject(group, !group.isShared)}
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                          >
-                            <Share2 className="h-3.5 w-3.5" />
-                            {t(group.isShared ? 'unshareAction' : 'shareAction')}
-                          </button>
+                          {group.canWrite && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => void handleShareProject(group, !group.isShared)}
+                              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                            >
+                              <Share2 className="h-3.5 w-3.5" />
+                              {t(group.isShared ? 'unshareAction' : 'shareAction')}
+                            </button>
                           )}
-                          {!isDefaultProject && group.canWrite && (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => handleOpenRenameProject(group)}
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
-                          >
-                            <PencilLine className="h-3.5 w-3.5" />
-                            {t('projectDialog.renameAction')}
-                          </button>
+                          {group.canWrite && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => handleOpenRenameProject(group)}
+                              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                            >
+                              <PencilLine className="h-3.5 w-3.5" />
+                              {t('projectDialog.renameAction')}
+                            </button>
                           )}
-                          {!isDefaultProject && group.canDelete && (
-                          <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                          {group.canDelete && (
+                            <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
                           )}
-                          {!isDefaultProject && group.canDelete && (
-                          <button
-                            type="button"
-                            role="menuitem"
-                            onClick={() => handleOpenDeleteProject(group)}
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/40"
-                          >
-                            <Trash2 className="h-3.5 w-3.5" />
-                            {t('projectDialog.deleteAction')}
-                          </button>
+                          {group.canDelete && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => handleOpenDeleteProject(group)}
+                              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/40"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                              {t('projectDialog.deleteAction')}
+                            </button>
                           )}
                         </div>
                       )}
@@ -1894,7 +1882,7 @@ export default function SessionPage() {
                       type="button"
                       onClick={(event) => {
                         event.stopPropagation();
-                        handleCreateSessionInProject(taskSessionGroup.id);
+                        void handleCreateSession(TASK_SESSION_GROUP_ID);
                       }}
                       disabled={creating || taskSessionGroup.pathStatus !== 'available'}
                       className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
@@ -1951,8 +1939,7 @@ export default function SessionPage() {
                   )}
                 </section>
               )}
-            </div>
-          )}
+          </div>
         </div>
 
         {/* Bottom：批量操作栏 / 批量选择入口 */}

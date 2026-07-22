@@ -11,7 +11,6 @@ from pydantic import BaseModel
 
 from flocks.auth.context import AuthUser
 from flocks.project.project import (
-    DEFAULT_PROJECT_ID,
     Project,
     ProjectDeletionError,
     ProjectInfo,
@@ -60,15 +59,12 @@ class FolderBrowserResponse(BaseModel):
 
 async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List[ProjectInfo]:
     owner_id = user.id
-    projects = await Project.list_visible(
-        owner_id=owner_id,
-        default_worktree=Project.default_worktree_candidate(),
-    )
+    projects = await Project.list_visible(owner_id=owner_id)
     shared_project_ids = Project.shared_project_ids()
     term = search.strip().casefold() if search else None
     stats = Project.get_session_stats_cache(owner_id, term or "")
     if stats is None:
-        registered_ids = {project.id for project in projects if not project.is_default}
+        registered_ids = {project.id for project in projects}
         counts = {project.id: 0 for project in projects}
         matched_counts = {project.id: 0 for project in projects}
         last_activity: dict[str, int] = {}
@@ -85,11 +81,9 @@ async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List
                 continue
             if session.parent_id or session.category not in _MANAGER_CATEGORIES:
                 continue
-            project_id = (
-                session.project_id
-                if session.project_id in registered_ids
-                else DEFAULT_PROJECT_ID
-            )
+            if session.project_id not in registered_ids:
+                continue
+            project_id = session.project_id
             counts[project_id] = counts.get(project_id, 0) + 1
             if term is None or term in session.title.casefold():
                 matched_counts[project_id] = matched_counts.get(project_id, 0) + 1
@@ -122,7 +116,7 @@ async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List
 @router.get("", response_model=List[ProjectInfo], include_in_schema=False)
 @router.get("/", response_model=List[ProjectInfo], summary="List projects")
 async def list_projects(request: Request, search: Optional[str] = Query(None)):
-    """List the virtual default project and user-registered folders."""
+    """List user-registered project folders."""
 
     user = require_user(request)
     try:
@@ -155,24 +149,19 @@ async def create_project(request: Request, payload: ProjectCreateRequest):
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-@router.get("/current", response_model=ProjectInfo, summary="Get default project")
+@router.get("/current", response_model=ProjectInfo, summary="Get current project")
 async def get_current_project(request: Request, project_id: Optional[str] = Query(None, alias="projectID")):
-    """Return a requested registered project, falling back to default."""
+    """Return a requested project or the current runtime context."""
 
     user = require_user(request)
-    project = await Project.get(
-        project_id or DEFAULT_PROJECT_ID,
-        owner_id=user.id,
-        default_worktree=Project.default_worktree_candidate(),
-    )
+    if project_id:
+        project = await Project.get(project_id, owner_id=user.id)
+    else:
+        from flocks.project.instance import Instance
+
+        project = Instance.get_project()
     if project is None:
-        project = await Project.get(
-            DEFAULT_PROJECT_ID,
-            owner_id=user.id,
-            default_worktree=Project.default_worktree_candidate(),
-        )
-    if project is None:
-        raise HTTPException(status_code=500, detail="Default project is unavailable")
+        raise HTTPException(status_code=404, detail="Current project is unavailable")
     return project
 
 
@@ -180,16 +169,8 @@ async def get_current_project(request: Request, project_id: Optional[str] = Quer
 async def browse_project_folders(request: Request, path: Optional[str] = Query(None)):
     """List directories under configured roots without exposing file contents."""
 
-    user = require_user(request)
-    default_project = await Project.get(
-        DEFAULT_PROJECT_ID,
-        owner_id=user.id,
-        default_worktree=Project.default_worktree_candidate(),
-    )
-    if default_project is None:
-        raise HTTPException(status_code=500, detail="Default project is unavailable")
-
-    roots = Project.allowed_roots(default_project.worktree)
+    require_user(request)
+    roots = Project.allowed_roots()
     if not roots:
         raise HTTPException(status_code=400, detail="No project roots are available")
 
@@ -302,12 +283,32 @@ async def unshare_project_local(project_id: str, request: Request):
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
-@router.delete("/{project_id}", response_model=bool, summary="Remove project")
+@router.delete("/{project_id}", response_model=bool, summary="Delete project")
 async def delete_project(project_id: str, request: Request):
-    """Remove a project registration while preserving sessions and files."""
+    """Remove a project and its sessions while preserving project files."""
 
     user = require_user(request)
     try:
+        if await Project.get(project_id, owner_id=user.id) is None:
+            raise ValueError(f"Project {project_id} not found")
+
+        project_sessions = [
+            session
+            for session in await Session.list_all_unfiltered()
+            if session.project_id == project_id
+        ]
+        if any(not SessionPolicy.can_delete(session, user) for session in project_sessions):
+            raise HTTPException(
+                status_code=403,
+                detail="Only session owners can delete project sessions",
+            )
+
+        from flocks.server.routes.session import delete_session_for_user
+
+        for session in project_sessions:
+            if await Session.get(project_id, session.id) is not None:
+                await delete_session_for_user(session.id, user)
+
         return await Project.delete(project_id, owner_id=user.id)
     except ProjectDeletionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
@@ -321,7 +322,6 @@ async def get_project(project_id: str, request: Request):
     project = await Project.get(
         project_id,
         owner_id=user.id,
-        default_worktree=Project.default_worktree_candidate(),
     )
     if project is None:
         raise HTTPException(status_code=404, detail=f"Project {project_id} not found")

@@ -369,6 +369,71 @@ async def test_discover_project_source_for_project_plugins(tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_discover_source_root_plugins_from_unrelated_cwd(tmp_path):
+    """Bundled source-root skills remain visible outside the source checkout."""
+    source_root = tmp_path / "source"
+    ordinary_cwd = tmp_path / "ordinary-cwd"
+    ordinary_cwd.mkdir()
+    bundled_skill = source_root / ".flocks" / "plugins" / "skills" / "bundled-skill"
+    _write_skill_md(bundled_skill / "SKILL.md", "bundled-skill")
+
+    module_file = source_root / "flocks" / "skill" / "skill.py"
+    with (
+        patch("os.path.expanduser", return_value=str(tmp_path / "home")),
+        patch("flocks.skill.skill.__file__", str(module_file)),
+        patch(
+            "flocks.skill.skill.Instance.get_directory",
+            return_value=str(ordinary_cwd),
+        ),
+        patch(
+            "flocks.skill.skill.Instance.get_worktree",
+            return_value=str(ordinary_cwd),
+        ),
+    ):
+        skills = await Skill.all()
+
+    skill = next((item for item in skills if item.name == "bundled-skill"), None)
+    assert skill is not None, "source-root bundled skill not discovered"
+    assert skill.source == "project"
+
+
+@pytest.mark.asyncio
+async def test_skill_cache_does_not_leak_across_project_contexts(tmp_path):
+    """An ordinary-session discovery must not poison a project lookup."""
+    fake_home = tmp_path / "home"
+    ordinary_cwd = tmp_path / "ordinary-cwd"
+    project_dir = tmp_path / "project"
+    source_root = tmp_path / "source"
+    ordinary_cwd.mkdir()
+    project_dir.mkdir()
+    _write_skill_md(
+        project_dir / ".flocks" / "plugins" / "skills" / "project-only" / "SKILL.md",
+        "project-only",
+    )
+
+    context = {"directory": str(ordinary_cwd)}
+    module_file = source_root / "flocks" / "skill" / "skill.py"
+    with (
+        patch("os.path.expanduser", return_value=str(fake_home)),
+        patch("flocks.skill.skill.__file__", str(module_file)),
+        patch(
+            "flocks.skill.skill.Instance.get_directory",
+            side_effect=lambda: context["directory"],
+        ),
+        patch(
+            "flocks.skill.skill.Instance.get_worktree",
+            side_effect=lambda: context["directory"],
+        ),
+    ):
+        ordinary_skills = await Skill.all()
+        context["directory"] = str(project_dir)
+        project_skills = await Skill.all()
+
+    assert "project-only" not in {skill.name for skill in ordinary_skills}
+    assert "project-only" in {skill.name for skill in project_skills}
+
+
+@pytest.mark.asyncio
 async def test_discover_flocks_source_for_builtin_skills(tmp_path):
     """Skills under .flocks/skills/ (not plugins/) must get source='flocks'."""
     project_dir = tmp_path / "myproject"
