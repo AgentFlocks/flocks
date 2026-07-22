@@ -2973,6 +2973,37 @@ describe('streaming activity helpers', () => {
 });
 
 describe('SessionChat fallback polling', () => {
+  it('reconciles pending questions while the session is busy', async () => {
+    vi.useFakeTimers();
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(pendingQuestionsHookMock.fetchPendingQuestions).toHaveBeenCalledWith('sess-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not finish streaming while fetched messages still contain a running tool', async () => {
     vi.useFakeTimers();
     const refetch = vi.fn();
