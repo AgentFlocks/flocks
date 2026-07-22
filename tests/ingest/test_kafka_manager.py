@@ -17,12 +17,23 @@ import asyncio
 import json
 import sys
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from flocks.ingest.kafka import manager as kafka_manager
 from flocks.workflow import execution_store
 from flocks.workflow.triggers.models import TriggerDefinition
+
+
+@pytest.fixture(autouse=True)
+def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    context = object()
+    builder = AsyncMock(return_value=context)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(kafka_manager, "build_workflow_tool_context", builder)
+    monkeypatch.setattr(kafka_manager, "cleanup_workflow_tool_context", cleanup)
+    return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
 
 
 @pytest.mark.asyncio
@@ -150,7 +161,7 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
     manager._abort_events[workflow_id] = abort
     workers = [
         asyncio.create_task(
-                manager._worker_loop(workflow_id, {}, trigger, {}, queue, abort, "topic-a"),
+            manager._worker_loop(workflow_id, {}, trigger, {}, queue, abort, "topic-a"),
             name=f"test-worker-{i}",
         )
         for i in range(pool_size)
@@ -172,8 +183,7 @@ async def test_worker_pool_bounds_in_flight_dispatches(monkeypatch: pytest.Monke
 
     assert completed == burst_size, f"expected {burst_size} dispatches, got {completed}"
     assert max_in_flight <= pool_size, (
-        f"in-flight dispatches exceeded worker pool size: "
-        f"max_in_flight={max_in_flight}, pool_size={pool_size}"
+        f"in-flight dispatches exceeded worker pool size: max_in_flight={max_in_flight}, pool_size={pool_size}"
     )
 
 
@@ -499,6 +509,7 @@ async def test_trigger_workflow_merges_configured_inputs_with_consumed_message(
 @pytest.mark.asyncio
 async def test_trigger_workflow_applies_mapping_and_filter(
     monkeypatch: pytest.MonkeyPatch,
+    trigger_tool_context: SimpleNamespace,
 ) -> None:
     manager = kafka_manager.KafkaManager()
     captured_run_kwargs: dict = {}
@@ -550,6 +561,12 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["inputs"]["order_id"] == 7
     assert captured_run_kwargs["inputs"]["region"] == "cn"
     assert captured_run_kwargs["inputs"]["pipeline"] == "orders"
+    assert captured_run_kwargs["tool_context"] is trigger_tool_context.context
+    trigger_tool_context.builder.assert_awaited_once_with(
+        workflow_id="wf-orders",
+        action_name="trigger:kafka",
+    )
+    trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
     assert recorded_exec_data["triggerId"] == "kafka-orders"
     assert recorded_exec_data["triggerSource"] == "orders-topic"
 

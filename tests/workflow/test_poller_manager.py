@@ -4,12 +4,28 @@ import asyncio
 import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
+from flocks.tool import ToolContext
 from flocks.workflow import poller_manager
 from flocks.workflow import execution_store
 from flocks.workflow.runner import RunWorkflowResult
+
+
+@pytest.fixture(autouse=True)
+def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    context = ToolContext(
+        session_id="schedule-parent",
+        message_id="schedule-message",
+        agent="rex",
+    )
+    builder = AsyncMock(return_value=context)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(poller_manager, "build_workflow_tool_context", builder)
+    monkeypatch.setattr(poller_manager, "cleanup_workflow_tool_context", cleanup)
+    return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
 
 
 @pytest.mark.asyncio
@@ -88,7 +104,10 @@ async def test_restart_missing_workflow_reports_failed(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_once_injects_dynamic_inputs_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_tool_context: SimpleNamespace,
+) -> None:
     manager = poller_manager.WorkflowPollerManager()
     captured_inputs: dict[str, Any] = {}
 
@@ -109,6 +128,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         captured_inputs.update(inputs)
         assert workflow["start"] == "n1"
@@ -117,6 +137,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         assert trace is False
         assert run_id == "exec-wf-run-once"
         assert execution_profile == "high_frequency"
+        assert tool_context is trigger_tool_context.context
         assert cancel() is False
         return RunWorkflowResult(
             status="success",
@@ -176,6 +197,11 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     assert captured_inputs["input_date"]
     assert captured_inputs["_trigger"] == "poller"
     assert captured_inputs["_poller_run_id"].startswith("poller-")
+    trigger_tool_context.builder.assert_awaited_once_with(
+        workflow_id="wf-run-once",
+        action_name="trigger:schedule",
+    )
+    trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
 
 
 @pytest.mark.asyncio
@@ -239,6 +265,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         assert workflow["start"] == "n1"
         assert workflow["nodes"][0]["id"] == "n1"
@@ -330,6 +357,7 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         _ = workflow, inputs, timeout_s, trace, cancel, run_id
         _ = on_step_complete
@@ -426,6 +454,7 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         _ = workflow, inputs, timeout_s, trace, cancel, run_id
         _ = on_step_complete

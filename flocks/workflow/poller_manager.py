@@ -28,6 +28,10 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.tool_context import (
+    build_workflow_tool_context,
+    cleanup_workflow_tool_context,
+)
 
 WORKFLOW_POLLER_CONFIG_PREFIX = "workflow_poller_config/"
 DEFAULT_INTERVAL_SECONDS = 30
@@ -458,7 +462,12 @@ class WorkflowPollerManager:
         current["activeRuns"] = self._cleanup_done_runs(workflow_id)
         self._status[workflow_id] = current
 
+        tool_context = None
         try:
+            tool_context = await build_workflow_tool_context(
+                workflow_id=workflow_id,
+                action_name="trigger:schedule",
+            )
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
@@ -469,6 +478,7 @@ class WorkflowPollerManager:
                 execution_profile="high_frequency",
                 cancel=cancel_event.is_set,
                 on_step_complete=step_recorder.on_step_complete,
+                tool_context=tool_context,
             )
             if not isinstance(result, RunWorkflowResult):
                 result = RunWorkflowResult(status="failed", error="invalid_run_result")
@@ -545,6 +555,7 @@ class WorkflowPollerManager:
             self._status[workflow_id] = current
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
+            await cleanup_workflow_tool_context(tool_context)
             try:
                 await record_execution_result(workflow_id, exec_id, exec_data)
             except Exception as exc:
