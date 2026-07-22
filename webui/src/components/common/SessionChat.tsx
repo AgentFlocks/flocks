@@ -2871,11 +2871,30 @@ export default function SessionChat({
         });
         const msgs: any[] = Array.isArray(res.data) ? res.data : (res.data?.items || []);
         const lastMsg = msgs[msgs.length - 1];
-        if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
-          const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
-          if (hasFetchedActiveTool) {
-            return;
+        const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
+        if (hasFetchedActiveTool) {
+          const localActiveToolPartIds = new Set<string>();
+          const localActiveToolCallIds = new Set<string>();
+          for (const message of messagesRef.current) {
+            for (const part of message.parts || []) {
+              if (!isActiveToolPart(part)) continue;
+              if (part.id) localActiveToolPartIds.add(part.id);
+              if (part.callID) localActiveToolCallIds.add(part.callID);
+            }
           }
+          const hasMissingFetchedActiveTool = msgs.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => (
+              isActiveToolPart(part)
+              && !(
+                (part.id && localActiveToolPartIds.has(part.id))
+                || (part.callID && localActiveToolCallIds.has(part.callID))
+              )
+            ))
+          ));
+          if (hasMissingFetchedActiveTool) refetch();
+          return;
+        }
+        if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
           activeToolPartIdsRef.current.clear();
           const statusRes = await client.get('/api/session/status');
           const status = statusRes.data?.[sessionId];

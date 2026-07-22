@@ -674,6 +674,58 @@ describe('updateMessagePart scheduling', () => {
     expect((result.current.messages[2].parts as any[])[0].text).toBe('new reply');
   });
 
+  it('moves a late assistant process beside its parent when metadata arrives', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'old-user',
+        role: 'user',
+        timestamp: 100,
+      }));
+      result.current.addMessage(makeMsg({
+        id: 'current-user',
+        role: 'user',
+        timestamp: 300,
+      }));
+      result.current.addMessage(makeMsg({
+        id: 'current-assistant',
+        role: 'assistant',
+        parentID: 'current-user',
+        timestamp: 400,
+        finish: 'stop',
+      }));
+
+      // A tool/reasoning part can arrive before its message metadata. The
+      // placeholder is initially appended after the current conversation.
+      result.current.updateMessagePart({
+        id: 'old-tool',
+        messageID: 'old-assistant',
+        sessionID: 'sess-1',
+        type: 'tool',
+        tool: 'question',
+        state: { status: 'completed' },
+      });
+      result.current.updateMessage({
+        id: 'old-assistant',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        parentID: 'old-user',
+        time: { created: 200 },
+        finish: 'tool-calls',
+      });
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      'old-user',
+      'old-assistant',
+      'current-user',
+      'current-assistant',
+    ]);
+    expect((result.current.messages[1].parts as any[])[0].id).toBe('old-tool');
+  });
+
   it('moves a replaced temp user before an already streamed assistant child', async () => {
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     await act(async () => {});

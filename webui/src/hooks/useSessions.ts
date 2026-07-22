@@ -613,7 +613,11 @@ export function useSessionMessages(sessionId?: string) {
             providerID: messageInfo.providerID ?? existing.providerID,
             cost: messageInfo.cost ?? existing.cost,
           };
-          return updated;
+          // Part events can create an assistant placeholder before its
+          // message metadata arrives. Once parentID is known, move that
+          // placeholder beside its user message instead of leaving an old
+          // reasoning/tool process at the end of the conversation.
+          return normalizeMessageOrder(updated);
         }
 
         // If a user SSE message arrives and there's a temp placeholder, replace it

@@ -3033,6 +3033,91 @@ describe('SessionChat fallback polling', () => {
     }
   });
 
+  it('refetches when polling finds a running question missing from local messages', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      useSessionMessagesMock.mockReturnValue({
+        messages: [
+          makeMessage({
+            id: 'assistant-1',
+            parts: [],
+          }),
+        ],
+        loading: false,
+        refetch,
+        addMessage: vi.fn(),
+        updateMessage: vi.fn(),
+        updateMessagePart: vi.fn(),
+        replaceMessageText: vi.fn(),
+        truncateAfterMessage: vi.fn(),
+      });
+      clientGetMock.mockImplementation((url: string) => {
+        if (url === '/api/session/sess-1/message') {
+          return Promise.resolve({
+            data: {
+              items: [
+                {
+                  info: {
+                    id: 'assistant-1',
+                    sessionID: 'sess-1',
+                    role: 'assistant',
+                    finish: null,
+                  },
+                  parts: [
+                    {
+                      id: 'question-tool-1',
+                      messageID: 'assistant-1',
+                      sessionID: 'sess-1',
+                      type: 'tool',
+                      tool: 'question',
+                      callID: 'call-question-1',
+                      state: {
+                        status: 'running',
+                        input: { questions: [{ question: 'Continue?' }] },
+                      },
+                    },
+                  ],
+                },
+              ],
+              hasMore: false,
+              nextBefore: null,
+            },
+          });
+        }
+        if (url === '/api/session/status') {
+          return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
+        }
+        return Promise.resolve({ data: {} });
+      });
+
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+        onStreamingDone,
+      }));
+      await act(async () => {
+        await Promise.resolve();
+      });
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(onStreamingDone).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not finish streaming while fetched messages still contain a running tool', async () => {
     vi.useFakeTimers();
     const refetch = vi.fn();
@@ -3056,24 +3141,32 @@ describe('SessionChat fallback polling', () => {
         replaceMessageText: vi.fn(),
         truncateAfterMessage: vi.fn(),
       });
-      clientGetMock.mockResolvedValueOnce({
-        data: {
-          items: [
-            {
-              info: {
-                id: 'assistant-1',
-                sessionID: 'sess-1',
-                role: 'assistant',
-                finish: 'tool-calls',
-              },
-              parts: [
-                { id: 'tool-1', type: 'tool', state: { status: 'running' } },
+      clientGetMock.mockImplementation((url: string) => {
+        if (url === '/api/session/sess-1/message') {
+          return Promise.resolve({
+            data: {
+              items: [
+                {
+                  info: {
+                    id: 'assistant-1',
+                    sessionID: 'sess-1',
+                    role: 'assistant',
+                    finish: 'tool-calls',
+                  },
+                  parts: [
+                    { id: 'tool-1', type: 'tool', state: { status: 'running' } },
+                  ],
+                },
               ],
+              hasMore: false,
+              nextBefore: null,
             },
-          ],
-          hasMore: false,
-          nextBefore: null,
-        },
+          });
+        }
+        if (url === '/api/session/status') {
+          return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
+        }
+        return Promise.resolve({ data: {} });
       });
 
       render(React.createElement(SessionChat, {
@@ -3081,6 +3174,9 @@ describe('SessionChat fallback polling', () => {
         live: true,
         onStreamingDone,
       }));
+      await act(async () => {
+        await Promise.resolve();
+      });
       act(() => {
         useSSEOptionsRef.current.onEvent({
           type: 'session.status',
@@ -3088,7 +3184,9 @@ describe('SessionChat fallback polling', () => {
         });
       });
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
 
       expect(refetch).not.toHaveBeenCalled();
       expect(onStreamingDone).not.toHaveBeenCalled();
