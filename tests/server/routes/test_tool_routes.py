@@ -26,6 +26,7 @@ from flocks.tool.registry import (
 def _temporary_tool(tool: Tool) -> Iterator[None]:
     ToolRegistry.init()
     existing = ToolRegistry._tools.get(tool.info.name)
+    existing_default = ToolRegistry._enabled_defaults.get(tool.info.name)
     ToolRegistry.register(tool)
     _clear_tool_summary_cache()
     try:
@@ -36,6 +37,10 @@ def _temporary_tool(tool: Tool) -> Iterator[None]:
             ToolRegistry._tools[tool.info.name] = existing
         else:
             ToolRegistry._tools.pop(tool.info.name, None)
+        if existing_default is not None:
+            ToolRegistry._enabled_defaults[tool.info.name] = existing_default
+        else:
+            ToolRegistry._enabled_defaults.pop(tool.info.name, None)
         _clear_tool_summary_cache()
 
 
@@ -405,6 +410,67 @@ class TestToolRouteSecurity:
 
 
 class TestToolListPageRoute:
+    @pytest.mark.asyncio
+    async def test_auto_disable_syncs_cached_page_across_worker_state(self, client: AsyncClient):
+        from flocks.config.config_writer import ConfigWriter
+
+        async def handler(_ctx, probe_id: str) -> ToolResult:
+            return ToolResult(success=False, error=f"repeated failure for {probe_id}")
+
+        tool = Tool(
+            info=ToolInfo(
+                name="page_auto_disable_cache_tool",
+                description="NeedleAutoDisableCache",
+                category=ToolCategory.CUSTOM,
+                source="plugin_py",
+            ),
+            handler=handler,
+        )
+
+        with _temporary_tool(tool):
+            initial = await client.get(
+                "/api/tools/page",
+                params={"q": "needleautodisablecache", "limit": 25},
+            )
+            for _ in range(ToolRegistry._failure_disable_threshold):
+                result = await client.post(
+                    f"/api/tools/{tool.info.name}/test",
+                    json={"params": {"probe_id": "same-input"}},
+                )
+            setting = ConfigWriter.get_tool_setting(tool.info.name)
+            # Simulate a second worker whose in-memory registry and list cache
+            # still contain the pre-disable state.  The persisted config token
+            # must make the next page request repair both immediately.
+            tool.info.enabled = True
+            refreshed = await client.get(
+                "/api/tools/page",
+                params={"q": "needleautodisablecache", "limit": 25},
+            )
+            disabled_after_refresh = tool.info.enabled
+
+            # The reverse transition must also propagate: another worker can
+            # manually restore the default by deleting the disable overlay.
+            removed = ConfigWriter.delete_tool_setting(tool.info.name)
+            tool.info.enabled = False
+            reenabled = await client.get(
+                "/api/tools/page",
+                params={"q": "needleautodisablecache", "limit": 25},
+            )
+
+        assert initial.status_code == 200, initial.text
+        assert initial.json()["items"][0]["enabled"] is True
+        assert result.status_code == 200, result.text
+        assert result.json()["metadata"]["disabled"] is True
+        assert setting == {"enabled": False}
+        assert disabled_after_refresh is False
+        assert refreshed.status_code == 200, refreshed.text
+        assert refreshed.json()["items"][0]["enabled"] is False
+        assert removed is True
+        assert tool.info.enabled is True
+        assert tool.info.name not in ToolRegistry._failure_state
+        assert reenabled.status_code == 200, reenabled.text
+        assert reenabled.json()["items"][0]["enabled"] is True
+
     @pytest.mark.asyncio
     async def test_list_page_searches_server_side_and_omits_parameter_payload(self, client: AsyncClient):
         async def handler(ctx, text: str) -> ToolResult:
