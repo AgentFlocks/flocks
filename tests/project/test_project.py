@@ -11,6 +11,7 @@ from flocks.project.project import (
     ProjectDeletionError,
     ProjectNameConflictError,
     ProjectPathConflictError,
+    TASK_SESSION_GROUP_ID,
 )
 from flocks.storage.storage import Storage
 
@@ -18,16 +19,13 @@ from flocks.storage.storage import Storage
 @pytest.fixture
 def project_root(tmp_path, monkeypatch):
     root = tmp_path / ".flocks"
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
     monkeypatch.setenv("FLOCKS_ROOT", str(root))
     monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
-    monkeypatch.setenv("FLOCKS_DEFAULT_PROJECT_DIR", str(workspace))
     return tmp_path
 
 
 @pytest.mark.asyncio
-async def test_list_projects_uses_json_registry_and_virtual_default(project_root):
+async def test_list_projects_uses_json_registry_without_virtual_default(project_root):
     labs = project_root / "labs"
     labs.mkdir()
     created = await Project.create(owner_id="user-1", name="Labs", worktree=str(labs))
@@ -35,14 +33,15 @@ async def test_list_projects_uses_json_registry_and_virtual_default(project_root
     with patch.object(Storage, "list_entries", new=AsyncMock()) as list_entries:
         projects = await Project.list(owner_id="user-1")
 
-    assert [project.id for project in projects] == [DEFAULT_PROJECT_ID, created.id]
-    assert projects[0].name == "默认"
-    assert projects[0].is_default is True
-    assert projects[1].worktree == str(labs.resolve())
+    assert [project.id for project in projects] == [created.id]
+    assert projects[0].worktree == str(labs.resolve())
+    assert projects[0].is_default is False
+    assert await Project.get(DEFAULT_PROJECT_ID, owner_id="user-1") is None
     list_entries.assert_not_awaited()
 
     registry = json.loads(Project.registry_path("user-1").read_text(encoding="utf-8"))
-    assert registry["defaultWorktree"] == str((project_root / "workspace").resolve())
+    assert "defaultWorktree" not in registry
+    assert not (project_root / "workspace").exists()
     assert registry["projects"][0]["id"].startswith("prj_")
     uuid.UUID(registry["projects"][0]["id"].removeprefix("prj_"))
 
@@ -57,7 +56,7 @@ async def test_create_rejects_duplicate_canonical_directory(project_root):
         await Project.create(owner_id="user-1", name="Other", worktree=str(labs / "."))
 
     assert exc_info.value.project.id == existing.id
-    assert len((await Project.list(owner_id="user-1"))) == 2
+    assert len((await Project.list(owner_id="user-1"))) == 1
 
 
 @pytest.mark.asyncio
@@ -139,16 +138,16 @@ async def test_delete_rejects_default_project(project_root):
 
 
 @pytest.mark.asyncio
-async def test_effective_project_maps_legacy_and_removed_projects_to_default(project_root):
+async def test_effective_project_maps_legacy_and_removed_projects_to_tasks(project_root):
     labs = project_root / "labs"
     labs.mkdir()
     created = await Project.create(owner_id="user-1", name="Labs", worktree=str(labs))
 
     assert Project.effective_project_id("user-1", created.id) == created.id
-    assert Project.effective_project_id("user-1", "old-git-project") == DEFAULT_PROJECT_ID
+    assert Project.effective_project_id("user-1", "old-git-project") == TASK_SESSION_GROUP_ID
 
     await Project.delete(created.id, owner_id="user-1")
-    assert Project.effective_project_id("user-1", created.id) == DEFAULT_PROJECT_ID
+    assert Project.effective_project_id("user-1", created.id) == TASK_SESSION_GROUP_ID
 
 
 @pytest.mark.asyncio
@@ -178,7 +177,7 @@ async def test_concurrent_project_creates_keep_every_registry_entry(project_root
     ))
 
     projects = await Project.list(owner_id="user-1")
-    assert {project.id for project in projects[1:]} == {project.id for project in created}
+    assert {project.id for project in projects} == {project.id for project in created}
 
 
 @pytest.mark.asyncio
@@ -194,12 +193,12 @@ async def test_registry_writes_do_not_create_backup(project_root):
 
 
 @pytest.mark.asyncio
-async def test_corrupt_registry_only_returns_default(project_root):
+async def test_corrupt_registry_returns_no_projects(project_root):
     await Project.ensure_registry("user-1")
     registry_path = Project.registry_path("user-1")
     registry_path.write_text("{broken", encoding="utf-8")
 
     projects = await Project.list(owner_id="user-1")
 
-    assert [project.id for project in projects] == [DEFAULT_PROJECT_ID]
+    assert projects == []
     assert registry_path.read_text(encoding="utf-8") == "{broken"

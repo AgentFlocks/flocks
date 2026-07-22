@@ -30,10 +30,8 @@ async def test_project_crud_uses_registry_without_project_database_rows(
     list_response = await client.get("/api/project")
     assert list_response.status_code == status.HTTP_200_OK
     projects = list_response.json()
-    assert projects[0]["id"] == "default"
-    assert projects[0]["name"] == "默认"
-    assert projects[0]["isDefault"] is True
-    assert [item["id"] for item in projects[1:]] == [project["id"]]
+    assert [item["id"] for item in projects] == [project["id"]]
+    assert all(item["isDefault"] is False for item in projects)
 
     rename_response = await client.patch(
         f"/api/project/{project['id']}",
@@ -42,10 +40,21 @@ async def test_project_crud_uses_registry_without_project_database_rows(
     assert rename_response.status_code == status.HTTP_200_OK
     assert rename_response.json()["name"] == "Security Labs"
 
+    retained_file = worktree / "keep.txt"
+    retained_file.write_text("project files stay", encoding="utf-8")
+    session_response = await client.post(
+        "/api/session",
+        json={"title": "Delete with project", "projectID": project["id"]},
+    )
+    assert session_response.status_code == status.HTTP_200_OK
+    session_id = session_response.json()["id"]
+
     delete_response = await client.delete(f"/api/project/{project['id']}")
     assert delete_response.status_code == status.HTTP_200_OK
     assert worktree.exists()
-    assert [item["id"] for item in (await client.get("/api/project")).json()] == ["default"]
+    assert retained_file.read_text(encoding="utf-8") == "project files stay"
+    assert (await client.get("/api/project")).json() == []
+    assert (await client.get(f"/api/session/{session_id}")).status_code == status.HTTP_404_NOT_FOUND
 
 
 @pytest.mark.asyncio
@@ -85,7 +94,7 @@ async def test_duplicate_project_directory_returns_existing_project(
     assert first.status_code == status.HTTP_200_OK
     assert second.status_code == status.HTTP_200_OK
     assert second.json()["id"] == first.json()["id"]
-    assert len((await client.get("/api/project")).json()) == 2
+    assert len((await client.get("/api/project")).json()) == 1
 
 
 @pytest.mark.asyncio
@@ -212,6 +221,7 @@ async def test_project_local_sharing_includes_existing_and_future_sessions(
 async def test_project_counts_and_session_lists_are_user_scoped(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ):
     from flocks.server.routes import project as project_routes
     from flocks.server.routes import session as session_routes
@@ -219,8 +229,20 @@ async def test_project_counts_and_session_lists_are_user_scoped(
     alice = AuthUser(id="usr_alice", username="alice", role="member", status="active")
     bob = AuthUser(id="usr_bob", username="bob", role="member", status="active")
 
+    alice_worktree = tmp_path / "alice-project"
+    alice_worktree.mkdir()
+    monkeypatch.setattr(project_routes, "require_user", lambda _request: alice)
+    project_response = await client.post(
+        "/api/project",
+        json={"name": "Alice Project", "worktree": str(alice_worktree)},
+    )
+    alice_project = project_response.json()
+
     monkeypatch.setattr(session_routes, "require_user", lambda _request: alice)
-    alice_session = await client.post("/api/session", json={"title": "Alice session"})
+    alice_session = await client.post(
+        "/api/session",
+        json={"title": "Alice session", "projectID": alice_project["id"]},
+    )
     assert alice_session.status_code == status.HTTP_200_OK
 
     monkeypatch.setattr(session_routes, "require_user", lambda _request: bob)
@@ -228,15 +250,13 @@ async def test_project_counts_and_session_lists_are_user_scoped(
     assert bob_session.status_code == status.HTTP_200_OK
 
     monkeypatch.setattr(session_routes, "require_user", lambda _request: alice)
-    monkeypatch.setattr(project_routes, "require_user", lambda _request: alice)
-
     projects = (await client.get("/api/project")).json()
-    assert projects[0]["id"] == "default"
+    assert projects[0]["id"] == alice_project["id"]
     assert projects[0]["sessionCount"] == 1
 
     second_alice_session = await client.post(
         "/api/session",
-        json={"title": "Second Alice session"},
+        json={"title": "Second Alice session", "projectID": alice_project["id"]},
     )
     assert second_alice_session.status_code == status.HTTP_200_OK
     refreshed_projects = (await client.get("/api/project")).json()
@@ -257,10 +277,19 @@ async def test_project_counts_and_session_lists_are_user_scoped(
 @pytest.mark.asyncio
 async def test_session_title_update_invalidates_project_search_stats(
     client: AsyncClient,
+    tmp_path: Path,
 ):
+    worktree = tmp_path / "search-project"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Search Project", "worktree": str(worktree)},
+        )
+    ).json()
     created = await client.post(
         "/api/session",
-        json={"title": "Initial title"},
+        json={"title": "Initial title", "projectID": project["id"]},
     )
     assert created.status_code == status.HTTP_200_OK
 
