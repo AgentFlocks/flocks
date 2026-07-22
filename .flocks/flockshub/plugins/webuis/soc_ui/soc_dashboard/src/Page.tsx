@@ -72,6 +72,7 @@ const EMPTY_STATS = {
   },
   sources: [],
   closedLoop: { autoClosed: 0, resolved: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
+  tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [], dailyLabels: [], source: '' },
   verdicts: [],
   attackProfile: [],
   topThreats: [],
@@ -362,6 +363,7 @@ function mergeStats(raw) {
     triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
     pipeline: { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) },
     closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
+    tokenUsage: { ...EMPTY_STATS.tokenUsage, ...((raw || {}).tokenUsage || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
     timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
@@ -413,6 +415,12 @@ function compactNumber(value) {
   if (Math.abs(n) >= 100000000) return `${trim(n / 100000000)}亿`;
   if (Math.abs(n) >= 10000) return `${trim(n / 10000)}万`;
   return fullNumber(n);
+}
+
+function formatTokenVolume(value) {
+  const n = Math.max(Number(value || 0), 0);
+  if (n >= 1000000000) return `${(n / 1000000000).toFixed(2)}B`;
+  return `${(n / 1000000).toFixed(2)}M`;
 }
 
 function AnimatedNumber({ value, format, tag = 'span', className, duration = 900 }) {
@@ -903,6 +911,22 @@ function Sparkline({ values, color }) {
   return h('svg', { className: 'sparkline', viewBox: '0 0 300 96', role: 'img' }, [
     h('path', { key: 'grid', d: 'M0 88 H300 M0 56 H300 M0 24 H300', className: 'spark-grid' }),
     h('polyline', { key: 'line', className: 'spark-line', points, fill: 'none', stroke: color || '#2be7ff', strokeWidth: 3, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+  ]);
+}
+
+function TokenSparkline({ values, color }) {
+  const nums = (values || []).map((v) => Math.max(Number(v || 0), 0));
+  const series = nums.length > 1 ? nums : [0, nums[0] || 0];
+  const max = Math.max(...series, 1);
+  const min = Math.min(...series);
+  const span = Math.max(max - min, 1);
+  const points = series.map((value, index) => {
+    const x = series.length === 1 ? 0 : (index / (series.length - 1)) * 300;
+    const y = 80 - ((value - min) / span) * 52;
+    return `${x},${y}`;
+  }).join(' ');
+  return h('svg', { className: 'token-chart', viewBox: '0 0 300 92', role: 'img' }, [
+    h('polyline', { key: 'line', className: 'token-chart-line', points, fill: 'none', stroke: color || '#ff674d', strokeWidth: 4, strokeLinecap: 'round', strokeLinejoin: 'round' }),
   ]);
 }
 
@@ -1444,12 +1468,34 @@ function CommandMetric({ label, value, format, sub, values, color }) {
   ]);
 }
 
+function TokenUsageMetric({ tokenUsage }) {
+  return h('div', { className: 'command-metric token-usage-metric', style: { '--metric-color': '#ff674d' } }, [
+    h('span', { className: 'token-title', key: 'label' }, 'Token 消耗'),
+    h('div', { className: 'token-summary-row', key: 'summary' }, [
+      h(AnimatedNumber, {
+        tag: 'b',
+        className: 'token-value',
+        value: tokenUsage.todayTokens,
+        format: formatTokenVolume,
+        duration: 1200,
+        key: 'value',
+      }),
+      h('small', { className: 'token-sub', key: 'sub' }, [
+        h('span', { className: 'token-sub-line', key: 'total' }, `累计 ${formatTokenVolume(tokenUsage.totalTokens)}`),
+        h('span', { className: 'token-sub-line', key: 'today' }, `今日调用 ${compactNumber(tokenUsage.todayRequests)} 次`),
+      ]),
+    ]),
+    h(TokenSparkline, { values: tokenUsage.dailySeries, color: '#ff674d', key: 'chart' }),
+  ]);
+}
+
 function CommandMetrics({ stats }) {
+  const tokenUsage = stats.tokenUsage || EMPTY_STATS.tokenUsage;
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
     h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
-    h(CommandMetric, { label: '平均研判时间', value: stats.triage.avgTriageMs, format: (value) => formatDurationMs(value), sub: `${compactNumber(stats.triage.totalRecords)} 条已完成研判`, values: stats.timeline.triageTotal, color: '#ff674d', key: 'mtta' }),
+    h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
   ]);
 }
 
@@ -1822,6 +1868,9 @@ export default function Page() {
         if (payload.error) throw new Error(payload.error);
         activityCursor.current = payload.cursor || activityCursor.current;
         if (!stopped) {
+          if (payload.tokenUsage) {
+            setStats((previous) => mergeStats({ ...previous, tokenUsage: payload.tokenUsage }));
+          }
           const rawIncomingEvents = bootstrap
             ? recentUnseenActivity(payload.recentEvents)
             : (payload.events || []);
@@ -3977,6 +4026,62 @@ const CSS = `
 .command-metric .sparkline { width: 100%; height: 43px; margin-top: 6px; opacity: .75; }
 .command-metric .spark-grid { opacity: 0; }
 .command-metric .spark-line { stroke-width: 4; filter: drop-shadow(0 0 5px var(--metric-color)); }
+.token-usage-metric {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  row-gap: 7px;
+  padding-bottom: 8px;
+}
+.token-title {
+  display: block;
+  color: #b6bdbb;
+  font-size: 12px;
+}
+.token-summary-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 48%) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  min-width: 0;
+}
+.token-value {
+  display: block;
+  min-width: 0;
+  min-height: 30px;
+  overflow: hidden;
+  color: #f1f4f3;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.token-sub {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--metric-color);
+  font-size: 9px;
+  line-height: 13.5px;
+}
+.token-chart {
+  display: block;
+  width: 100%;
+  height: 42px;
+  margin: 0;
+  overflow: visible;
+}
+.token-chart-line {
+  filter: drop-shadow(0 0 5px var(--metric-color));
+  animation: commandMetricGlow 2.8s ease-in-out infinite;
+}
+.token-sub-line {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .command-event-rail {
   position: relative;
   z-index: 6;

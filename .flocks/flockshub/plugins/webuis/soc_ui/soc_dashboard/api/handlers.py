@@ -7,7 +7,7 @@ import sqlite3
 import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
@@ -32,6 +32,7 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
+USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
 
 _workflow_stats_cache: OrderedDict = OrderedDict()
 _CACHE_TTL: float = 30.0
@@ -473,6 +474,86 @@ def _safe_json_object(value):
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _usage_iso(dt):
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _parse_usage_created_at(value):
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    if raw.endswith("Z"):
+        raw = raw[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except Exception:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.astimezone()
+    return parsed.astimezone()
+
+
+def _read_token_usage():
+    empty = {
+        "totalTokens": 0,
+        "todayTokens": 0,
+        "todayRequests": 0,
+        "dailySeries": [],
+        "dailyLabels": [],
+        "source": "usage_records",
+    }
+    if not USAGE_DB.is_file():
+        return empty
+
+    now_local = datetime.now().astimezone()
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+    first_day = today_start - timedelta(days=6)
+    labels = [(first_day + timedelta(days=index)).strftime("%m/%d") for index in range(7)]
+    series_by_date = {
+        (first_day + timedelta(days=index)).date().isoformat(): 0
+        for index in range(7)
+    }
+
+    try:
+        with sqlite3.connect(f"file:{USAGE_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            total_tokens = _safe_int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(total_tokens), 0) FROM usage_records"
+                ).fetchone()[0]
+            )
+            today_row = conn.execute(
+                "SELECT COALESCE(SUM(total_tokens), 0), COUNT(*) "
+                "FROM usage_records WHERE created_at >= ? AND created_at < ?",
+                (_usage_iso(today_start), _usage_iso(tomorrow_start)),
+            ).fetchone()
+            series_rows = conn.execute(
+                "SELECT created_at, total_tokens FROM usage_records "
+                "WHERE created_at >= ? AND created_at < ?",
+                (_usage_iso(first_day), _usage_iso(tomorrow_start)),
+            ).fetchall()
+    except Exception:
+        return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
+
+    for created_at, total in series_rows:
+        parsed = _parse_usage_created_at(created_at)
+        if parsed is None:
+            continue
+        key = parsed.date().isoformat()
+        if key in series_by_date:
+            series_by_date[key] += max(_safe_int(total), 0)
+
+    return {
+        **empty,
+        "totalTokens": max(total_tokens, 0),
+        "todayTokens": max(_safe_int(today_row[0]), 0) if today_row else 0,
+        "todayRequests": max(_safe_int(today_row[1]), 0) if today_row else 0,
+        "dailySeries": list(series_by_date.values()),
+        "dailyLabels": labels,
+    }
 
 
 def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0):
@@ -1122,6 +1203,7 @@ def _activity_response(
         "cursorReset": cursor_reset,
         "workflowStats": workflow_stats or {"callCount": None, "latestStartedAt": None},
         "workflowEvents": workflow_events or [],
+        "tokenUsage": _read_token_usage(),
     }
 
 
@@ -1505,6 +1587,7 @@ def _get_stats(params):
     if cached is not None:
         return {
             **cached,
+            "tokenUsage": _read_token_usage(),
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
             "latencyMs": round((time.time() - started) * 1000),
             "cacheHit": True,
@@ -1584,6 +1667,7 @@ def _get_stats(params):
                 "allowedDatabases": [
                     _display_path(DEFAULT_SQLITE_DB),
                     _display_path(WORKFLOW_DB),
+                    _display_path(USAGE_DB),
                 ],
             },
             "workflowStatsDb": _display_path(WORKFLOW_DB),
@@ -1625,6 +1709,7 @@ def _get_stats(params):
         ],
         "topThreats": _counter_items(triage["threatCounter"] or denoise["threatCounter"], 14),
         "riskLevels": _counter_items(triage["riskCounter"], 5),
+        "tokenUsage": _read_token_usage(),
         "timeline": {
             "labels": denoise.get("_timelineLabels")
             or _series_labels(max(len(denoise["seriesRaw"]), len(triage["seriesTotal"]))),
