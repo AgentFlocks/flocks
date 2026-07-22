@@ -736,11 +736,11 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
 
     assert restart_handoff.run(args) == 0
     assert events == [
-        "wait-parent:1234",
         (
             "stop-supervisor:{'daemon_pid': 2468, 'backend_port': 5173, "
             "'service_ports': (5173,), 'force_daemon_stop': True}"
         ),
+        "wait-parent:1234",
         "install",
         "cleanup-handover",
         f"spawn:{restart_argv}:{tmp_path}:True",
