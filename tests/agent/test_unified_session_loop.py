@@ -285,8 +285,13 @@ class TestResolveModel:
         )
 
     @pytest.mark.asyncio
-    async def test_webui_auto_uses_default_primary_and_returns_actual_model(self, monkeypatch):
-        """Auto ignores agent overrides and reports the model that recovered."""
+    @pytest.mark.parametrize("category", ["user", "entity-config", "workflow"])
+    async def test_webui_auto_uses_default_primary_and_returns_actual_model(
+        self,
+        monkeypatch,
+        category,
+    ):
+        """Supported WebUI chats use Auto and report the recovered model."""
         from types import SimpleNamespace
 
         from flocks.server.routes import session as session_routes
@@ -304,7 +309,7 @@ class TestResolveModel:
             model="stale-model",
             model_pinned=False,
             model_auto=True,
-            category="user",
+            category=category,
         )
         agent = SimpleNamespace(
             name="rex",
@@ -397,19 +402,19 @@ class TestResolveModel:
         assert title_generation.await_args.kwargs["model_id"] == "fallback-model"
 
     @pytest.mark.asyncio
-    async def test_non_user_session_ignores_legacy_auto_flag(self, monkeypatch):
-        """Corrupt or historical workflow flags cannot activate WebUI Auto."""
+    async def test_unsupported_session_ignores_auto_flag(self, monkeypatch):
+        """A corrupt task Auto flag cannot activate WebUI Auto."""
         from types import SimpleNamespace
 
         from flocks.server.routes import session as session_routes
         from flocks.session.session_loop import SessionLoop
 
         request = session_routes.PromptRequest(
-            parts=[{"type": "text", "text": "workflow input"}],
+            parts=[{"type": "text", "text": "task input"}],
             noReply=True,
         )
         session = SimpleNamespace(
-            id="ses_workflow",
+            id="ses_task",
             project_id="proj",
             directory="/tmp/project",
             agent="rex",
@@ -417,7 +422,7 @@ class TestResolveModel:
             model="direct-model",
             model_pinned=True,
             model_auto=True,
-            category="workflow",
+            category="task",
         )
         agent = SimpleNamespace(name="rex", model=None)
         resolve = AsyncMock(return_value=("direct", "direct-model", "session"))

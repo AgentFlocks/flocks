@@ -112,12 +112,14 @@ class TestSessionCRUD:
         assert resp.json()["category"] == "workflow"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", [None, "entity-config", "workflow"])
     async def test_create_session_with_manual_auto_mode(
         self,
         client: AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
+        category: str | None,
     ):
-        """Auto is persisted only when explicitly requested by the WebUI."""
+        """Auto is persisted for supported WebUI conversation sessions."""
         from flocks.session.session_loop import SessionLoop
 
         _use_webui_admin(monkeypatch)
@@ -126,22 +128,21 @@ class TestSessionCRUD:
             "validate_auto_configuration",
             AsyncMock(return_value=(True, "available")),
         )
-        resp = await client.post(
-            "/api/session",
-            json={"title": "Auto Session", "model_auto": True},
-        )
+        payload = {"title": "Auto Session", "model_auto": True}
+        if category is not None:
+            payload["category"] = category
+        resp = await client.post("/api/session", json=payload)
 
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["model_auto"] is True
         assert resp.json()["model_pinned"] is False
+        assert resp.json()["category"] == (category or "user")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("category", ["workflow", "task"])
-    async def test_create_non_user_session_rejects_auto(
+    async def test_create_unsupported_session_rejects_auto(
         self,
         client: AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
-        category: str,
     ):
         from flocks.session.session_loop import SessionLoop
 
@@ -154,11 +155,14 @@ class TestSessionCRUD:
 
         resp = await client.post(
             "/api/session",
-            json={"category": category, "model_auto": True},
+            json={"category": "task", "model_auto": True},
         )
 
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
-        assert "only available for user sessions" in str(resp.json())
+        assert (
+            "only available for user, entity configuration, and workflow sessions"
+            in str(resp.json())
+        )
         validate_auto.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -686,6 +690,38 @@ class TestSessionCRUD:
         assert concrete_resp.json()["model_pinned"] is True
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", ["entity-config", "workflow"])
+    async def test_update_supported_sidebar_session_allows_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        category: str,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        create_resp = await client.post(
+            "/api/session",
+            json={"title": "Sidebar Chat", "category": category},
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        resp = await client.patch(
+            f"/api/session/{create_resp.json()['id']}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["category"] == category
+        assert resp.json()["model_auto"] is True
+        assert resp.json()["model_pinned"] is False
+
+    @pytest.mark.asyncio
     async def test_update_session_rejects_unavailable_auto(
         self,
         client: AsyncClient,
@@ -768,7 +804,7 @@ class TestSessionCRUD:
         validate_auto.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_update_non_user_session_rejects_auto(
+    async def test_update_unsupported_session_rejects_auto(
         self,
         client: AsyncClient,
         monkeypatch: pytest.MonkeyPatch,
@@ -777,7 +813,7 @@ class TestSessionCRUD:
 
         create_resp = await client.post(
             "/api/session",
-            json={"title": "Workflow Session", "category": "workflow"},
+            json={"title": "Non-user Session", "category": "task"},
         )
         assert create_resp.status_code == status.HTTP_200_OK
         session_id = create_resp.json()["id"]
@@ -794,7 +830,10 @@ class TestSessionCRUD:
         )
 
         assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
-        assert "only available for user sessions" in str(resp.json())
+        assert (
+            "only available for user, entity configuration, and workflow sessions"
+            in str(resp.json())
+        )
         validate_auto.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1761,9 +1800,11 @@ class TestSessionMessagesRemaining:
         assert context_usage.await_args.kwargs["model_id"] == "fallback-model"
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", ["user", "entity-config", "workflow"])
     async def test_prepare_auto_replay_defers_unavailable_primary_to_failover(
         self,
         monkeypatch: pytest.MonkeyPatch,
+        category: str,
     ):
         from flocks.server.routes import session as session_routes
         from flocks.session.session_loop import SessionLoop
@@ -1775,7 +1816,10 @@ class TestSessionMessagesRemaining:
         )
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(model_auto=True, category="user")),
+            AsyncMock(return_value=SimpleNamespace(
+                model_auto=True,
+                category=category,
+            )),
         )
         monkeypatch.setattr(
             "flocks.config.config.Config.resolve_default_llm",
@@ -1808,7 +1852,7 @@ class TestSessionMessagesRemaining:
         resolve.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_prepare_replay_ignores_legacy_auto_on_non_user_session(
+    async def test_prepare_replay_ignores_auto_on_unsupported_session(
         self,
         monkeypatch: pytest.MonkeyPatch,
     ):
@@ -1824,7 +1868,7 @@ class TestSessionMessagesRemaining:
             "flocks.session.session.Session.get_by_id",
             AsyncMock(return_value=SimpleNamespace(
                 model_auto=True,
-                category="workflow",
+                category="task",
             )),
         )
         resolve = AsyncMock(return_value=("direct", "direct-model", "session"))

@@ -13,6 +13,7 @@ Ported from original SessionPrompt.loop() pattern.
 """
 
 import asyncio
+import hashlib
 import inspect
 import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
@@ -21,7 +22,11 @@ from datetime import datetime
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
-from flocks.session.session import Session, SessionInfo
+from flocks.session.session import (
+    Session,
+    SessionInfo,
+    is_model_auto_session_category,
+)
 from flocks.session.message import Message, MessageInfo, MessageRole
 from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
 from flocks.session.core.task_utils import fire_and_forget
@@ -103,7 +108,7 @@ class LoopContext:
     last_observed_prompt_tokens: int = 0
     auto_failover: bool = False
     # Entrypoint authorization is separate from persisted model_auto. Only a
-    # WebUI message route may set this bit; IM/tasks/workflows use the default.
+    # WebUI message route may set this bit; non-WebUI entrypoints use the default.
     auto_failover_allowed: bool = False
     model_candidates: List[RuntimeModel] = field(default_factory=list)
     candidate_index: int = 0
@@ -224,37 +229,82 @@ class SessionLoop:
     async def _build_model_candidates(
         cls,
         primary: RuntimeModel,
+        *,
+        route_seed: str,
+        preferred: Optional[RuntimeModel] = None,
     ) -> List[RuntimeModel]:
-        """Build primary + ordered valid fallbacks, preserving configured order."""
+        """Build a stable per-turn primary, same-provider, cross-provider chain."""
         from flocks.config.config import Config
+        from flocks.provider.model_manager import get_model_manager
+        from flocks.provider.types import ModelType
 
         config = await Config.get()
-        candidates = [primary]
-        seen = {(primary.provider_id, primary.model_id)}
-        for index, raw in enumerate(getattr(config, "fallback_providers", None) or []):
-            candidate = RuntimeModel(
-                provider_id=raw.provider_id,
-                model_id=raw.model_id,
-            )
-            identity = (candidate.provider_id, candidate.model_id)
-            if identity in seen:
-                continue
-            seen.add(identity)
+        await Provider.apply_config(config)
+        definitions = get_model_manager().list_models(
+            model_type=ModelType.LLM,
+            enabled_only=True,
+        )
+        discovered = {
+            RuntimeModel(definition.provider_id, definition.id)
+            for definition in definitions
+        }
+        discovered.discard(primary)
+
+        same_provider: List[RuntimeModel] = []
+        other_providers: List[RuntimeModel] = []
+        for candidate in sorted(
+            discovered,
+            key=lambda item: (item.provider_id, item.model_id),
+        ):
             available, reason = await cls.validate_runtime_model(
                 candidate.provider_id,
                 candidate.model_id,
                 config=config,
             )
             if not available:
-                log.warn("session.model.fallback_skipped", {
+                log.debug("session.model.fallback_skipped", {
                     "provider_id": candidate.provider_id,
                     "model_id": candidate.model_id,
-                    "configured_index": index,
                     "reason": reason,
                 })
                 continue
-            candidates.append(candidate)
+
+            if candidate.provider_id == primary.provider_id:
+                same_provider.append(candidate)
+            else:
+                other_providers.append(candidate)
+
+        candidates = [primary]
+        for tier, pool in (
+            ("same_provider", same_provider),
+            ("other_provider", other_providers),
+        ):
+            if not pool:
+                continue
+            selected = (
+                preferred
+                if preferred is not None and preferred in pool
+                else cls._stable_candidate_choice(pool, route_seed, tier)
+            )
+            candidates.append(selected)
         return candidates
+
+    @staticmethod
+    def _stable_candidate_choice(
+        candidates: List[RuntimeModel],
+        route_seed: str,
+        tier: str,
+    ) -> RuntimeModel:
+        """Choose pseudo-randomly without Python's process-randomized hash()."""
+        ordered = sorted(
+            candidates,
+            key=lambda item: (item.provider_id, item.model_id),
+        )
+        digest = hashlib.sha256(
+            f"{route_seed}\0{tier}".encode("utf-8")
+        ).digest()
+        index = int.from_bytes(digest[:8], "big") % len(ordered)
+        return ordered[index]
 
     @classmethod
     async def validate_auto_configuration(cls) -> tuple[bool, str]:
@@ -274,9 +324,22 @@ class SessionLoop:
         )
         if not available:
             return False, f"primary_{reason}"
-        if len(await cls._build_model_candidates(primary)) < 2:
-            return False, "fallback_unavailable"
         return True, "available"
+
+    @classmethod
+    def _active_cooldown_model(
+        cls,
+        session_id: str,
+        primary: RuntimeModel,
+    ) -> Optional[RuntimeModel]:
+        """Return a still-valid cooldown target for the current primary."""
+        cooldown = cls._auto_failover_cooldowns.get(session_id)
+        if cooldown is None:
+            return None
+        if cooldown.expires_at <= time.monotonic() or cooldown.primary != primary:
+            cls._auto_failover_cooldowns.pop(session_id, None)
+            return None
+        return cooldown.model
 
     @classmethod
     def _cooldown_candidate_index(
@@ -284,17 +347,13 @@ class SessionLoop:
         session_id: str,
         candidates: List[RuntimeModel],
     ) -> int:
-        cooldown = cls._auto_failover_cooldowns.get(session_id)
-        if cooldown is None:
+        if not candidates:
             return 0
-        if cooldown.expires_at <= time.monotonic():
-            cls._auto_failover_cooldowns.pop(session_id, None)
-            return 0
-        if not candidates or candidates[0] != cooldown.primary:
-            cls._auto_failover_cooldowns.pop(session_id, None)
+        cooldown_model = cls._active_cooldown_model(session_id, candidates[0])
+        if cooldown_model is None:
             return 0
         try:
-            return candidates.index(cooldown.model)
+            return candidates.index(cooldown_model)
         except ValueError:
             cls._auto_failover_cooldowns.pop(session_id, None)
             return 0
@@ -510,7 +569,9 @@ class SessionLoop:
                 active_ctx = cls._active_loops.get(session_id)
                 if (
                     active_ctx is not None
-                    and getattr(active_ctx.session, "category", "user") == "user"
+                    and is_model_auto_session_category(
+                        getattr(active_ctx.session, "category", "user")
+                    )
                 ):
                     active_ctx.auto_failover_allowed = True
             return LoopResult(
@@ -544,17 +605,11 @@ class SessionLoop:
         model_candidates = [primary_model]
         candidate_index = 0
         auto_failover = bool(
-            auto_failover and getattr(session, "category", "user") == "user"
-        )
-        if auto_failover:
-            model_candidates = await cls._build_model_candidates(primary_model)
-            candidate_index = cls._cooldown_candidate_index(
-                session_id,
-                model_candidates,
+            auto_failover
+            and is_model_auto_session_category(
+                getattr(session, "category", "user")
             )
-            active_candidate = model_candidates[candidate_index]
-            provider_id = active_candidate.provider_id
-            model_id = active_candidate.model_id
+        )
 
         # Keep the in-memory session aligned with the runtime model so
         # downstream helpers (title generation, compaction checks, etc.) see
@@ -785,6 +840,22 @@ class SessionLoop:
         """Synchronize routing when the loop advances to a real WebUI turn."""
         if ctx.turn_user_id is None:
             ctx.turn_user_id = last_user.id
+            if ctx.auto_failover and ctx.auto_failover_allowed:
+                primary = ctx.model_candidates[0]
+                preferred = cls._active_cooldown_model(
+                    ctx.session.id,
+                    primary,
+                )
+                ctx.model_candidates = await cls._build_model_candidates(
+                    primary,
+                    route_seed=f"{ctx.session.id}:{last_user.id}",
+                    preferred=preferred,
+                )
+                next_index = cls._cooldown_candidate_index(
+                    ctx.session.id,
+                    ctx.model_candidates,
+                )
+                cls._select_candidate(ctx, next_index)
             return
         if last_user.id == ctx.turn_user_id:
             return
@@ -797,7 +868,9 @@ class SessionLoop:
         persisted_session = await Session.get_by_id(ctx.session.id)
         persisted_model_auto = bool(
             persisted_session
-            and getattr(persisted_session, "category", "user") == "user"
+            and is_model_auto_session_category(
+                getattr(persisted_session, "category", "user")
+            )
             and getattr(persisted_session, "model_auto", False)
         )
         persisted_auto = persisted_model_auto and ctx.auto_failover_allowed
@@ -841,9 +914,15 @@ class SessionLoop:
             provider_id=(default_llm or {}).get("provider_id") or user_provider_id or ctx.provider_id,
             model_id=(default_llm or {}).get("model_id") or user_model_id or ctx.model_id,
         )
-        # Rebuild for every real turn so disabled/removed fallbacks never leak
-        # from an earlier queued message. Synthetic continuations return above.
-        ctx.model_candidates = await cls._build_model_candidates(primary)
+        # Rebuild once for every real turn. The user message ID makes the
+        # pseudo-random choices stable throughout that turn, while an active
+        # cooldown keeps its valid target in the newly sampled tier.
+        preferred = cls._active_cooldown_model(ctx.session.id, primary)
+        ctx.model_candidates = await cls._build_model_candidates(
+            primary,
+            route_seed=f"{ctx.session.id}:{last_user.id}",
+            preferred=preferred,
+        )
         ctx.auto_failover = True
         next_index = cls._cooldown_candidate_index(
             ctx.session.id,

@@ -5,7 +5,6 @@ import type {
   ProviderInfoV2,
   ModelDefinitionV2,
   DefaultModelConfig,
-  FallbackModelsConfig,
   UsageStats,
   CustomProviderCreate,
   CustomProviderInfo,
@@ -251,15 +250,6 @@ export const defaultModelAPI = {
   delete: (modelType: string) =>
     client.delete(`/api/default-model/${modelType}`),
 
-  /** Get the ordered runtime fallback chain used by WebUI Auto sessions. */
-  getFallbacks: () =>
-    client.get<FallbackModelsConfig>('/api/default-model/fallbacks'),
-
-  /** Replace the ordered runtime fallback chain. An empty list clears it. */
-  setFallbacks: (fallbackProviders: FallbackModelsConfig['fallback_providers']) =>
-    client.put<FallbackModelsConfig>('/api/default-model/fallbacks', {
-      fallback_providers: fallbackProviders,
-    }),
 };
 
 // ==================== Usage API ====================

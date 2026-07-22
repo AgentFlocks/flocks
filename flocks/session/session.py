@@ -30,6 +30,12 @@ log = Log.create(service="session")
 # Title prefix patterns for default title detection
 PARENT_TITLE_PREFIX = "New session - "
 CHILD_TITLE_PREFIX = "Child session - "
+MODEL_AUTO_SESSION_CATEGORIES = frozenset({"user", "entity-config", "workflow"})
+
+
+def is_model_auto_session_category(category: Optional[str]) -> bool:
+    """Return whether a session category may use WebUI Auto mode."""
+    return category in MODEL_AUTO_SESSION_CATEGORIES
 
 
 class SessionChangeStats(BaseModel):

@@ -25,7 +25,11 @@ from flocks.session.context_usage import (
     build_context_usage_snapshot,
     token_usage_to_dict,
 )
-from flocks.session.session import Session, SessionInfo as SessionModel
+from flocks.session.session import (
+    Session,
+    SessionInfo as SessionModel,
+    is_model_auto_session_category,
+)
 from flocks.session.policy import SessionPolicy
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
@@ -714,10 +718,14 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     if request is None:
         request = SessionCreateRequest()
     if request.model_auto:
-        if request.category not in (None, "user"):
+        category = request.category if request.category is not None else "user"
+        if not is_model_auto_session_category(category):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Auto mode is only available for user sessions",
+                detail=(
+                    "Auto mode is only available for user, entity "
+                    "configuration, and workflow sessions"
+                ),
             )
         if current_user.id == API_TOKEN_SERVICE_USER_ID:
             raise HTTPException(
@@ -1132,10 +1140,13 @@ async def update_session(
             detail="Auto mode cannot be combined with a pinned provider/model",
         )
     if request.model_auto is True:
-        if existing.category != "user":
+        if not is_model_auto_session_category(existing.category):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Auto mode is only available for user sessions",
+                detail=(
+                    "Auto mode is only available for user, entity "
+                    "configuration, and workflow sessions"
+                ),
             )
         if current_user.id == API_TOKEN_SERVICE_USER_ID:
             raise HTTPException(
@@ -2212,7 +2223,7 @@ async def _prepare_replay_runtime(
     session = await Session.get_by_id(session_id)
     auto_failover = bool(
         session
-        and getattr(session, "category", "user") == "user"
+        and is_model_auto_session_category(getattr(session, "category", "user"))
         and getattr(session, "model_auto", False)
     )
     if auto_failover:
@@ -2965,7 +2976,7 @@ async def _process_session_message(
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
     auto_failover = bool(
-        getattr(session, "category", "user") == "user"
+        is_model_auto_session_category(getattr(session, "category", "user"))
         and getattr(session, "model_auto", False)
         and not request.model
     )

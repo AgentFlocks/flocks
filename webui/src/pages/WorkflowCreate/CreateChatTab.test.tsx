@@ -9,14 +9,26 @@ import { workflowAPI } from '@/api/workflow';
 
 const {
   capturedSessionChatProps,
+  capturedSessionOptions,
+  capturedModelPickerProps,
   mockCreateAndSend,
+  mockClientGet,
+  mockClientPatch,
   mockSendPrompt,
+  mockSetSelectedModelAuto,
   mockSetSelectedModelKey,
+  workflowModelState,
 } = vi.hoisted(() => ({
   capturedSessionChatProps: [] as any[],
+  capturedSessionOptions: [] as any[],
+  capturedModelPickerProps: [] as any[],
   mockCreateAndSend: vi.fn(),
+  mockClientGet: vi.fn(),
+  mockClientPatch: vi.fn(),
   mockSendPrompt: vi.fn(),
+  mockSetSelectedModelAuto: vi.fn(),
   mockSetSelectedModelKey: vi.fn(),
+  workflowModelState: { auto: false },
 }));
 
 const selectedPromptModel = { providerID: 'provider-1', modelID: 'model-1' };
@@ -37,12 +49,19 @@ vi.mock('@/hooks/useDefaultModelVision', () => ({
 }));
 
 vi.mock('@/hooks/useSessionChat', () => ({
-  useSessionChat: (options: any) => ({
-    sessionId: options.initialSessionId ?? null,
-    error: null,
-    createAndSend: mockCreateAndSend,
-    retry: vi.fn(),
-  }),
+  useSessionChat: (options: any) => {
+    capturedSessionOptions.push(options);
+    return {
+      sessionId: options.initialSessionId ?? null,
+      error: null,
+      createAndSend: mockCreateAndSend,
+      retry: vi.fn(),
+    };
+  },
+}));
+
+vi.mock('@/api/client', () => ({
+  default: { get: mockClientGet, patch: mockClientPatch },
 }));
 
 vi.mock('@/api/workflow', () => ({
@@ -60,14 +79,30 @@ vi.mock('@/components/common/ChatPromptSelectors', () => ({
   useChatModelOptions: () => ({
     groupedOptions: [],
     loading: false,
+    effectiveModelOption: selectedModelOption,
+    modelPickerAutoOption: {
+      selected: workflowModelState.auto,
+      disabled: false,
+      statusLabel: 'Auto',
+      onSelect: () => { workflowModelState.auto = true; },
+    },
+    selectModelKey: (key: string) => {
+      workflowModelState.auto = false;
+      mockSetSelectedModelKey(key);
+    },
+    selectedModelAuto: workflowModelState.auto,
     selectedModelOption,
-    selectedPromptModel,
+    selectedPromptModel: workflowModelState.auto ? null : selectedPromptModel,
+    setSelectedModelAuto: mockSetSelectedModelAuto,
     setSelectedModelKey: mockSetSelectedModelKey,
   }),
   ChatAgentDisplay: ({ selectedAgent }: { selectedAgent: string }) => (
     <div>Agent:{selectedAgent}</div>
   ),
-  ChatModelPicker: () => <div>ModelPicker</div>,
+  ChatModelPicker: (props: any) => {
+    capturedModelPickerProps.push(props);
+    return <div>ModelPicker</div>;
+  },
 }));
 
 vi.mock('@/components/common/SessionChat', () => ({
@@ -141,7 +176,15 @@ describe('WorkflowCreate CreateChatTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     capturedSessionChatProps.length = 0;
+    capturedSessionOptions.length = 0;
+    capturedModelPickerProps.length = 0;
+    workflowModelState.auto = false;
+    mockSetSelectedModelAuto.mockImplementation((enabled: boolean) => {
+      workflowModelState.auto = enabled;
+    });
     mockCreateAndSend.mockResolvedValue('session-1');
+    mockClientGet.mockResolvedValue({ data: {} });
+    mockClientPatch.mockResolvedValue({ data: {} });
     vi.mocked(workflowAPI.list).mockResolvedValue({ data: [] });
     vi.mocked(workflowAPI.get).mockResolvedValue({ data: null as any });
   });
@@ -170,6 +213,7 @@ describe('WorkflowCreate CreateChatTab', () => {
         imageParts: [],
         agent: 'rex',
         model: selectedPromptModel,
+        modelAuto: false,
         displayText: '@@flocks-instruction:如何创建工作流',
       });
     });
@@ -201,6 +245,7 @@ describe('WorkflowCreate CreateChatTab', () => {
     expect(capturedSessionChatProps[0].agentName).toBe('rex');
     expect(capturedSessionChatProps[0].mentionAgents.map((agent: any) => agent.name)).toEqual(['rex']);
     expect(capturedSessionChatProps[0].model).toEqual(selectedPromptModel);
+    expect(capturedSessionChatProps[0].modelAuto).toBe(false);
     expect(capturedSessionChatProps[0].supportsVision).toBe(true);
     expect(capturedSessionChatProps[0].contextWindowTokens).toBe(128000);
     expect(capturedSessionChatProps[0].display).toEqual({
@@ -224,8 +269,44 @@ describe('WorkflowCreate CreateChatTab', () => {
         imageParts: [],
         agent: 'rex',
         model: selectedPromptModel,
+        modelAuto: false,
         displayText: '@@flocks-instruction:IP 情报',
       });
+    });
+    expect(capturedSessionOptions[0]).toEqual(expect.objectContaining({
+      category: 'workflow',
+      modelAuto: false,
+    }));
+    expect(capturedModelPickerProps[0].autoOption).toBeDefined();
+  });
+
+  it('uses Auto only after manual selection and sends no concrete model', async () => {
+    const view = renderCreateChatTab();
+
+    act(() => {
+      capturedModelPickerProps[capturedModelPickerProps.length - 1].autoOption.onSelect();
+    });
+    view.rerender(
+      <MemoryRouter>
+        <CreateChatTab onWorkflowCreated={vi.fn()} />
+      </MemoryRouter>,
+    );
+
+    const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+    expect(latestProps.model).toBeNull();
+    expect(latestProps.modelAuto).toBe(true);
+    expect(latestProps.supportsVision).toBe(true);
+    expect(capturedSessionOptions[capturedSessionOptions.length - 1].modelAuto).toBe(true);
+
+    await latestProps.onCreateAndSend('创建一个工作流', []);
+
+    expect(mockCreateAndSend).toHaveBeenLastCalledWith({
+      text: '创建一个工作流',
+      imageParts: [],
+      agent: 'rex',
+      model: null,
+      modelAuto: true,
+      displayText: undefined,
     });
   });
 
@@ -239,6 +320,45 @@ describe('WorkflowCreate CreateChatTab', () => {
     expect(capturedSessionChatProps[0].sessionId).toBe('session-restored');
     expect(capturedSessionChatProps[0].welcomeContent).toBeUndefined();
     expect(onSessionChange).toHaveBeenCalledWith('session-restored');
+  });
+
+  it('restores Auto from a persisted create session', async () => {
+    mockClientGet.mockResolvedValueOnce({ data: { model_auto: true } });
+
+    renderCreateChatTab({ initialSessionId: 'session-auto' });
+
+    await waitFor(() => {
+      expect(mockSetSelectedModelAuto).toHaveBeenCalledWith(true);
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.model).toBeNull();
+      expect(latestProps.modelAuto).toBe(true);
+    });
+  });
+
+  it('persists picker changes for a resumed create session', async () => {
+    renderCreateChatTab({ initialSessionId: 'session-picker' });
+
+    await waitFor(() => {
+      expect(mockClientGet).toHaveBeenCalledWith('/api/session/session-picker');
+    });
+    act(() => {
+      capturedModelPickerProps[capturedModelPickerProps.length - 1].autoOption.onSelect();
+    });
+    expect(mockClientPatch).toHaveBeenCalledWith('/api/session/session-picker', {
+      model_auto: true,
+      model_pinned: false,
+    });
+
+    act(() => {
+      capturedModelPickerProps[capturedModelPickerProps.length - 1]
+        .onSelectModel(selectedModelOption);
+    });
+    expect(mockClientPatch).toHaveBeenCalledWith('/api/session/session-picker', {
+      provider: 'provider-1',
+      model: 'model-1',
+      model_pinned: true,
+      model_auto: false,
+    });
   });
 
   it('does not attach an already-known workflow just because it was created recently', async () => {

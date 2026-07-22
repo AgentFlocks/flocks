@@ -518,15 +518,6 @@ export interface DefaultModelConfig {
   model_id: string;
 }
 
-export interface FallbackModelRef {
-  provider_id: string;
-  model_id: string;
-}
-
-export interface FallbackModelsConfig {
-  fallback_providers: FallbackModelRef[];
-}
-
 /** Usage summary from /api/usage/summary */
 export interface UsageStats {
   summary: {

@@ -39,14 +39,23 @@ def _session(**updates) -> SessionInfo:
     return SessionInfo.model_construct(**values)
 
 
-def _ctx(*, auto: bool = True, index: int = 0) -> LoopContext:
+def _ctx(
+    *,
+    auto: bool = True,
+    index: int = 0,
+    category: str = "user",
+) -> LoopContext:
     candidates = [
         RuntimeModel("primary", "primary-model"),
         RuntimeModel("fallback", "fallback-model"),
     ]
     active = candidates[index]
     return LoopContext(
-        session=_session(provider=active.provider_id, model=active.model_id),
+        session=_session(
+            provider=active.provider_id,
+            model=active.model_id,
+            category=category,
+        ),
         provider_id=active.provider_id,
         model_id=active.model_id,
         agent_name="rex",
@@ -717,7 +726,7 @@ async def test_failed_blank_message_deletion_stops_switch(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_fallbacks_are_attempted_in_configured_order(monkeypatch):
+async def test_fallbacks_are_attempted_in_candidate_order(monkeypatch):
     ctx = _ctx()
     ctx.model_candidates = [
         RuntimeModel("primary", "primary-model"),
@@ -798,6 +807,8 @@ async def test_full_loop_reports_chain_exhaustion_once(monkeypatch):
         agent="rex",
         model={"providerID": "primary", "modelID": "primary-model"},
     )
+    # This test exercises exhaustion of an already fixed per-turn chain.
+    ctx.turn_user_id = user.id
     final_assistant = SimpleNamespace(
         id="msg_fallback",
         role=MessageRole.ASSISTANT,
@@ -967,40 +978,156 @@ async def test_chain_exhaustion_does_not_shorten_rate_limit_cooldown(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_candidate_builder_skips_unavailable_entries_in_order(monkeypatch):
-    from flocks.config.config import ConfigInfo
-
+async def test_candidate_builder_discovers_one_model_per_tier_with_stable_seed(
+    monkeypatch,
+):
+    config = SimpleNamespace()
+    model_manager = MagicMock()
+    model_manager.list_models.return_value = [
+        SimpleNamespace(provider_id="primary", id="primary-model"),
+        SimpleNamespace(provider_id="primary", id="same-a"),
+        SimpleNamespace(provider_id="primary", id="same-b"),
+        SimpleNamespace(provider_id="other-a", id="other-a-model"),
+        SimpleNamespace(provider_id="other-b", id="other-b-model"),
+        SimpleNamespace(provider_id="missing", id="missing-model"),
+    ]
     monkeypatch.setattr(
         "flocks.config.config.Config.get",
-        AsyncMock(return_value=ConfigInfo.model_validate({
-            "fallback_providers": [
-                {"provider_id": "missing", "model_id": "missing-model"},
-                {"provider_id": "fallback-1", "model_id": "model-1"},
-                {"provider_id": "fallback-2", "model_id": "model-2"},
-            ],
-        })),
+        AsyncMock(return_value=config),
     )
-    # Runtime must consume Config.get() after all config sources are merged,
-    # rather than re-reading the raw file and ignoring env/content overrides.
     monkeypatch.setattr(
-        "flocks.config.config_writer.ConfigWriter.get_fallback_providers",
-        lambda: [{"provider_id": "raw-file", "model_id": "ignored-model"}],
+        "flocks.provider.provider.Provider.apply_config",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.model_manager.get_model_manager",
+        lambda: model_manager,
     )
 
     async def validate(provider_id, _model_id, **_kwargs):
-        return (provider_id != "missing", "available" if provider_id != "missing" else "disabled")
+        available = provider_id != "missing"
+        return available, "available" if available else "provider_not_configured"
 
     monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+    primary = RuntimeModel("primary", "primary-model")
 
-    candidates = await SessionLoop._build_model_candidates(
-        RuntimeModel("primary", "primary-model")
+    first = await SessionLoop._build_model_candidates(
+        primary,
+        route_seed="ses_auto:msg_1",
+    )
+    repeated = await SessionLoop._build_model_candidates(
+        primary,
+        route_seed="ses_auto:msg_1",
     )
 
-    assert candidates == [
-        RuntimeModel("primary", "primary-model"),
-        RuntimeModel("fallback-1", "model-1"),
-        RuntimeModel("fallback-2", "model-2"),
+    assert first == repeated
+    assert first[0] == primary
+    assert len(first) == 3
+    assert first[1].provider_id == "primary"
+    assert first[1].model_id in {"same-a", "same-b"}
+    assert first[2].provider_id in {"other-a", "other-b"}
+    assert all(candidate.provider_id != "missing" for candidate in first)
+
+    selections = {
+        tuple(await SessionLoop._build_model_candidates(
+            primary,
+            route_seed=f"ses_auto:msg_{index}",
+        ))
+        for index in range(12)
+    }
+    assert len(selections) > 1
+
+
+@pytest.mark.asyncio
+async def test_candidate_builder_keeps_active_cooldown_model_in_its_tier(
+    monkeypatch,
+):
+    config = SimpleNamespace()
+    model_manager = MagicMock()
+    model_manager.list_models.return_value = [
+        SimpleNamespace(provider_id="primary", id="primary-model"),
+        SimpleNamespace(provider_id="primary", id="same-a"),
+        SimpleNamespace(provider_id="primary", id="same-b"),
+        SimpleNamespace(provider_id="other", id="other-a"),
+        SimpleNamespace(provider_id="other", id="other-b"),
     ]
+    monkeypatch.setattr(
+        "flocks.config.config.Config.get",
+        AsyncMock(return_value=config),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.provider.Provider.apply_config",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.model_manager.get_model_manager",
+        lambda: model_manager,
+    )
+    monkeypatch.setattr(
+        SessionLoop,
+        "validate_runtime_model",
+        AsyncMock(return_value=(True, "available")),
+    )
+    primary = RuntimeModel("primary", "primary-model")
+    cooldown_model = RuntimeModel("other", "other-b")
+
+    candidates = await SessionLoop._build_model_candidates(
+        primary,
+        route_seed="ses_auto:new-turn",
+        preferred=cooldown_model,
+    )
+
+    assert candidates[0] == primary
+    assert candidates[1].provider_id == "primary"
+    assert candidates[2] == cooldown_model
+
+
+@pytest.mark.asyncio
+async def test_auto_configuration_only_requires_available_primary(monkeypatch):
+    monkeypatch.setattr(
+        "flocks.config.config.Config.resolve_default_llm",
+        AsyncMock(return_value={
+            "provider_id": "primary",
+            "model_id": "primary-model",
+        }),
+    )
+    monkeypatch.setattr(
+        SessionLoop,
+        "validate_runtime_model",
+        AsyncMock(return_value=(True, "available")),
+    )
+    build_candidates = AsyncMock()
+    monkeypatch.setattr(SessionLoop, "_build_model_candidates", build_candidates)
+
+    assert await SessionLoop.validate_auto_configuration() == (True, "available")
+    build_candidates.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_candidate_builder_allows_primary_only_chain(monkeypatch):
+    model_manager = MagicMock()
+    model_manager.list_models.return_value = [
+        SimpleNamespace(provider_id="primary", id="primary-model"),
+    ]
+    monkeypatch.setattr(
+        "flocks.config.config.Config.get",
+        AsyncMock(return_value=SimpleNamespace()),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.provider.Provider.apply_config",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.model_manager.get_model_manager",
+        lambda: model_manager,
+    )
+
+    primary = RuntimeModel("primary", "primary-model")
+
+    assert await SessionLoop._build_model_candidates(
+        primary,
+        route_seed="ses_auto:msg_primary_only",
+    ) == [primary]
 
 
 def test_cooldown_is_cleared_when_primary_changes():
@@ -1038,6 +1165,34 @@ async def test_synthetic_subtask_continuation_keeps_fallback(monkeypatch):
     assert ctx.auto_failover is True
     assert ctx.turn_user_id == "msg_real"
     assert (ctx.provider_id, ctx.model_id) == ("fallback", "fallback-model")
+
+
+@pytest.mark.asyncio
+async def test_first_real_turn_builds_stable_chain_from_user_id(monkeypatch):
+    ctx = _ctx()
+    ctx.turn_user_id = None
+    ctx.model_candidates = [RuntimeModel("primary", "primary-model")]
+    first_user = SimpleNamespace(
+        id="msg_first",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    rebuilt = [
+        RuntimeModel("primary", "primary-model"),
+        RuntimeModel("primary", "same-provider-model"),
+        RuntimeModel("other", "other-provider-model"),
+    ]
+    build = AsyncMock(return_value=rebuilt)
+    monkeypatch.setattr(SessionLoop, "_build_model_candidates", build)
+
+    await SessionLoop._prepare_auto_turn(ctx, first_user)
+
+    assert ctx.turn_user_id == "msg_first"
+    assert ctx.model_candidates == rebuilt
+    build.assert_awaited_once_with(
+        RuntimeModel("primary", "primary-model"),
+        route_seed="ses_auto:msg_first",
+        preferred=None,
+    )
 
 
 @pytest.mark.asyncio
@@ -1121,12 +1276,17 @@ async def test_queued_webui_turn_rebuilds_auto_chain(monkeypatch):
 
     assert ctx.auto_failover is True
     assert ctx.model_candidates == rebuilt
-    build.assert_awaited_once_with(RuntimeModel("primary", "primary-model"))
+    build.assert_awaited_once_with(
+        RuntimeModel("primary", "primary-model"),
+        route_seed="ses_auto:msg_auto",
+        preferred=None,
+    )
 
 
 @pytest.mark.asyncio
-async def test_queued_webui_auto_authorizes_active_loop():
-    ctx = _ctx(auto=False)
+@pytest.mark.parametrize("category", ["user", "entity-config", "workflow"])
+async def test_queued_webui_auto_authorizes_active_loop(category):
+    ctx = _ctx(auto=False, category=category)
     SessionLoop._active_loops[ctx.session.id] = ctx
     try:
         result = await SessionLoop.run(ctx.session.id, auto_failover=True)
@@ -1138,7 +1298,9 @@ async def test_queued_webui_auto_authorizes_active_loop():
 
 
 @pytest.mark.asyncio
-async def test_non_user_session_loop_ignores_auto_authorization(monkeypatch):
+async def test_unsupported_session_loop_ignores_auto_authorization(
+    monkeypatch,
+):
     task_session = _session(category="task")
     captured_ctx = None
 
@@ -1183,9 +1345,8 @@ async def test_non_user_session_loop_ignores_auto_authorization(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_active_non_user_loop_rejects_auto_authorization():
-    ctx = _ctx(auto=False)
-    ctx.session.category = "workflow"
+async def test_active_unsupported_loop_rejects_auto_authorization():
+    ctx = _ctx(auto=False, category="task")
     SessionLoop._active_loops[ctx.session.id] = ctx
     try:
         result = await SessionLoop.run(ctx.session.id, auto_failover=True)

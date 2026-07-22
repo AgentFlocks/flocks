@@ -628,15 +628,6 @@ class ChannelConfig(BaseModel):
 
 # ==================== Main Configuration ====================
 
-class FallbackProviderConfig(BaseModel):
-    """Ordered model identity used for runtime provider fallback."""
-
-    model_config = {"extra": "forbid"}
-
-    provider_id: str
-    model_id: str
-
-
 class ConfigInfo(BaseModel):
     """
     Main configuration schema
@@ -669,7 +660,6 @@ class ConfigInfo(BaseModel):
     enabled_providers: Optional[List[str]] = None
     model: Optional[str] = None
     small_model: Optional[str] = Field(None, alias="smallModel")
-    fallback_providers: Optional[List[FallbackProviderConfig]] = None
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
     username: Optional[str] = None
     mode: Optional[Dict[str, AgentConfig]] = Field(None, description="@deprecated Use 'agent'")
@@ -721,72 +711,6 @@ class ConfigInfo(BaseModel):
             "workspace_access (none/ro/rw), workspace_root, docker, tools, prune."
         ),
     )
-
-    @field_validator("fallback_providers", mode="before")
-    @classmethod
-    def normalize_fallback_providers(cls, value: Any) -> Any:
-        """Keep config loading tolerant of malformed fallback entries.
-
-        Runtime and API readers still receive typed, trimmed, ordered entries.
-        Invalid identities are ignored and duplicate identities retain their
-        first position, matching :class:`ConfigWriter` raw-read behavior.
-        """
-        if value is None:
-            return None
-
-        from flocks.utils.log import Log
-
-        config_log = Log.create(service="config")
-        if not isinstance(value, list):
-            config_log.warning("config.fallback_providers_invalid", {
-                "reason": "not_a_list",
-            })
-            return []
-
-        normalized: List[Dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for index, raw in enumerate(value):
-            if not isinstance(raw, dict):
-                config_log.warning("config.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "not_an_object",
-                })
-                continue
-
-            provider_id = raw.get("provider_id")
-            model_id = raw.get("model_id")
-            if not isinstance(provider_id, str) or not isinstance(model_id, str):
-                config_log.warning("config.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "invalid_identity",
-                })
-                continue
-
-            provider_id = provider_id.strip()
-            model_id = model_id.strip()
-            if not provider_id or not model_id:
-                config_log.warning("config.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "empty_identity",
-                })
-                continue
-
-            identity = (provider_id, model_id)
-            if identity in seen:
-                config_log.warning("config.fallback_provider_duplicate", {
-                    "index": index,
-                    "provider_id": provider_id,
-                    "model_id": model_id,
-                })
-                continue
-
-            seen.add(identity)
-            normalized.append({
-                "provider_id": provider_id,
-                "model_id": model_id,
-            })
-
-        return normalized
     allow_read_paths: Optional[List[str]] = Field(
         None,
         alias="allowReadPaths",
@@ -1252,49 +1176,6 @@ class Config:
             raise ValueError(f"Failed to read config file {filepath}: {e}")
         
         return await cls.load_text(text, filepath)
-
-    @staticmethod
-    def parse_jsonc(text: str, filepath: Path) -> Dict[str, Any]:
-        """Parse JSON or JSONC text without resolving configuration values."""
-        try:
-            # Remove block comments before processing line comments. This is
-            # the same JSONC syntax accepted by ``load_text``.
-            text_no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-
-            cleaned_lines = []
-            for line in text_no_comments.split('\n'):
-                in_string = False
-                escape_next = False
-                comment_start = -1
-
-                for index, char in enumerate(line):
-                    if escape_next:
-                        escape_next = False
-                        continue
-                    if char == '\\':
-                        escape_next = True
-                        continue
-                    if char == '"':
-                        in_string = not in_string
-                    if (
-                        not in_string
-                        and index < len(line) - 1
-                        and line[index:index + 2] == '//'
-                    ):
-                        comment_start = index
-                        break
-
-                if comment_start >= 0:
-                    line = line[:comment_start]
-                cleaned_lines.append(line)
-
-            data = json.loads('\n'.join(cleaned_lines))
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Invalid JSON in {filepath}: {exc}") from exc
-
-        if not isinstance(data, dict):
-            raise ValueError(f"Invalid configuration in {filepath}: expected an object")
-        return data
     
     @classmethod
     async def load_text(cls, text: str, filepath: Path) -> ConfigInfo:
@@ -1319,8 +1200,52 @@ class Config:
         # Replace file references
         text = await cls.replace_file_refs(text, filepath.parent)
         
-        # Try to parse as JSONC (JSON with comments).
-        data = cls.parse_jsonc(text, filepath)
+        # Try to parse as JSONC (JSON with comments)
+        try:
+            # Remove comments properly
+            # 1. Remove /* */ block comments first
+            text_no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+
+            # 2. Remove // line comments, but NOT in strings!
+            # We need to be careful not to remove // inside quoted strings (like URLs)
+            # This regex matches // that are NOT inside quotes
+            # Negative lookbehind to avoid matching inside strings
+            lines = text_no_comments.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                # Find // but not inside strings
+                # Simple approach: find first // that is not between quotes
+                in_string = False
+                escape_next = False
+                comment_start = -1
+
+                for i, char in enumerate(line):
+                    if escape_next:
+                        escape_next = False
+                        continue
+
+                    if char == '\\':
+                        escape_next = True
+                        continue
+
+                    if char == '"' and not escape_next:
+                        in_string = not in_string
+
+                    if not in_string and i < len(line) - 1 and line[i:i+2] == '//':
+                        comment_start = i
+                        break
+
+                if comment_start >= 0:
+                    line = line[:comment_start]
+
+                cleaned_lines.append(line)
+
+            text_no_comments = '\n'.join(cleaned_lines)
+
+            # Parse JSON
+            data = json.loads(text_no_comments)
+        except json.JSONDecodeError as e:
+            raise ValueError(f"Invalid JSON in {filepath}: {e}")
         
         # Validate and parse with Pydantic
         try:

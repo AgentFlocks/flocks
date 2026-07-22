@@ -93,61 +93,17 @@ class ConfigWriter:
     @classmethod
     def _read_raw(cls) -> Dict[str, Any]:
         """Read flocks.json as raw dict (no secret resolution)."""
-        return cls._read_path_raw(cls._get_config_path())
-
-    @classmethod
-    def _read_path_raw(
-        cls,
-        path: Path,
-        *,
-        strict: bool = False,
-    ) -> Dict[str, Any]:
-        """Read a JSON/JSONC file without resolving secrets or references."""
+        path = cls._get_config_path()
         if not path.exists():
             return {}
         try:
             text = path.read_text(encoding="utf-8")
             if not text.strip():
                 return {}
-            return Config.parse_jsonc(text, path)
-        except (ValueError, OSError) as exc:
+            return json.loads(text)
+        except (json.JSONDecodeError, OSError) as exc:
             log.error("config_writer.read_failed", {"path": str(path), "error": str(exc)})
-            if strict:
-                raise ValueError(
-                    f"Unable to read config file {path}: {exc}"
-                ) from exc
             return {}
-
-    @classmethod
-    def get_fallback_override_source(cls) -> Optional[str]:
-        """Return a higher-priority source overriding the writable fallback list."""
-        writable_path = cls._get_config_path().resolve()
-        global_config = Config.get_global()
-
-        inline_content = global_config.config_content
-        if inline_content:
-            try:
-                inline_data = json.loads(inline_content)
-            except json.JSONDecodeError:
-                inline_data = None
-            if (
-                isinstance(inline_data, dict)
-                and inline_data.get("fallback_providers") is not None
-            ):
-                return "FLOCKS_CONFIG_CONTENT"
-
-        candidates = []
-        if global_config.config_path:
-            candidates.append(("FLOCKS_CONFIG", Path(global_config.config_path)))
-        candidates.append(("config.json", global_config.config_dir / "config.json"))
-
-        for source, path in candidates:
-            if not path.exists() or path.resolve() == writable_path:
-                continue
-            data = cls._read_path_raw(path, strict=True)
-            if data.get("fallback_providers") is not None:
-                return source
-        return None
 
     @classmethod
     def _write_raw(cls, data: Dict[str, Any]) -> None:
@@ -443,98 +399,6 @@ class ConfigWriter:
         """Get all default model configs."""
         data = cls._read_raw()
         return data.get("default_models", {})
-
-    # ------------------------------------------------------------------
-    # Runtime model fallbacks (fallback_providers section)
-    # ------------------------------------------------------------------
-
-    @classmethod
-    def get_fallback_providers(cls) -> List[Dict[str, str]]:
-        """Return the ordered, structurally valid runtime fallback models.
-
-        Malformed entries are ignored without rewriting the user's config.
-        Duplicate identities retain their first position. Model availability is
-        intentionally not checked here so stale references remain visible to
-        configuration clients and can be repaired.
-        """
-        data = cls._read_raw()
-        raw_fallbacks = data.get("fallback_providers", [])
-        if not isinstance(raw_fallbacks, list):
-            log.warning("config_writer.fallback_providers_invalid", {
-                "reason": "not_a_list",
-            })
-            return []
-
-        fallbacks: List[Dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for index, raw in enumerate(raw_fallbacks):
-            if not isinstance(raw, dict):
-                log.warning("config_writer.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "not_an_object",
-                })
-                continue
-
-            provider_id = raw.get("provider_id")
-            model_id = raw.get("model_id")
-            if not isinstance(provider_id, str) or not isinstance(model_id, str):
-                log.warning("config_writer.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "invalid_identity",
-                })
-                continue
-
-            provider_id = provider_id.strip()
-            model_id = model_id.strip()
-            if not provider_id or not model_id:
-                log.warning("config_writer.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "empty_identity",
-                })
-                continue
-
-            identity = (provider_id, model_id)
-            if identity in seen:
-                log.warning("config_writer.fallback_provider_duplicate", {
-                    "index": index,
-                    "provider_id": provider_id,
-                    "model_id": model_id,
-                })
-                continue
-
-            seen.add(identity)
-            fallbacks.append({
-                "provider_id": provider_id,
-                "model_id": model_id,
-            })
-
-        return fallbacks
-
-    @classmethod
-    def set_fallback_providers(
-        cls,
-        fallbacks: List[Dict[str, str]],
-    ) -> None:
-        """Atomically replace the ordered runtime fallback model list.
-
-        An empty list removes the top-level key instead of persisting redundant
-        empty configuration. Callers are responsible for validating identities.
-        """
-        data = cls._read_path_raw(cls._get_config_path(), strict=True)
-        if fallbacks:
-            data["fallback_providers"] = [
-                {
-                    "provider_id": fallback["provider_id"],
-                    "model_id": fallback["model_id"],
-                }
-                for fallback in fallbacks
-            ]
-        else:
-            data.pop("fallback_providers", None)
-        cls._write_raw(data)
-        log.info("config_writer.fallback_providers_set", {
-            "count": len(fallbacks),
-        })
 
     # ------------------------------------------------------------------
     # MCP server CRUD (mcp section)

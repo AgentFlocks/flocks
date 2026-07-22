@@ -44,7 +44,6 @@ const {
   useProviders: vi.fn(),
   defaultModelAPI: {
     getResolved: vi.fn(),
-    getFallbacks: vi.fn(),
   },
   modelV2API: {
     listDefinitions: vi.fn(),
@@ -317,7 +316,6 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
     client.get.mockResolvedValue({
       data: [{
@@ -1775,9 +1773,6 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }] },
-    });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
     renderSessionPage('/sessions?session=session-1');
@@ -1786,7 +1781,8 @@ describe('SessionPage session actions menu', () => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'minimax/minimax-m3');
     });
     await user.click(screen.getByRole('button', { name: /MiniMax M3/i }));
-    await user.click((await screen.findByText('modelPicker.autoHint')).closest('button')!);
+    const autoButton = await screen.findByRole('button', { name: 'modelPicker.auto' });
+    await user.click(autoButton);
 
     await waitFor(() => {
       expect(sessionApi.update).toHaveBeenCalledWith('session-1', {
@@ -1797,7 +1793,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', '');
   });
 
-  it('does not offer Auto for an existing non-user session', async () => {
+  it('does not offer Auto for a non-WebUI task session', async () => {
     const user = userEvent.setup();
     useSessions.mockReturnValue({
       sessions: [{ ...session, category: 'task' }],
@@ -1817,15 +1813,76 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }] },
-    });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
     renderSessionPage('/sessions?session=session-1');
 
     await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
-    const autoButton = (await screen.findByText('modelPicker.autoUnavailable')).closest('button');
+    const autoButton = await screen.findByRole('button', { name: 'modelPicker.auto' });
+    expect(autoButton).toBeDisabled();
+    expect(sessionApi.update).not.toHaveBeenCalled();
+  });
+
+  it('offers Auto for an entity configuration WebUI session', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [{ ...session, category: 'entity-config' }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
+    const autoButton = await screen.findByRole('button', { name: 'modelPicker.auto' });
+    expect(autoButton).toBeEnabled();
+    await user.click(autoButton);
+    expect(sessionApi.update).toHaveBeenCalledWith('session-1', {
+      model_auto: true,
+      model_pinned: false,
+    });
+  });
+
+  it('does not offer Auto without a valid primary model', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [session],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    useProviders.mockReturnValue({
+      providers: modelProviders,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
+    modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
+    const autoButton = await screen.findByRole('button', { name: 'modelPicker.auto' });
     expect(autoButton).toBeDisabled();
     expect(sessionApi.update).not.toHaveBeenCalled();
   });
@@ -1850,15 +1907,12 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }] },
-    });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
     renderSessionPage('/sessions?session=session-1');
 
     await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
-    expect((await screen.findByText('modelPicker.autoHint')).closest('button')).toBeEnabled();
+    expect(await screen.findByRole('button', { name: 'modelPicker.auto' })).toBeEnabled();
   });
 
   it('uses primary model capabilities while Auto is selected', async () => {
@@ -1880,9 +1934,6 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }] },
-    });
     modelV2API.listDefinitions.mockResolvedValue({
       data: {
         models: modelDefinitions.map((definition) => definition.id === 'gpt-4o'
@@ -1928,9 +1979,6 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }] },
-    });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
     renderSessionPage('/sessions?session=session-1');
@@ -1948,7 +1996,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('keeps an existing Auto session selected when no fallback is currently available', async () => {
+  it('keeps an existing Auto session selected with a valid primary model', async () => {
     useSessions.mockReturnValue({
       sessions: [{ ...session, model_auto: true, model_pinned: false }],
       loading: false,
@@ -1967,7 +2015,6 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
     renderSessionPage('/sessions?session=session-1');
@@ -1976,55 +2023,6 @@ describe('SessionPage session actions menu', () => {
       expect(screen.getByRole('button', { name: /^modelPicker\.auto/i })).toBeInTheDocument();
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', '');
     });
-  });
-
-  it('does not enable Auto when the only fallback is not an LLM', async () => {
-    const user = userEvent.setup();
-    useSessions.mockReturnValue({
-      sessions: [session],
-      loading: false,
-      error: null,
-      refetch: refetchSessions,
-      updateSessionTitle,
-      removeSession,
-      removeSessions,
-      addSession,
-    });
-    useProviders.mockReturnValue({
-      providers: modelProviders,
-      connectedIds: ['openai', 'minimax'],
-      loading: false,
-      error: null,
-      refetch: vi.fn(),
-    });
-    defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-embed' }] },
-    });
-    modelV2API.listDefinitions.mockResolvedValue({
-      data: {
-        models: [
-          ...modelDefinitions,
-          {
-            provider_id: 'minimax',
-            id: 'minimax-embed',
-            name: 'MiniMax Embed',
-            model_type: 'text-embedding',
-            source: 'predefined',
-            capabilities: {},
-            pricing: null,
-            limits: {},
-          },
-        ],
-      },
-    });
-
-    renderSessionPage('/sessions?session=session-1');
-
-    await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
-    const autoButton = (await screen.findByText('modelPicker.autoUnavailable')).closest('button');
-    expect(autoButton).toBeDisabled();
-    expect(sessionApi.update).not.toHaveBeenCalled();
   });
 
   it('creates a blank-session Auto chat without a model override', async () => {
@@ -2047,15 +2045,12 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
-    defaultModelAPI.getFallbacks.mockResolvedValue({
-      data: { fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }] },
-    });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: modelDefinitions } });
 
     renderSessionPage();
 
     await user.click(await screen.findByRole('button', { name: /GPT-4o/i }));
-    await user.click((await screen.findByText('modelPicker.autoHint')).closest('button')!);
+    await user.click(await screen.findByRole('button', { name: 'modelPicker.auto' }));
     await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
 
     await waitFor(() => {

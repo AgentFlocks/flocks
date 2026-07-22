@@ -11,6 +11,7 @@ import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import SuiteInstallProgressPanel, {
@@ -27,7 +28,6 @@ import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
 import {
   useEnabledChatModelDefinitions,
-  useFallbackModels,
   useResolvedDefaultModel,
 } from '@/hooks/useChatModelResources';
 import client from '@/api/client';
@@ -341,6 +341,8 @@ export default function SessionPage() {
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
+  const modelSelectorRef = useRef<HTMLDivElement>(null);
+  const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [creating, setCreating] = useState(false);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
@@ -389,6 +391,14 @@ export default function SessionPage() {
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
+  const updateModelMenuLeftOffset = useCallback(() => {
+    const selector = modelSelectorRef.current;
+    if (!selector) return;
+    setModelMenuLeftOffset(getAnchoredMenuLeftOffset(
+      selector.getBoundingClientRect().left,
+      window.innerWidth,
+    ));
+  }, []);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
@@ -425,10 +435,6 @@ export default function SessionPage() {
     data: enabledModelDefinitions,
     loading: loadingEnabledModels,
   } = useEnabledChatModelDefinitions();
-  const {
-    data: fallbackModels,
-    loading: loadingFallbackModels,
-  } = useFallbackModels();
   const primaryAgents = useMemo(() => agents.filter((a) => a.mode === 'primary' && isAgentUsableInChat(a)), [agents]);
   const subAgents = useMemo(
     () => agents.filter((a) => a.mode !== 'primary' && isAgentUsableInChat(a)),
@@ -539,20 +545,11 @@ export default function SessionPage() {
     const key = makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID);
     return chatModelOptions.find((option) => option.key === key) ?? null;
   }, [chatModelOptions, resolvedDefaultModel]);
-  const availableFallbackOptions = useMemo(() => {
-    const primaryKey = primaryModelOption?.key;
-    return fallbackModels.flatMap((fallback) => {
-      const option = chatModelOptions.find(
-        (candidate) => candidate.key === makeModelKey(fallback.provider_id, fallback.model_id),
-      );
-      return option && option.key !== primaryKey ? [option] : [];
-    });
-  }, [chatModelOptions, fallbackModels, primaryModelOption?.key]);
   const autoSelectionAllowed = !selectedSessionId || Boolean(
-    selectedSession && (selectedSession.category ?? 'user') === 'user',
+    selectedSession && ['user', 'entity-config', 'workflow'].includes(selectedSession.category ?? 'user'),
   );
   const canSelectAuto = Boolean(
-    autoSelectionAllowed && primaryModelOption && availableFallbackOptions.length > 0,
+    autoSelectionAllowed && primaryModelOption,
   );
   const effectiveModelOption = selectedModelAuto ? primaryModelOption : selectedModelOption;
   const selectedPromptModel = selectedModelAuto
@@ -561,11 +558,11 @@ export default function SessionPage() {
       ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
       : null;
   const effectiveSupportsVision = effectiveModelOption?.supportsVision ?? supportsVision;
-  const autoRouteLabel = primaryModelOption
-    ? [primaryModelOption, ...availableFallbackOptions]
-      .map((option) => `${option.providerName} / ${option.label}`)
-      .join(' → ')
-    : t('modelPicker.autoUnavailable');
+  const autoStatusLabel = !autoSelectionAllowed
+    ? t('modelPicker.autoUserSessionsOnly')
+    : primaryModelOption
+      ? t('modelPicker.autoHint')
+      : t('modelPicker.autoUnavailable');
   const firstChatModelKey = chatModelOptions[0]?.key ?? null;
   const resolvedDefaultKey = resolvedDefaultModel
     ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
@@ -875,6 +872,13 @@ export default function SessionPage() {
 
   useEffect(() => {
     if (!showModelOptions) return;
+    updateModelMenuLeftOffset();
+    window.addEventListener('resize', updateModelMenuLeftOffset);
+    return () => window.removeEventListener('resize', updateModelMenuLeftOffset);
+  }, [showModelOptions, updateModelMenuLeftOffset]);
+
+  useEffect(() => {
+    if (!showModelOptions) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
       if (!target.closest('[data-model-selector]')) setShowModelOptions(false);
@@ -1006,7 +1010,7 @@ export default function SessionPage() {
   }, [refetchSessions, selectedModelKey, selectedSessionId, toast, t]);
 
   const handleSelectAutoModel = useCallback(async () => {
-    if (!autoSelectionAllowed || (!canSelectAuto && !selectedModelAuto)) return;
+    if (!canSelectAuto) return;
     const previousModelKey = selectedModelKey;
     setSelectedModelKey(AUTO_MODEL_KEY);
     setShowModelOptions(false);
@@ -1022,7 +1026,7 @@ export default function SessionPage() {
       setSelectedModelKey(previousModelKey);
       toast.error(t('chat.error', 'Error'), err.message);
     }
-  }, [autoSelectionAllowed, canSelectAuto, refetchSessions, selectedModelAuto, selectedModelKey, selectedSessionId, toast, t]);
+  }, [canSelectAuto, refetchSessions, selectedModelKey, selectedSessionId, toast, t]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -2170,14 +2174,17 @@ export default function SessionPage() {
             </div>
           }
           centerToolbarSlot={
-            <div className="relative" data-model-selector>
+            <div ref={modelSelectorRef} className="relative" data-model-selector>
               <button
                 type="button"
-                onClick={() => setShowModelOptions(!showModelOptions)}
+                onClick={() => {
+                  if (!showModelOptions) updateModelMenuLeftOffset();
+                  setShowModelOptions(!showModelOptions);
+                }}
                 disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
                 className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                 title={selectedModelAuto
-                  ? `${t('modelPicker.auto')}: ${autoRouteLabel}`
+                  ? `${t('modelPicker.auto')}: ${autoStatusLabel}`
                   : selectedModelOption
                     ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}`
                     : t('modelPicker.empty')}
@@ -2193,13 +2200,16 @@ export default function SessionPage() {
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div className="absolute right-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                <div
+                  className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                  style={{ transform: `translateX(${modelMenuLeftOffset}px)` }}
+                >
                   <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
                     <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
                     <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
                   </div>
                   <div className="h-[15.5rem] overflow-y-auto p-1.5">
-                    {loadingProviders || loadingEnabledModels || loadingFallbackModels ? (
+                    {loadingProviders || loadingEnabledModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
                     ) : (
                       <>
@@ -2207,8 +2217,8 @@ export default function SessionPage() {
                           <button
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
-                            disabled={!autoSelectionAllowed || (!canSelectAuto && !selectedModelAuto)}
-                            className={`w-full rounded-md px-2 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                            disabled={!canSelectAuto}
+                            className={`w-full rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
                                 ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
                                 : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
@@ -2216,21 +2226,16 @@ export default function SessionPage() {
                           >
                             <div className="flex min-w-0 items-center gap-2">
                               <Sparkles className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                              <div className="min-w-0 flex-1">
-                                <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{t('modelPicker.auto')}</div>
-                                <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
-                                  {canSelectAuto || (autoSelectionAllowed && selectedModelAuto)
-                                    ? t('modelPicker.autoHint')
-                                    : t('modelPicker.autoUnavailable')}
-                                </div>
-                              </div>
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                                {t('modelPicker.auto')}
+                              </span>
                               <span
                                 className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
                                 onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                 onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                                onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoRouteLabel])}
-                                onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoRouteLabel])}
-                                onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoRouteLabel])}
+                                onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
+                                onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
+                                onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
                                 onMouseLeave={() => setSelectorTooltip(null)}
                                 onPointerLeave={() => setSelectorTooltip(null)}
                               >

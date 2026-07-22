@@ -1,5 +1,5 @@
 import { defaultModelAPI, modelV2API } from '@/api/provider';
-import type { FallbackModelRef, ModelDefinitionV2 } from '@/types';
+import type { ModelDefinitionV2 } from '@/types';
 import {
   createSharedResource,
   useSharedResource,
@@ -37,17 +37,6 @@ const resolvedDefaultModelResource = createSharedResource<ResolvedDefaultModel>(
   fallbackDataOnError: null,
 });
 
-const fallbackModelsResource = createSharedResource<FallbackModelRef[]>({
-  initialData: [],
-  staleTimeMs: CHAT_MODEL_RESOURCES_STALE_TIME_MS,
-  minFetchIntervalMs: 1000,
-  fetcher: async () => {
-    const response = await defaultModelAPI.getFallbacks();
-    return response?.data?.fallback_providers ?? [];
-  },
-  fallbackDataOnError: [],
-});
-
 export function useEnabledChatModelDefinitions() {
   return useSharedResource(enabledModelDefinitionsResource);
 }
@@ -56,12 +45,6 @@ export function useResolvedDefaultModel(enabled: boolean) {
   return useSharedResource(resolvedDefaultModelResource, {
     enabled,
     loadOnMount: enabled,
-    silentInitialLoad: true,
-  });
-}
-
-export function useFallbackModels() {
-  return useSharedResource(fallbackModelsResource, {
     silentInitialLoad: true,
   });
 }
@@ -78,12 +61,7 @@ export function fetchResolvedDefaultModel(
   return resolvedDefaultModelResource.fetch(options);
 }
 
-export function invalidateFallbackModels(): void {
-  fallbackModelsResource.invalidate();
-}
-
 export function __resetChatModelResourcesForTesting(): void {
   enabledModelDefinitionsResource.resetForTesting();
   resolvedDefaultModelResource.resetForTesting();
-  fallbackModelsResource.resetForTesting();
 }

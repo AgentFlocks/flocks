@@ -739,8 +739,7 @@ class Provider:
 
             # Provider credentials/options are optional. Model definitions and
             # display names below still need to load when credentials are
-            # unresolved or intentionally omitted (for example, while editing
-            # an Auto fallback before connecting that provider).
+            # unresolved or supplied outside the main config.
             options = getattr(pconfig, "options", None)
             options_data: Optional[Dict[str, Any]] = None
             if hasattr(options, "model_dump"):
