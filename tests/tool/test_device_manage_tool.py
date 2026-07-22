@@ -7,7 +7,7 @@ import pytest
 
 from flocks.tool.device.intake import DeviceNotFoundError
 from flocks.tool.device.manage_tool import device_manage
-from flocks.tool.device.models import DeviceIntegration, DeviceTestResult
+from flocks.tool.device.models import DeviceIntegration, DeviceTemplate, DeviceTestResult
 from flocks.tool.registry import ToolContext, ToolRegistry
 
 
@@ -41,19 +41,43 @@ def make_device(**overrides) -> DeviceIntegration:
     return DeviceIntegration(**data)
 
 
+def make_template(**overrides) -> DeviceTemplate:
+    data = {
+        "plugin_id": "360-waf",
+        "storage_key": "360_waf_v5_5",
+        "service_id": "360_waf",
+        "name": "360 WAF",
+        "credential_schema": [],
+        "installed": True,
+        "state": "installed",
+        "source": "project",
+    }
+    data.update(overrides)
+    return DeviceTemplate(**data)
+
+
 def test_device_manage_is_registered():
     tools = {tool.name for tool in ToolRegistry.list_tools()}
     assert "device_manage" in tools
 
 
-def test_device_manage_schema_includes_update_action():
+def test_device_manage_schema_includes_template_discovery_action():
     tool = ToolRegistry.get("device_manage")
     assert tool is not None
 
     action_param = next(param for param in tool.info.parameters if param.name == "action")
-    assert action_param.enum == ["list", "update", "connectivity_test"]
+    assert action_param.enum == [
+        "list",
+        "list_templates",
+        "create",
+        "update",
+        "connectivity_test",
+    ]
     assert {param.name for param in tool.info.parameters} >= {
         "device_id",
+        "device_name",
+        "storage_key",
+        "group_id",
         "fields",
         "verify_ssl",
     }
@@ -69,6 +93,216 @@ async def test_device_manage_list_returns_device_inventory():
 
     assert result.success is True
     assert "dev-1" in result.output
+
+
+@pytest.mark.asyncio
+async def test_device_manage_list_templates_returns_existing_template_metadata():
+    templates = [
+        make_template(
+            plugin_id="tdp",
+            storage_key="tdp_v3_3_10",
+            service_id="tdp",
+            name="TDP",
+            version="3.3.10",
+            vendor="threatbook",
+            credential_schema=[
+                {
+                    "key": "base_url",
+                    "label": "Base URL",
+                    "required": True,
+                    "secret": False,
+                },
+                {
+                    "key": "api_key",
+                    "label": "API Key",
+                    "required": True,
+                    "secret": True,
+                },
+            ],
+            tool_count=2,
+        )
+    ]
+    with patch(
+        "flocks.tool.device.plugin_index.list_device_templates",
+        return_value=templates,
+    ) as mocked_list:
+        result = await device_manage(make_ctx(), action="list_templates")
+
+    mocked_list.assert_called_once_with(refresh=False)
+    assert result.success is True
+    assert result.output == [templates[0].model_dump(mode="json")]
+    assert result.metadata == {
+        "template_count": 1,
+        "installed_count": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_device_manage_create_uses_installed_template_identity():
+    template = make_template(
+        credential_schema=[
+            {
+                "key": "base_url",
+                "label": "Base URL",
+                "storage": "config",
+                "required": True,
+            },
+            {
+                "key": "username",
+                "label": "Username",
+                "storage": "config",
+                "required": False,
+            },
+            {
+                "key": "password",
+                "label": "Password",
+                "storage": "secret",
+                "required": True,
+            },
+        ],
+    )
+    created = make_device(
+        id="dev-360",
+        name="360 WAF",
+        storage_key=template.storage_key,
+        service_id=template.service_id,
+        fields={"base_url": "https://192.168.1.100"},
+        fields_set={"base_url": True},
+    )
+    with (
+        patch(
+            "flocks.tool.device.plugin_index.list_device_templates",
+            return_value=[template],
+        ),
+        patch(
+            "flocks.tool.device.manage_tool.create_device",
+            AsyncMock(return_value=created),
+        ) as mocked_create,
+    ):
+        result = await device_manage(
+            make_ctx(),
+            action="create",
+            storage_key="360_waf_v5_5",
+            device_name="360 WAF",
+            fields={"base_url": "https://192.168.1.100"},
+            verify_ssl=False,
+        )
+
+    mocked_create.assert_awaited_once()
+    body = mocked_create.await_args.args[0]
+    assert body.name == "360 WAF"
+    assert body.storage_key == "360_waf_v5_5"
+    assert body.service_id == "360_waf"
+    assert body.fields == {"base_url": "https://192.168.1.100"}
+    assert result.success is True
+    assert result.output["device_id"] == "dev-360"
+    assert result.metadata["sensitive_fields"] == ["password"]
+
+
+@pytest.mark.asyncio
+async def test_device_manage_create_rejects_uninstalled_template():
+    template = make_template(
+        installed=False,
+        state="available",
+        source="bundled",
+    )
+    with patch(
+        "flocks.tool.device.plugin_index.list_device_templates",
+        return_value=[template],
+    ):
+        result = await device_manage(
+            make_ctx(),
+            action="create",
+            storage_key=template.storage_key,
+            device_name="360 WAF",
+        )
+
+    assert result.success is False
+    assert "尚未安装" in (result.error or "")
+    assert "360-waf" in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_device_manage_create_rejects_secret_and_unknown_fields():
+    template = make_template(
+        credential_schema=[
+            {"key": "base_url", "storage": "config", "required": True},
+            {"key": "password", "storage": "secret", "required": True},
+        ],
+    )
+    with patch(
+        "flocks.tool.device.plugin_index.list_device_templates",
+        return_value=[template],
+    ):
+        secret_result = await device_manage(
+            make_ctx(),
+            action="create",
+            storage_key=template.storage_key,
+            device_name="360 WAF",
+            fields={
+                "base_url": "https://192.168.1.100",
+                "password": "do-not-store",
+            },
+        )
+        unknown_result = await device_manage(
+            make_ctx(),
+            action="create",
+            storage_key=template.storage_key,
+            device_name="360 WAF",
+            fields={
+                "base_url": "https://192.168.1.100",
+                "account": "admin",
+            },
+        )
+
+    assert secret_result.success is False
+    assert "敏感字段" in (secret_result.error or "")
+    assert "password" in (secret_result.error or "")
+    assert unknown_result.success is False
+    assert "模板未声明字段" in (unknown_result.error or "")
+    assert "account" in (unknown_result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_device_manage_create_leaves_missing_fields_for_page_completion():
+    template = make_template(
+        credential_schema=[
+            {
+                "key": "base_url",
+                "storage": "config",
+                "required": True,
+                "default_value": "https://default.local",
+            },
+            {"key": "password", "storage": "secret", "required": True},
+        ],
+    )
+    created = make_device(
+        name="360 WAF",
+        storage_key=template.storage_key,
+        service_id=template.service_id,
+        fields={},
+        fields_set={},
+    )
+    with (
+        patch(
+            "flocks.tool.device.plugin_index.list_device_templates",
+            return_value=[template],
+        ),
+        patch(
+            "flocks.tool.device.manage_tool.create_device",
+            AsyncMock(return_value=created),
+        ) as mocked_create,
+    ):
+        result = await device_manage(
+            make_ctx(),
+            action="create",
+            storage_key=template.storage_key,
+            device_name="360 WAF",
+        )
+
+    assert result.success is True
+    assert mocked_create.await_args.args[0].fields == {}
+    assert result.output["sensitive_fields_to_complete"] == ["password"]
 
 
 @pytest.mark.asyncio
