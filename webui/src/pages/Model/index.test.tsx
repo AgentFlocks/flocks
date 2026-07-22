@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   catalogList: vi.fn(),
   createProvider: vi.fn(),
   getCredentials: vi.fn(),
+  revealCredentials: vi.fn(),
   setCredentials: vi.fn(),
   testCredentials: vi.fn(),
 }));
@@ -113,6 +114,7 @@ vi.mock('@/components/common/EntitySheet', () => ({
 vi.mock('@/api/provider', () => ({
   providerAPI: {
     getCredentials: mocks.getCredentials,
+    revealCredentials: mocks.revealCredentials,
     setCredentials: mocks.setCredentials,
     testCredentials: mocks.testCredentials,
   },
@@ -277,6 +279,15 @@ describe('ModelPage configure provider dialog', () => {
         has_credential: true,
       },
     });
+    mocks.revealCredentials.mockResolvedValue({
+      data: {
+        secret_id: 'openai_llm_key',
+        api_key: 'sk-existing-secret-1234',
+        api_key_masked: 'sk-***1234',
+        base_url: 'https://old.example.com/v1',
+        has_credential: true,
+      },
+    });
     mocks.setCredentials.mockResolvedValue({ data: { success: true } });
     mocks.testCredentials.mockResolvedValue({
       data: {
@@ -294,15 +305,18 @@ describe('ModelPage configure provider dialog', () => {
     renderWithRouter(<ModelPage />);
     await user.click(await screen.findByTitle('Configure'));
     expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
+    expect(mocks.revealCredentials).toHaveBeenCalledWith('openai');
   }
 
-  it('preserves an existing secret when saving a new base URL with a blank key', async () => {
+  it('displays and preserves the existing API key when saving a new base URL', async () => {
     const user = userEvent.setup();
     await openConfigureDialog(user);
 
-    const apiKeyInput = screen.getByPlaceholderText('Leave blank to keep the existing API key');
-    expect(apiKeyInput).toHaveValue('');
+    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
+    expect(apiKeyInput).toHaveAttribute('type', 'password');
     expect(apiKeyInput).not.toHaveValue('sk-***1234');
+    await user.click(screen.getByTitle('form.show'));
+    expect(apiKeyInput).toHaveAttribute('type', 'text');
 
     const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
     await user.clear(baseUrlInput);
@@ -317,7 +331,7 @@ describe('ModelPage configure provider dialog', () => {
     expect(payload).not.toHaveProperty('api_key');
   });
 
-  it('persists a base URL change without a key before testing the connection', async () => {
+  it('persists the displayed API key and a base URL change before testing the connection', async () => {
     const user = userEvent.setup();
     await openConfigureDialog(user);
     mocks.setCredentials.mockClear();
@@ -337,5 +351,20 @@ describe('ModelPage configure provider dialog', () => {
     await waitFor(() => {
       expect(mocks.testCredentials).toHaveBeenCalledWith('openai', 'gpt-4o');
     });
+  });
+
+  it('submits a replacement API key when the displayed value changes', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+
+    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
+    await user.clear(apiKeyInput);
+    await user.type(apiKeyInput, 'sk-replacement-secret');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
+      api_key: 'sk-replacement-secret',
+    }));
   });
 });

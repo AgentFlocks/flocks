@@ -247,7 +247,7 @@ class TestGLM5TraceReplay:
             ("threatbook-io-llm", "minimax-m2.7", "reasoning_details", {"reasoning_split": True}),
             ("threatbook-io-llm", "minimax-m3", "reasoning_details", {"reasoning_split": True}),
             ("minimax", "minimax-m2.5", "reasoning_details", {"reasoning_split": True}),
-            ("deepseek", "deepseek-reasoner", "reasoning_content", DEEPSEEK_THINKING_EXTRA_BODY),
+            ("deepseek", "deepseek-v4-pro", "reasoning_content", DEEPSEEK_THINKING_EXTRA_BODY),
             ("stepfun", "step-3.5-flash", "reasoning_content", {"enable_thinking": True}),
         ],
     )
@@ -312,26 +312,6 @@ class TestDispatchShape:
         assert not hasattr(provider_options, "_openai_base_thinking_shape"), (
             "_openai_base_thinking_shape should be removed; generic_chat "
             "interleaved emits extra_body inline"
-        )
-
-    def test_deepseek_v3_is_not_auto_thinking_model(self) -> None:
-        """``deepseek-chat`` (V3) must not inherit thinking params from a
-        broad ``deepseek`` substring.
-        """
-        catalog = model_catalog.get_raw_catalog()
-        v3_entry = catalog.get("deepseek", {}).get("models", {}).get("deepseek-chat")
-        assert v3_entry is not None, "deepseek-chat missing from catalog"
-        assert v3_entry.get("capabilities", {}).get("interleaved") is None, (
-            "deepseek-chat now declares interleaved in catalog — remove the "
-            "series-token assertion and let the catalog coverage test pin it"
-        )
-
-        options = provider_options.build_provider_options(
-            "deepseek", "deepseek-chat", resolve_max_tokens=False,
-        )
-        assert "extra_body" not in options, (
-            "deepseek-chat does not declare interleaved in catalog and should "
-            f"not be auto-enabled by a broad deepseek token. options={options!r}"
         )
 
     def test_explicit_reasoning_toggle_propagates(self) -> None:
@@ -488,7 +468,6 @@ class TestDispatchShape:
     @pytest.mark.parametrize(
         "provider_id,model_id,expected_extra_body",
         [
-            ("deepseek", "deepseek-reasoner", DEEPSEEK_THINKING_EXTRA_BODY),
             ("deepseek", "deepseek-v4-flash", DEEPSEEK_THINKING_EXTRA_BODY),
             ("minimax", "minimax-m3", {"reasoning_split": True}),
             ("stepfun", "step-3.5-flash", {"enable_thinking": True}),

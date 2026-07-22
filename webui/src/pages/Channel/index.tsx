@@ -20,6 +20,7 @@ import {
   RefreshCw,
   Loader2,
   RotateCcw,
+  ExternalLink,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -127,6 +128,20 @@ interface TelegramChannelConfig {
   dedupTtlSeconds?: number;
   streaming?: boolean;
   streamingCoalesceMs?: number;
+}
+
+interface SlackChannelConfig {
+  enabled: boolean;
+  botToken?: string;
+  appToken?: string;
+  homeChannel?: string;
+  homeChannelName?: string;
+  defaultAgent?: string;
+  groupTrigger?: string;
+  allowFrom?: string[];
+  replyInThread?: boolean;
+  replyBroadcast?: boolean;
+  allowBots?: 'none' | 'mentions' | 'all';
 }
 
 interface EmailChannelConfig {
@@ -287,6 +302,7 @@ type ChannelConfig =
   | WeComChannelConfig
   | DingTalkChannelConfig
   | TelegramChannelConfig
+  | SlackChannelConfig
   | EmailChannelConfig
   | WeixinChannelConfig
   | WhatsAppChannelConfig;
@@ -333,6 +349,16 @@ function defaultTelegramConfig(): TelegramChannelConfig {
     streaming: false,
     streamingCoalesceMs: 200,
     mentionContextMessages: 0,
+  };
+}
+
+function defaultSlackConfig(): SlackChannelConfig {
+  return {
+    enabled: false,
+    groupTrigger: 'mention',
+    replyInThread: true,
+    replyBroadcast: false,
+    allowBots: 'none',
   };
 }
 
@@ -742,11 +768,15 @@ function Section({
 const CHANNEL_ICON_SRC: Record<string, string> = {
   feishu: '/channel-feishu.png',
   wecom: '/channel-wecom.png',
-  dingtalk: '/channel-dingtalk.png',
   telegram: '/channel-telegram.png',
   email: '/channel-email.png',
-  weixin: '/channel-weixin.png',
   whatsapp: '/channel-whatsapp.png',
+  slack: '/channel-slack.png',
+};
+
+const CHANNEL_MASK_ICON: Record<string, { src: string; color: string }> = {
+  dingtalk: { src: '/channel-dingtalk-transparent.png', color: '#1677ff' },
+  weixin: { src: '/channel-weixin-transparent.png', color: '#07c160' },
 };
 
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
@@ -755,14 +785,35 @@ const WECOM_GUIDE_PDF_URL = '/wecom-bot-guide.pdf';
 const WECOM_GUIDE_PDF_FILENAME = 'wecom-bot-guide.pdf';
 const DINGTALK_GUIDE_PDF_URL = '/dingtalk-channel-guide.pdf';
 const DINGTALK_GUIDE_PDF_FILENAME = 'dingtalk-channel-guide.pdf';
+const SLACK_APPS_URL = 'https://api.slack.com/apps';
 
 function getChannelIcon(id: string, size: 'sm' | 'md' = 'sm') {
   const dim = size === 'md' ? 'w-10 h-10' : 'w-9 h-9';
   const imgDim = size === 'md' ? 'w-7 h-7' : 'w-6 h-6';
   const src = CHANNEL_ICON_SRC[id];
-  return src ? (
+  const maskIcon = CHANNEL_MASK_ICON[id];
+  return src || maskIcon ? (
     <div className={`${dim} rounded-xl bg-white border border-gray-100 shadow-sm flex items-center justify-center flex-shrink-0`}>
-      <img src={src} alt={id} className={`${imgDim} object-contain`} />
+      {maskIcon ? (
+        <span
+          role="img"
+          aria-label={id}
+          className={`${imgDim} block`}
+          style={{
+            backgroundColor: maskIcon.color,
+            WebkitMaskImage: `url(${maskIcon.src})`,
+            maskImage: `url(${maskIcon.src})`,
+            WebkitMaskPosition: 'center',
+            maskPosition: 'center',
+            WebkitMaskRepeat: 'no-repeat',
+            maskRepeat: 'no-repeat',
+            WebkitMaskSize: 'contain',
+            maskSize: 'contain',
+          }}
+        />
+      ) : (
+        <img src={src} alt={id} className={`${imgDim} object-contain`} />
+      )}
     </div>
   ) : (
     <div className={`${dim} rounded-xl bg-gray-100 flex items-center justify-center flex-shrink-0`}>
@@ -924,8 +975,8 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
             )}
           </div>
           {status?.last_error && (
-            <p className="text-xs text-red-600 mt-0.5 truncate" title={status.last_error}>
-              {status.last_error}
+            <p className="text-xs text-red-600 mt-0.5">
+              {t('connection.failureReason')}
             </p>
           )}
         </div>
@@ -935,9 +986,27 @@ function ConnectionStatusPanel({ status, config, channelId }: ConnectionStatusPa
           {channelId === 'dingtalk' && 'Stream'}
           {channelId === 'weixin' && 'Long-Poll'}
           {channelId === 'telegram' && ((config as TelegramChannelConfig).mode === 'webhook' ? 'Webhook' : 'Polling')}
+          {channelId === 'slack' && 'Socket Mode'}
           {channelId === 'email' && 'IMAP Polling'}
         </span>
       </div>
+
+      {status?.last_error && (
+        <div className="border-t border-red-100 bg-white/70 px-4 py-3">
+          <div className="mb-1.5 flex items-center gap-1.5 text-xs font-semibold text-red-700">
+            <AlertTriangle className="h-3.5 w-3.5 flex-shrink-0" />
+            {t('connection.failureReason')}
+          </div>
+          <p className="whitespace-pre-wrap break-words text-sm leading-relaxed text-red-700">
+            {status.last_error}
+          </p>
+          {!isConnected && (
+            <p className="mt-1.5 text-xs leading-relaxed text-red-500">
+              {t('connection.retryAfterFix')}
+            </p>
+          )}
+        </div>
+      )}
 
       {/* Metrics row */}
       {isEnabled && (
@@ -971,9 +1040,12 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
   // status key present = gateway is tracking this channel
   const isInGateway = status !== undefined;
   const isConnected = status?.connected === true;
+  const hasError = Boolean(status?.last_error);
 
   const dotColor = isConnected
     ? 'bg-green-500'
+    : hasError
+    ? 'bg-red-500'
     : isInGateway
     ? 'bg-amber-400'
     : isEnabled
@@ -982,6 +1054,8 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
 
   const subText = isConnected
     ? t('card.running')
+    : hasError
+    ? t('connection.error')
     : isInGateway
     ? t('card.connecting')
     : isEnabled
@@ -1681,6 +1755,211 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
             value={config.dedupTtlSeconds ?? 86400}
             onChange={(v) => set('dedupTtlSeconds', v)}
             min={60}
+          />
+        </FieldRow>
+      </Section>
+    </>
+  );
+}
+
+// ============================================================================
+// Slack Config Panel
+// ============================================================================
+
+function SlackPanel({
+  config,
+  onChange,
+}: {
+  config: SlackChannelConfig;
+  onChange: (c: SlackChannelConfig) => void;
+}) {
+  const { t } = useTranslation('channel');
+  const toast = useToast();
+  const set = useCallback(
+    <K extends keyof SlackChannelConfig>(key: K, value: SlackChannelConfig[K]) =>
+      onChange({ ...config, [key]: value }),
+    [config, onChange]
+  );
+  const allowFromEnabled = config.allowFrom !== undefined;
+  const toggleAllowFrom = useCallback(
+    (enabled: boolean) => {
+      onChange({ ...config, allowFrom: enabled ? (config.allowFrom ?? []) : undefined });
+    },
+    [config, onChange]
+  );
+  const handleDownloadManifest = useCallback(async () => {
+    try {
+      const res = await client.get('/api/channel/slack/manifest/download', {
+        responseType: 'blob',
+      });
+      const url = URL.createObjectURL(new Blob([res.data], { type: 'application/json' }));
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = 'flocks-slack-manifest.json';
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(url);
+    } catch (err: any) {
+      toast.error(t('slack.downloadManifestFailed'), err.message);
+    }
+  }, [t, toast]);
+
+  return (
+    <>
+      <Section title={t('slack.setup')} description={t('slack.setupDesc')}>
+        <div className="space-y-4 py-2">
+          <div className="grid gap-3 md:grid-cols-2">
+            <button
+              type="button"
+              onClick={handleDownloadManifest}
+              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-white text-red-600 shadow-sm">
+                  <Download className="h-5 w-5" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-red-700">{t('slack.downloadManifest')}</span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-red-600">{t('slack.downloadManifestDesc')}</span>
+                </span>
+              </span>
+              <Download className="h-4 w-4 flex-shrink-0 text-red-500 transition-transform group-hover:translate-y-0.5" />
+            </button>
+            <a
+              href={SLACK_APPS_URL}
+              target="_blank"
+              rel="noreferrer"
+              className="group flex min-h-[82px] items-center justify-between gap-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-red-300 hover:bg-red-100 hover:shadow-md focus:outline-none focus:ring-2 focus:ring-red-400 focus:ring-offset-1"
+            >
+              <span className="flex min-w-0 items-center gap-3">
+                <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-md bg-white text-red-600 shadow-sm">
+                  <MessageSquare className="h-5 w-5" />
+                </span>
+                <span className="min-w-0">
+                  <span className="block text-sm font-semibold text-red-700">{t('slack.openSlackApps')}</span>
+                  <span className="mt-0.5 block text-xs leading-relaxed text-red-600">{t('slack.openSlackAppsDesc')}</span>
+                </span>
+              </span>
+              <ExternalLink className="h-4 w-4 flex-shrink-0 text-red-500 transition-transform group-hover:-translate-y-0.5 group-hover:translate-x-0.5" />
+            </a>
+          </div>
+          <ol className="grid gap-2 text-sm text-gray-600">
+            <li className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600">1</span>
+              <span>{t('slack.stepCreateApp')}</span>
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600">2</span>
+              <span>{t('slack.stepInstall')}</span>
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600">3</span>
+              <span>{t('slack.stepTokens')}</span>
+            </li>
+            <li className="flex gap-2">
+              <span className="mt-0.5 flex h-5 w-5 flex-shrink-0 items-center justify-center rounded-full bg-gray-100 text-xs font-semibold text-gray-600">4</span>
+              <span>{t('slack.stepSaveEnable')}</span>
+            </li>
+          </ol>
+          <p className="flex items-start gap-1 text-xs leading-relaxed text-red-800">
+            <span className="text-sm font-semibold leading-none text-red-600">*</span>
+            <span>{t('slack.manifestHint')}</span>
+          </p>
+        </div>
+      </Section>
+
+      <Section title={t('slack.credentials')} description={t('slack.credentialsDesc')}>
+        <FieldRow label="Bot Token" required hint={t('slack.botTokenHint')}>
+          <SecretInput
+            value={config.botToken ?? ''}
+            onChange={(v) => set('botToken', v || undefined)}
+            placeholder="xoxb-..."
+          />
+        </FieldRow>
+        <FieldRow label="App Token" required hint={t('slack.appTokenHint')}>
+          <SecretInput
+            value={config.appToken ?? ''}
+            onChange={(v) => set('appToken', v || undefined)}
+            placeholder="xapp-..."
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.homeChannel')} hint={t('slack.homeChannelHint')}>
+          <TextInput
+            value={config.homeChannel ?? ''}
+            onChange={(v) => set('homeChannel', v || undefined)}
+            placeholder="C0123456789"
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.homeChannelName')} hint={t('slack.homeChannelNameHint')}>
+          <TextInput
+            value={config.homeChannelName ?? ''}
+            onChange={(v) => set('homeChannelName', v || undefined)}
+            placeholder="general"
+          />
+        </FieldRow>
+      </Section>
+
+      <Section title={t('slack.behavior')} description={t('slack.behaviorDesc')} defaultOpen={false}>
+        <FieldRow label={t('slack.defaultAgent')} hint={t('slack.defaultAgentHint')}>
+          <TextInput
+            value={config.defaultAgent ?? ''}
+            onChange={(v) => set('defaultAgent', v || undefined)}
+            placeholder={t('slack.optional')}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.groupTrigger')} hint={t('slack.groupTriggerHint')}>
+          <Select
+            value={config.groupTrigger ?? 'mention'}
+            onChange={(v) => set('groupTrigger', v)}
+            options={[
+              { value: 'mention', label: t('slack.triggerMention') },
+              { value: 'all', label: t('slack.triggerAll') },
+            ]}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.allowFromEnabled')} hint={t('slack.allowFromEnabledHint')}>
+          <Toggle
+            checked={allowFromEnabled}
+            onChange={toggleAllowFrom}
+            label={t('slack.allowFromEnabledLabel')}
+          />
+        </FieldRow>
+        {allowFromEnabled && (
+          <FieldRow label={t('slack.allowFrom')} hint={t('slack.allowFromHint')}>
+            <TagsInput
+              value={config.allowFrom ?? []}
+              onChange={(v) => set('allowFrom', v)}
+              placeholder={t('slack.allowFromPlaceholder')}
+            />
+          </FieldRow>
+        )}
+      </Section>
+
+      <Section title={t('slack.advanced')} description={t('slack.advancedDesc')} defaultOpen={false}>
+        <FieldRow label={t('slack.replyInThread')} hint={t('slack.replyInThreadHint')}>
+          <Toggle
+            checked={config.replyInThread ?? true}
+            onChange={(v) => set('replyInThread', v)}
+            label={t('slack.replyInThreadLabel')}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.replyBroadcast')} hint={t('slack.replyBroadcastHint')}>
+          <Toggle
+            checked={config.replyBroadcast ?? false}
+            onChange={(v) => set('replyBroadcast', v)}
+            label={t('slack.replyBroadcastLabel')}
+          />
+        </FieldRow>
+        <FieldRow label={t('slack.allowBots')} hint={t('slack.allowBotsHint')}>
+          <Select
+            value={config.allowBots ?? 'none'}
+            onChange={(v) => set('allowBots', v as 'none' | 'mentions' | 'all')}
+            options={[
+              { value: 'none', label: t('slack.allowBotsNone') },
+              { value: 'mentions', label: t('slack.allowBotsMentions') },
+              { value: 'all', label: t('slack.allowBotsAll') },
+            ]}
           />
         </FieldRow>
       </Section>
@@ -2791,8 +3070,8 @@ export default function ChannelPage() {
           configs[ch.id] = { ...defaultDingTalkConfig(), ...saved };
         } else if (ch.id === 'telegram') {
           configs[ch.id] = { ...defaultTelegramConfig(), ...saved };
-        } else if (ch.id === 'email') {
-          configs[ch.id] = { ...defaultEmailConfig(), ...saved };
+        } else if (ch.id === 'slack') {
+          configs[ch.id] = { ...defaultSlackConfig(), ...saved };
         } else if (ch.id === 'email') {
           configs[ch.id] = { ...defaultEmailConfig(), ...saved };
         } else if (ch.id === 'whatsapp') {
@@ -2863,7 +3142,7 @@ export default function ChannelPage() {
       const updatedChannels = {
         ...(fullConfig.channels ?? {}),
         ...Object.fromEntries(
-          Object.entries(channelConfigs).map(([id, cfg]) => [id, stripEmpty(cfg)])
+          Object.entries(channelConfigs).map(([id, cfg]) => [id, stripChannelConfigForSave(id, cfg)])
         ),
       };
 
@@ -3167,6 +3446,12 @@ export default function ChannelPage() {
                       onRefresh={fetchAll}
                     />
                   )}
+                  {selectedId === 'slack' && (
+                    <SlackPanel
+                      config={selectedConfig as SlackChannelConfig}
+                      onChange={(cfg) => handleChannelConfigChange('slack', cfg)}
+                    />
+                  )}
                   {selectedId === 'email' && (
                     <EmailPanel
                       config={selectedConfig as EmailChannelConfig}
@@ -3218,5 +3503,19 @@ function stripEmpty(obj: Record<string, any>): Record<string, any> {
     // (distinct from absent key which means "open access").
     result[k] = v;
   }
+  return result;
+}
+
+function stripChannelConfigForSave(channelId: string, cfg: Record<string, any>): Record<string, any> {
+  const result = stripEmpty(cfg);
+
+  if (channelId === 'slack') {
+    const allowFrom = Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [];
+    result.dmPolicy = allowFrom.length > 0 ? 'allowlist' : 'open';
+    if (cfg.allowFrom === undefined) {
+      result.allowFrom = null;
+    }
+  }
+
   return result;
 }

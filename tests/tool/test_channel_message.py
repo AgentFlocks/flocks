@@ -26,6 +26,11 @@ def test_channel_message_normalizes_wecom_aliases() -> None:
     assert _normalize_channel_type("wxwork") == "wecom"
 
 
+def test_channel_message_normalizes_slack_aliases() -> None:
+    assert _normalize_channel_type("slack") == "slack"
+    assert _normalize_channel_type("sl") == "slack"
+
+
 def test_channel_message_normalizes_telegram_whatsapp_email_aliases() -> None:
     assert _normalize_channel_type("telegram") == "telegram"
     assert _normalize_channel_type("tg") == "telegram"
@@ -52,6 +57,7 @@ def test_channel_message_schema_includes_builtin_channels() -> None:
         "telegram",
         "whatsapp",
         "email",
+        "slack",
         "邮件",
     ):
         assert value in channel_enum

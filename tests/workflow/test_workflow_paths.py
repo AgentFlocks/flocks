@@ -162,5 +162,99 @@ async def test_new_canonical_path_wins_over_legacy(
 
     results = await center.scan_skill_workflows(tmp_path)
     # The new canonical path (plugins/workflows/) has higher priority and wins
-    names = [r["name"] for r in results]
-    assert "shared-wf-new" in names
+    assert [r["name"] for r in results] == ["shared-wf-new"]
+
+
+@pytest.mark.asyncio
+async def test_scan_and_registry_prefer_user_workflow_over_project_bundle(
+    tmp_path: Path,
+    isolated_storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    project_root = tmp_path / "project"
+    user_root = tmp_path / "user"
+    for root, name in (
+        (project_root, "project bundle"),
+        (user_root, "user customization"),
+    ):
+        workflow_dir = root / "shared-workflow"
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "workflow.json").write_text(
+            json.dumps(_workflow_payload(name)),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        center,
+        "resolve_project_workflow_roots",
+        lambda _base: [project_root],
+    )
+    monkeypatch.setattr(center, "resolve_global_workflow_roots", lambda: [user_root])
+
+    scanned = await center.scan_skill_workflows(tmp_path)
+    registered = await center.list_registry_entries()
+
+    assert len(scanned) == 1
+    assert scanned[0]["name"] == "user customization"
+    assert scanned[0]["sourceType"] == "global"
+    matching_registry_entries = [
+        entry
+        for entry in registered
+        if entry.get("logicalWorkflowId") == "shared-workflow"
+        and Path(str(entry.get("workflowPath"))).is_relative_to(tmp_path)
+    ]
+    assert len(matching_registry_entries) == 1
+    assert matching_registry_entries[0]["name"] == "user customization"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("invalid_user_workflow", ["invalid_json", "hidden"])
+async def test_registry_falls_back_when_user_workflow_is_no_longer_discoverable(
+    tmp_path: Path,
+    isolated_storage,
+    monkeypatch: pytest.MonkeyPatch,
+    invalid_user_workflow: str,
+) -> None:
+    project_root = tmp_path / "project"
+    user_root = tmp_path / "user"
+    project_dir = project_root / "shared-workflow"
+    user_dir = user_root / "shared-workflow"
+    project_dir.mkdir(parents=True)
+    user_dir.mkdir(parents=True)
+    (project_dir / "workflow.json").write_text(
+        json.dumps(_workflow_payload("project bundle")),
+        encoding="utf-8",
+    )
+    user_workflow_path = user_dir / "workflow.json"
+    user_workflow_path.write_text(
+        json.dumps(_workflow_payload("user customization")),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(
+        center,
+        "resolve_project_workflow_roots",
+        lambda _base: [project_root],
+    )
+    monkeypatch.setattr(center, "resolve_global_workflow_roots", lambda: [user_root])
+
+    await center.scan_skill_workflows(tmp_path)
+    if invalid_user_workflow == "invalid_json":
+        user_workflow_path.write_text("{", encoding="utf-8")
+    else:
+        (user_dir / "meta.json").write_text(
+            json.dumps({"hidden": True}),
+            encoding="utf-8",
+        )
+
+    scanned = await center.scan_skill_workflows(tmp_path)
+    registered = await center.list_registry_entries()
+    matching_registry_entries = [
+        entry
+        for entry in registered
+        if entry.get("logicalWorkflowId") == "shared-workflow"
+        and Path(str(entry.get("workflowPath"))).is_relative_to(tmp_path)
+    ]
+
+    assert [entry["name"] for entry in scanned] == ["project bundle"]
+    assert [entry["name"] for entry in matching_registry_entries] == ["project bundle"]

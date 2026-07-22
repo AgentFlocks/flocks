@@ -77,6 +77,7 @@ export interface SessionListParams {
   limit?: number;
   offset?: number;
   directory?: string;
+  projectID?: string;
   roots?: boolean;
   start?: number;
   search?: string;
@@ -125,7 +126,7 @@ export const sessionApi = {
   /**
    * 创建会话
    */
-  create: async (data?: { title?: string; parentID?: string }) => {
+  create: async (data?: { title?: string; parentID?: string; projectID?: string }) => {
     const response = await client.post('/api/session', data || {});
     return response.data;
   },

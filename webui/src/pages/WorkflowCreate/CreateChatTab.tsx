@@ -132,8 +132,8 @@ export default function CreateChatTab({
       const freshBoundary = Math.max(creationStartedAt ?? 0, snapshotStartedAt) - 500;
       snapshotStartedAtRef.current = snapshotStartedAt;
       try {
-        const snap = await workflowAPI.list();
-        knownIdsRef.current = new Set((snap.data as Workflow[])
+        const snap = await workflowAPI.listSummaries();
+        knownIdsRef.current = new Set(snap.data
           .filter((w) => {
             const createdAt = Number(w.createdAt ?? 0);
             return !(createdAt > 0 && createdAt >= freshBoundary);
@@ -182,8 +182,8 @@ export default function CreateChatTab({
       return;
     }
     try {
-      const res = await workflowAPI.list();
-      const workflows: Workflow[] = res.data;
+      const res = await workflowAPI.listSummaries();
+      const workflows = res.data;
       const sortedWorkflows = [...workflows].sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
       const startedAt = Math.max(creationStartedAt ?? 0, snapshotStartedAtRef.current ?? 0);
       const freshCandidates = sortedWorkflows.filter((w) => {
@@ -192,10 +192,10 @@ export default function CreateChatTab({
         return !(startedAt > 0 && createdAt > 0 && createdAt < startedAt - 500);
       });
       if (freshCandidates.length === 1) {
-        attachCreatedWorkflow(freshCandidates[0]);
+        await attachCreatedWorkflowById(freshCandidates[0].id);
       }
     } catch { /* ignore */ }
-  }, [attachCreatedWorkflow, creationStartedAt, snapshotReady]);
+  }, [attachCreatedWorkflowById, creationStartedAt, snapshotReady]);
 
   useEffect(() => {
     if (!snapshotReady) return;

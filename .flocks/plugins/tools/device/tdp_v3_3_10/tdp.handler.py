@@ -479,7 +479,7 @@ def _condition_time_body(body: dict[str, Any]) -> dict[str, Any]:
 def _incident_search_body(body: dict[str, Any]) -> dict[str, Any]:
     defaults = _body_with_condition_time(
         {
-            "condition": {"duration": {"begin_duration": 0, "end_duration": 24}},
+            "condition": {"duration": {"begin_duration": 0}},
             "page": {"cur_page": 1, "page_size": 20, "sort": [{"sort_by": "last_time", "sort_order": "desc"}]},
         }
     )
@@ -845,17 +845,17 @@ SERVICE_ASSET_ACTIONS: JsonActionMap = {
 }
 
 THREAT_HOST_ACTIONS: JsonActionMap = {
-    "summary": ("/api/v1/host/getFallHostSumList", _threat_host_summary_body, "host_get_fall_host_sum_list"),
-    "events": ("/api/v1/host/threat/list", _threat_host_event_body, "host_threat_list"),
+    "alert_host_list": ("/api/v1/host/getFallHostSumList", _threat_host_summary_body, "host_get_fall_host_sum_list"),
+    "host_threat_list": ("/api/v1/host/threat/list", _threat_host_event_body, "host_threat_list"),
 }
 
 INCIDENT_ACTIONS: JsonActionMap = {
-    "search": ("/api/v1/incident/search", _incident_search_body, "incident_search"),
+    "incident_search": ("/api/v1/incident/search", _incident_search_body, "incident_search"),
     "top_attacked_entity": ("/api/v1/incident/topAttackedEntity", _condition_time_body, "incident_top_attacked_entity"),
-    "result": ("/api/v1/incident/result", _dashboard_body, "incident_result"),
-    "timeline": ("/api/v1/incident/timeline", _dashboard_body, "incident_timeline"),
-    "alert_search": ("/api/v1/alert/search", _condition_time_body, "incident_alert_search"),
-    "result_distribution": (
+    "attack_success": ("/api/v1/incident/result", _dashboard_body, "incident_result"),
+    "attack_timeline": ("/api/v1/incident/timeline", _dashboard_body, "incident_timeline"),
+    "attack_alert_list": ("/api/v1/alert/search", _condition_time_body, "incident_alert_search"),
+    "attack_result_distribution": (
         "/api/v1/incident/result/distribution",
         _condition_time_body,
         "incident_result_distribution",
@@ -1267,7 +1267,7 @@ async def dashboard_status(
 
 async def threat_host_list(
     context: ToolContext,
-    action: str = "summary",
+    action: str = "alert_host_list",
     condition: dict[str, Any] | None = None,
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
@@ -1289,7 +1289,7 @@ async def threat_host_list(
     sort_order: str | None = None,
 ) -> ToolResult:
     del context
-    selected_action = _normalize_action(action, "summary")
+    selected_action = _normalize_action(action, "alert_host_list")
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
@@ -1306,16 +1306,21 @@ async def threat_host_list(
     _set_list_if_present(condition_dict, "host_type", host_type)
     _set_keyword_fuzzy(condition_dict, keyword, HOST_THREAT_FUZZY_FIELDS)
     _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
-    if selected_action == "events":
+    if selected_action == "host_threat_list":
         validation_error = _validate_required_body_fields(selected_action, body, "condition.asset_machine")
         if validation_error:
             return validation_error
-    return await _run_action_json_tool(THREAT_HOST_ACTIONS, default_action="summary", action=selected_action, body=body)
+    return await _run_action_json_tool(
+        THREAT_HOST_ACTIONS,
+        default_action="alert_host_list",
+        action=selected_action,
+        body=body,
+    )
 
 
 async def incident_list(
     context: ToolContext,
-    action: str = "search",
+    action: str = "incident_search",
     condition: dict[str, Any] | None = None,
     page: dict[str, Any] | None = None,
     incident_id: str | None = None,
@@ -1339,9 +1344,9 @@ async def incident_list(
     sort_order: str | None = None,
 ) -> ToolResult:
     del context
-    selected_action = _normalize_action(action, "search")
+    selected_action = _normalize_action(action, "incident_search")
     body = _compose_payload(condition=condition, page=page)
-    if selected_action == "search":
+    if selected_action == "incident_search":
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
         _set_if_present(condition_dict, "time_to", time_to)
@@ -1354,7 +1359,7 @@ async def incident_list(
             _set_if_present(duration, "begin_duration", begin_duration)
             _set_if_present(duration, "end_duration", end_duration)
         _set_keyword_fuzzy(condition_dict, keyword, INCIDENT_SEARCH_FUZZY_FIELDS)
-    elif selected_action == "alert_search":
+    elif selected_action == "attack_alert_list":
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
         _set_if_present(condition_dict, "time_to", time_to)
@@ -1372,17 +1377,17 @@ async def incident_list(
         _set_if_present(body, "time_from", time_from)
         _set_if_present(body, "time_to", time_to)
         _set_if_present(body, "include_risk", include_risk)
-        if selected_action == "timeline":
+        if selected_action == "attack_timeline":
             body["show_attack"] = True if show_attack is None else show_attack
         if attacker is not None:
             body["attacker"] = list(attacker)
     _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     validation_map: dict[str, tuple[str, ...]] = {
         "top_attacked_entity": ("incident_id",),
-        "result": ("incident_id",),
-        "timeline": ("incident_id",),
-        "alert_search": ("condition.id", "page"),
-        "result_distribution": ("incident_id",),
+        "attack_success": ("incident_id",),
+        "attack_timeline": ("incident_id",),
+        "attack_alert_list": ("condition.id", "page"),
+        "attack_result_distribution": ("incident_id",),
         "attacker_ip_list": ("condition.incident_id",),
         "attacker_ip_detail": ("incident_id", "attacker"),
     }
@@ -1391,7 +1396,12 @@ async def incident_list(
         validation_error = _validate_required_body_fields(selected_action, body, *required_fields)
         if validation_error:
             return validation_error
-    return await _run_action_json_tool(INCIDENT_ACTIONS, default_action="search", action=selected_action, body=body)
+    return await _run_action_json_tool(
+        INCIDENT_ACTIONS,
+        default_action="incident_search",
+        action=selected_action,
+        body=body,
+    )
 
 
 async def service_asset_list(

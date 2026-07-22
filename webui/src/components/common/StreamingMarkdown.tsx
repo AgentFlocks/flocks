@@ -248,7 +248,7 @@ export interface StreamingMarkdownProps {
  */
 const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
   return (
-    <div className="prose prose-sm max-w-none">
+    <div className="prose prose-sm w-full min-w-0 max-w-full">
       <ReactMarkdown
         remarkPlugins={[remarkGfm, remarkBreaks]}
         rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [rehypeHighlight, { detect: false, ignoreMissing: true }]]}

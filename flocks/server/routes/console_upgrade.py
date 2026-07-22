@@ -525,11 +525,18 @@ async def _run_auto_upgrade_install(record: dict[str, Any]) -> dict[str, Any]:
 
     final_stage = ""
     final_message = ""
-    async for progress in perform_pro_bundle_install(restart=False):
+    async for progress in perform_pro_bundle_install(restart=True):
         final_stage = progress.stage
         final_message = progress.message
         if progress.stage == "error":
             raise ValueError(progress.message)
+        if progress.stage == "restarting":
+            details["auto_install_result"] = "restarting"
+            details["auto_install_message"] = progress.message
+            record["updated_at"] = datetime.now(UTC).isoformat()
+            request_id = str(record.get("request_id") or "").strip()
+            if request_id:
+                await Storage.set(_request_key(request_id), record, "json")
 
     await _maybe_activate_pro_license(record, allow_fallback=False)
     await _maybe_refresh_pro_license(record)

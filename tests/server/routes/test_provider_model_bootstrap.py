@@ -31,6 +31,8 @@ class TestThreatBookProviderModelBootstrap:
 
         raw = ConfigWriter.get_provider_raw("threatbook-cn-llm")
         assert raw is not None
+        assert "kimi-k2.7-code" in raw["models"]
+        assert raw["models"]["kimi-k2.7-code"]["name"] == "kimi-k2.7-code"
         assert "kimi-k2.6" in raw["models"]
         assert raw["models"]["kimi-k2.6"]["name"] == "kimi-k2.6"
         fake_secrets.set.assert_called_once_with("threatbook-cn-llm_llm_key", "tb-key")

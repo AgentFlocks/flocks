@@ -1,6 +1,6 @@
 [project]
 name = "flocks"
-version = "v2026.7.15"
+version = "v2026.7.22"
 description = "AI-Native SecOps platform with multi-agent collaboration"
 authors = [
     {name = "Flocks Team", email = "team@example.com"}
@@ -71,6 +71,9 @@ dependencies = [
     "lark-oapi>=1.3.0",
     # DingTalk Stream Mode (WebSocket long-connection)
     "dingtalk-stream>=0.20",
+    # Slack Socket Mode
+    "slack-bolt>=1.26.0",
+    "slack-sdk>=3.38.0",
     "python-socks>=2.8.1",
     "pytz>=2026.1.post1",
     # docs parser

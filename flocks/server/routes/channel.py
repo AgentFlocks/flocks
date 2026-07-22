@@ -4,10 +4,11 @@ Channel HTTP routes: webhook callbacks, health/status, and outbound send APIs.
 
 from __future__ import annotations
 
+import json
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 
 from flocks.channel.gateway.manager import default_manager
@@ -210,6 +211,27 @@ async def list_channels():
         }
         for ch in channels
     ]
+
+
+@router.get("/slack/manifest")
+async def slack_manifest():
+    """Return a Slack app manifest for creating the Flocks Slack app."""
+    from flocks.channel.builtin.slack.manifest import build_slack_app_manifest
+
+    return build_slack_app_manifest()
+
+
+@router.get("/slack/manifest/download")
+async def slack_manifest_download():
+    """Download a Slack app manifest for creating the Flocks Slack app."""
+    from flocks.channel.builtin.slack.manifest import build_slack_app_manifest
+
+    payload = json.dumps(build_slack_app_manifest(), indent=2, ensure_ascii=False)
+    return Response(
+        content=payload + "\n",
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="flocks-slack-manifest.json"'},
+    )
 
 
 @router.post("/{channel_id}/record-inbound")

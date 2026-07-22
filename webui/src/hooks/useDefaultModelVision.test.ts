@@ -93,6 +93,19 @@ describe('useDefaultModelVision', () => {
     await waitFor(() => expect(result.current).toBe(true));
   });
 
+  it('returns true for the predefined kimi-k2.7-code model', async () => {
+    mockResolved.mockResolvedValue(makeResolvedResp('threatbook-cn-llm', 'kimi-k2.7-code'));
+    mockDefinitions.mockResolvedValue(makeDefinitionsResp(
+      { supports_vision: true },
+      'predefined',
+      'threatbook-cn-llm',
+      'kimi-k2.7-code',
+    ));
+
+    const { result } = renderHook(() => useDefaultModelVision());
+    await waitFor(() => expect(result.current).toBe(true));
+  });
+
   it('returns null when capabilities are absent', async () => {
     mockResolved.mockResolvedValue(makeResolvedResp());
     mockDefinitions.mockResolvedValue({

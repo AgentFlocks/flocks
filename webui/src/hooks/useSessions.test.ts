@@ -5,6 +5,27 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Message } from '@/types';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function sessionListItem(id: string, projectID: string, updated = 1) {
+  return {
+    id,
+    projectID,
+    effectiveProjectID: projectID,
+    title: id,
+    time: { created: updated, updated },
+    category: 'user',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mocks — keep API calls from running in unit tests
 // ---------------------------------------------------------------------------
@@ -1014,5 +1035,249 @@ describe('useSessions list loading', () => {
     await act(async () => {
       resolveSearch([]);
     });
+  });
+
+  it('loads and tracks pages independently for each project', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.projectID === 'default') {
+        return Array.from({ length: 100 }, (_, index) => ({
+          id: `default-${index}`,
+          projectID: 'legacy-project',
+          effectiveProjectID: 'default',
+          title: `Default ${index}`,
+          time: { created: index, updated: index },
+          category: 'user',
+        })) as any;
+      }
+      return [{
+        id: 'labs-1',
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        title: 'Labs',
+        time: { created: 1, updated: 1 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(101);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: false,
+    });
+  });
+
+  it('uses a custom page size for project session pagination', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(12);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: true,
+    });
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 6,
+    }));
+  });
+
+  it('preserves each project loaded depth during a background refetch', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+    expect(result.current.sessions).toHaveLength(18);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 12,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(18);
+  });
+
+  it('uses the selected project offset when loading more sessions', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [{
+          id: `${params.projectID}-1`,
+          projectID: params.projectID,
+          effectiveProjectID: params.projectID,
+          title: 'First page',
+          time: { created: 1, updated: 1 },
+          category: 'user',
+        }] as any;
+      }
+      return [{
+        id: `${params.projectID}-2`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: 'Second page',
+        time: { created: 2, updated: 2 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 1,
+    }));
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('loads more sessions for different projects concurrently', async () => {
+    const defaultPage = deferred<any[]>();
+    const labsPage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+      }
+      return params.projectID === 'default' ? defaultPage.promise : labsPage.promise;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadDefault!: Promise<void>;
+    let loadLabs!: Promise<void>;
+    act(() => {
+      loadDefault = result.current.loadMore('default');
+      loadLabs = result.current.loadMore('prj_labs');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default', 'prj_labs']));
+
+    await act(async () => {
+      defaultPage.resolve([sessionListItem('default-2', 'default', 2)] as any);
+      await loadDefault;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['prj_labs']));
+
+    await act(async () => {
+      labsPage.resolve([sessionListItem('prj_labs-2', 'prj_labs', 2)] as any);
+      await loadLabs;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'default-2',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('clears project pagination state when a background refresh supersedes it', async () => {
+    const stalePage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset > 0) return stalePage.promise;
+      return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadMore!: Promise<void>;
+    act(() => {
+      loadMore = result.current.loadMore('default');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default']));
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+
+    await act(async () => {
+      stalePage.resolve([sessionListItem('default-stale', 'default', 2)] as any);
+      await loadMore;
+    });
+    expect(result.current.sessions.map((item) => item.id)).not.toContain('default-stale');
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
   });
 });

@@ -118,7 +118,7 @@ def test_anthropic_formatter_preserves_unsigned_thinking_for_deepseek_compatible
     formatted = AnthropicProvider._format_messages_anthropic(
         [message],
         base_url="https://api.deepseek.com/anthropic",
-        model_id="deepseek-chat",
+        model_id="deepseek-v4-flash",
     )
 
     assert formatted[0]["content"][0] == {

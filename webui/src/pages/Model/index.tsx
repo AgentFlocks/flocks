@@ -505,7 +505,15 @@ export default function ModelPage() {
                   onConfigure={async () => {
                     await handleSelectProvider(provider);
                     if (selectedProviderRef.current?.id === provider.id) {
-                      setShowConfigDialog(true);
+                      try {
+                        const res = await providerAPI.revealCredentials(provider.id);
+                        if (selectedProviderRef.current?.id === provider.id) {
+                          setCredentials(res.data);
+                          setShowConfigDialog(true);
+                        }
+                      } catch (err: any) {
+                        toast.error(t('configFailed'), err.message);
+                      }
                     }
                   }}
                 />
@@ -554,7 +562,10 @@ export default function ModelPage() {
           provider={selectedProvider}
           existingCredentials={credentials}
           models={providerModels}
-          onClose={() => setShowConfigDialog(false)}
+          onClose={() => {
+            setShowConfigDialog(false);
+            setCredentials(null);
+          }}
           onConfigured={async () => {
             if (selectedProvider) {
               const res = await providerAPI.getCredentials(selectedProvider.id).catch(() => ({ data: null }));
@@ -2179,7 +2190,11 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
 
 function allowsBuiltInVisionToggle(modelId: string): boolean {
   const lowered = modelId.toLowerCase();
-  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+  return (
+    lowered.includes('qwen3.6-plus')
+    || lowered.includes('kimi-k2.6')
+    || lowered.includes('kimi-k2.7-code')
+  );
 }
 
 // ==================== Configure Dialog ====================
@@ -2192,10 +2207,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   const toast = useToast();
   const { t } = useTranslation('model');
   const hasExisting = existingCredentials?.has_credential ?? false;
-  // Credential reads intentionally never return the raw key. Keep the input
-  // empty and use hasExisting to express "leave blank to preserve"; in
-  // particular, never seed this field with api_key_masked.
-  const existingKey = '';
+  const existingKey = existingCredentials?.api_key ?? '';
   const existingBaseUrl = existingCredentials?.base_url ?? '';
 
   const [baseUrl, setBaseUrl] = useState(existingCredentials?.base_url ?? '');
@@ -2273,6 +2285,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
 
   const handleSubmit = async () => {
     const nextApiKey = apiKey.trim();
+    const apiKeyChanged = nextApiKey !== existingKey.trim();
     if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
       toast.warning('Please enter API Key');
       return;
@@ -2285,7 +2298,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
           ? (providerName.trim() || undefined)
           : undefined,
       };
-      if (nextApiKey) payload.api_key = nextApiKey;
+      if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
       await providerAPI.setCredentials(provider.id, payload);
 
       // Sync catalog model list: add newly selected, delete deselected
@@ -2326,6 +2339,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
     );
 
     const nextApiKey = apiKey.trim();
+    const apiKeyChanged = nextApiKey !== existingKey.trim();
     if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
       toast.warning('Please enter API Key first');
       return;
@@ -2341,7 +2355,7 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
             ? (providerName.trim() || undefined)
             : undefined,
         };
-        if (nextApiKey) payload.api_key = nextApiKey;
+        if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
         await providerAPI.setCredentials(provider.id, payload);
       } catch (err: any) {
         toast.error(t('deleteFailed'), err.message);

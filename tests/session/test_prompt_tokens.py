@@ -196,7 +196,15 @@ class TestSystemPromptEnvironment:
     async def test_includes_working_directory(self):
         result = await SystemPrompt.environment("/my/work/dir")
         combined = "\n".join(result)
-        assert "/my/work/dir" in combined
+        assert "current working directory: /my/work/dir" in combined
+
+    def test_distinguishes_source_code_and_working_directories(self, monkeypatch):
+        monkeypatch.setenv("FLOCKS_REPO_ROOT", "/opt/flocks")
+
+        combined = "\n".join(SystemPrompt.environment_stable("/workspace/project"))
+
+        assert "flocks source code directory: /opt/flocks" in combined
+        assert "current working directory: /workspace/project" in combined
 
     @pytest.mark.asyncio
     async def test_includes_date_info(self):

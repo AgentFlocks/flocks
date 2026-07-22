@@ -20,6 +20,14 @@
     "workflows": "Workflows",
     "normal": "Normal",
     "abnormal": "Abnormal",
+    "loadErrorHint": {
+      "authExpired": "Your login session has expired. Please sign in again.",
+      "forbidden": "You do not have permission to load dashboard stats.",
+      "notFound": "The stats endpoint is unavailable for this backend version.",
+      "partial": "Some dashboard stats could not be loaded. Values may be incomplete.",
+      "network": "Dashboard stats could not be loaded. Check the API route, host, or proxy configuration.",
+      "unavailable": "Dashboard stats could not be loaded."
+    },
     "checking": "Checking...",
     "activeScheduled": "Active Scheduled",
     "agentCount": "Agents",

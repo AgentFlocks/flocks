@@ -237,7 +237,7 @@ class WeixinChannel(ChannelPlugin):
             "base_url": self._base_url,
         })
         if self._group_policy != "disabled":
-            log.warning("weixin.group_policy.note", {
+            log.info("weixin.group_policy.note", {
                 "group_policy": self._group_policy,
                 "note": (
                     "QR-login connects an iLink bot identity (e.g. ...@im.bot), not a "

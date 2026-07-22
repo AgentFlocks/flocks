@@ -376,6 +376,13 @@ def _normalize_param_key(name: str) -> str:
     return "".join(ch for ch in str(name).lower() if ch.isalnum())
 
 
+def _api_service_storage_key(provider: str) -> str:
+    """Resolve the single persisted key used for an API-like provider."""
+    from flocks.config.api_versioning import versioned_storage_key_for
+
+    return versioned_storage_key_for(provider) or provider
+
+
 _SCOPED_SCHEMA_ALIASES: Dict[str, Dict[str, str]] = {
     # SkyEye historically surfaced "威胁级别", which some callers guessed as
     # threat_level. Keep the schema canonical on hazard_level, but accept the
@@ -516,7 +523,7 @@ class Tool:
             # Validate required parameters
             for required_param in schema.required:
                 if required_param not in effective_kwargs:
-                    log.error("tool.execute.missing_param", {
+                    log.warn("tool.execute.missing_param", {
                         "tool": self.info.name,
                         "missing": required_param,
                         "provided": list(effective_kwargs.keys()),
@@ -607,7 +614,11 @@ class ToolRegistry:
     _dynamic_modules: Dict[str, str] = {}
     _dynamic_tools_by_module: Dict[str, List[str]] = {}
     _plugin_tool_names: List[str] = []
+    # Source-level plugin failures observed by the last load. They remain
+    # diagnostic only because the plugin loader already isolates each source.
+    _plugin_load_errors: List[str] = []
     _revision: int = 0
+    _config_state_token: Optional[tuple[str, int, int, int]] = None
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
     _init_lock = threading.Lock()
@@ -668,22 +679,80 @@ class ToolRegistry:
     def revision(cls) -> int:
         """Return the current registry revision.
 
-        The revision is bumped when plugin or dynamic tools are reloaded so
-        long-lived session caches can detect toolset changes.
+        The revision is bumped when tool membership or enabled state changes
+        so long-lived session caches can detect toolset changes.
         """
+        cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             return cls._revision
 
     @classmethod
+    def _current_config_state_token(cls) -> tuple[str, int, int, int]:
+        """Return a cross-process token for the active flocks config file."""
+        from flocks.config.config_writer import ConfigWriter
+
+        path = ConfigWriter._get_config_path()
+        try:
+            stat = path.stat()
+            return str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return str(path), -1, -1, -1
+
+    @classmethod
+    def _sync_configured_enabled_states(cls) -> None:
+        """Apply config changes written by another server worker.
+
+        Registry revisions and ``ToolInfo.enabled`` values are process-local,
+        while ``flocks.json`` is shared.  Rebuild enabled states whenever the
+        atomically replaced config file changes so a request handled by a
+        different worker immediately observes tool/service toggles and
+        repeated-failure auto-disables.
+        """
+        try:
+            token = cls._current_config_state_token()
+        except Exception:
+            return
+
+        with cls._refresh_lock:
+            if token == cls._config_state_token:
+                return
+
+            previous_states = {
+                name: bool(tool.info.enabled)
+                for name, tool in cls._tools.items()
+            }
+            for name, tool in cls._tools.items():
+                default_enabled = cls._enabled_defaults.get(name)
+                if default_enabled is not None:
+                    tool.info.enabled = default_enabled
+            cls._sync_api_service_states()
+            cls._apply_tool_settings()
+            cls._config_state_token = token
+
+            changed_names = [
+                name
+                for name, tool in cls._tools.items()
+                if previous_states[name] != bool(tool.info.enabled)
+            ]
+            for name in changed_names:
+                if cls._tools[name].info.enabled:
+                    cls._reset_failure_state(name)
+            if changed_names:
+                cls._bump_revision("config_enabled_state_sync")
+
+    @classmethod
     def _bump_revision(cls, reason: str) -> None:
         """Advance the registry revision and invalidate agent prompt caches."""
-        cls._revision += 1
+        with cls._refresh_lock:
+            cls._revision += 1
+            revision = cls._revision
         try:
             from flocks.agent.registry import Agent
             Agent.invalidate_cache()
         except Exception as e:
             log.debug("tool.revision.agent_invalidate_failed", {"error": str(e)})
-        log.debug("tool.registry.revision.bumped", {"revision": cls._revision, "reason": reason})
+        log.debug("tool.registry.revision.bumped", {"revision": revision, "reason": reason})
 
     @classmethod
     def register_function(
@@ -756,6 +825,7 @@ class ToolRegistry:
     def get(cls, name: str) -> Optional[Tool]:
         """Get a tool by name"""
         cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             return cls._tools.get(name)
 
@@ -763,6 +833,7 @@ class ToolRegistry:
     def list_tools(cls, category: Optional[ToolCategory] = None) -> List[ToolInfo]:
         """List all registered tools, optionally filtered by category"""
         cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             tools = list(cls._tools.values())
             if category:
@@ -875,7 +946,11 @@ class ToolRegistry:
         if result.success:
             cls._reset_failure_state(tool_name)
         else:
-            disabled = cls._record_failure(tool, kwargs, result.error)
+            if await cls._failure_auto_disable_enabled():
+                disabled = cls._record_failure(tool, kwargs, result.error)
+            else:
+                cls._reset_failure_state(tool_name)
+                disabled = False
             if disabled:
                 result.metadata = {**(result.metadata or {}), "disabled": True, "disabled_reason": "repeated_error"}
                 suffix = f"tool disabled after {cls._failure_disable_threshold} identical errors"
@@ -1003,6 +1078,7 @@ class ToolRegistry:
     def snapshot_identity(cls) -> tuple[int, tuple[str, ...]]:
         """Return a revision/tool-id identity from one consistent registry state."""
         cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             return cls._revision, tuple(cls._tools.keys())
 
@@ -1052,7 +1128,7 @@ class ToolRegistry:
                 cls._register_builtin_tools()
                 cls._register_dynamic_tools()
                 cls._register_plugin_extension_point()
-                cls._load_plugin_tools()
+                cls._plugin_load_errors = cls._load_plugin_tools()
                 cls._initialized = True
                 log.debug("tool_registry.initialized", {"count": len(cls._tools)})
             finally:
@@ -1064,7 +1140,7 @@ class ToolRegistry:
         await asyncio.to_thread(cls.init)
 
     @classmethod
-    def _load_plugin_tools(cls, errors: Optional[List[str]] = None) -> None:
+    def _load_plugin_tools(cls, errors: Optional[List[str]] = None) -> List[str]:
         """Load plugin tools from both user-level and project-level plugin dirs on init.
 
         Without this, YAML/Python plugin tools only appear after an explicit
@@ -1077,18 +1153,23 @@ class ToolRegistry:
         Tracks which tool names were added so that
         ``refresh_plugin_tools`` can accurately unregister stale entries
         (regardless of the ``ToolInfo.source`` value).
+
+        Returns every source-level load error for diagnostics and scoped Hub
+        refresh decisions.
         """
         before = set(cls._tools.keys())
+        load_errors: List[str] = []
         try:
             from flocks.plugin import PluginLoader
 
-            load_errors = PluginLoader.load_extension("TOOLS", load_entry_points=True)
-            if errors is not None:
-                errors.extend(load_errors)
+            reported_errors = PluginLoader.load_extension("TOOLS", load_entry_points=True)
+            if reported_errors:
+                load_errors.extend(reported_errors)
         except Exception as e:
             log.warn("tool_registry.plugin_load_failed", {"error": str(e)})
-            if errors is not None:
-                errors.append(f"plugin loader: {e}")
+            load_errors.append(f"plugin loader: {e}")
+        if errors is not None:
+            errors.extend(load_errors)
         after = set(cls._tools.keys())
         new_plugin_tools = sorted(after - before)
         python_tool_sources: Dict[str, Path] = {}
@@ -1131,8 +1212,14 @@ class ToolRegistry:
             except ValueError:
                 tool.info.native = True
         cls._plugin_tool_names = sorted(set(new_plugin_tools) | python_plugin_names)
-        if errors:
-            return
+        if errors is not None and load_errors:
+            return load_errors
+        cls._finalize_plugin_tools_load()
+        return load_errors
+
+    @classmethod
+    def _finalize_plugin_tools_load(cls) -> None:
+        """Apply configuration overlays after an accepted plugin load."""
         cls._bootstrap_user_api_services()
         # Defence-in-depth: ``register()`` is the canonical writer for
         # ``_enabled_defaults`` but this catches any tool that landed in
@@ -1174,7 +1261,7 @@ class ToolRegistry:
                 or not info.enabled
             ):
                 continue
-            provider = info.provider
+            provider = _api_service_storage_key(info.provider)
             if provider in seen_providers:
                 continue
             seen_providers.add(provider)
@@ -1226,9 +1313,10 @@ class ToolRegistry:
         disabled_count = 0
         restored_count = 0
         for tool in cls._tools.values():
-            provider = tool.info.provider
-            if not provider:
+            configured_provider = tool.info.provider
+            if not configured_provider:
                 continue
+            provider = _api_service_storage_key(configured_provider)
             svc = api_services.get(provider, {})
             svc_enabled = svc.get("enabled", False)
             if not svc_enabled:
@@ -1612,39 +1700,80 @@ class ToolRegistry:
         cls._watcher.start()
 
     @classmethod
-    def refresh_plugin_tools(cls) -> List[str]:
+    def refresh_plugin_tools(cls, changed_path: Optional[Path] = None) -> List[str]:
         """Reload plugin tools (YAML + Python) from disk.
 
         Unregisters stale plugin tools first so that deleted files are
-        correctly removed from the registry.
+        correctly removed from the registry. When a Hub operation supplies
+        ``changed_path``, source failures outside that path are isolated and
+        do not block the operation; failures inside it still roll back.
         """
         cls._ensure_initialized()
         with cls._refresh_lock:
             tools_before = cls._tools.copy()
             defaults_before = cls._enabled_defaults.copy()
             plugin_names_before = list(cls._plugin_tool_names)
+            plugin_errors_before = list(cls._plugin_load_errors)
+            enabled_before = {
+                name: tool.info.enabled
+                for name, tool in tools_before.items()
+            }
+            revision_before = cls._revision
             load_errors: List[str] = []
+
+            def _restore_snapshot() -> None:
+                for name, enabled in enabled_before.items():
+                    tool = tools_before.get(name)
+                    if tool is not None:
+                        tool.info.enabled = enabled
+                cls._tools.clear()
+                cls._tools.update(tools_before)
+                cls._enabled_defaults.clear()
+                cls._enabled_defaults.update(defaults_before)
+                cls._plugin_tool_names = plugin_names_before
+                cls._plugin_load_errors = plugin_errors_before
+                cls._revision = revision_before
 
             try:
                 cls._unregister_plugin_tools()
                 cls._load_plugin_tools(load_errors)
-            except Exception:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._plugin_tool_names = plugin_names_before
-                raise
-            if load_errors:
-                cls._tools.clear()
-                cls._tools.update(tools_before)
-                cls._enabled_defaults.clear()
-                cls._enabled_defaults.update(defaults_before)
-                cls._plugin_tool_names = plugin_names_before
-                raise ToolRefreshError("plugin", load_errors)
+                changed_root = changed_path.resolve() if changed_path is not None else None
+                fatal_errors: List[str] = []
+                for error in load_errors:
+                    if changed_root is None or error.startswith(
+                        (
+                            "plugin loader:",
+                            "extension point not found:",
+                            "entry point scan:",
+                        )
+                    ):
+                        fatal_errors.append(error)
+                        continue
+                    if error.startswith("entry point "):
+                        continue
+                    source_text, separator, _detail = error.partition(": ")
+                    if not separator:
+                        fatal_errors.append(error)
+                        continue
+                    source_path = Path(source_text)
+                    if not source_path.is_absolute():
+                        fatal_errors.append(error)
+                        continue
+                    source_path = source_path.resolve()
+                    if source_path == changed_root or changed_root in source_path.parents:
+                        fatal_errors.append(error)
+                if fatal_errors:
+                    raise ToolRefreshError("plugin", fatal_errors)
 
-            cls._bump_revision("plugin_refresh")
-            return cls.all_tool_ids()
+                if load_errors:
+                    cls._finalize_plugin_tools_load()
+
+                cls._plugin_load_errors = load_errors
+                cls._bump_revision("plugin_refresh")
+                return cls.all_tool_ids()
+            except Exception:
+                _restore_snapshot()
+                raise
 
     @classmethod
     def refresh_dynamic_tools(cls) -> List[str]:
@@ -1685,8 +1814,21 @@ class ToolRegistry:
     @classmethod
     def _reset_failure_state(cls, tool_name: str) -> None:
         """Reset failure tracking for a tool after success."""
-        if tool_name in cls._failure_state:
+        with cls._refresh_lock:
             cls._failure_state.pop(tool_name, None)
+
+    @classmethod
+    async def _failure_auto_disable_enabled(cls) -> bool:
+        """Return the configured repeated-failure behavior, defaulting on."""
+        try:
+            from flocks.config.config import Config
+
+            config = await Config.get()
+            if config.tool_failure is not None:
+                return config.tool_failure.disable_on_repeated_failure
+        except Exception:
+            pass
+        return True
 
     @classmethod
     def _should_track_failure(cls, tool: Tool) -> bool:
@@ -1737,23 +1879,34 @@ class ToolRegistry:
 
         tool_name = tool.info.name
         key = cls._failure_key(tool_name, params, error)
-        state = cls._failure_state.get(tool_name, {"key": None, "count": 0})
+        with cls._refresh_lock:
+            state = cls._failure_state.get(tool_name, {"key": None, "count": 0})
 
-        if state.get("key") == key:
-            state["count"] = state.get("count", 0) + 1
-        else:
-            state = {"key": key, "count": 1}
+            if state.get("key") == key:
+                state["count"] = state.get("count", 0) + 1
+            else:
+                state = {"key": key, "count": 1}
 
-        cls._failure_state[tool_name] = state
+            cls._failure_state[tool_name] = state
 
-        if state["count"] >= cls._failure_disable_threshold:
-            tool.info.enabled = False
-            log.warn("tool.disabled.repeated_error", {
-                "tool": tool_name,
-                "count": state["count"],
-                "error": error,
-            })
-            return True
+            if state["count"] >= cls._failure_disable_threshold and tool.info.enabled:
+                tool.info.enabled = False
+                try:
+                    from flocks.config.config_writer import ConfigWriter
+
+                    ConfigWriter.set_tool_setting(tool_name, {"enabled": False})
+                except Exception as exc:
+                    log.warn("tool.disabled.repeated_error.persist_failed", {
+                        "tool": tool_name,
+                        "error": str(exc),
+                    })
+                cls._bump_revision("failure_auto_disable")
+                log.warn("tool.disabled.repeated_error", {
+                    "tool": tool_name,
+                    "count": state["count"],
+                    "error": error,
+                })
+                return True
 
         return False
 

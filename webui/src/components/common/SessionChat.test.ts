@@ -1,12 +1,11 @@
 import React from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/types';
 
 import {
-  areChatMessagePartsRenderEqual,
   areChatTimelineItemsRenderEqual,
   buildInstructionDisplayText,
   buildChatTimelineItems,
@@ -35,6 +34,7 @@ import {
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
@@ -435,6 +435,16 @@ describe('getMessageBubbleClassName', () => {
   // The message column owns the available width, so the inner bubble only
   // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
   // assert width semantics, not legacy max-width literals.
+  it('allows every bubble variant to shrink within the message column', () => {
+    for (const compact of [false, true]) {
+      for (const isUser of [false, true]) {
+        const className = getMessageBubbleClassName({ compact, isUser, isEditing: false });
+        expect(className).toContain('min-w-0');
+        expect(className).toContain('max-w-full');
+      }
+    }
+  });
+
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -443,7 +453,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-auto');
-    expect(className).not.toContain('w-full');
+    expect(className.split(' ')).not.toContain('w-full');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
@@ -1353,6 +1363,35 @@ describe('SessionChat error rendering', () => {
     expect(screen.getByText('Connection error.')).toBeInTheDocument();
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
   });
+
+  it('renders assistant error messages when the only part is blank text', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-error-with-blank-text',
+          role: 'assistant',
+          parts: [{ id: 'blank-text', type: 'text', text: '' }] as Message['parts'],
+          finish: 'error',
+          error: {
+            name: 'EmptyResponseError',
+            data: { message: 'Model returned an empty response.' },
+          } as any,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('Model returned an empty response.')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
 });
 
 describe('SessionChat intermediate process collapse', () => {
@@ -2252,6 +2291,32 @@ describe('SessionChat agent mentions', () => {
   });
 });
 
+describe('SessionChat slash command routing', () => {
+  it('sends absolute filesystem paths as normal prompts instead of slash commands', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    const text = '/tmp/stream_alert_denoise/rex_integration_guide.md\n\nuse this file';
+    const textarea = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: text } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: [{ type: 'text', text }],
+        }),
+      );
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/command',
+      expect.anything(),
+    );
+  });
+});
+
 describe('truncateToolDisplayText', () => {
   it('returns short text unchanged', () => {
     expect(truncateToolDisplayText('bash')).toBe('bash');
@@ -2937,6 +3002,37 @@ describe('streaming activity helpers', () => {
 });
 
 describe('SessionChat fallback polling', () => {
+  it('reconciles pending questions while the session is busy', async () => {
+    vi.useFakeTimers();
+    try {
+      render(React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        live: true,
+      }));
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'session.status',
+          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+        });
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(pendingQuestionsHookMock.fetchPendingQuestions).toHaveBeenCalledWith('sess-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('does not finish streaming while fetched messages still contain a running tool', async () => {
     vi.useFakeTimers();
     const refetch = vi.fn();

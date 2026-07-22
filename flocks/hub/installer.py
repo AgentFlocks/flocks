@@ -90,21 +90,54 @@ def _resolve_install_destination(
     return local.install_dir(plugin_type, plugin_id, scope)
 
 
-def _copy_package(src: Path, dst: Path) -> None:
+def _remove_path(path: Path) -> None:
+    if path.is_dir() and not path.is_symlink():
+        shutil.rmtree(path)
+    elif path.exists() or path.is_symlink():
+        path.unlink()
+
+
+def _replace_prepared_path(prepared: Path, dst: Path) -> Path | None:
+    backup: Path | None = None
+    if dst.exists() or dst.is_symlink():
+        backup = dst.parent / f".{dst.name}.bak"
+        _remove_path(backup)
+        dst.replace(backup)
+    try:
+        prepared.replace(dst)
+    except Exception:
+        if backup is not None and (backup.exists() or backup.is_symlink()):
+            backup.replace(dst)
+        raise
+    return backup
+
+
+def _commit_replacement(backup: Path | None) -> None:
+    if backup is None:
+        return
+    try:
+        _remove_path(backup)
+    except OSError:
+        pass
+
+
+def _rollback_replacement(dst: Path, backup: Path | None) -> None:
+    _remove_path(dst)
+    if backup is not None and (backup.exists() or backup.is_symlink()):
+        backup.replace(dst)
+
+
+def _copy_package(src: Path, dst: Path, *, retain_backup: bool = False) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
-        backup = None
-        if dst.exists():
-            backup = parent / f".{dst.name}.bak"
-            if backup.exists():
-                shutil.rmtree(backup)
-            dst.replace(backup)
-        tmp.replace(dst)
-        if backup and backup.exists():
-            shutil.rmtree(backup)
+        backup = _replace_prepared_path(tmp, dst)
+        if not retain_backup:
+            _commit_replacement(backup)
+            return None
+        return backup
     except Exception:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
@@ -122,32 +155,26 @@ def _copy_package_contents(src: Path, dst: Path) -> None:
             shutil.copy2(item, target)
 
 
-def _replace_dir(src: Path, dst: Path) -> None:
-    parent = dst.parent
-    backup = None
-    if dst.exists():
-        backup = parent / f".{dst.name}.bak"
-        if backup.exists():
-            shutil.rmtree(backup)
-        dst.replace(backup)
-    src.replace(dst)
-    if backup and backup.exists():
-        shutil.rmtree(backup)
-
-
 def _contracts_access_dir(plugin_id: str, scope: str) -> Path:
     return local.install_root("webui", scope).parent / "access" / plugin_id
 
 
-def _copy_attached_access_contracts(plugin_type: PluginType, plugin_id: str, src: Path, scope: str) -> Path | None:
+def _copy_attached_access_contracts(
+    plugin_type: PluginType,
+    plugin_id: str,
+    src: Path,
+    scope: str,
+    *,
+    retain_backup: bool = False,
+) -> tuple[Path, Path | None] | None:
     if plugin_type != "webui":
         return None
     access_src = src / "access"
     if not access_src.is_dir():
         return None
     access_dst = _contracts_access_dir(plugin_id, scope)
-    _copy_package(access_src, access_dst)
-    return access_dst
+    backup = _copy_package(access_src, access_dst, retain_backup=retain_backup)
+    return access_dst, backup
 
 
 def _remove_attached_access_contracts(plugin_type: PluginType, plugin_id: str, scope: str) -> None:
@@ -182,21 +209,34 @@ def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
             raise RuntimeError(f"Failed to build WebUI page bundle for {plugin_id}/{page.id}{detail}")
 
 
-def _copy_webui_package_with_build(plugin_id: str, src: Path, dst: Path) -> None:
+def _copy_webui_package_with_build(
+    plugin_id: str,
+    src: Path,
+    dst: Path,
+    *,
+    retain_backup: bool = False,
+) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
         _build_webui_pages(plugin_id, tmp)
-        _replace_dir(tmp, dst)
+        backup = _replace_prepared_path(tmp, dst)
+        if not retain_backup:
+            _commit_replacement(backup)
+            return None
+        return backup
     except Exception:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
         raise
 
 
-async def _refresh_runtime(plugin_type: PluginType) -> None:
+async def _refresh_runtime(
+    plugin_type: PluginType,
+    changed_path: Path | None = None,
+) -> None:
     if plugin_type == "skill":
         from flocks.skill.skill import Skill
 
@@ -223,7 +263,13 @@ async def _refresh_runtime(plugin_type: PluginType) -> None:
         from flocks.tool.registry import ToolRegistry
 
         await ToolRegistry.init_async()
-        await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
+        if changed_path is None:
+            await asyncio.to_thread(ToolRegistry.refresh_plugin_tools)
+        else:
+            await asyncio.to_thread(
+                ToolRegistry.refresh_plugin_tools,
+                changed_path=changed_path,
+            )
         clear_device_template_cache()
         # Drop the descriptor cache so freshly installed/uninstalled
         # API plugins surface in ``_load_provider_yaml_metadata`` (and
@@ -329,16 +375,6 @@ async def _rollback_component_ref_installs(
             local.remove_installed_record(plugin_type, plugin_id)
         except Exception:
             continue
-
-
-def _rollback_install_path(plugin_type: PluginType, plugin_id: str, install_path: Path, scope: str) -> None:
-    if ".flocks/plugins" in install_path.as_posix():
-        if install_path.is_dir():
-            shutil.rmtree(install_path, ignore_errors=True)
-        elif install_path.exists():
-            install_path.unlink()
-    _remove_attached_access_contracts(plugin_type, plugin_id, scope)
-    local.remove_installed_record(plugin_type, plugin_id)
 
 
 def _is_project_install_path(plugin_type: PluginType, install_path: Path) -> bool:
@@ -496,16 +532,31 @@ async def install_plugin(
     validate_package(src, manifest)
     dst = _resolve_install_destination(plugin_type, plugin_id, src, scope)
     component_key = f"component:{plugin_id}"
-    component_had_install = plugin_type == "component" and local.infer_local_install(plugin_type, plugin_id) is not None
     component_ref_installs: list[tuple[PluginType, str]] = []
+    previous_record = local.get_record(plugin_type, plugin_id)
+    package_backup: Path | None = None
+    package_replaced = False
+    access_replacement: tuple[Path, Path | None] | None = None
     try:
         if plugin_type == "component":
             component_ref_installs = await _install_component_refs(manifest, scope=scope, progress=progress)
         if plugin_type == "webui":
-            _copy_webui_package_with_build(plugin_id, src, dst)
+            package_backup = _copy_webui_package_with_build(
+                plugin_id,
+                src,
+                dst,
+                retain_backup=True,
+            )
         else:
-            _copy_package(src, dst)
-        _copy_attached_access_contracts(plugin_type, plugin_id, src, scope)
+            package_backup = _copy_package(src, dst, retain_backup=True)
+        package_replaced = True
+        access_replacement = _copy_attached_access_contracts(
+            plugin_type,
+            plugin_id,
+            src,
+            scope,
+            retain_backup=True,
+        )
         record = local.make_record(
             plugin_type=plugin_type,
             plugin_id=plugin_id,
@@ -518,15 +569,30 @@ async def install_plugin(
         )
         local.save_installed_record(record)
         clear_catalog_caches()
-        await _refresh_runtime(plugin_type)
+        await _refresh_runtime(plugin_type, dst)
         if plugin_type == "component":
             await _emit_component_progress(progress, manifest, "complete", record=record, message="Installed")
+        if access_replacement is not None:
+            _commit_replacement(access_replacement[1])
+        _commit_replacement(package_backup)
         return record
     except Exception:
+        if access_replacement is not None:
+            _rollback_replacement(*access_replacement)
+        if package_replaced:
+            _rollback_replacement(dst, package_backup)
+        if previous_record is None:
+            local.remove_installed_record(plugin_type, plugin_id)
+        else:
+            local.save_installed_record(previous_record)
+        clear_catalog_caches()
         if plugin_type == "component":
-            if not component_had_install:
-                _rollback_install_path(plugin_type, plugin_id, dst, scope)
             await _rollback_component_ref_installs(component_ref_installs, component_key)
+        if package_replaced:
+            try:
+                await _refresh_runtime(plugin_type, dst)
+            except Exception:
+                pass
         raise
 
 
@@ -584,13 +650,24 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     record = local.get_record(plugin_type, plugin_id)
     install_path = Path(record.installPath) if record and record.installPath else local.infer_local_install(plugin_type, plugin_id)
     if install_path is None or not install_path.exists():
+        changed_path = install_path
+        if changed_path is None and record is not None:
+            try:
+                changed_path = _resolve_install_destination(
+                    plugin_type,
+                    plugin_id,
+                    plugin_root(plugin_type, plugin_id),
+                    record.scope,
+                )
+            except Exception:
+                changed_path = local.install_dir(plugin_type, plugin_id, record.scope)
         children_removed = await _uninstall_component_refs(manifest) if manifest is not None else False
         had_record = record is not None
         local.remove_installed_record(plugin_type, plugin_id)
         clear_catalog_caches()
         _clear_device_template_cache_if_needed(plugin_type)
         if children_removed or had_record:
-            await _refresh_runtime(plugin_type)
+            await _refresh_runtime(plugin_type, changed_path)
         return children_removed or had_record
     project_root = local.install_root(plugin_type, "project").resolve()
     resolved_install_path = install_path.resolve()
@@ -618,5 +695,5 @@ async def uninstall_plugin(plugin_type: PluginType, plugin_id: str) -> bool:
     local.remove_installed_record(plugin_type, plugin_id)
     clear_catalog_caches()
     _cleanup_orphan_api_services(orphan_keys)
-    await _refresh_runtime(plugin_type)
+    await _refresh_runtime(plugin_type, install_path)
     return True

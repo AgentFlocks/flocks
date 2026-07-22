@@ -20,10 +20,13 @@ from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
 
+import httpcore
+import httpx
+
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
-from flocks.session.message import Message, MessageInfo, MessageRole
+from flocks.session.message import Message, MessageInfo, MessageRole, TextPart
 from flocks.session.prompt import SessionPrompt
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
@@ -107,6 +110,13 @@ LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
 # spurious failures in those cases.
 LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
 
+_RETRYABLE_TRANSPORT_EXCEPTIONS = (
+    httpx.TransportError,
+    httpcore.NetworkError,
+    httpcore.ProtocolError,
+    httpcore.TimeoutException,
+)
+
 _WORKFLOW_NODE_REF_RE = re.compile(r"^@@node:([^|\n]+)\|([^\n]+)\n?([\s\S]*)$")
 
 
@@ -173,6 +183,18 @@ async def _iter_with_chunk_timeout(
             await aiter.aclose()
         except Exception:
             pass
+
+
+def _find_retryable_transport_exception(exception: Exception) -> Optional[Exception]:
+    """Return a retryable HTTP transport error from an exception chain."""
+    current: Optional[BaseException] = exception
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, _RETRYABLE_TRANSPORT_EXCEPTIONS):
+            return current
+        current = current.__cause__ or current.__context__
+    return None
 
 
 @dataclass
@@ -297,6 +319,139 @@ class SessionRunner:
             "with the same arguments and kept producing a tool-only turn. Change strategy, "
             "summarize the blocker, or answer directly instead of repeating the exact same call."
         )
+
+    @staticmethod
+    def _build_session_error_dict(
+        message: str,
+        *,
+        name: str = "SessionError",
+        display_message: Optional[str] = None,
+        data: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        error_data = {"message": message}
+        if data:
+            error_data.update(data)
+        if display_message:
+            error_data["displayMessage"] = display_message
+        return {
+            "name": name,
+            "message": message,
+            "data": error_data,
+        }
+
+    async def _publish_assistant_error_message(
+        self,
+        assistant_msg: MessageInfo,
+        *,
+        agent_name: str,
+        parent_id: str,
+        error_dict: Dict[str, Any],
+        text_part: Optional[TextPart] = None,
+    ) -> None:
+        if not self.callbacks.event_publish_callback:
+            return
+        now_ms = int(time.time() * 1000)
+        await self.callbacks.event_publish_callback("message.updated", {
+            "info": {
+                "id": assistant_msg.id,
+                "sessionID": self.session.id,
+                "role": "assistant",
+                "time": {"created": now_ms, "completed": now_ms},
+                "parentID": parent_id,
+                "modelID": self.model_id,
+                "providerID": self.provider_id,
+                "agent": agent_name,
+                "mode": agent_name,
+                "finish": "error",
+                "error": error_dict,
+                "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+            }
+        })
+        if text_part is not None:
+            await self.callbacks.event_publish_callback("message.part.updated", {
+                "part": {
+                    "id": text_part.id,
+                    "messageID": text_part.messageID,
+                    "sessionID": text_part.sessionID,
+                    "type": "text",
+                    "text": text_part.text,
+                }
+            })
+
+    async def _create_error_assistant_message(
+        self,
+        *,
+        last_user: MessageInfo,
+        agent: AgentInfo,
+        error_message: str,
+        error_dict: Dict[str, Any],
+        visible_text: Optional[str] = None,
+    ) -> MessageInfo:
+        text = visible_text or error_message
+        part_id = Identifier.ascending("part")
+        now_ms = int(time.time() * 1000)
+        assistant_msg = await Message.create(
+            session_id=self.session.id,
+            role=MessageRole.ASSISTANT,
+            content=text,
+            agent=agent.name,
+            model_id=self.model_id,
+            provider_id=self.provider_id,
+            parent_id=last_user.id,
+            finish="error",
+            error=error_dict,
+            time={"created": now_ms, "completed": now_ms},
+            part_id=part_id,
+        )
+        parts = await Message.parts(assistant_msg.id, self.session.id)
+        text_part = next(
+            (
+                part for part in parts
+                if isinstance(part, TextPart) and part.id == part_id
+            ),
+            TextPart(
+                id=part_id,
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                type="text",
+                text=text,
+            ),
+        )
+        await self._publish_assistant_error_message(
+            assistant_msg,
+            agent_name=agent.name,
+            parent_id=last_user.id,
+            error_dict=error_dict,
+            text_part=text_part,
+        )
+        return assistant_msg
+
+    async def _ensure_visible_error_text(
+        self,
+        assistant_msg: MessageInfo,
+        error_message: str,
+    ) -> Optional[TextPart]:
+        if not error_message:
+            return None
+
+        parts = await Message.parts(assistant_msg.id, self.session.id)
+        for part in parts:
+            if getattr(part, "type", None) == "text" and str(getattr(part, "text", "") or "").strip():
+                return None
+
+        text_part = next((part for part in parts if getattr(part, "type", None) == "text"), None)
+        if isinstance(text_part, TextPart):
+            text_part.text = error_message
+        else:
+            text_part = TextPart(
+                id=Identifier.ascending("part"),
+                sessionID=self.session.id,
+                messageID=assistant_msg.id,
+                type="text",
+                text=error_message,
+            )
+        stored = await Message.store_part(self.session.id, assistant_msg.id, text_part)
+        return stored if isinstance(stored, TextPart) else text_part
 
     def _update_tool_loop_guard(
         self,
@@ -982,9 +1137,22 @@ class SessionRunner:
         provider = Provider.get(self.provider_id)
         if not provider:
             error = f"Provider {self.provider_id} not found"
+            error_dict = self._build_session_error_dict(
+                error,
+                name="ProviderUnavailableError",
+                display_message="Model is unavailable. Please check the provider connection and model configuration.",
+                data={"providerID": self.provider_id, "modelID": self.model_id},
+            )
+            await self._create_error_assistant_message(
+                last_user=last_user,
+                agent=agent,
+                error_message=error,
+                error_dict=error_dict,
+                visible_text=error_dict["data"]["displayMessage"],
+            )
             if self.callbacks.on_error:
-                await self.callbacks.on_error(error)
-            return StepResult(action="stop", error=error)
+                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
+            return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
 
         # Apply config-based provider options (api_key/base_url)
         try:
@@ -997,9 +1165,22 @@ class SessionRunner:
         
         if not provider.is_configured():
             error = f"Provider {self.provider_id} not configured"
+            error_dict = self._build_session_error_dict(
+                error,
+                name="ProviderConfigurationError",
+                display_message="Model is unavailable. Please check the provider connection and model configuration.",
+                data={"providerID": self.provider_id, "modelID": self.model_id},
+            )
+            await self._create_error_assistant_message(
+                last_user=last_user,
+                agent=agent,
+                error_message=error,
+                error_dict=error_dict,
+                visible_text=error_dict["data"]["displayMessage"],
+            )
             if self.callbacks.on_error:
-                await self.callbacks.on_error(error)
-            return StepResult(action="stop", error=error)
+                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
+            return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
         
         # Build prompts and tools
         tools_started_at = time.perf_counter()
@@ -1301,6 +1482,14 @@ class SessionRunner:
                             error=empty_error_dict,
                             finish="error",
                         )
+                        text_part = await self._ensure_visible_error_text(assistant_msg, empty_error_msg)
+                        await self._publish_assistant_error_message(
+                            assistant_msg,
+                            agent_name=agent.name,
+                            parent_id=last_user.id,
+                            error_dict=empty_error_dict,
+                            text_part=text_part,
+                        )
                         return StepResult(action="stop", error=empty_error_msg)
 
                 tool_loop_guard = self._update_tool_loop_guard(
@@ -1341,18 +1530,20 @@ class SessionRunner:
                 
             except Exception as e:
                 error_attempt += 1
-                log.error("runner.step.error", {
+                error_log_context = {
                     "error": str(e),
-                    "attempt": error_attempt,
-                })
-                
+                    "error_type": type(e).__name__,
+                    "error_module": type(e).__module__,
+                    "error_repr": repr(e)[:1000],
+                }
                 # Convert exception to error dict for retry check
                 error_dict = self._exception_to_error_dict(e)
-                
+
                 # Check if retryable
                 retry_message = SessionRetry.retryable(error_dict)
+                will_retry = retry_message is not None and error_attempt <= MAX_ERROR_RETRIES
 
-                if retry_message is not None and error_attempt <= MAX_ERROR_RETRIES:
+                if will_retry:
                     # Error is retryable and we have budget left
                     delay_ms = SessionRetry.delay(error_attempt, error_dict)
                     # Always cap the sleep to RETRY_MAX_DELAY_NO_HEADERS so a
@@ -1361,8 +1552,9 @@ class SessionRunner:
                     from flocks.session.lifecycle.retry import RETRY_MAX_DELAY_NO_HEADERS
                     delay_ms = min(delay_ms, RETRY_MAX_DELAY_NO_HEADERS)
                     next_retry_time = int(asyncio.get_event_loop().time() * 1000) + delay_ms
-                    
-                    log.info("runner.step.retry", {
+
+                    log.warn("runner.step.retry", {
+                        **error_log_context,
                         "attempt": error_attempt,
                         "delay_ms": delay_ms,
                         "reason": retry_message,
@@ -1388,12 +1580,15 @@ class SessionRunner:
                     # Error is not retryable, or retry budget exhausted
                     if retry_message is not None:
                         log.error("runner.step.max_retries_exceeded", {
-                            "error": str(e),
+                            **error_log_context,
                             "attempt": error_attempt,
                             "max_retries": MAX_ERROR_RETRIES,
                         })
                     else:
-                        log.error("runner.step.not_retryable", {"error": str(e)})
+                        log.error("runner.step.not_retryable", {
+                            **error_log_context,
+                            "attempt": error_attempt,
+                        })
 
                     final_error_message = str(e)
                     if SessionRetry.is_connection_error(error_dict):
@@ -1409,6 +1604,14 @@ class SessionRunner:
                         assistant_msg.id,
                         error=error_dict,
                         finish="error",
+                    )
+                    text_part = await self._ensure_visible_error_text(assistant_msg, final_error_message)
+                    await self._publish_assistant_error_message(
+                        assistant_msg,
+                        agent_name=agent.name,
+                        parent_id=last_user.id,
+                        error_dict=error_dict,
+                        text_part=text_part,
                     )
                     
                     return StepResult(action="stop", error=final_error_message)
@@ -1796,8 +1999,23 @@ class SessionRunner:
             "message": str(exception),
             "data": {
                 "message": str(exception),
+                "exceptionType": type(exception).__name__,
+                "exceptionModule": type(exception).__module__,
             }
         }
+
+        transport_exception = _find_retryable_transport_exception(exception)
+        if transport_exception is not None:
+            transport_type = type(transport_exception).__name__
+            error_dict["name"] = "APIError"
+            error_dict["data"].update({
+                "message": str(exception) or f"Transport connection error ({transport_type})",
+                "isRetryable": True,
+                "isConnectionError": True,
+                "displayMessage": CONNECTION_ERROR_DISPLAY_MESSAGE,
+                "transportExceptionType": transport_type,
+                "transportExceptionModule": type(transport_exception).__module__,
+            })
         
         # Check if it's an API error with specific attributes
         if hasattr(exception, 'status_code'):
