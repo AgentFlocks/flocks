@@ -1087,6 +1087,7 @@ export function getUserAvatarSpacerClassName(_compact: boolean): string {
 const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
+const PENDING_QUESTION_RECONCILE_MS = 2_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
 const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
@@ -2122,6 +2123,19 @@ export default function SessionChat({
     checkStatus();
   }, [sessionId, loading, messages, fetchPendingQuestions]);
 
+  // A remote proxy or a reconnect boundary can delay or lose the one-shot
+  // question.asked event. Reconcile only while the session is active; the
+  // hook ignores responses made stale by a newer SSE update.
+  useEffect(() => {
+    if (!sessionId || (!isStreaming && !sending)) return;
+    const timer = setInterval(() => {
+      fetchPendingQuestions(sessionId).catch((err) => {
+        console.warn('[SessionChat] Failed to reconcile pending questions:', err);
+      });
+    }, PENDING_QUESTION_RECONCILE_MS);
+    return () => clearInterval(timer);
+  }, [sessionId, isStreaming, sending, fetchPendingQuestions]);
+
   // Refetch when page becomes visible again
   useEffect(() => {
     if (!sessionId) return;
@@ -2129,11 +2143,14 @@ export default function SessionChat({
       if (document.visibilityState === 'visible') {
         refetch();
         fetchPromptQueue();
+        fetchPendingQuestions(sessionId).catch((err) => {
+          console.warn('[SessionChat] Failed to recover pending questions after visibility change:', err);
+        });
       }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch, fetchPromptQueue]);
+  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
