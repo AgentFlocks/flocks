@@ -522,6 +522,87 @@ def test_run_windows_netstat_handles_missing_stdout(monkeypatch) -> None:
     assert service_manager._run_windows_netstat(5173) == ""
 
 
+def test_run_windows_netstat_decodes_with_replacement(monkeypatch) -> None:
+    """netstat output is decoded as utf-8/replace so GBK console output on
+    Chinese Windows never raises UnicodeDecodeError in the reader thread."""
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="  TCP 127.0.0.1:5173 0.0.0.0:0 LISTENING 42\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert "42" in service_manager._run_windows_netstat(5173)
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_windows_tasklist_process_name_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout='"python.exe","9436"\n')
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._windows_tasklist_process_name(9436) == "python.exe"
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_process_list_pids_windows_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="9436\n36056\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._process_list_pids() == [9436, 36056]
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_get_node_major_version_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager, "resolve_node_executable", lambda: "node")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="v20.11.1\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager.get_node_major_version() == 20
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_windows_process_probes_survive_gbk_bytes(monkeypatch) -> None:
+    """End-to-end: real GBK-encoded bytes flowing through the decode path
+    must not raise UnicodeDecodeError (the restart-time reader-thread crash)."""
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    # 0xbb is the byte that crashed utf-8 decode in the original bug report.
+    gbk_stdout = "映像名称: python.exe 拒绝访问".encode("gbk").decode("utf-8", errors="replace")
+
+    def fake_run(*_args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
+        return SimpleNamespace(returncode=0, stdout=gbk_stdout)
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    # None of these should raise, even with mojibake stdout.
+    service_manager._windows_tasklist_process_name(123)
+    service_manager._run_windows_netstat(5173)
+    service_manager._process_list_pids()
+
+
 def test_port_owner_pids_warns_when_no_tool_found(monkeypatch) -> None:
     monkeypatch.setattr(service_manager.sys, "platform", "linux")
     monkeypatch.setattr(service_manager, "which", lambda _name: None)
