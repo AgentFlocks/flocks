@@ -45,3 +45,12 @@ def test_device_integration_guide_does_not_embed_page_json_protocol() -> None:
     assert "```json" not in content
     assert '"storage_key":"<storage_key>"' not in content
     assert "一键回填" not in content
+
+
+def test_device_integration_guide_updates_enabled_and_template_fields() -> None:
+    content = SKILL_FILE.read_text(encoding="utf-8")
+
+    assert "设备启停通过一级参数 `enabled` 更新" in content
+    assert "`fields` 只能包含目标模板 `credential_schema` 声明的字段" in content
+    assert "不要把 `enabled` 写入 `fields`" in content
+    assert "密码及 `input_type=password` 的字段不通过工具更新" in content

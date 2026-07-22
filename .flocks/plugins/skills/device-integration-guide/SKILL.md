@@ -26,7 +26,7 @@ description: 指导 Flocks 新建、添加和接入安全设备。Use when the u
 
 ## 决策流程
 
-1. 已有 `device_id`：非敏感配置用 `device_manage(action="update")`，测试或排障用 `connectivity_test`；敏感字段回到设备接入页面填写。
+1. 已有 `device_id`：启停设备或更新模板声明的非密码字段时使用 `device_manage(action="update")`，测试或排障用 `connectivity_test`；密码字段回到设备接入页面填写。
 2. 没有 `device_id`：先用 `device_manage(action="list")` 排除已有实例，再调用 `device_manage(action="list_templates")` 查询模板。设备实例为空不代表模板不存在。
 3. 按名称、厂商、`plugin_id`、`service_id`、`storage_key` 和描述匹配模板：
    - `installed=true`：按 `credential_schema` 整理非敏感字段，然后进入创建流程。
@@ -58,9 +58,9 @@ description: 指导 Flocks 新建、添加和接入安全设备。Use when the u
 
 ## 页面配置与更新
 
-如果用户正在设备接入页面配置设备，帮助确认需要填写的表单字段，让页面负责保存。独立会话中的已有设备非敏感配置更新使用 `device_manage(action="update")`。
+如果用户正在设备接入页面配置设备，帮助确认需要填写的表单字段，让页面负责保存。独立会话中的已有设备使用 `device_manage(action="update")`：设备启停通过一级参数 `enabled` 更新，`fields` 只能包含目标模板 `credential_schema` 声明的字段。
 
-可以整理的非敏感字段包括：
+`fields` 的具体可更新项以目标模板为准，常见字段包括：
 
 - `base_url`
 - `host`
@@ -69,6 +69,8 @@ description: 指导 Flocks 新建、添加和接入安全设备。Use when the u
 - `timeout`
 - `tenant`
 - `region`
+
+模板没有声明的字段不要传入 `fields`。
 
 不要在聊天中索要或回显敏感字段：
 
@@ -80,7 +82,7 @@ description: 指导 Flocks 新建、添加和接入安全设备。Use when the u
 
 如果用户的目标是补填密钥、修改密码、刷新 Token 或重新登录，只说明应该在设备接入页面对应字段中处理。
 
-对于已有设备编辑，只处理非敏感字段和 `verify_ssl`，并说明敏感字段应在页面表单内填写。
+不要把 `enabled` 写入 `fields`。密码及 `input_type=password` 的字段不通过工具更新，应在页面表单内填写。
 
 ## 连通性与冒烟验证
 
