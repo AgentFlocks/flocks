@@ -58,7 +58,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     overlay/service-gate combinations without touching real plugin YAML.
     """
     config_dir = tmp_path / ".flocks" / "config"
-    config_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
 
     from flocks.config.config import Config
@@ -68,6 +68,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     saved_tools = dict(ToolRegistry._tools)
     saved_defaults = dict(ToolRegistry._enabled_defaults)
+    saved_failure_state = dict(ToolRegistry._failure_state)
     saved_initialized = ToolRegistry._initialized
 
     enabled_tool = _stub_api_tool("onesec_dns_test", enabled=True)
@@ -80,6 +81,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         enabled_tool.info.name: True,
         disabled_tool.info.name: False,
     }
+    ToolRegistry._failure_state = {}
     # Skip plugin discovery — our stub registry is enough.
     ToolRegistry._initialized = True
 
@@ -100,6 +102,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     ToolRegistry._tools = saved_tools
     ToolRegistry._enabled_defaults = saved_defaults
+    ToolRegistry._failure_state = saved_failure_state
     ToolRegistry._initialized = saved_initialized
 
 
@@ -192,6 +195,24 @@ class TestToolInfoResponse:
 
 
 class TestUpdateTool:
+    def test_manual_reenable_clears_repeated_failure_count(self, tool_client):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        enabled_tool.info.enabled = False
+        ToolRegistry._failure_state[enabled_tool.info.name] = {
+            "key": "same-failure",
+            "count": ToolRegistry._failure_disable_threshold,
+        }
+
+        res = client.patch(
+            f"/api/tools/{enabled_tool.info.name}",
+            json={"enabled": True},
+        )
+
+        assert res.status_code == 200
+        assert res.json()["enabled"] is True
+        assert enabled_tool.info.name not in ToolRegistry._failure_state
+
     def test_overlay_persisted_when_differs_from_default(self, tool_client):
         client, _, disabled_tool = tool_client
         _set_service(enabled=True)

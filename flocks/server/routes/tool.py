@@ -665,6 +665,8 @@ def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
         })
 
     tool.info.enabled = new_enabled
+    if new_enabled:
+        ToolRegistry._reset_failure_state(tool.info.name)
     return new_enabled
 
 
