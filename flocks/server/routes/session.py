@@ -16,7 +16,7 @@ from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
-from flocks.auth.context import get_current_auth_user, set_current_auth_user, reset_current_auth_user
+from flocks.auth.context import AuthUser, get_current_auth_user, reset_current_auth_user, set_current_auth_user
 from flocks.server.routes._timing import log_route_timing
 from flocks.audit import emit_audit_event
 from flocks.license import assert_license_active
@@ -457,33 +457,29 @@ async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionMode
 
 
 async def _resolve_session_working_directory(session: SessionModel) -> str:
-    """Keep a valid historical cwd, otherwise use the user's default project."""
+    """Keep a valid historical cwd, otherwise use the request context."""
 
     if session.directory:
         directory = Path(session.directory).expanduser()
         if directory.is_dir() and os.access(directory, os.R_OK | os.X_OK):
             return str(directory.resolve())
 
-    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+    from flocks.project.instance import Instance
 
-    current_user = get_current_auth_user()
-    owner_id = current_user.id if current_user else API_TOKEN_SERVICE_USER_ID
-    default_project = await Project.get(
-        DEFAULT_PROJECT_ID,
-        owner_id=owner_id,
-        default_worktree=Project.default_worktree_candidate(),
-    )
-    if default_project is None or default_project.path_status != "available":
+    fallback_directory = Instance.get_directory() or os.getcwd()
+    fallback_path = Path(fallback_directory).expanduser()
+    if not fallback_path.is_dir() or not os.access(fallback_path, os.R_OK | os.X_OK):
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
-            detail="The session directory and default project directory are unavailable",
+            detail="The session directory and current request directory are unavailable",
         )
+    fallback_directory = str(fallback_path.resolve())
     log.warn(
         "session.directory.fallback",
         {
             "sessionID": session.id,
             "stored_directory": session.directory,
-            "fallback_directory": default_project.worktree,
+            "fallback_directory": fallback_directory,
         },
     )
     try:
@@ -495,7 +491,7 @@ async def _resolve_session_working_directory(session: SessionModel) -> str:
                 "sessionID": session.id,
                 "kind": "directory-fallback",
                 "storedDirectory": session.directory,
-                "fallbackDirectory": default_project.worktree,
+                "fallbackDirectory": fallback_directory,
             },
         )
     except Exception as exc:
@@ -503,7 +499,7 @@ async def _resolve_session_working_directory(session: SessionModel) -> str:
             "session.directory.fallback_notice_failed",
             {"sessionID": session.id, "error": str(exc)},
         )
-    return default_project.worktree
+    return fallback_directory
 
 
 async def _publish_context_usage_update(
@@ -594,7 +590,11 @@ async def list_sessions(
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
     current_user = require_user(request)
-    from flocks.project.project import DEFAULT_PROJECT_ID, Project
+    from flocks.project.project import (
+        DEFAULT_PROJECT_ID,
+        Project,
+        TASK_SESSION_GROUP_ID,
+    )
     list_started_at = time.perf_counter()
     all_sessions = await Session.list_all_unfiltered()
     list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
@@ -621,9 +621,14 @@ async def list_sessions(
         effective_project_id = (
             session.project_id
             if session.project_id in visible_project_ids
-            else DEFAULT_PROJECT_ID
+            else TASK_SESSION_GROUP_ID
         )
-        if projectID is not None and effective_project_id != projectID:
+        requested_group_id = (
+            TASK_SESSION_GROUP_ID
+            if projectID == DEFAULT_PROJECT_ID
+            else projectID
+        )
+        if requested_group_id is not None and effective_project_id != requested_group_id:
             continue
         if (roots or manager) and session.parent_id:
             continue
@@ -706,25 +711,37 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     if request is None:
         request = SessionCreateRequest()
 
-    from flocks.project.project import DEFAULT_PROJECT_ID, Project
-
-    project_id = request.projectID or DEFAULT_PROJECT_ID
-    project = await Project.get(
-        project_id,
-        owner_id=current_user.id,
-        default_worktree=Project.default_worktree_candidate(),
+    from flocks.project.instance import Instance
+    from flocks.project.project import (
+        DEFAULT_PROJECT_ID,
+        Project,
+        TASK_SESSION_GROUP_ID,
     )
-    if not project:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Project {project_id} not found",
-        )
-    if project.path_status != "available":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Project directory is {project.path_status}",
-        )
-    directory = project.worktree
+
+    directory = Instance.get_directory() or os.getcwd()
+    instance_project = Instance.get_project()
+    project_id = instance_project.id if instance_project else DEFAULT_PROJECT_ID
+
+    # "default" is accepted for compatibility with older WebUI clients, but
+    # ordinary sessions use the current request context rather than a virtual
+    # project's worktree.
+    if request.projectID and request.projectID not in {
+        DEFAULT_PROJECT_ID,
+        TASK_SESSION_GROUP_ID,
+    }:
+        project = await Project.get(request.projectID, owner_id=current_user.id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project {request.projectID} not found",
+            )
+        if project.path_status != "available":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project directory is {project.path_status}",
+            )
+        project_id = project.id
+        directory = project.worktree
     
     # Trigger command:new hook if creating from parent (like /new command)
     if request.parentID:
@@ -944,12 +961,17 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
 async def delete_session(sessionID: str, request: Request) -> bool:
     """Delete session by ID (returns true)"""
     current_user = require_user(request)
-    session = await _get_session_by_id_unfiltered(sessionID)
+    return await delete_session_for_user(sessionID, current_user)
+
+
+async def delete_session_for_user(session_id: str, current_user: AuthUser) -> bool:
+    """Delete one session using the normal lifecycle cleanup."""
+    session = await _get_session_by_id_unfiltered(session_id)
     
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
+            detail=f"Session {session_id} not found"
         )
     
     if not SessionPolicy.can_delete(session, current_user):
@@ -958,12 +980,12 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     from flocks.session.goal import GoalManager
     from flocks.session.interaction_queue import InteractionQueue
 
-    await _abort_session_processing(sessionID)
-    await InteractionQueue.clear(sessionID)
-    await GoalManager.clear(sessionID)
-    await _wait_for_sessions_idle([sessionID])
-    await _abort_and_wait_descendant_sessions(session.project_id, sessionID)
-    await Session.delete(session.project_id, sessionID)
+    await _abort_session_processing(session_id)
+    await InteractionQueue.clear(session_id)
+    await GoalManager.clear(session_id)
+    await _wait_for_sessions_idle([session_id])
+    await _abort_and_wait_descendant_sessions(session.project_id, session_id)
+    await Session.delete(session.project_id, session_id)
     from flocks.project.project import Project
 
     Project.invalidate_session_stats()
@@ -976,20 +998,20 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     # the upload cleanup is incidental.
     try:
         import shutil
-        uploads_root = _session_uploads_dir(sessionID)
+        uploads_root = _session_uploads_dir(session_id)
         if uploads_root.exists() and uploads_root.is_dir():
             shutil.rmtree(uploads_root, ignore_errors=True)
             log.info("session.uploads.cleaned", {
-                "session_id": sessionID,
+                "session_id": session_id,
                 "path": str(uploads_root),
             })
     except Exception as exc:
         log.warn("session.uploads.cleanup_failed", {
-            "session_id": sessionID,
+            "session_id": session_id,
             "error": str(exc),
         })
 
-    log.info("session.deleted", {"session_id": sessionID})
+    log.info("session.deleted", {"session_id": session_id})
     try:
         await emit_audit_event(
             "session_action",
@@ -999,7 +1021,7 @@ async def delete_session(sessionID: str, request: Request) -> bool:
                 "actor_name": current_user.username,
                 "user_name": current_user.username,
                 "username": current_user.username,
-                "session_id": sessionID,
+                "session_id": session_id,
                 "owner_user_id": current_user.id,
                 "project_id": session.project_id,
             },

@@ -2,7 +2,7 @@
 
 Projects are UI/session groupings bound to existing directories. Legacy project
 records in Storage are intentionally ignored; sessions that do not reference a
-registered project are presented under the virtual default project.
+registered project remain ordinary sessions rather than becoming a project.
 """
 
 from __future__ import annotations
@@ -27,7 +27,11 @@ from flocks.utils.log import Log
 
 log = Log.create(service="project")
 
+# Legacy stored project ID used by ordinary sessions. It is not a ProjectInfo
+# entry and never resolves to a worktree.
 DEFAULT_PROJECT_ID = "default"
+# Session-manager wire ID for the Tasks section; also not a project.
+TASK_SESSION_GROUP_ID = "tasks"
 DEFAULT_PROJECT_NAME = "默认"
 _RESERVED_PROJECT_NAMES = {"default", DEFAULT_PROJECT_NAME.casefold()}
 
@@ -151,12 +155,12 @@ class ProjectRegistry(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    default_worktree: str = Field(alias="defaultWorktree")
+    default_worktree: Optional[str] = Field(None, alias="defaultWorktree")
     projects: List[ProjectRegistryEntry] = Field(default_factory=list)
 
 
 class Project:
-    """Project registry and virtual default-project operations."""
+    """User-scoped registry of explicitly created projects."""
 
     _lock = asyncio.Lock()
     _session_stats_cache: ClassVar[
@@ -222,23 +226,6 @@ class Project:
         if not os.access(path, os.R_OK | os.X_OK):
             return "unreadable"
         return "available"
-
-    @classmethod
-    def default_worktree_candidate(cls) -> str:
-        """Resolve the initial default directory without using the server cwd."""
-
-        configured = os.getenv("FLOCKS_DEFAULT_PROJECT_DIR")
-        if configured:
-            path = Path(configured).expanduser()
-        else:
-            configured_workspace = os.getenv("FLOCKS_WORKSPACE_DIR")
-            path = (
-                Path(configured_workspace).expanduser()
-                if configured_workspace
-                else cls._flocks_root() / "workspace"
-            )
-        path.mkdir(parents=True, exist_ok=True)
-        return str(path.resolve())
 
     @classmethod
     def allowed_roots(cls, default_worktree: Optional[str] = None) -> List[Path]:
@@ -328,20 +315,15 @@ class Project:
     def _read_registry(
         cls,
         owner_id: str,
-        *,
-        default_worktree: Optional[str] = None,
     ) -> ProjectRegistry:
         path = cls.registry_path(owner_id)
         registry = cls._read_registry_file(path)
         if registry is not None:
+            # The pre-task/project split stored a virtual default worktree.
+            # Keep reading that field for compatibility but never use it.
+            registry.default_worktree = None
             return registry
-
-        candidate = default_worktree or cls.default_worktree_candidate()
-        try:
-            candidate = cls.validate_worktree(candidate, default_worktree=candidate)
-        except ValueError:
-            candidate = cls.default_worktree_candidate()
-        return ProjectRegistry(defaultWorktree=candidate, projects=[])
+        return ProjectRegistry(projects=[])
 
     @classmethod
     def _write_registry(cls, owner_id: str, registry: ProjectRegistry) -> None:
@@ -356,7 +338,7 @@ class Project:
         try:
             with os.fdopen(fd, "w", encoding="utf-8") as handle:
                 json.dump(
-                    registry.model_dump(by_alias=True),
+                    registry.model_dump(by_alias=True, exclude_none=True),
                     handle,
                     ensure_ascii=False,
                     indent=2,
@@ -401,32 +383,16 @@ class Project:
         )
 
     @classmethod
-    def _default_to_info(cls, registry: ProjectRegistry) -> ProjectInfo:
-        now = cls._now_ms()
-        return ProjectInfo(
-            id=DEFAULT_PROJECT_ID,
-            worktree=registry.default_worktree,
-            name=DEFAULT_PROJECT_NAME,
-            vcs="git" if (Path(registry.default_worktree) / ".git").exists() else None,
-            time=ProjectTime(created=now, updated=now),
-            isDefault=True,
-            pathStatus=cls._path_status(registry.default_worktree),
-            canDelete=False,
-        )
-
-    @classmethod
     async def ensure_registry(
         cls,
         owner_id: str,
-        *,
-        default_worktree: Optional[str] = None,
     ) -> ProjectRegistry:
-        """Load a registry and persist its initial default directory once."""
+        """Load a registry and create an empty one when needed."""
 
         async with cls._lock:
             path = cls.registry_path(owner_id)
             with _registry_cross_process_lock(path):
-                registry = cls._read_registry(owner_id, default_worktree=default_worktree)
+                registry = cls._read_registry(owner_id)
                 if not path.exists():
                     cls._write_registry(owner_id, registry)
                 return registry
@@ -446,12 +412,8 @@ class Project:
                 registry = cls._read_registry(owner_id)
                 normalized_worktree = cls.validate_worktree(
                     worktree,
-                    default_worktree=registry.default_worktree,
                     create_if_missing=True,
                 )
-
-                if normalized_worktree == cls._normalized_worktree(registry.default_worktree):
-                    raise ProjectPathConflictError(cls._default_to_info(registry))
 
                 for entry in registry.projects:
                     if cls._normalized_worktree(entry.worktree) == normalized_worktree:
@@ -486,12 +448,11 @@ class Project:
         cls,
         *,
         owner_id: str,
-        default_worktree: Optional[str] = None,
     ) -> List[ProjectInfo]:
-        registry = await cls.ensure_registry(owner_id, default_worktree=default_worktree)
+        registry = await cls.ensure_registry(owner_id)
         projects = [cls._entry_to_info(entry) for entry in registry.projects]
         projects.sort(key=lambda item: item.time.updated, reverse=True)
-        return [cls._default_to_info(registry), *projects]
+        return projects
 
     @classmethod
     def _all_registry_entries(cls) -> List[ProjectRegistryEntry]:
@@ -518,11 +479,10 @@ class Project:
         cls,
         *,
         owner_id: str,
-        default_worktree: Optional[str] = None,
     ) -> List[ProjectInfo]:
         """List owned projects plus projects shared by other local users."""
 
-        owned = await cls.list(owner_id=owner_id, default_worktree=default_worktree)
+        owned = await cls.list(owner_id=owner_id)
         owned_ids = {project.id for project in owned}
         shared = [
             cls._entry_to_info(entry, can_write=False)
@@ -582,11 +542,8 @@ class Project:
         project_id: str,
         *,
         owner_id: str,
-        default_worktree: Optional[str] = None,
     ) -> Optional[ProjectInfo]:
-        registry = await cls.ensure_registry(owner_id, default_worktree=default_worktree)
-        if project_id == DEFAULT_PROJECT_ID:
-            return cls._default_to_info(registry)
+        registry = await cls.ensure_registry(owner_id)
         entry = next((item for item in registry.projects if item.id == project_id), None)
         return cls._entry_to_info(entry) if entry else None
 
@@ -648,7 +605,7 @@ class Project:
     def effective_project_id(cls, owner_id: str, stored_project_id: Optional[str]) -> str:
         if stored_project_id and stored_project_id in cls.visible_project_ids(owner_id):
             return stored_project_id
-        return DEFAULT_PROJECT_ID
+        return TASK_SESSION_GROUP_ID
 
     @classmethod
     def get_session_stats_cache(

@@ -37,19 +37,14 @@ from flocks.session.session import Session
 
 
 @pytest.mark.asyncio
-async def test_missing_session_directory_uses_default_and_publishes_notice(
+async def test_missing_session_directory_uses_cwd_and_publishes_notice(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
 ):
-    from flocks.project.project import Project
     from flocks.server.routes import event as event_routes
     from flocks.server.routes import session as session_routes
 
-    default_project = SimpleNamespace(
-        worktree=str(tmp_path),
-        path_status="available",
-    )
-    monkeypatch.setattr(Project, "get", AsyncMock(return_value=default_project))
+    monkeypatch.chdir(tmp_path)
     publish_event = AsyncMock()
     monkeypatch.setattr(event_routes, "publish_event", publish_event)
 
@@ -83,6 +78,23 @@ class TestSessionCRUD:
         assert data["id"].startswith("ses_")
         assert "projectID" in data
         assert "directory" in data
+
+    @pytest.mark.asyncio
+    async def test_create_ordinary_session_uses_process_cwd(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A task session must not resolve through a virtual default project."""
+        process_cwd = tmp_path / "server-cwd"
+        process_cwd.mkdir()
+        monkeypatch.chdir(process_cwd)
+
+        response = await client.post("/api/session", json={})
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["directory"] == str(process_cwd)
 
     @pytest.mark.asyncio
     async def test_create_session_with_title(self, client: AsyncClient):
@@ -325,12 +337,12 @@ class TestSessionCRUD:
         assert row["directory"] == project["worktree"]
 
     @pytest.mark.asyncio
-    async def test_legacy_session_is_grouped_under_default_without_rewrite(
+    async def test_legacy_session_is_grouped_under_tasks_without_rewrite(
         self,
         client: AsyncClient,
         tmp_path,
     ):
-        """Legacy project IDs are projected to Default while storage stays unchanged."""
+        """Legacy project IDs are projected to Tasks while storage stays unchanged."""
         legacy = await Session.create(
             project_id="legacy-git-project",
             directory=str(tmp_path),
@@ -343,25 +355,25 @@ class TestSessionCRUD:
                 "view": "list",
                 "manager": "true",
                 "roots": "true",
-                "projectID": "default",
+                "projectID": "tasks",
             },
         )
 
         assert response.status_code == status.HTTP_200_OK
         row = next(item for item in response.json() if item["id"] == legacy.id)
         assert row["projectID"] == "legacy-git-project"
-        assert row["effectiveProjectID"] == "default"
+        assert row["effectiveProjectID"] == "tasks"
         stored = await Session.get("legacy-git-project", legacy.id)
         assert stored is not None
         assert stored.project_id == "legacy-git-project"
 
     @pytest.mark.asyncio
-    async def test_removed_project_sessions_fall_back_to_default(
+    async def test_deleted_project_sessions_are_removed(
         self,
         client: AsyncClient,
         tmp_path,
     ):
-        """Removing a project keeps its sessions and maps them to Default."""
+        """Deleting a project removes its sessions but preserves its directory."""
         worktree = tmp_path / "removable-project"
         worktree.mkdir()
         project_response = await client.post(
@@ -379,15 +391,15 @@ class TestSessionCRUD:
         assert delete_response.status_code == status.HTTP_200_OK
         assert worktree.exists()
 
-        default_response = await client.get(
+        session_get_response = await client.get(f"/api/session/{session_id}")
+        assert session_get_response.status_code == status.HTTP_404_NOT_FOUND
+
+        tasks_response = await client.get(
             "/api/session",
-            params={"view": "list", "manager": "true", "projectID": "default"},
+            params={"view": "list", "manager": "true", "projectID": "tasks"},
         )
-        row = next(item for item in default_response.json() if item["id"] == session_id)
-        assert row["projectID"] == project["id"]
-        assert row["effectiveProjectID"] == "default"
-        stored = await Session.get(project["id"], session_id)
-        assert stored is not None
+        assert all(item["id"] != session_id for item in tasks_response.json())
+        assert await Session.get(project["id"], session_id) is None
 
     @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):
