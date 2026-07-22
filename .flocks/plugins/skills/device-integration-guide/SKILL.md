@@ -18,67 +18,33 @@ description: 指导 Flocks 新建、添加和接入安全设备。Use when the u
 
 ## 核心原则
 
-- 先确认用户是在**新建设备实例**、**整理配置草稿**，还是**测试连通性**。
+- 先确认用户是在**新建设备实例**、**页面配置**，还是**测试连通性**。
 - 不要要求用户在聊天里粘贴密码、Token、Cookie、API Key 等敏感凭证。
-- 不要在 skill 中优先引导通过工具写入设备配置；设备接入页面表单和 JSON 草稿是配置写入的主路径。
+- 独立会话中，已安装模板的新设备优先通过 `device_manage(action="create")` 创建；只有敏感凭证需要回到设备接入页面填写。
 - 每次修改后，优先用标准连通性测试验证结果。
 - 保持回答简短，给出当前动作、结果和下一步。
 
 ## 决策流程
 
-1. 用户已经在设备列表里有目标设备，并提供了 `device_id`：
+1. 已有 `device_id`：非敏感配置用 `device_manage(action="update")`，测试或排障用 `connectivity_test`；敏感字段回到设备接入页面填写。
+2. 没有 `device_id`：先用 `device_manage(action="list")` 排除已有实例，再调用 `device_manage(action="list_templates")` 查询模板。设备实例为空不代表模板不存在。
+3. 按名称、厂商、`plugin_id`、`service_id`、`storage_key` 和描述匹配模板：
+   - `installed=true`：按 `credential_schema` 整理非敏感字段，然后进入创建流程。
+   - `installed=false`：引导用户在 FlockHub 安装返回的 `plugin_id`，安装后重新查询；不要创建自定义模板。
+   - 没有匹配模板：进入自定义 API、浏览器或 Workflow 接入。
 
-- 如果是配置变更，回到设备接入页面表单或输出页面可回填 JSON 草稿。
-- 如果是测试或排障，先走 `device_manage(action="connectivity_test")`。
+## 使用模板直接创建设备
 
-2. 用户说“添加设备”“接入设备”“新建设备”，但还没有设备实例：
+只有 `list_templates` 已返回匹配模板且 `installed=true` 时，才能调用 `device_manage(action="create")`。`create` 会再次校验模板状态，不能用 `update` 代替创建。
 
-- 如果有已安装模板，引导用户在设备接入页面填写表单。
-- 如果没有合适模板，进入自定义设备接入路径。
-- 如果涉及密钥、密码、Token、Cookie 或浏览器登录态，只说明应该填到页面表单，不要在聊天中收集真实值。
+从模板收集设备名称、机房、SSL 偏好和已声明的非敏感字段；不询问或传递 `storage=secret`、`sensitive=true`、`input_type=password` 的字段。
 
-3. 用户只描述产品、厂商、控制台地址或 API 文档：
+创建成功后：
 
-- 先判断已有模板是否可用。
-- 未安装模板需要先去 FlockHub 安装。
-- 没有合适模板时，按“自定义接入路由”选择 API、浏览器或 Workflow。
-
-## 设备列表与目标确认
-
-如果用户没有给出 `device_id`，先调用：
-
-```python
-device_manage(action="list")
-```
-
-从返回结果里确认目标设备、机房、工具集和 `device_id`。
-
-如果设备不存在，提醒用户前往「设备接入」页面添加设备；不要伪造 `device_id` 或直接调用业务工具。
-
-## 新建设备与页面回填
-
-用户在设备接入页面创建或配置设备时，目标是帮助页面得到清晰的表单信息。
-
-需要收集的信息：
-
-- 设备名称。
-- 已安装模板的 `storage_key`。
-- Base URL、Host、端口、协议、租户或区域等非敏感字段。
-- SSL 证书验证偏好：`verify_ssl=true/false`。
-- 需要填写哪些敏感字段，但不收集真实值。
-
-当信息足够，并且当前任务是在设备接入页面生成配置草稿时，在回复末尾输出 JSON 代码块供页面一键回填：
-
-```json
-{"storage_key":"<storage_key>","device_name":"<设备名称>","fields":{"base_url":"https://example.local"},"verify_ssl":false}
-```
-
-JSON 草稿规则：
-
-- 只包含非敏感字段。
-- 不写真实 API Key、Secret、Token、Cookie、密码。
-- 敏感字段留空或省略，并提示用户稍后在页面表单中填写。
-- 如果没有合适模板，不要输出设备配置 JSON，先进入自定义接入路径。
+- 记录并报告返回的 `device_id`，后续操作始终使用它。
+- 如果返回 `sensitive_fields_to_complete`，告诉用户前往该设备的配置表单填写这些字段，不要在聊天中索要真实值。
+- 用户确认敏感字段已填写后，调用 `device_manage(action="connectivity_test", device_id="<device_id>")`。
+- 同一轮会话已经拿到成功返回的 `device_id` 后，不要因重试或继续对话再次创建。
 
 ## 自定义接入路由
 
@@ -90,9 +56,9 @@ JSON 草稿规则：
 
 如果用户已经明确选择 API、浏览器或 Workflow，不要重复询问接入方式。只有无法判断时，才用一句话澄清。
 
-## 配置草稿与表单更新
+## 页面配置与更新
 
-如果用户要写入或更新设备配置，应根据当前页面上下文整理表单草稿，让设备接入页面负责落库。
+如果用户正在设备接入页面配置设备，帮助确认需要填写的表单字段，让页面负责保存。独立会话中的已有设备非敏感配置更新使用 `device_manage(action="update")`。
 
 可以整理的非敏感字段包括：
 
@@ -104,22 +70,21 @@ JSON 草稿规则：
 - `tenant`
 - `region`
 
-不要在 JSON 草稿或聊天中写入敏感字段：
+不要在聊天中索要或回显敏感字段：
 
 - `api_key`
 - `secret`
 - `password`
 - `token`
 - `cookie`
-- `auth_state`
 
 如果用户的目标是补填密钥、修改密码、刷新 Token 或重新登录，只说明应该在设备接入页面对应字段中处理。
 
-当需要给页面回填时，使用“新建设备与页面回填”中的 JSON 草稿格式。对于已有设备编辑，也只输出非敏感字段和 `verify_ssl`，并说明敏感字段在页面表单内填写。
+对于已有设备编辑，只处理非敏感字段和 `verify_ssl`，并说明敏感字段应在页面表单内填写。
 
 ## 连通性与冒烟验证
 
-配置在设备接入页面保存后，除非用户明确不需要，继续调用：
+设备通过 `create` 返回 `device_id`，或在设备接入页面保存后，除非用户明确不需要，继续调用：
 
 ```python
 device_manage(action="connectivity_test", device_id="<device_id>")
@@ -149,6 +114,5 @@ device_manage(action="connectivity_test", device_id="<device_id>")
 
 - 不要在聊天中索要、保存或复述真实密钥。
 - 不要把自定义设备误做成普通 API 服务。
-- 不要对未安装模板输出可回填 JSON。
 - 不要跳过 `device_manage(action="connectivity_test")` 就声称设备已可用。
 - 不要把卡片状态建立在普通业务工具结果上；卡片状态以标准连通性测试写入结果为准。

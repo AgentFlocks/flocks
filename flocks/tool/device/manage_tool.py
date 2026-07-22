@@ -1,16 +1,25 @@
 """Built-in device management tool for Rex.
 
-``device_manage`` is the single system-tool entrypoint for device discovery,
-non-secret config updates, and standard connectivity checks. Its
+``device_manage`` is the single system-tool entrypoint for device and template
+discovery, non-secret config updates, and standard connectivity checks. Its
 ``connectivity_test`` action reuses the existing device test path, so card state
 stays consistent with the ``POST /api/devices/{id}/test`` endpoint.
 """
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Optional
 
-from flocks.tool.device.intake import DeviceNotFoundError, test_device, update_device
-from flocks.tool.device.models import DeviceIntegrationUpdate
+from flocks.tool.device.intake import (
+    DeviceNotFoundError,
+    create_device,
+    test_device,
+    update_device,
+)
+from flocks.tool.device.models import (
+    DeviceIntegrationCreate,
+    DeviceIntegrationUpdate,
+)
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -28,6 +37,8 @@ log = Log.create(service="tool.device.manage_tool")
     name="device_manage",
     description=(
         "管理已接入安全设备。action=list 用于列出机房、设备、device_id 和工具集；"
+        "action=list_templates 用于列出已有设备模板、安装状态和配置字段；"
+        "action=create 用于从已安装模板创建设备实例，仅接受非敏感配置；"
         "action=update 用于写入/更新已有设备实例的非敏感配置字段；"
         "action=connectivity_test 用于测试指定设备连通性并更新设备卡片状态。"
     ),
@@ -37,9 +48,37 @@ log = Log.create(service="tool.device.manage_tool")
         ToolParameter(
             name="action",
             type=ParameterType.STRING,
-            description="操作类型：list 列出设备；update 更新已有设备非敏感配置；connectivity_test 测试设备连通性。",
+            description=(
+                "操作类型：list 列出设备实例；list_templates 列出已有设备模板；"
+                "create 从已安装模板创建设备实例；update 更新已有设备非敏感配置；"
+                "connectivity_test 测试设备连通性。"
+            ),
             required=True,
-            enum=["list", "update", "connectivity_test"],
+            enum=[
+                "list",
+                "list_templates",
+                "create",
+                "update",
+                "connectivity_test",
+            ],
+        ),
+        ToolParameter(
+            name="storage_key",
+            type=ParameterType.STRING,
+            description="已安装设备模板的 storage_key。action=create 时必填。",
+            required=False,
+        ),
+        ToolParameter(
+            name="device_name",
+            type=ParameterType.STRING,
+            description="新设备实例名称。action=create 时必填。",
+            required=False,
+        ),
+        ToolParameter(
+            name="group_id",
+            type=ParameterType.STRING,
+            description="目标机房 ID。action=create 时可选，默认使用默认机房。",
+            required=False,
         ),
         ToolParameter(
             name="device_id",
@@ -51,15 +90,16 @@ log = Log.create(service="tool.device.manage_tool")
             name="fields",
             type=ParameterType.OBJECT,
             description=(
-                "要更新的非敏感设备配置字段，例如 {\"base_url\":\"https://device.local\"}。"
-                "禁止传入 api_key、secret、password、token、cookie、auth_state 等敏感字段。"
+                "要创建或更新的非敏感设备配置字段，例如 "
+                "{\"base_url\":\"https://device.local\"}。"
+                "禁止传入 api_key、secret、password、token、cookie 等敏感字段。"
             ),
             required=False,
         ),
         ToolParameter(
             name="verify_ssl",
             type=ParameterType.BOOLEAN,
-            description="是否开启 SSL 证书验证。仅 action=update 时使用。",
+            description="是否开启 SSL 证书验证。action=create 或 update 时使用。",
             required=False,
         ),
     ],
@@ -67,21 +107,37 @@ log = Log.create(service="tool.device.manage_tool")
 async def device_manage(
     ctx: ToolContext,
     action: str,
+    storage_key: Optional[str] = None,
+    device_name: Optional[str] = None,
+    group_id: Optional[str] = None,
     device_id: Optional[str] = None,
     fields: Optional[dict[str, Any]] = None,
     verify_ssl: Optional[bool] = None,
 ) -> ToolResult:
-    """List devices, update non-secret config, or run a standard probe."""
+    """List devices/templates, update non-secret config, or run a probe."""
     normalized_action = (action or "").strip()
     if normalized_action == "list":
         return await _list_devices()
+    if normalized_action == "list_templates":
+        return await _list_device_templates()
+    if normalized_action == "create":
+        return await _create_device_from_template(
+            storage_key,
+            device_name,
+            group_id,
+            fields,
+            verify_ssl,
+        )
     if normalized_action == "update":
         return await _update_device_config(ctx, device_id, fields, verify_ssl)
     if normalized_action == "connectivity_test":
         return await _connectivity_test(ctx, device_id)
     return ToolResult(
         success=False,
-        error="未知 action，请使用 list、update 或 connectivity_test。",
+        error=(
+            "未知 action，请使用 list、list_templates、create、update 或 "
+            "connectivity_test。"
+        ),
     )
 
 
@@ -104,6 +160,131 @@ async def _list_devices() -> ToolResult:
         return ToolResult(success=False, error=f"查询设备列表失败: {exc}")
 
 
+async def _list_device_templates() -> ToolResult:
+    """Return the same device template index consumed by the access page."""
+    try:
+        from flocks.tool.device.plugin_index import list_device_templates
+
+        templates = await asyncio.to_thread(list_device_templates, refresh=False)
+        return ToolResult(
+            success=True,
+            output=[template.model_dump(mode="json") for template in templates],
+            metadata={
+                "template_count": len(templates),
+                "installed_count": sum(template.installed for template in templates),
+            },
+            title="设备模板列表",
+        )
+    except Exception as exc:
+        log.warn("tool.device_manage.list_templates_failed", {"error": str(exc)})
+        return ToolResult(success=False, error=f"查询设备模板失败: {exc}")
+
+
+async def _create_device_from_template(
+    storage_key: Optional[str],
+    device_name: Optional[str],
+    group_id: Optional[str],
+    fields: Optional[dict[str, Any]],
+    verify_ssl: Optional[bool],
+) -> ToolResult:
+    target_storage_key = (storage_key or "").strip()
+    name = (device_name or "").strip()
+    if not target_storage_key:
+        return ToolResult(success=False, error="action=create 时 storage_key 不能为空。")
+    if not name:
+        return ToolResult(success=False, error="action=create 时 device_name 不能为空。")
+
+    try:
+        from flocks.tool.device.plugin_index import list_device_templates
+
+        templates = await asyncio.to_thread(list_device_templates, refresh=False)
+        template = next(
+            (item for item in templates if item.storage_key == target_storage_key),
+            None,
+        )
+    except Exception as exc:
+        log.warn("tool.device_manage.create_template_lookup_failed", {"error": str(exc)})
+        return ToolResult(success=False, error=f"查询设备模板失败: {exc}")
+
+    if template is None:
+        return ToolResult(
+            success=False,
+            error=(
+                f"未找到 storage_key={target_storage_key!r} 的设备模板，"
+                "请先调用 device_manage(action='list_templates')。"
+            ),
+        )
+    if not template.installed:
+        return ToolResult(
+            success=False,
+            error=(
+                f"模板 {template.name!r} 尚未安装。请先在 FlockHub 安装 "
+                f"plugin_id={template.plugin_id!r}，然后重新查询模板。"
+            ),
+        )
+
+    schema = {
+        str(field.get("key") or "").strip(): field
+        for field in template.credential_schema
+        if str(field.get("key") or "").strip()
+    }
+    normalized_fields = {
+        str(key).strip(): "" if value is None else str(value)
+        for key, value in (fields or {}).items()
+    }
+    unknown = sorted(set(normalized_fields).difference(schema))
+    if unknown:
+        return ToolResult(
+            success=False,
+            error="模板未声明字段：" + ", ".join(f"`{key}`" for key in unknown),
+        )
+
+    sensitive_fields = sorted(
+        key
+        for key, field in schema.items()
+        if field.get("storage") == "secret"
+        or field.get("sensitive") is True
+        or field.get("input_type") == "password"
+        or key.lower() in _SENSITIVE_FIELD_KEYS
+    )
+    rejected = sorted(set(normalized_fields).intersection(sensitive_fields))
+    if rejected:
+        return ToolResult(
+            success=False,
+            error=(
+                "拒绝写入敏感字段："
+                + ", ".join(f"`{key}`" for key in rejected)
+                + "。请创建设备后在设备接入页面填写。"
+            ),
+        )
+
+    body = DeviceIntegrationCreate(
+        name=name,
+        storage_key=template.storage_key,
+        service_id=template.service_id,
+        group_id=(group_id or "").strip() or None,
+        verify_ssl=bool(verify_ssl) if verify_ssl is not None else False,
+        fields=normalized_fields,
+    )
+    try:
+        created = await create_device(body)
+    except ValueError as exc:
+        return ToolResult(success=False, error=f"创建设备失败: {exc}")
+    except Exception as exc:
+        log.warn("tool.device_manage.create_failed", {"error": str(exc)})
+        return ToolResult(success=False, error=f"创建设备失败: {exc}")
+
+    output = created.model_dump(mode="json")
+    output["device_id"] = created.id
+    output["sensitive_fields_to_complete"] = sensitive_fields
+    return ToolResult(
+        success=True,
+        output=output,
+        metadata={"device_id": created.id, "sensitive_fields": sensitive_fields},
+        title="设备已创建",
+    )
+
+
 _SENSITIVE_FIELD_KEYS = frozenset(
     {
         "api_key",
@@ -116,7 +297,6 @@ _SENSITIVE_FIELD_KEYS = frozenset(
         "access_token",
         "refresh_token",
         "cookie",
-        "auth_state",
     }
 )
 
@@ -144,7 +324,7 @@ def _normalize_update_fields(
         return {}, (
             "拒绝通过 device_manage(action='update') 写入敏感字段："
             + ", ".join(f"`{key}`" for key in sorted(rejected))
-            + "。请在设备接入页面的配置表单中填写密钥、密码、Token、Cookie 或 auth_state。"
+            + "。请在设备接入页面的配置表单中填写密钥、密码、Token 或 Cookie。"
         )
 
     return normalized, None
