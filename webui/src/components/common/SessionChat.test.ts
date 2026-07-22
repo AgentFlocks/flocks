@@ -2226,6 +2226,82 @@ describe('SessionChat intermediate process collapse', () => {
   });
 });
 
+describe('SessionChat optimistic message identity', () => {
+  it('uses the optimistic user message ID for the persisted prompt', async () => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '测试 question 工具{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    expect(addMessage).toHaveBeenCalledTimes(1);
+    expect(clientPostMock.mock.calls.filter(
+      ([url]) => url === '/api/session/sess-1/prompt_async',
+    )).toHaveLength(1);
+    const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+    const promptCall = clientPostMock.mock.calls.find(
+      ([url]) => url === '/api/session/sess-1/prompt_async',
+    );
+    const payload = promptCall?.[1] as { messageID?: string } | undefined;
+    expect(payload?.messageID).toBe(optimisticMessage.id);
+  });
+
+  it('uses the optimistic user message ID for slash commands', async () => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '/tools{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/command',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    expect(addMessage).toHaveBeenCalledTimes(1);
+    expect(clientPostMock.mock.calls.filter(
+      ([url]) => url === '/api/session/sess-1/command',
+    )).toHaveLength(1);
+    const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+    const commandCall = clientPostMock.mock.calls.find(
+      ([url]) => url === '/api/session/sess-1/command',
+    );
+    const payload = commandCall?.[1] as { messageID?: string } | undefined;
+    expect(payload?.messageID).toBe(optimisticMessage.id);
+  });
+});
+
 describe('SessionChat agent mentions', () => {
   const mentionAgents = [
     {

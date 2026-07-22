@@ -39,6 +39,7 @@ import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { copyText } from '@/utils/clipboard';
+import { createMessageId } from '@/utils/messageId';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -2472,12 +2473,12 @@ export default function SessionChat({
     setIsStreaming(true);
 
     const displayText = args ? `/${command} ${args}` : `/${command}`;
-    const tempId = `temp-${Date.now()}`;
+    const messageId = createMessageId();
     addMessage({
-      id: tempId,
+      id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: [{ id: `${tempId}-part`, type: 'text', text: displayText }],
+      parts: [{ id: `temp-${messageId}-part`, type: 'text', text: displayText }],
       timestamp: Date.now(),
     } as Message);
 
@@ -2486,6 +2487,7 @@ export default function SessionChat({
         command,
         arguments: args,
         agent: agentName,
+        messageID: messageId,
       });
       if (command === 'goal' && args.trim()) {
         goalHydrationVersionRef.current += 1;
@@ -2527,18 +2529,18 @@ export default function SessionChat({
     setIsStreaming(true);
     setPendingAgentName(effectiveAgent || 'rex');
 
-    const tempId = `temp-${Date.now()}`;
+    const messageId = createMessageId();
     const tempParts: MessagePart[] = [];
-    if (visibleText) tempParts.push({ id: `${tempId}-text`, type: 'text', text: visibleText });
+    if (visibleText) tempParts.push({ id: `temp-${messageId}-text`, type: 'text', text: visibleText });
     imageParts.forEach((img, i) => {
-      tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+      tempParts.push({ id: `temp-${messageId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
     });
 
     addMessage({
-      id: tempId,
+      id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text: visibleText }],
+      parts: tempParts.length > 0 ? tempParts : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
       timestamp: Date.now(),
       agent: effectiveAgent,
     } as Message);
@@ -2546,6 +2548,7 @@ export default function SessionChat({
     try {
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
+        messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
