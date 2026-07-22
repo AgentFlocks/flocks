@@ -600,6 +600,106 @@ class TestFeishuNativeCommands:
         assert update_mock.await_args.kwargs["status"] == "archived"
 
     @pytest.mark.asyncio
+    async def test_new_command_with_args_sends_args_to_new_session(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        append_mock = AsyncMock()
+        run_mock = AsyncMock()
+        monkeypatch.setattr(dispatcher, "_append_user_message", append_mock)
+        monkeypatch.setattr(dispatcher, "_run_agent", run_mock)
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="slack",
+                account_id="T1",
+                chat_id="C123",
+                chat_type=ChatType.CHANNEL,
+                thread_id="171.1",
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="slack",
+            account_id="T1",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            thread_id="171.1",
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="slack",
+            account_id="T1",
+            message_id="171.1",
+            sender_id="U123",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            text="<@UBOT> /new 叫我uuuu",
+            mention_text="/new 叫我uuuu",
+            thread_id="171.1",
+            mentioned=True,
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="claude-sonnet-4-20250514",
+                    model_pinned=True,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.create",
+            AsyncMock(return_value=SimpleNamespace(id="session_new", agent="rex")),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.update",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "flocks.channel.inbound.dispatcher._resolve_session_model",
+            AsyncMock(return_value={"providerID": "anthropic", "modelID": "claude"}),
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/new 叫我uuuu",
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert "已开始全新对话。" in delivered[0]
+        append_mock.assert_awaited_once()
+        assert append_mock.await_args.args[:3] == ("session_new", "叫我uuuu", msg)
+        assert append_mock.await_args.kwargs["agent"] == "rex"
+        run_mock.assert_awaited_once()
+        assert run_mock.await_args.args[0].session_id == "session_new"
+
+    @pytest.mark.asyncio
     async def test_reset_alias_matches_new_semantics(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.channel.inbound.session_binding import SessionBinding

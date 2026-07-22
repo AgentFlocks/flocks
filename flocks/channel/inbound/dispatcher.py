@@ -723,6 +723,8 @@ class InboundDispatcher:
                     msg=msg,
                     callbacks=callbacks,
                     scope_override=scope_override,
+                    channel_config=channel_config,
+                    initial_text=command_args or None,
                 )
                 return True
             if parsed.canonical_name == "compact":
@@ -864,6 +866,8 @@ class InboundDispatcher:
         msg: InboundMessage,
         callbacks: ChannelDeliveryCallbacks,
         scope_override: Optional[str],
+        channel_config: ChannelConfig,
+        initial_text: Optional[str] = None,
     ) -> None:
         from flocks.session.session import Session
         from flocks.channel.inbound.session_binding import (
@@ -931,6 +935,26 @@ class InboundDispatcher:
                 ]
             )
         )
+        if initial_text and initial_text.strip():
+            text = initial_text.strip()
+            resolved_model = await _resolve_session_model(new_binding.session_id)
+            await self._append_user_message(
+                new_binding.session_id,
+                text,
+                msg,
+                channel_config,
+                model=resolved_model,
+                agent=new_binding.agent_id,
+            )
+            if msg.channel_id == "feishu":
+                await self._run_agent_with_typing(
+                    new_binding,
+                    new_callbacks,
+                    msg,
+                    channel_config,
+                )
+            else:
+                await self._run_agent(new_binding, new_callbacks)
 
     @staticmethod
     async def _handle_compact_command(
