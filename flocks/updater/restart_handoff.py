@@ -591,13 +591,8 @@ def run(argv: Sequence[str] | None = None) -> int:
         f"frontend={args.frontend_host}:{args.frontend_port}"
     )
     legacy_daemon_pid = _legacy_supervisor_pid(args) if args.prepare_handover else None
-
-    if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
-        _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
-        _cleanup_dir(args.cleanup_dir)
-        return 1
-
     supervisor_stopped = False
+
     if args.prepare_handover:
         supervisor_stopped = _stop_supervisor_before_restart(
             daemon_pid=legacy_daemon_pid,
@@ -609,7 +604,13 @@ def run(argv: Sequence[str] | None = None) -> int:
             _record_handoff_log("legacy_handover_stop_timeout")
             _cleanup_dir(args.cleanup_dir)
             return 1
-    elif args.pro_wheel_path or args.pro_bundle_manifest_path:
+
+    if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
+        _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
+        _cleanup_dir(args.cleanup_dir)
+        return 1
+
+    if not args.prepare_handover and (args.pro_wheel_path or args.pro_bundle_manifest_path):
         supervisor_stopped = _stop_supervisor_before_restart(
             backend_port=args.backend_port,
             service_ports=(args.frontend_port,),
@@ -622,7 +623,7 @@ def run(argv: Sequence[str] | None = None) -> int:
             _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
             _cleanup_dir(args.cleanup_dir)
             return 1
-    elif not _ensure_backend_port_free(args.backend_port):
+    elif not args.prepare_handover and not _ensure_backend_port_free(args.backend_port):
         _record_handoff_log(f"backend_port_unavailable port={args.backend_port}")
         _cleanup_dir(args.cleanup_dir)
         return 1
