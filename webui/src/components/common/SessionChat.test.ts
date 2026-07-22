@@ -271,6 +271,83 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   } as Message;
 }
 
+type FetchedMessageFixture = {
+  info: {
+    id: string;
+    sessionID: string;
+    role: 'user' | 'assistant';
+    parentID?: string;
+    finish?: string | null;
+  };
+  parts: Message['parts'];
+};
+
+function makeFetchedMessage(
+  info: Omit<FetchedMessageFixture['info'], 'sessionID'>,
+  parts: Message['parts'] = [],
+): FetchedMessageFixture {
+  return {
+    info: { sessionID: 'sess-1', ...info },
+    parts,
+  };
+}
+
+function mockFallbackPolling({
+  localMessages,
+  fetchedMessages,
+  refetch,
+  status = { 'sess-1': { type: 'busy' } },
+}: {
+  localMessages: Message[];
+  fetchedMessages: FetchedMessageFixture[];
+  refetch: () => unknown;
+  status?: Record<string, { type: string }>;
+}) {
+  useSessionMessagesMock.mockReturnValue({
+    messages: localMessages,
+    loading: false,
+    refetch,
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+  clientGetMock.mockImplementation((url: string) => {
+    if (url === '/api/session/sess-1/message') {
+      return Promise.resolve({
+        data: {
+          items: fetchedMessages,
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+    }
+    if (url === '/api/session/status') {
+      return Promise.resolve({ data: status });
+    }
+    return Promise.resolve({ data: {} });
+  });
+}
+
+async function startFallbackPolling(onStreamingDone: () => void) {
+  render(React.createElement(SessionChat, {
+    sessionId: 'sess-1',
+    live: true,
+    onStreamingDone,
+  }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  clientGetMock.mockClear();
+  act(() => {
+    useSSEOptionsRef.current.onEvent({
+      type: 'session.status',
+      properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+    });
+  });
+}
+
 function mockStatefulSessionMessages() {
   useSessionMessagesMock.mockImplementation(() => {
     const [messages, setMessages] = React.useState<Message[]>([]);
@@ -3033,79 +3110,46 @@ describe('SessionChat fallback polling', () => {
     }
   });
 
-  it('refetches when polling finds a running question missing from local messages', async () => {
+  it('refetches when polling finds a pending question missing from local messages', async () => {
     vi.useFakeTimers();
-    const refetch = vi.fn();
+    let resolveRefetch: (() => void) | undefined;
+    const refetch = vi.fn(() => new Promise<void>((resolve) => {
+      resolveRefetch = resolve;
+    }));
     const onStreamingDone = vi.fn();
     try {
-      useSessionMessagesMock.mockReturnValue({
-        messages: [
-          makeMessage({
-            id: 'assistant-1',
-            parts: [],
-          }),
+      pendingQuestionsHookMock.pendingQuestions = {
+        'call-question-1': {
+          requestId: 'request-question-1',
+          questions: [{ question: 'Continue?' }],
+        },
+      };
+      mockFallbackPolling({
+        localMessages: [
+          makeMessage({ id: 'user-1', role: 'user' }),
+          makeMessage({ id: 'assistant-1', parentID: 'user-1' }),
         ],
-        loading: false,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'user-1', role: 'user' }),
+          makeFetchedMessage(
+            { id: 'assistant-1', role: 'assistant', parentID: 'user-1', finish: 'tool-calls' },
+            [{
+              id: 'question-tool-1',
+              messageID: 'assistant-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'question',
+              callID: 'call-question-1',
+              state: {
+                status: 'completed',
+                input: { questions: [{ question: 'Continue?' }] },
+              },
+            } as Message['parts'][number]],
+          ),
+        ],
         refetch,
-        addMessage: vi.fn(),
-        updateMessage: vi.fn(),
-        updateMessagePart: vi.fn(),
-        replaceMessageText: vi.fn(),
-        truncateAfterMessage: vi.fn(),
       });
-      clientGetMock.mockImplementation((url: string) => {
-        if (url === '/api/session/sess-1/message') {
-          return Promise.resolve({
-            data: {
-              items: [
-                {
-                  info: {
-                    id: 'assistant-1',
-                    sessionID: 'sess-1',
-                    role: 'assistant',
-                    finish: null,
-                  },
-                  parts: [
-                    {
-                      id: 'question-tool-1',
-                      messageID: 'assistant-1',
-                      sessionID: 'sess-1',
-                      type: 'tool',
-                      tool: 'question',
-                      callID: 'call-question-1',
-                      state: {
-                        status: 'running',
-                        input: { questions: [{ question: 'Continue?' }] },
-                      },
-                    },
-                  ],
-                },
-              ],
-              hasMore: false,
-              nextBefore: null,
-            },
-          });
-        }
-        if (url === '/api/session/status') {
-          return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
-        }
-        return Promise.resolve({ data: {} });
-      });
-
-      render(React.createElement(SessionChat, {
-        sessionId: 'sess-1',
-        live: true,
-        onStreamingDone,
-      }));
-      await act(async () => {
-        await Promise.resolve();
-      });
-      act(() => {
-        useSSEOptionsRef.current.onEvent({
-          type: 'session.status',
-          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
-        });
-      });
+      await startFallbackPolling(onStreamingDone);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
@@ -3113,76 +3157,173 @@ describe('SessionChat fallback polling', () => {
 
       expect(refetch).toHaveBeenCalledTimes(1);
       expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(clientGetMock.mock.calls.filter(
+        ([url]) => url === '/api/session/sess-1/message',
+      )).toHaveLength(2);
+
+      await act(async () => {
+        resolveRefetch?.();
+        await Promise.resolve();
+      });
     } finally {
       vi.useRealTimers();
     }
   });
 
-  it('does not finish streaming while fetched messages still contain a running tool', async () => {
+  it('ignores a missing running question from a historical turn while the session is busy', async () => {
     vi.useFakeTimers();
     const refetch = vi.fn();
     const onStreamingDone = vi.fn();
     try {
-      useSessionMessagesMock.mockReturnValue({
-        messages: [
-          makeMessage({
-            id: 'assistant-1',
-            finish: 'tool-calls',
-            parts: [
-              { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
-            ],
+      const localMessages = [
+        makeMessage({ id: 'old-user', role: 'user' }),
+        makeMessage({ id: 'old-assistant', parentID: 'old-user', finish: 'tool-calls' }),
+        makeMessage({ id: 'current-user', role: 'user' }),
+        makeMessage({ id: 'current-assistant', parentID: 'current-user' }),
+      ];
+      mockFallbackPolling({
+        localMessages,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'old-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'old-assistant',
+              role: 'assistant',
+              parentID: 'old-user',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'old-tool',
+              type: 'tool',
+              tool: 'question',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+          makeFetchedMessage({ id: 'current-user', role: 'user' }),
+          makeFetchedMessage({
+            id: 'current-assistant',
+            role: 'assistant',
+            parentID: 'current-user',
+            finish: null,
           }),
         ],
-        loading: false,
         refetch,
-        addMessage: vi.fn(),
-        updateMessage: vi.fn(),
-        updateMessagePart: vi.fn(),
-        replaceMessageText: vi.fn(),
-        truncateAfterMessage: vi.fn(),
       });
-      clientGetMock.mockImplementation((url: string) => {
-        if (url === '/api/session/sess-1/message') {
-          return Promise.resolve({
-            data: {
-              items: [
-                {
-                  info: {
-                    id: 'assistant-1',
-                    sessionID: 'sess-1',
-                    role: 'assistant',
-                    finish: 'tool-calls',
-                  },
-                  parts: [
-                    { id: 'tool-1', type: 'tool', state: { status: 'running' } },
-                  ],
-                },
-              ],
-              hasMore: false,
-              nextBefore: null,
-            },
-          });
-        }
-        if (url === '/api/session/status') {
-          return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
-        }
-        return Promise.resolve({ data: {} });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
       });
 
-      render(React.createElement(SessionChat, {
-        sessionId: 'sess-1',
-        live: true,
-        onStreamingDone,
-      }));
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
+        params: { page: true, limit: 50, include_archived: true },
+      });
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+      expect(refetch).not.toHaveBeenCalled();
+      expect(onStreamingDone).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes streaming when only a historical turn has a running question', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      const localMessages = [
+        makeMessage({ id: 'old-user', role: 'user' }),
+        makeMessage({ id: 'old-assistant', parentID: 'old-user', finish: 'tool-calls' }),
+        makeMessage({ id: 'current-user', role: 'user' }),
+        makeMessage({ id: 'current-assistant', parentID: 'current-user', finish: 'stop' }),
+      ];
+      mockFallbackPolling({
+        localMessages,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'old-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'old-assistant',
+              role: 'assistant',
+              parentID: 'old-user',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'old-tool',
+              type: 'tool',
+              tool: 'question',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+          makeFetchedMessage({ id: 'current-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'current-assistant',
+              role: 'assistant',
+              parentID: 'current-user',
+              finish: 'stop',
+            },
+            [{ id: 'current-text', type: 'text', text: 'done' } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+        status: {},
+      });
+      await startFallbackPolling(onStreamingDone);
+
       await act(async () => {
-        await Promise.resolve();
+        await vi.advanceTimersByTimeAsync(5_000);
       });
-      act(() => {
-        useSSEOptionsRef.current.onEvent({
-          type: 'session.status',
-          properties: { sessionID: 'sess-1', status: { type: 'busy' } },
-        });
+
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(onStreamingDone).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
       });
+      expect(refetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not refetch a missing non-question tool while it is still running', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      mockFallbackPolling({
+        localMessages: [
+          makeMessage({ id: 'user-1', role: 'user' }),
+          makeMessage({ id: 'assistant-1', parentID: 'user-1', finish: 'tool-calls' }),
+        ],
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'user-1', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'assistant-1',
+              role: 'assistant',
+              parentID: 'user-1',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'tool-1',
+              type: 'tool',
+              tool: 'bash',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
 
       await act(async () => {
         await vi.advanceTimersByTimeAsync(5_000);
@@ -3190,6 +3331,7 @@ describe('SessionChat fallback polling', () => {
 
       expect(refetch).not.toHaveBeenCalled();
       expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
       expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
         params: { page: true, limit: 50, include_archived: true },
       });
