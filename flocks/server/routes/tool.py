@@ -12,6 +12,7 @@ from flocks.server.auth import require_admin
 from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
+from flocks.permission.interactive import legacy_tool_permission_prompt_required
 from flocks.permission.next import DeniedError, PermissionNext
 from flocks.tool.registry import (
     ToolRegistry,
@@ -271,10 +272,12 @@ def _build_http_tool_context(
 
     if session_id:
         async def permission_callback(request) -> None:
+            if not legacy_tool_permission_prompt_required():
+                return
             metadata = dict(request.metadata or {})
             metadata.setdefault("messageID", effective_message_id)
             metadata.setdefault("route", "tool.execute")
-            await PermissionNext.ask(
+            reply = await PermissionNext.ask(
                 session_id=session_id,
                 permission=request.permission,
                 patterns=list(request.patterns or []),
@@ -283,6 +286,8 @@ def _build_http_tool_context(
                 always=list(request.always or []),
                 tool={"name": tool_name},
             )
+            if reply in {"deny", "reject", "never"}:
+                raise PermissionError(f"Permission denied: {request.permission}")
 
         return ToolContext(
             session_id=session_id,

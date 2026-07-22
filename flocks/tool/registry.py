@@ -553,6 +553,9 @@ class Tool:
             result = await execute_with_hooks(
                 {
                     "operation": "tool.execute",
+                    # Neutral execution provenance for extensions.  Flocks
+                    # does not use this value to decide policy outcomes.
+                    "execution_domain": "execution_runtime",
                     "tool": {
                         "name": self.info.name,
                         "input": raw_kwargs,

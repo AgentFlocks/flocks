@@ -33,7 +33,7 @@ describe('PermissionApprovalDialog', () => {
     const onReply = vi.fn();
     render(<PermissionApprovalDialog request={request} onReply={onReply} />);
 
-    await user.click(screen.getByRole('button', { name: '始终允许' }));
+    await user.click(screen.getByRole('button', { name: '始终允许此类命令' }));
     await user.click(screen.getByRole('button', { name: '拒绝' }));
 
     expect(onReply).toHaveBeenNthCalledWith(1, 'always');

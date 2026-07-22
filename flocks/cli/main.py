@@ -469,10 +469,11 @@ def tui(
         if _ensure_server_api_token():
             console.print("[dim]Initialized local API token for TUI access[/dim]")
 
-        # Set auto-approve environment variable for TUI mode
         if auto_approve:
             env["FLOCKS_AUTO_APPROVE"] = "true"
-            console.print("[dim]Auto-approve enabled: All permissions will be automatically granted[/dim]")
+            console.print(
+                "[dim]Auto-approve enabled: all permissions will be automatically granted[/dim]"
+            )
 
         server_process = subprocess.Popen(
             resolve_flocks_cli_command() + [

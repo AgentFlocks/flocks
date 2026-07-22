@@ -862,6 +862,7 @@ async def test_tool_lifecycle_forwards_context_extra_as_opaque_carrier() -> None
     )
 
     assert result.success is True
+    assert observed[0]["execution_domain"] == "execution_runtime"
     assert observed[0]["tool_context_extra"] == context_extra
     assert observed[0]["tool_context_extra"] is not context_extra
     assert observed[0]["tool_context_extra"]["opaque"] is context_extra["opaque"]

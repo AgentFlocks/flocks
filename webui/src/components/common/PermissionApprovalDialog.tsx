@@ -68,7 +68,7 @@ export function PermissionApprovalDialog({
           className="inline-flex items-center gap-1 rounded-lg border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-amber-200 dark:hover:bg-amber-900/40"
         >
           <ShieldCheck className="h-3.5 w-3.5" />
-          始终允许
+          始终允许此类命令
         </button>
         <button
           type="button"
