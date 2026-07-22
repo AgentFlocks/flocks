@@ -1190,12 +1190,10 @@ class StreamProcessor:
                 container_workdir=sandbox_ctx.container_workdir,
                 env=sandbox_ctx.docker.env,
             )
-            result["extra"] = {
-                "sandbox": {
-                    **sandbox.model_dump(exclude_none=True),
-                    "workspace_access": sandbox_ctx.workspace_access,
-                    "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
-                }
+            result["extra"]["sandbox"] = {
+                **sandbox.model_dump(exclude_none=True),
+                "workspace_access": sandbox_ctx.workspace_access,
+                "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
             }
             elevated_cfg = getattr(self._sandbox_config_cache, "elevated", None)
             if elevated_cfg and elevated_cfg.enabled:

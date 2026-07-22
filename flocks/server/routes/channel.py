@@ -4,6 +4,7 @@ Channel HTTP routes: webhook callbacks, health/status, and outbound send APIs.
 
 from __future__ import annotations
 
+import hashlib
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Request
@@ -12,9 +13,12 @@ from pydantic import BaseModel
 
 from flocks.channel.gateway.manager import default_manager
 from flocks.channel.registry import default_registry
+from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
+from flocks.server.routes.action_lifecycle import ActionLifecycleRouter
 from flocks.utils.log import Log
 
-router = APIRouter()
+router = ActionLifecycleRouter(lifecycle_domain="channel")
 log = Log.create(service="channel.routes")
 
 
@@ -159,8 +163,29 @@ async def channel_webhook(channel_id: str, request: Request):
 
     body = await request.body()
     headers = dict(request.headers)
+    evidence_provider = getattr(plugin, "webhook_authentication_evidence", None)
+    authentication = {"plugin_authenticated": False}
+    if callable(evidence_provider):
+        supplied = await evidence_provider(body, headers)
+        if isinstance(supplied, dict):
+            authentication = dict(supplied)
 
-    result = await plugin.handle_webhook(body, headers)
+    payload = {
+        "operation": "channel.webhook.receive",
+        "entry": "channel_webhook",
+        "channel_id": channel_id,
+        "authentication": authentication,
+        "body_sha256": hashlib.sha256(body).hexdigest(),
+    }
+    try:
+        result = await execute_with_hooks(
+            payload,
+            lambda: plugin.handle_webhook(body, headers),
+            before=HookPipeline.run_channel_webhook_before,
+            after=HookPipeline.run_channel_webhook_after,
+        )
+    except ExecutionStopped as exc:
+        raise HTTPException(status_code=403, detail="Channel webhook stopped by extension") from exc
     if isinstance(result, dict) and isinstance(result.get("status_code"), int):
         status_code = int(result["status_code"])
         payload = {k: v for k, v in result.items() if k != "status_code"}

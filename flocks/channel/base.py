@@ -238,6 +238,20 @@ class ChannelPlugin(ABC):
             f"Channel '{self.meta().id}' does not support webhook mode"
         )
 
+    async def webhook_authentication_evidence(
+        self,
+        body: bytes,
+        headers: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return opaque verification evidence before a public webhook effect.
+
+        The default reports no verification.  Flocks does not decide whether
+        this evidence is sufficient; extensions may apply their own policy at
+        the generic Channel webhook lifecycle boundary.
+        """
+        del body, headers
+        return {"plugin_authenticated": False}
+
     async def stop(self) -> None:
         """Stop listening and release resources."""
 

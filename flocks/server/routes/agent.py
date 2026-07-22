@@ -31,9 +31,10 @@ import flocks.agent.delegatable_settings as delegatable_settings
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo as AgentInfoModel, AgentModel as AgentModelConfig
 from flocks.agent.agent_factory import find_yaml_agent, read_yaml_agent, update_yaml_agent, delete_yaml_agent
+from flocks.server.routes.action_lifecycle import ActionLifecycleRouter
 from flocks.utils.log import Log
 
-router = APIRouter()
+router = ActionLifecycleRouter(lifecycle_domain="agent")
 log = Log.create(service="routes.agent")
 
 # Lazily-initialised lock to prevent concurrent read-modify-write on model_overrides.
