@@ -35,6 +35,36 @@ router = APIRouter()
 log = Log.create(service="routes.config")
 
 
+def _channel_allow_from_deletion_ids(config_data: Dict[str, Any]) -> set[str]:
+    """Return channel IDs whose PATCH explicitly removes allowFrom."""
+    channels = config_data.get("channels")
+    if not isinstance(channels, dict):
+        return set()
+
+    return {
+        channel_id
+        for channel_id, channel_cfg in channels.items()
+        if isinstance(channel_cfg, dict)
+        and "allowFrom" in channel_cfg
+        and channel_cfg.get("allowFrom") is None
+    }
+
+
+def _normalize_slack_dm_policy(config_data: Dict[str, Any]) -> None:
+    """Keep Slack allowFrom and dmPolicy aligned for DM access control."""
+    channels = config_data.get("channels")
+    if not isinstance(channels, dict):
+        return
+    slack = channels.get("slack")
+    if not isinstance(slack, dict) or "allowFrom" not in slack:
+        return
+    allow_from = slack.get("allowFrom")
+    if isinstance(allow_from, list) and len(allow_from) > 0:
+        slack["dmPolicy"] = "allowlist"
+    else:
+        slack["dmPolicy"] = "open"
+
+
 def _build_model_from_config(
     provider_id: str,
     model_id: str,
@@ -612,6 +642,9 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     flocks.json, so that plaintext secrets never land in that file.
     """
     try:
+        channel_allow_from_deletions = _channel_allow_from_deletion_ids(config_data)
+        _normalize_slack_dm_policy(config_data)
+
         # Extract channel sensitive fields into .secret.json before persisting
         if "channels" in config_data and isinstance(config_data.get("channels"), dict):
             from flocks.security.channel_secrets import extract_channel_secrets
@@ -621,7 +654,10 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         config = ConfigInfoModel.model_validate(config_data)
         
         # Update project config
-        await Config.update(config)
+        await Config.update(
+            config,
+            channel_allow_from_deletions=channel_allow_from_deletions,
+        )
         
         # Clear cache to reload
         Config.clear_cache()

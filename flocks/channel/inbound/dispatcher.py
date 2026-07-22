@@ -163,7 +163,10 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
       non-empty, but are otherwise unrestricted.
     """
     allow_from = config.allow_from
-    dm_policy = config.dm_policy or "open"
+    dm_policy = config.dm_policy
+    if msg.channel_id == "slack" and dm_policy is None and allow_from:
+        dm_policy = "allowlist"
+    dm_policy = dm_policy or "open"
 
     if msg.chat_type == ChatType.DIRECT:
         if dm_policy == "open":
@@ -720,6 +723,8 @@ class InboundDispatcher:
                     msg=msg,
                     callbacks=callbacks,
                     scope_override=scope_override,
+                    channel_config=channel_config,
+                    initial_text=command_args or None,
                 )
                 return True
             if parsed.canonical_name == "compact":
@@ -861,6 +866,8 @@ class InboundDispatcher:
         msg: InboundMessage,
         callbacks: ChannelDeliveryCallbacks,
         scope_override: Optional[str],
+        channel_config: ChannelConfig,
+        initial_text: Optional[str] = None,
     ) -> None:
         from flocks.session.session import Session
         from flocks.channel.inbound.session_binding import (
@@ -928,6 +935,26 @@ class InboundDispatcher:
                 ]
             )
         )
+        if initial_text and initial_text.strip():
+            text = initial_text.strip()
+            resolved_model = await _resolve_session_model(new_binding.session_id)
+            await self._append_user_message(
+                new_binding.session_id,
+                text,
+                msg,
+                channel_config,
+                model=resolved_model,
+                agent=new_binding.agent_id,
+            )
+            if msg.channel_id == "feishu":
+                await self._run_agent_with_typing(
+                    new_binding,
+                    new_callbacks,
+                    msg,
+                    channel_config,
+                )
+            else:
+                await self._run_agent(new_binding, new_callbacks)
 
     @staticmethod
     async def _handle_compact_command(
@@ -1531,7 +1558,7 @@ def _is_placeholder_text(text: str) -> bool:
     )
     if text in placeholders:
         return True
-    return text.startswith("[文件消息:")
+    return text.startswith("[文件消息:") or text.startswith("[图片消息:")
 
 
 # Best-effort eager registration at import time.  Channels that need
@@ -1560,6 +1587,12 @@ try:
 except Exception:  # pragma: no cover
     pass
 
+try:
+    from flocks.channel.builtin.slack import inbound_media as _slack_inbound_media
+    register_inbound_media_downloader("slack", _slack_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover
+    pass
+
 
 async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     """Dispatch inbound media download to the appropriate channel handler.
@@ -1582,4 +1615,7 @@ async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     if channel_id == "telegram":
         from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
         return await _telegram_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "slack":
+        from flocks.channel.builtin.slack import inbound_media as _slack_inbound_media
+        return await _slack_inbound_media.download_inbound_media(msg, config)
     return None
