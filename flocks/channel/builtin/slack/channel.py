@@ -145,7 +145,7 @@ class SlackChannel(ChannelPlugin):
     def capabilities(self) -> ChannelCapabilities:
         return ChannelCapabilities(
             chat_types=[ChatType.DIRECT, ChatType.GROUP, ChatType.CHANNEL],
-            media=False,
+            media=True,
             threads=True,
             reactions=False,
             edit=False,
@@ -371,14 +371,19 @@ class SlackChannel(ChannelPlugin):
             return
 
         @self._app.event("message")
-        async def handle_message_event(event, say):
-            await self._handle_slack_event(event)
+        async def handle_message_event(event, body, say):
+            await self._handle_slack_event(event, body=body)
 
         @self._app.event("app_mention")
-        async def handle_app_mention_event(event, say):
-            await self._handle_slack_event(event)
+        async def handle_app_mention_event(event, body, say):
+            await self._handle_slack_event(event, body=body)
 
-    async def _handle_slack_event(self, event: dict[str, Any]) -> None:
+    async def _handle_slack_event(
+        self,
+        event: dict[str, Any],
+        *,
+        body: Optional[dict[str, Any]] = None,
+    ) -> None:
         if not self._on_message:
             return
         inbound = build_inbound_message(
@@ -386,6 +391,7 @@ class SlackChannel(ChannelPlugin):
             bot_user_id=self._bot_user_id,
             config=self._config,
             known_thread_ids=set(self._known_thread_ids.keys()),
+            body=body,
         )
         if inbound is None:
             return

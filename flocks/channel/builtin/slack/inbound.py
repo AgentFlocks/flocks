@@ -146,18 +146,43 @@ def _extract_attachments_text(attachments: Any) -> str:
     return _join_parts(parts)
 
 
+def _file_display_name(item: dict[str, Any]) -> str:
+    return str(item.get("name") or item.get("title") or item.get("id") or "file")
+
+
 def _extract_files_text(files: Any) -> str:
     if not isinstance(files, list) or not files:
         return ""
 
     names = [
-        str(item.get("name") or item.get("title") or item.get("id") or "file")
+        _file_display_name(item)
         for item in files
         if isinstance(item, dict)
     ]
-    if names:
-        return "[Slack files: " + ", ".join(names) + "]"
-    return ""
+    if not names:
+        return ""
+
+    first = next((item for item in files if isinstance(item, dict)), {})
+    mimetype = str(first.get("mimetype") or "").lower()
+    label = "图片消息" if mimetype.startswith("image/") else "文件消息"
+    return f"[{label}: " + ", ".join(names) + "]"
+
+
+def _first_file_media(files: Any) -> tuple[Optional[str], Optional[str]]:
+    if not isinstance(files, list):
+        return None, None
+    for item in files:
+        if not isinstance(item, dict):
+            continue
+        url = str(item.get("url_private_download") or item.get("url_private") or "").strip()
+        file_id = str(item.get("id") or "").strip()
+        if not url and file_id:
+            url = f"slack://file/{file_id}"
+        if not url:
+            continue
+        mimetype = str(item.get("mimetype") or item.get("filetype") or "").strip() or None
+        return url, mimetype
+    return None, None
 
 
 def extract_text(event: dict[str, Any]) -> str:
@@ -202,6 +227,28 @@ def extract_text(event: dict[str, Any]) -> str:
     return ""
 
 
+def _extract_body_team_id(body: Optional[dict[str, Any]]) -> str:
+    if not isinstance(body, dict):
+        return ""
+    for key in ("team_id", "team"):
+        value = body.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if isinstance(value, dict):
+            nested = str(value.get("id") or "").strip()
+            if nested:
+                return nested
+    authorizations = body.get("authorizations")
+    if isinstance(authorizations, list):
+        for authorization in authorizations:
+            if not isinstance(authorization, dict):
+                continue
+            team_id = str(authorization.get("team_id") or "").strip()
+            if team_id:
+                return team_id
+    return ""
+
+
 def is_own_or_ignored_bot_message(
     event: dict[str, Any],
     *,
@@ -229,6 +276,7 @@ def build_inbound_message(
     bot_user_id: Optional[str],
     config: dict[str, Any],
     known_thread_ids: set[str],
+    body: Optional[dict[str, Any]] = None,
 ) -> Optional[InboundMessage]:
     """Convert a Slack message/app_mention event into a Flocks InboundMessage."""
     subtype = event.get("subtype")
@@ -261,7 +309,12 @@ def build_inbound_message(
         # as channel surfaces while preserving group-trigger behavior in the
         # dispatcher (all non-DIRECT chats use the same trigger policy).
         chat_type = ChatType.CHANNEL
-    account_id = str(event.get("team") or event.get("team_id") or "default")
+    account_id = str(
+        event.get("team")
+        or event.get("team_id")
+        or _extract_body_team_id(body)
+        or "default"
+    )
     thread_ts = str(event.get("thread_ts") or "")
     is_thread_reply = bool(thread_ts and thread_ts != ts)
     mentioned = bool(bot_user_id and f"<@{bot_user_id}>" in text)
@@ -284,6 +337,7 @@ def build_inbound_message(
             mention_text = text
 
     sender_name = str(event.get("username") or event.get("user_name") or "") or None
+    media_url, media_mime = _first_file_media(event.get("files"))
 
     return InboundMessage(
         channel_id="slack",
@@ -294,6 +348,8 @@ def build_inbound_message(
         chat_id=channel_id,
         chat_type=chat_type,
         text=text,
+        media_url=media_url,
+        media_mime=media_mime,
         reply_to_id=str(event.get("parent_user_id") or "") or None,
         thread_id=thread_ts or None,
         mentioned=mentioned,

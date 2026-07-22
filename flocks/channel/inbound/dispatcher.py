@@ -1534,7 +1534,7 @@ def _is_placeholder_text(text: str) -> bool:
     )
     if text in placeholders:
         return True
-    return text.startswith("[文件消息:")
+    return text.startswith("[文件消息:") or text.startswith("[图片消息:")
 
 
 # Best-effort eager registration at import time.  Channels that need
@@ -1563,6 +1563,12 @@ try:
 except Exception:  # pragma: no cover
     pass
 
+try:
+    from flocks.channel.builtin.slack import inbound_media as _slack_inbound_media
+    register_inbound_media_downloader("slack", _slack_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover
+    pass
+
 
 async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     """Dispatch inbound media download to the appropriate channel handler.
@@ -1585,4 +1591,7 @@ async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     if channel_id == "telegram":
         from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
         return await _telegram_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "slack":
+        from flocks.channel.builtin.slack import inbound_media as _slack_inbound_media
+        return await _slack_inbound_media.download_inbound_media(msg, config)
     return None

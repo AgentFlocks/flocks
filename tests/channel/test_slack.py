@@ -8,6 +8,7 @@ import pytest
 
 from flocks.channel.base import ChatType, NonRetryableChannelError, OutboundContext
 import flocks.channel.builtin.slack.channel as slack_mod
+import flocks.channel.builtin.slack.inbound_media as slack_media_mod
 from flocks.channel.builtin.slack.channel import SlackChannel
 from flocks.channel.builtin.slack.format import markdown_to_slack_mrkdwn
 from flocks.channel.builtin.slack.inbound import build_inbound_message, slack_thread_cache_key
@@ -19,7 +20,7 @@ def test_plugin_exports_slack_channel():
     assert plugin.meta().id == "slack"
     assert plugin.meta().label == "Slack"
     assert "sl" in plugin.meta().aliases
-    assert plugin.capabilities().media is False
+    assert plugin.capabilities().media is True
     assert plugin.capabilities().rich_text is True
     assert plugin.capabilities().self_managed_connection is True
 
@@ -34,6 +35,7 @@ def test_slack_manifest_matches_socket_mode_setup_needs():
         "channels:history",
         "channels:read",
         "chat:write",
+        "files:read",
         "groups:history",
         "groups:read",
         "im:history",
@@ -280,7 +282,98 @@ def test_build_inbound_appends_attachments_and_file_names():
     assert "review alert" in msg.text
     assert "Alert context" in msg.text
     assert "Severity: high" in msg.text
-    assert "[Slack files: screenshot.png]" in msg.text
+    assert "[文件消息: screenshot.png]" in msg.text
+
+
+def test_build_inbound_image_file_sets_media_url_and_mime():
+    msg = build_inbound_message(
+        {
+            "channel": "D123",
+            "channel_type": "im",
+            "user": "U123",
+            "ts": "171.25",
+            "team": "T1",
+            "files": [
+                {
+                    "id": "F123",
+                    "name": "screenshot.png",
+                    "mimetype": "image/png",
+                    "url_private_download": "https://files.slack.com/files-pri/T1-F123/download/screenshot.png",
+                },
+            ],
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert msg is not None
+    assert msg.text == "[图片消息: screenshot.png]"
+    assert msg.media_url == "https://files.slack.com/files-pri/T1-F123/download/screenshot.png"
+    assert msg.media_mime == "image/png"
+
+
+def test_build_inbound_file_stub_uses_slack_file_uri():
+    msg = build_inbound_message(
+        {
+            "channel": "C123",
+            "channel_type": "channel",
+            "user": "U123",
+            "ts": "171.26",
+            "text": "<@UBOT> inspect",
+            "files": [
+                {
+                    "id": "F_STUB",
+                    "name": "stub.pdf",
+                    "mimetype": "application/pdf",
+                    "file_access": "check_file_info",
+                },
+            ],
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert msg is not None
+    assert msg.media_url == "slack://file/F_STUB"
+    assert msg.media_mime == "application/pdf"
+
+
+def test_build_inbound_uses_socket_mode_body_team_id_for_stable_dm_sessions():
+    from flocks.channel.inbound.session_binding import _resolve_session_key
+
+    event_without_team = {
+        "channel": "D123",
+        "channel_type": "im",
+        "user": "U123",
+        "ts": "171.27",
+        "text": "hello",
+    }
+    event_with_team = {
+        **event_without_team,
+        "ts": "171.28",
+        "team": "T1",
+    }
+
+    first = build_inbound_message(
+        event_without_team,
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+        body={"team_id": "T1"},
+    )
+    second = build_inbound_message(
+        event_with_team,
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert first is not None
+    assert second is not None
+    assert first.account_id == second.account_id == "T1"
+    assert _resolve_session_key(first) == _resolve_session_key(second)
 
 
 def test_build_inbound_group_dm_uses_group_chat_type():
@@ -707,3 +800,107 @@ async def test_handle_slack_event_dispatches_inbound_message():
 
     assert len(dispatched) == 1
     assert dispatched[0].mention_text == "ping"
+
+
+@pytest.mark.asyncio
+async def test_handle_slack_event_passes_socket_body_to_inbound_parser():
+    plugin = SlackChannel()
+    plugin._config = {}
+    plugin._bot_user_id = "UBOT"
+    dispatched = []
+
+    async def on_message(msg):
+        dispatched.append(msg)
+
+    plugin._on_message = on_message
+
+    await plugin._handle_slack_event(
+        {
+            "channel": "D123",
+            "channel_type": "im",
+            "user": "U123",
+            "ts": "171.29",
+            "text": "hello",
+        },
+        body={"authorizations": [{"team_id": "T_BODY"}]},
+    )
+
+    assert len(dispatched) == 1
+    assert dispatched[0].account_id == "T_BODY"
+
+
+@pytest.mark.asyncio
+async def test_slack_inbound_media_downloads_private_file_with_bot_token(monkeypatch, tmp_path):
+    monkeypatch.setenv("HOME", str(tmp_path))
+    captured = {}
+
+    class FakeResponse:
+        headers = {
+            "content-type": "image/png",
+            "content-disposition": 'attachment; filename="from-slack.png"',
+        }
+
+        def raise_for_status(self):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def aiter_bytes(self, size):
+            yield b"png-bytes"
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        def stream(self, method, url, headers):
+            captured["method"] = method
+            captured["url"] = url
+            captured["headers"] = headers
+            return FakeResponse()
+
+    monkeypatch.setattr(slack_media_mod.httpx, "AsyncClient", FakeClient)
+
+    msg = build_inbound_message(
+        {
+            "channel": "D123",
+            "channel_type": "im",
+            "user": "U123",
+            "ts": "171.30",
+            "team": "T1",
+            "files": [
+                {
+                    "id": "F123",
+                    "name": "screenshot.png",
+                    "mimetype": "image/png",
+                    "url_private_download": "https://files.slack.com/files-pri/T1-F123/download/screenshot.png",
+                }
+            ],
+        },
+        bot_user_id="UBOT",
+        config={},
+        known_thread_ids=set(),
+    )
+
+    assert msg is not None
+    media = await slack_media_mod.download_inbound_media(
+        msg,
+        {"botToken": "xoxb-test"},
+    )
+
+    assert media is not None
+    assert captured["headers"] == {"Authorization": "Bearer xoxb-test"}
+    assert captured["url"].startswith("https://files.slack.com/")
+    assert media.filename == "screenshot.png"
+    assert media.mime == "image/png"
+    assert media.url.startswith("file://")
+    assert media.source["channel"] == "slack"

@@ -1634,6 +1634,34 @@ class TestDownloadChannelMediaRouting:
         assert captured["msg"].channel_id == "telegram"
 
     @pytest.mark.asyncio
+    async def test_dispatch_to_slack_downloader(self, monkeypatch):
+        from flocks.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_slack(msg, config):
+            captured["msg"] = msg
+            captured["config"] = config
+            return SimpleNamespace(
+                filename="slack.png", mime="image/png",
+                url="file:///tmp/slack.png", source={"channel": "slack"},
+            )
+
+        import flocks.channel.builtin.slack.inbound_media as slack_inb
+        monkeypatch.setattr(slack_inb, "download_inbound_media", fake_slack)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="slack", account_id="T1", message_id="m",
+                sender_id="u", media_url="https://files.slack.com/x",
+            ),
+            {"botToken": "xoxb-test"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "slack"
+        assert captured["config"] == {"botToken": "xoxb-test"}
+
+    @pytest.mark.asyncio
     async def test_unknown_channel_returns_none(self):
         from flocks.channel.inbound import dispatcher as dispatch_mod
 
@@ -1655,6 +1683,7 @@ class TestIsPlaceholderText:
     def test_recognises_channel_placeholders(self):
         from flocks.channel.inbound.dispatcher import _is_placeholder_text
         assert _is_placeholder_text("[图片消息]") is True
+        assert _is_placeholder_text("[图片消息: screenshot.png]") is True
         assert _is_placeholder_text("[文件消息]") is True
         assert _is_placeholder_text("[文件消息: report.pdf]") is True
         assert _is_placeholder_text("[Image]") is True
