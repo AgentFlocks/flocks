@@ -24,6 +24,7 @@ from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
 from flocks.browser import helpers
+from flocks.browser.admin import ensure_daemon
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
 
@@ -31,6 +32,7 @@ SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
 USERNAME_SECRET_ID = "sangfor_edr_username"
 PASSWORD_SECRET_ID = "sangfor_edr_password"
+TOKEN_SECRET_ID = "sangfor_edr_token"
 DEFAULT_AUTH_STATE_PATH = "~/.flocks/browser/sangfor-edr/auth-state.json"
 DEFAULT_LOGIN_PATH = "/ui/login.php"
 DEFAULT_INDEX_PATH = "/ui/#/index"
@@ -245,6 +247,7 @@ def _saved_auto_login_status(params: dict[str, Any]) -> dict[str, Any]:
         "has_base_url": has_base_url,
         "has_saved_username": has_username,
         "has_saved_password": has_password,
+        "has_saved_token": bool(secrets.get(TOKEN_SECRET_ID)),
         "can_auto_refresh": has_base_url and has_username and has_password,
     }
 
@@ -326,6 +329,106 @@ def _open_page(url: str) -> None:
     helpers.wait_for_load(timeout=15)
 
 
+def _ensure_browser_daemon() -> None:
+    """Start the browser daemon or replace a stale/incompatible instance."""
+    ensure_daemon(wait=15.0, _open_inspect=False)
+
+
+def _browser_daemon_result(exc: Exception, auth_state_path: Path) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_daemon_not_ready",
+        "reason": "browser_daemon_not_ready",
+        "error": str(exc),
+        "next_action": "run `flocks browser --setup`, then `flocks browser --doctor`, then retry",
+        "auth_state_path": str(auth_state_path),
+    }
+
+
+def _browser_page_open_result(exc: Exception, cfg: RuntimeConfig) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_login_page_open_failed",
+        "reason": "browser_login_page_open_failed",
+        "error": str(exc),
+        "next_action": "verify base_url and EDR connectivity, then retry",
+        "login_url": _login_url(cfg),
+        "auth_state_path": str(cfg.auth_state_path),
+    }
+
+
+def _manual_login_result(cfg: RuntimeConfig, reason: str, error: str = "") -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "manual_login_required",
+        "reason": reason,
+        "error": error,
+        "login_url": _login_url(cfg),
+        "auth_state_path": str(cfg.auth_state_path),
+        "browser_left_open": True,
+        "next_action": "complete login in the opened browser, then call `complete_manual_login`",
+    }
+
+
+def _install_login_token_capture() -> bool:
+    script = r"""(() => {
+  const key = "__flocks_sangfor_edr_token";
+  sessionStorage.removeItem(key);
+  if (window.__flocksSangforEdrTokenHooked) return true;
+  window.__flocksSangforEdrTokenHooked = true;
+  const capture = (text) => {
+    try {
+      const token = JSON.parse(text)?.data?.token;
+      if (token !== undefined && token !== null && String(token)) sessionStorage.setItem(key, String(token));
+    } catch (_) {}
+  };
+  const originalFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const response = await originalFetch.apply(this, args);
+    const url = String(args[0]?.url || args[0] || "");
+    if (url.includes("/launch_login.php")) {
+      try { capture(await response.clone().text()); } catch (_) {}
+    }
+    return response;
+  };
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__flocksEdrLogin = String(url || "").includes("/launch_login.php");
+    return originalOpen.call(this, method, url, ...rest);
+  };
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this.__flocksEdrLogin) this.addEventListener("load", () => {
+      try { capture(this.responseType && this.responseType !== "text" ? JSON.stringify(this.response) : this.responseText); }
+      catch (_) {}
+    }, {once: true});
+    return originalSend.apply(this, args);
+  };
+  return true;
+})()"""
+    try:
+        return bool(helpers.js(script))
+    except Exception:
+        return False
+
+
+def _save_captured_login_token(timeout: float = 2.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            token = str(helpers.js("sessionStorage.getItem('__flocks_sangfor_edr_token') || ''") or "").strip()
+            if token:
+                _get_secret_manager().set(TOKEN_SECRET_ID, token)
+                return True
+        except Exception:
+            return False
+        time.sleep(0.1)
+    return False
+
+
 def _page_text() -> str:
     try:
         return str(helpers.js("document.body ? document.body.innerText : ''") or "")
@@ -393,6 +496,13 @@ def _validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
             "reason": "auth_state_not_found",
             "auth_state_path": str(cfg.auth_state_path),
         }
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        result = _browser_daemon_result(exc, cfg.auth_state_path)
+        result["reason"] = "auth_state_load_failed_browser_daemon_not_ready"
+        return result
+
     try:
         loaded = helpers.load_state(cfg.auth_state_path, url=_index_url(cfg))
         helpers.wait_for_load(timeout=15)
@@ -770,6 +880,15 @@ def _wait_for_login_success(cfg: RuntimeConfig) -> bool:
     return False
 
 
+def _manual_login_reason() -> str:
+    text = _page_text().lower()
+    if any(marker in text for marker in ("动态口令", "短信验证码", "二次认证", "mfa", "otp")):
+        return "mfa_required"
+    if any(marker in text for marker in ("ukey", "usb key", "证书登录")):
+        return "certificate_login_required"
+    return "login_form_not_ready"
+
+
 def _missing_login_inputs(cfg: RuntimeConfig) -> list[str]:
     missing = []
     if not cfg.username:
@@ -781,33 +900,36 @@ def _missing_login_inputs(cfg: RuntimeConfig) -> list[str]:
 
 def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
     missing = _missing_login_inputs(cfg)
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        return _browser_daemon_result(exc, cfg.auth_state_path)
+    try:
+        _open_page(_login_url(cfg))
+    except Exception as exc:
+        return _browser_page_open_result(exc, cfg)
+    _install_login_token_capture()
     if missing:
-        return {
-            "success": False,
-            "status": "manual_login_required",
-            "reason": "missing_cdp_login_credentials",
-            "missing": missing,
-            "auth_state_path": str(cfg.auth_state_path),
-        }
-
-    _open_page(_login_url(cfg))
-    form_state = _wait_for_login_form_ready(cfg)
+        result = _manual_login_result(cfg, "missing_cdp_login_credentials")
+        result["missing"] = missing
+        return result
+    try:
+        form_state = _wait_for_login_form_ready(cfg)
+    except Exception as exc:
+        return _manual_login_result(cfg, _manual_login_reason(), str(exc))
     last_error = ""
     for attempt in range(1, cfg.max_captcha_retry + 1):
         try:
+            _install_login_token_capture()
             code = captcha_code.strip()
             if not code:
                 if not cfg.auto_ocr_code:
-                    return {
-                        "success": False,
-                        "status": "manual_login_required",
-                        "reason": "captcha_code_required",
-                        "auth_state_path": str(cfg.auth_state_path),
-                    }
+                    return _manual_login_result(cfg, "captcha_code_required")
                 code = _ocr_verify_code(_captcha_image_from_browser(cfg))
 
             filled = _set_login_form_values(cfg, code)
             if _wait_for_login_success(cfg):
+                token_saved = _save_captured_login_token()
                 saved = _save_auth_state(cfg)
                 return {
                     "success": True,
@@ -817,6 +939,7 @@ def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "
                     "form": form_state,
                     "filled": {key: bool(value) for key, value in filled.items()},
                     "saved": saved,
+                    "token_saved": token_saved,
                 }
             last_error = "login_success_check_timeout"
         except Exception as exc:
@@ -830,13 +953,39 @@ def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "
         except Exception:
             pass
 
-    return {
-        "success": False,
-        "status": "manual_login_required",
-        "reason": "browser_cdp_login_failed",
-        "last_error": last_error,
-        "auth_state_path": str(cfg.auth_state_path),
-    }
+    return _manual_login_result(cfg, "browser_cdp_login_failed", last_error)
+
+
+def _complete_manual_login(cfg: RuntimeConfig) -> dict[str, Any]:
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        return _browser_daemon_result(exc, cfg.auth_state_path)
+    try:
+        info = helpers.page_info()
+        if urlparse(str(info.get("url") or "")).netloc != urlparse(cfg.base_url).netloc:
+            _open_page(_index_url(cfg))
+        if not _is_logged_in(cfg):
+            return _manual_login_result(cfg, "manual_login_not_completed")
+        token_saved = _save_captured_login_token()
+        return {
+            "success": True,
+            "valid": True,
+            "status": "manual_login_captured_auth_state",
+            "auth_state_path": str(cfg.auth_state_path),
+            "saved": _save_auth_state(cfg),
+            "token_saved": token_saved,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "valid": False,
+            "status": "manual_login_capture_failed",
+            "reason": "manual_login_capture_failed",
+            "error": str(exc),
+            "auth_state_path": str(cfg.auth_state_path),
+            "next_action": "keep the browser open and retry `complete_manual_login`",
+        }
 
 
 # ── Tool actions ─────────────────────────────────────────────────────────────
@@ -881,12 +1030,24 @@ async def handle(ctx: ToolContext) -> ToolResult:
 
         if action == "validate_auth_state":
             validation = _validate_auth_state(cfg)
-            return ToolResult(success=bool(validation.get("valid")), output=validation)
+            return ToolResult(
+                success=bool(validation.get("valid")),
+                output=validation,
+                error=None if validation.get("valid") else str(validation.get("reason") or "auth_state_invalid"),
+            )
+
+        if action == "complete_manual_login":
+            result = _complete_manual_login(cfg)
+            return ToolResult(
+                success=bool(result.get("success")),
+                output=result,
+                error=None if result.get("success") else result.get("reason"),
+            )
 
         if action not in {"ensure_auth_state", "refresh_auth_state"}:
             return ToolResult(
                 success=False,
-                error="Unsupported Sangfor EDR auth action. Use status_auth_state, ensure_auth_state, validate_auth_state, or refresh_auth_state.",
+                error="Unsupported Sangfor EDR auth action. Use status_auth_state, ensure_auth_state, validate_auth_state, refresh_auth_state, or complete_manual_login.",
             )
 
         force_refresh = action == "refresh_auth_state" or _coerce_bool(params.get("force_refresh"), default=False)

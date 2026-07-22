@@ -50,6 +50,62 @@ _context_usage_cache_lock = asyncio.Lock()
 # extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
+_UPLOAD_EXT_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+}
+
+
+def _session_uploads_dir(session_id: str) -> Path:
+    """Return the application-owned upload directory for one session."""
+    from flocks.config.config import Config
+
+    uploads_root = (Config.get_data_path() / "uploads").resolve()
+    target = (uploads_root / session_id).resolve()
+    if target == uploads_root or not target.is_relative_to(uploads_root):
+        raise ValueError(f"Invalid session ID for upload path: {session_id}")
+    return target
+
+
+def _materialize_data_url_part(
+    session_id: str,
+    data_url: str,
+    mime_hint: str,
+    filename_hint: Optional[str],
+    *,
+    failure_event: str = "session.prompt_queue.materialize_failed",
+) -> str:
+    """Persist a data URL under the application data directory."""
+    try:
+        import base64
+        from flocks.utils.id import Identifier
+
+        _header, _sep, encoded = data_url.partition(",")
+        if not encoded:
+            return data_url
+        raw_bytes = base64.b64decode(encoded)
+        uploads_root = _session_uploads_dir(session_id)
+        uploads_root.mkdir(parents=True, exist_ok=True)
+
+        ext = _UPLOAD_EXT_BY_MIME.get(mime_hint, "")
+        if not ext and filename_hint:
+            _, _, tail = filename_hint.rpartition(".")
+            if tail.lower() in _UPLOAD_SAFE_EXTS:
+                ext = "." + tail.lower()
+        target = uploads_root / f"{Identifier.create('part')}{ext}"
+        target.write_bytes(raw_bytes)
+        return target.resolve().as_uri()
+    except Exception as exc:
+        log.warn(failure_event, {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
+        return data_url
 
 
 def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[str, int]:
@@ -222,6 +278,7 @@ class SessionListItem(BaseModel):
 def _session_to_response(
     session: SessionModel,
     effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
 ) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
@@ -229,7 +286,7 @@ def _session_to_response(
     current_user = get_current_auth_user()
     can_write = SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_shared(session)
+    is_shared = SessionPolicy.is_shared(session, shared_project_ids)
     from flocks.project.project import Project
 
     if effective_project_id is None:
@@ -271,6 +328,7 @@ def _session_to_response(
 def _session_to_list_item(
     session: SessionModel,
     effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
 ) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
@@ -300,16 +358,17 @@ def _session_to_list_item(
         model_pinned=session.model_pinned,
         canWrite=SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
-        isShared=SessionPolicy.is_shared(session),
+        isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
 
 
 async def _session_to_response_with_goal(
     session: SessionModel,
     effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
 ) -> SessionResponse:
     """Convert SessionModel to SessionResponse and attach persisted goal state."""
-    response = _session_to_response(session, effective_project_id)
+    response = _session_to_response(session, effective_project_id, shared_project_ids)
     try:
         from flocks.session.goal import GoalManager
 
@@ -539,7 +598,8 @@ async def list_sessions(
     list_started_at = time.perf_counter()
     all_sessions = await Session.list_all_unfiltered()
     list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
-    registered_project_ids = Project.registered_project_ids(current_user.id)
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
     
     filtered = []
     effective_project_ids: Dict[str, str] = {}
@@ -548,7 +608,11 @@ async def list_sessions(
     skip_remaining = offset or 0
     
     for session in all_sessions:
-        if not SessionPolicy.can_read(session, current_user):
+        if not SessionPolicy.can_read(
+            session,
+            current_user,
+            shared_project_ids=shared_project_ids,
+        ):
             continue
         if _is_hidden_from_session_manager(session):
             continue
@@ -556,7 +620,7 @@ async def list_sessions(
             continue
         effective_project_id = (
             session.project_id
-            if session.project_id in registered_project_ids
+            if session.project_id in visible_project_ids
             else DEFAULT_PROJECT_ID
         )
         if projectID is not None and effective_project_id != projectID:
@@ -589,7 +653,7 @@ async def list_sessions(
 
     if view == "list":
         response = [
-            _session_to_list_item(s, effective_project_ids[s.id])
+            _session_to_list_item(s, effective_project_ids[s.id], shared_project_ids)
             for s in filtered
         ]
         log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
@@ -607,7 +671,11 @@ async def list_sessions(
         return response
 
     response = [
-        await _session_to_response_with_goal(s, effective_project_ids[s.id])
+        await _session_to_response_with_goal(
+            s,
+            effective_project_ids[s.id],
+            shared_project_ids,
+        )
         for s in filtered
     ]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
@@ -901,17 +969,14 @@ async def delete_session(sessionID: str, request: Request) -> bool:
     Project.invalidate_session_stats()
 
     # Best-effort cleanup of any image/file uploads materialised for this
-    # session via ``_materialize_data_url_to_disk`` (see prompt_async).
+    # session via ``_materialize_data_url_part`` (see prompt_async).
     # The session DB row is gone, so the on-disk bytes are now orphaned —
-    # remove them to keep the workspace tidy. We deliberately swallow any
+    # remove them to keep application data tidy. We deliberately swallow any
     # filesystem errors: deletion of the session record is the contract,
     # the upload cleanup is incidental.
     try:
         import shutil
-        from flocks.workspace.manager import WorkspaceManager
-
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
+        uploads_root = _session_uploads_dir(sessionID)
         if uploads_root.exists() and uploads_root.is_dir():
             shutil.rmtree(uploads_root, ignore_errors=True)
             log.info("session.uploads.cleaned", {
@@ -2890,51 +2955,6 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     from flocks.session.message import FilePart
 
-    def _materialize_data_url_to_disk(
-        data_url: str, mime_hint: str, filename_hint: Optional[str]
-    ) -> str:
-        """Decode a ``data:`` URL to ``~/.flocks/workspace/uploads/<session>/...``.
-
-        Returns a ``file://`` URL pointing at the persisted file. On failure
-        the original ``data:`` URL is returned unchanged (older code paths
-        still cope with that, just with the now-known token-cost penalty).
-        """
-        try:
-            import base64
-            from flocks.workspace.manager import WorkspaceManager
-
-            header, _, encoded = data_url.partition(",")
-            if not encoded:
-                return data_url
-            raw_bytes = base64.b64decode(encoded)
-
-            ws = WorkspaceManager.get_instance()
-            # Use resolve_workspace_path to guard against path traversal if
-            # sessionID were ever user-controlled (e.g. ../../../tmp/x).
-            uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
-            uploads_root.mkdir(parents=True, exist_ok=True)
-
-            ext_map = {
-                "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
-                "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
-                "application/pdf": ".pdf",
-            }
-            ext = ext_map.get(mime_hint, "")
-            if not ext and filename_hint:
-                _, _, tail = filename_hint.rpartition(".")
-                if tail.lower() in _UPLOAD_SAFE_EXTS:
-                    ext = "." + tail.lower()
-            unique_name = f"{Identifier.create('part')}{ext}"
-            target = uploads_root / unique_name
-            target.write_bytes(raw_bytes)
-            return target.resolve().as_uri()
-        except Exception as exc:
-            log.warn("session.message.file_part.materialize_failed", {
-                "sessionID": sessionID,
-                "error": str(exc),
-            })
-            return data_url
-
     for raw_part in request.parts or []:
         part_type = raw_part.get("type")
         if part_type == "text":
@@ -2950,7 +2970,13 @@ async def _process_session_message(
                 continue
             # Materialize ``data:`` URLs to disk before persisting the part.
             if url.startswith("data:"):
-                url = _materialize_data_url_to_disk(url, mime, raw_part.get("filename"))
+                url = _materialize_data_url_part(
+                    sessionID,
+                    url,
+                    mime,
+                    raw_part.get("filename"),
+                    failure_event="session.message.file_part.materialize_failed",
+                )
             file_part_id = raw_part.get("id") or Identifier.create("part")
             file_part = FilePart(
                 id=file_part_id,
@@ -3402,50 +3428,6 @@ def _materialize_queued_parts(session_id: str, parts: List[Dict[str, Any]]) -> L
             next_part["url"] = _materialize_data_url_part(session_id, url, mime, filename)
         prepared.append(next_part)
     return prepared
-
-
-def _materialize_data_url_part(
-    session_id: str,
-    data_url: str,
-    mime_hint: str,
-    filename_hint: Optional[str],
-) -> str:
-    try:
-        import base64
-        from flocks.workspace.manager import WorkspaceManager
-        from flocks.utils.id import Identifier
-
-        _header, _sep, encoded = data_url.partition(",")
-        if not encoded:
-            return data_url
-        raw_bytes = base64.b64decode(encoded)
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{session_id}")
-        uploads_root.mkdir(parents=True, exist_ok=True)
-
-        ext_map = {
-            "image/png": ".png",
-            "image/jpeg": ".jpg",
-            "image/jpg": ".jpg",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-            "image/bmp": ".bmp",
-            "application/pdf": ".pdf",
-        }
-        ext = ext_map.get(mime_hint, "")
-        if not ext and filename_hint:
-            _, _, tail = filename_hint.rpartition(".")
-            if tail.lower() in _UPLOAD_SAFE_EXTS:
-                ext = "." + tail.lower()
-        target = uploads_root / f"{Identifier.create('part')}{ext}"
-        target.write_bytes(raw_bytes)
-        return target.resolve().as_uri()
-    except Exception as exc:
-        log.warn("session.prompt_queue.materialize_failed", {
-            "sessionID": session_id,
-            "error": str(exc),
-        })
-        return data_url
 
 
 def _event_from_queued_prompt(item, working_directory: str):

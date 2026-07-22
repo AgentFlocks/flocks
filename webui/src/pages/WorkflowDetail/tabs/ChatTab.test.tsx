@@ -7,11 +7,13 @@ import type { ComponentProps } from 'react';
 import ChatTab from './ChatTab';
 import { workflowAPI } from '@/api/workflow';
 import { setStoredSessions } from '../sessionStorage';
+import { __resetChatModelOptionsResourcesForTesting } from '@/components/common/ChatPromptSelectors';
 
 const {
   capturedSessionChatProps,
   capturedSessionOptions,
   mockClientGet,
+  mockClientPatch,
   mockCreate,
   mockCreateAndSend,
   mockReset,
@@ -24,6 +26,7 @@ const {
   capturedSessionChatProps: [] as any[],
   capturedSessionOptions: [] as any[],
   mockClientGet: vi.fn(),
+  mockClientPatch: vi.fn(),
   mockCreate: vi.fn(),
   mockCreateAndSend: vi.fn(),
   mockReset: vi.fn(),
@@ -53,7 +56,7 @@ vi.mock('@/hooks/useSessionChat', () => ({
 }));
 
 vi.mock('@/api/client', () => ({
-  default: { get: mockClientGet },
+  default: { get: mockClientGet, patch: mockClientPatch },
 }));
 
 vi.mock('@/api/workflow', () => ({
@@ -266,10 +269,12 @@ function renderChatTab(props: Partial<ComponentProps<typeof ChatTab>> = {}) {
 describe('WorkflowDetail ChatTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    __resetChatModelOptionsResourcesForTesting();
     capturedSessionChatProps.length = 0;
     capturedSessionOptions.length = 0;
     localStorage.clear();
     mockClientGet.mockResolvedValue({ data: {} });
+    mockClientPatch.mockResolvedValue({ data: {} });
     mockCreateAndSend.mockResolvedValue(undefined);
     mockUseAgents.mockReturnValue({
       agents: [
@@ -563,6 +568,152 @@ describe('WorkflowDetail ChatTab', () => {
     expect(screen.getAllByText(/Rex/i).length).toBeGreaterThan(0);
     expect(screen.queryByRole('button', { name: /Rex/i })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Explore/i })).not.toBeInTheDocument();
+  });
+
+  it('hydrates the workflow workbench model picker from the active session pinned model', async () => {
+    setStoredSessions(workflow.id, [
+      { id: 'workflow-session-kimi', title: 'Existing', createdAt: Date.now() },
+    ]);
+    mockUseProviders.mockReturnValue({
+      providers: [{ id: 'moonshot', name: 'Moonshot', configured: true }],
+      connectedIds: ['moonshot'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mockModelListDefinitions.mockResolvedValue({
+      data: {
+        models: [{
+          provider_id: 'moonshot',
+          id: 'kimi-k2.6',
+          name: 'kimi-k2.6',
+          model_type: 'chat',
+          capabilities: { supports_vision: false },
+          limits: { context_window: 128000 },
+        }],
+      },
+    });
+    mockClientGet.mockResolvedValue({
+      data: {
+        id: 'workflow-session-kimi',
+        provider: 'moonshot',
+        model: 'kimi-k2.6',
+        model_pinned: true,
+      },
+    });
+
+    renderChatTab();
+
+    await waitFor(() => {
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.sessionId).toBe('workflow-session-kimi');
+      expect(latestProps.model).toEqual({ providerID: 'moonshot', modelID: 'kimi-k2.6' });
+    });
+    expect(await screen.findByText('kimi-k2.6')).toBeInTheDocument();
+  });
+
+  it('falls back consistently when the active session pinned model is no longer available', async () => {
+    setStoredSessions(workflow.id, [
+      { id: 'workflow-session-stale-model', title: 'Existing', createdAt: Date.now() },
+    ]);
+    mockUseProviders.mockReturnValue({
+      providers: [{ id: 'minimax', name: 'MiniMax', configured: true }],
+      connectedIds: ['minimax'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mockModelListDefinitions.mockResolvedValue({
+      data: {
+        models: [{
+          provider_id: 'minimax',
+          id: 'minimax-m3',
+          name: 'minimax-m3',
+          model_type: 'chat',
+          capabilities: { supports_vision: false },
+          limits: { context_window: 64000 },
+        }],
+      },
+    });
+    mockClientGet.mockResolvedValue({
+      data: {
+        id: 'workflow-session-stale-model',
+        provider: 'moonshot',
+        model: 'kimi-k2.6',
+        model_pinned: true,
+      },
+    });
+
+    renderChatTab();
+
+    await waitFor(() => {
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.sessionId).toBe('workflow-session-stale-model');
+      expect(latestProps.model).toEqual({ providerID: 'minimax', modelID: 'minimax-m3' });
+    });
+    expect(await screen.findByText('minimax-m3')).toBeInTheDocument();
+  });
+
+  it('pins model picker changes back to the active workflow chat session', async () => {
+    const user = userEvent.setup();
+    setStoredSessions(workflow.id, [
+      { id: 'workflow-session-model-switch', title: 'Existing', createdAt: Date.now() },
+    ]);
+    mockUseProviders.mockReturnValue({
+      providers: [
+        { id: 'minimax', name: 'MiniMax', configured: true },
+        { id: 'moonshot', name: 'Moonshot', configured: true },
+      ],
+      connectedIds: ['minimax', 'moonshot'],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    mockModelListDefinitions.mockResolvedValue({
+      data: {
+        models: [
+          {
+            provider_id: 'moonshot',
+            id: 'kimi-k2.6',
+            name: 'kimi-k2.6',
+            model_type: 'chat',
+            capabilities: { supports_vision: false },
+            limits: { context_window: 128000 },
+          },
+          {
+            provider_id: 'minimax',
+            id: 'minimax-m3',
+            name: 'minimax-m3',
+            model_type: 'chat',
+            capabilities: { supports_vision: false },
+            limits: { context_window: 64000 },
+          },
+        ],
+      },
+    });
+    mockClientGet.mockResolvedValue({
+      data: {
+        id: 'workflow-session-model-switch',
+        provider: 'moonshot',
+        model: 'kimi-k2.6',
+        model_pinned: true,
+      },
+    });
+
+    renderChatTab();
+
+    await user.click(await screen.findByRole('button', { name: /kimi-k2\.6/i }));
+    await user.click(await screen.findByRole('button', { name: /minimax-m3/i }));
+
+    expect(mockClientPatch).toHaveBeenCalledWith('/api/session/workflow-session-model-switch', {
+      provider: 'minimax',
+      model: 'minimax-m3',
+      model_pinned: true,
+    });
+    await waitFor(() => {
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.model).toEqual({ providerID: 'minimax', modelID: 'minimax-m3' });
+    });
   });
 
   it('keeps the workflow composer compact enough for guide shortcuts above it', () => {

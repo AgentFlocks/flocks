@@ -20,6 +20,14 @@
     "workflows": "工作流",
     "normal": "正常",
     "abnormal": "异常",
+    "loadErrorHint": {
+      "authExpired": "登录状态已失效，请重新登录。",
+      "forbidden": "当前账号无权加载首页统计数据。",
+      "notFound": "当前后端版本不提供统计接口。",
+      "partial": "部分首页统计数据加载失败，当前数值可能不完整。",
+      "network": "首页统计数据加载失败，请检查 API 路由、Host 或代理配置。",
+      "unavailable": "首页统计数据加载失败。"
+    },
     "checking": "检测中...",
     "activeScheduled": "启动计划任务",
     "agentCount": "Agent 数量",

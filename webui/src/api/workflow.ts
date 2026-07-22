@@ -310,9 +310,23 @@ export interface WorkflowService {
   publishedAt: number;
   containerName?: string;
   driver?: 'local' | 'docker';
+  port?: number;
 }
 
 export type WorkflowServiceDriver = 'local' | 'docker';
+
+export function resolveWorkflowServicePort(
+  service?: Pick<WorkflowService, 'port' | 'serviceUrl'> | null,
+): number | undefined {
+  if (service?.port && service.port >= 1 && service.port <= 65535) return service.port;
+  if (!service?.serviceUrl) return undefined;
+  try {
+    const port = Number(new URL(service.serviceUrl).port);
+    return port >= 1 && port <= 65535 ? port : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface WorkflowIntegrationConfig {
   version: number;
@@ -495,7 +509,7 @@ export const workflowAPI = {
   export: (id: string) =>
     client.get<WorkflowJSON>(`/api/workflow/${id}/export`),
 
-  publish: (id: string, data?: { driver?: WorkflowServiceDriver }) =>
+  publish: (id: string, data?: { driver?: WorkflowServiceDriver; port?: number }) =>
     client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 600000 }),
 
   unpublish: (id: string) =>

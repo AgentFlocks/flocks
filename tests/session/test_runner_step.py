@@ -2148,7 +2148,7 @@ async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypat
 def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
     runner = _make_runner("ses_runner_interleaved_capability_key")
     runner.provider_id = "deepseek"
-    runner.model_id = "deepseek-reasoner"
+    runner.model_id = "deepseek-v4-pro"
 
     monkeypatch.setattr(SessionRunner, "_model_supports_vision", lambda self: False)
     monkeypatch.setattr(
@@ -2296,6 +2296,8 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_connection_error")
     update_mock = AsyncMock(return_value=None)
+    warn_log = MagicMock()
+    error_log = MagicMock()
     call_count = 0
 
     async def fake_call_llm(*_args, **_kwargs):
@@ -2318,6 +2320,8 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     monkeypatch.setattr(runner_mod.Message, "update", update_mock)
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
     monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(runner_mod.log, "warn", warn_log)
+    monkeypatch.setattr(runner_mod.log, "error", error_log)
 
     result = await runner._process_step([last_user], last_user)
 
@@ -2330,6 +2334,21 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     assert final_update["finish"] == "error"
     assert final_update["error"]["data"]["message"] == "Connection error."
     assert final_update["error"]["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    retry_logs = [
+        call for call in warn_log.call_args_list
+        if call.args and call.args[0] == "runner.step.retry"
+    ]
+    max_retry_logs = [
+        call for call in error_log.call_args_list
+        if call.args and call.args[0] == "runner.step.max_retries_exceeded"
+    ]
+    assert len(retry_logs) == 3
+    assert len(max_retry_logs) == 1
+    assert not any(
+        call.args and call.args[0] == "runner.step.error"
+        for call in [*warn_log.call_args_list, *error_log.call_args_list]
+    )
 
 
 @pytest.mark.asyncio

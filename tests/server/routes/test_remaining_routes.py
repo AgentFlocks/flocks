@@ -509,6 +509,43 @@ class TestConfigRoutes:
         )
 
     @pytest.mark.asyncio
+    async def test_tool_failure_preference_defaults_on_and_updates_only_its_section(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        from flocks.config.config import Config
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        Config._global_config = None
+        Config._cached_config = None
+        ConfigWriter._write_raw({"theme": "dark"})
+
+        resp = await client.get("/api/config/tool-failure")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": True}
+
+        resp = await client.patch(
+            "/api/config/tool-failure",
+            json={"disableOnRepeatedFailure": False},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": False}
+        assert ConfigWriter._read_raw() == {
+            "theme": "dark",
+            "toolFailure": {"disableOnRepeatedFailure": False},
+        }
+
+        resp = await client.get("/api/config/tool-failure")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": False}
+
+        resp = await client.patch("/api/config/tool-failure", json={})
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+    @pytest.mark.asyncio
     async def test_ui_display_defaults_and_updates(
         self,
         client: AsyncClient,

@@ -25,7 +25,7 @@ async def test_notifications_require_browser_login(client: AsyncClient):
 async def test_active_notifications_and_dismiss_forever(client: AsyncClient):
     response = await client.get(
         "/api/notifications/active",
-        params={"locale": "zh-CN", "current_version": "2026.04.27"},
+        params={"locale": "zh-CN"},
     )
     assert response.status_code == 200, response.text
     items = response.json()
@@ -37,14 +37,14 @@ async def test_active_notifications_and_dismiss_forever(client: AsyncClient):
 
     response = await client.get(
         "/api/notifications/active",
-        params={"locale": "zh-CN", "current_version": "2026.04.27"},
+        params={"locale": "zh-CN"},
     )
     assert response.status_code == 200, response.text
     assert response.json() == []
 
     response = await client.get(
         "/api/notifications/active",
-        params={"locale": "zh-CN", "current_version": "2026.05.01"},
+        params={"locale": "zh-CN"},
     )
     assert response.status_code == 200, response.text
     assert response.json() == []
