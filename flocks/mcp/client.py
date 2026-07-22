@@ -781,10 +781,15 @@ class McpClient:
         command = _ClientCommand(action=action, payload=payload, response=response)
         await self._command_queue.put(command)
 
-        done, _ = await asyncio.wait(
-            {response, owner_task},
-            return_when=asyncio.FIRST_COMPLETED,
-        )
+        try:
+            done, _ = await asyncio.wait(
+                {response, owner_task},
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+        except asyncio.CancelledError:
+            response.cancel()
+            raise
+
         if response in done:
             return await response
 
