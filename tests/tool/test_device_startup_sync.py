@@ -15,6 +15,7 @@ These tests pin the behavioural contract:
 """
 from __future__ import annotations
 
+import sqlite3
 from pathlib import Path
 from typing import List
 
@@ -22,6 +23,33 @@ import pytest
 import yaml
 
 from flocks.tool.device import startup
+
+
+@pytest.mark.asyncio
+async def test_heal_stale_service_ids_reads_named_sqlite_rows(tmp_path, monkeypatch):
+    db_path = tmp_path / "devices.db"
+    with sqlite3.connect(db_path) as db:
+        db.execute(
+            "CREATE TABLE device_integrations (id TEXT, storage_key TEXT, service_id TEXT)"
+        )
+        db.execute(
+            "INSERT INTO device_integrations VALUES (?, ?, ?)",
+            ("dev-1", "onesec_api_v2_8_2", "stale_service_id"),
+        )
+
+    monkeypatch.setattr(startup.Storage, "get_db_path", staticmethod(lambda: db_path))
+    monkeypatch.setattr(
+        "flocks.tool.device.store.storage_key_to_service_id",
+        lambda storage_key: "onesec_api" if storage_key == "onesec_api_v2_8_2" else storage_key,
+    )
+
+    await startup._heal_stale_service_ids()
+
+    with sqlite3.connect(db_path) as db:
+        row = db.execute(
+            "SELECT service_id FROM device_integrations WHERE id = ?", ("dev-1",)
+        ).fetchone()
+    assert row == ("onesec_api",)
 
 
 @pytest.fixture

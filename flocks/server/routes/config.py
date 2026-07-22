@@ -171,6 +171,17 @@ class UIConfigUpdateRequest(BaseModel):
     display_name: Optional[str] = Field(None, alias="displayName")
 
 
+class ToolFailurePreference(BaseModel):
+    """Repeated tool-failure preference exposed to the WebUI."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        ...,
+        alias="disableOnRepeatedFailure",
+    )
+
+
 DEFAULT_UI_DISPLAY_NAME = "Flocks"
 DEFAULT_UI_PRO_DISPLAY_NAME = "Flocks Pro"
 FAVICON_MAX_BYTES = 512 * 1024
@@ -430,6 +441,12 @@ def _persist_ui_section(data: Dict[str, Any], ui_section: Dict[str, Any]) -> Non
     ConfigWriter._write_raw(data)
 
 
+def _effective_tool_failure_preference(config: ConfigInfoModel) -> bool:
+    if config.tool_failure is None:
+        return True
+    return config.tool_failure.disable_on_repeated_failure
+
+
 @router.get("/ui-display", response_model=UIDisplayResponse, summary="Get public UI display name")
 async def get_ui_display() -> UIDisplayResponse:
     """Return only the effective WebUI display name for public screens."""
@@ -549,6 +566,47 @@ async def reset_ui_favicon() -> UIDisplayResponse:
     ui_section.pop("faviconPath", None)
     _persist_ui_section(data, ui_section)
     return await get_ui_display()
+
+
+@router.get(
+    "/tool-failure",
+    response_model=ToolFailurePreference,
+    summary="Get repeated tool-failure preference",
+)
+async def get_tool_failure_preference() -> ToolFailurePreference:
+    """Return whether repeated identical failures automatically disable tools."""
+    try:
+        config = await Config.get()
+        return ToolFailurePreference(
+            disableOnRepeatedFailure=_effective_tool_failure_preference(config)
+        )
+    except Exception as e:
+        log.error("config.tool_failure.get.error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch(
+    "/tool-failure",
+    response_model=ToolFailurePreference,
+    summary="Update repeated tool-failure preference",
+)
+async def update_tool_failure_preference(
+    request: ToolFailurePreference,
+) -> ToolFailurePreference:
+    """Update only the repeated-failure switch in flocks.json."""
+    try:
+        data = ConfigWriter._read_raw()
+        existing = data.get("toolFailure", data.get("tool_failure", {}))
+        section = dict(existing) if isinstance(existing, dict) else {}
+        section.pop("disable_on_repeated_failure", None)
+        section["disableOnRepeatedFailure"] = request.disable_on_repeated_failure
+        data.pop("tool_failure", None)
+        data["toolFailure"] = section
+        ConfigWriter._write_raw(data)
+        return await get_tool_failure_preference()
+    except Exception as e:
+        log.error("config.tool_failure.update.error", {"error": str(e)})
+        raise HTTPException(status_code=400, detail=str(e))
 
 
 @router.get("", summary="Get configuration")

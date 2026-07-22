@@ -4,11 +4,12 @@ import userEvent from '@testing-library/user-event';
 import { MemoryRouter } from 'react-router-dom';
 import Home from './index';
 
-const { createMock, navigateMock, toastErrorMock, useAuthMock } = vi.hoisted(() => ({
+const { createMock, navigateMock, toastErrorMock, useAuthMock, useStatsMock } = vi.hoisted(() => ({
   createMock: vi.fn(),
   navigateMock: vi.fn(),
   toastErrorMock: vi.fn(),
   useAuthMock: vi.fn(),
+  useStatsMock: vi.fn(),
 }));
 
 vi.mock('react-router-dom', async () => {
@@ -26,11 +27,7 @@ vi.mock('@/api/session', () => ({
 }));
 
 vi.mock('@/hooks/useStats', () => ({
-  useStats: () => ({
-    stats: null,
-    loading: false,
-    error: null,
-  }),
+  useStats: () => useStatsMock(),
 }));
 
 vi.mock('@/components/common/Toast', () => ({
@@ -54,6 +51,11 @@ describe('Home create WebUI contract page entry', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     createMock.mockResolvedValue({ id: 'session-webui-contract-1' });
+    useStatsMock.mockReturnValue({
+      stats: null,
+      loading: false,
+      error: null,
+    });
     useAuthMock.mockReturnValue({
       user: {
         id: 'user-1',
@@ -76,7 +78,9 @@ describe('Home create WebUI contract page entry', () => {
     await user.click(screen.getByRole('button', { name: 'createWebUIContractPage' }));
 
     await waitFor(() => {
-      expect(createMock).toHaveBeenCalledWith({ title: 'createWebUIContractPageSessionTitle' });
+      expect(createMock).toHaveBeenCalledWith({
+        title: 'createWebUIContractPageSessionTitle',
+      });
     });
 
     expect(navigateMock).toHaveBeenCalledWith(
@@ -103,5 +107,22 @@ describe('Home create WebUI contract page entry', () => {
 
     expect(screen.queryByRole('button', { name: 'createWebUIContractPage' })).not.toBeInTheDocument();
     expect(createMock).not.toHaveBeenCalled();
+  });
+
+  it('shows the concrete stats load failure instead of a backend-not-running hint', () => {
+    useStatsMock.mockReturnValue({
+      stats: null,
+      loading: false,
+      error: new Error('authExpired'),
+    });
+
+    render(
+      <MemoryRouter>
+        <Home />
+      </MemoryRouter>,
+    );
+
+    expect(screen.getByText('stats.loadErrorHint.authExpired')).toBeInTheDocument();
+    expect(screen.queryByText(/backend is running/i)).not.toBeInTheDocument();
   });
 });

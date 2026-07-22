@@ -106,4 +106,19 @@ describe('useStats', () => {
     expect(result.current.error).toBeInstanceOf(Error);
     expect(result.current.error?.message).toBe('backend down');
   });
+
+  it('maps degraded system stats to the existing Error return shape', async () => {
+    getSystemStatsMock.mockResolvedValue(makeStats({
+      system: { status: 'warning', message: 'partial' },
+    }));
+
+    const { result } = renderHook(() => useStats());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.error).toBeInstanceOf(Error);
+    expect(result.current.error?.message).toBe('partial');
+  });
 });

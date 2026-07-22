@@ -23,7 +23,7 @@ import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
-import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
+import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
@@ -34,6 +34,7 @@ import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
@@ -821,7 +822,7 @@ export function getMessageBubbleClassName({
       ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
       : 'w-full max-w-full';
 
-    return `${widthClass} px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
       isUser
         ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
         : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
@@ -832,7 +833,7 @@ export function getMessageBubbleClassName({
     ? (isEditing ? 'w-full' : 'w-auto')
     : 'w-full';
 
-  return `${widthClass} px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
+  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
     isUser
       ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
       : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
@@ -1079,83 +1080,6 @@ export function getUserAvatarSpacerClassName(_compact: boolean): string {
   return 'h-0';
 }
 
-function areToolStatesRenderEqual(
-  prevState?: ToolState,
-  nextState?: ToolState,
-): boolean {
-  if (prevState === nextState) return true;
-  if (
-    prevState?.status !== nextState?.status ||
-    prevState?.title !== nextState?.title ||
-    prevState?.error !== nextState?.error ||
-    prevState?.time?.start !== nextState?.time?.start ||
-    prevState?.time?.end !== nextState?.time?.end
-  ) {
-    return false;
-  }
-
-  return (
-    JSON.stringify(prevState?.input) === JSON.stringify(nextState?.input)
-    && JSON.stringify(prevState?.output) === JSON.stringify(nextState?.output)
-    && JSON.stringify(prevState?.metadata) === JSON.stringify(nextState?.metadata)
-  );
-}
-
-function areLegacyToolPayloadsRenderEqual(
-  prevPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
-  nextPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
-): boolean {
-  if (prevPayload === nextPayload) return true;
-  return JSON.stringify(prevPayload) === JSON.stringify(nextPayload);
-}
-
-export function areChatMessagePartsRenderEqual(
-  prevParts?: MessagePart[],
-  nextParts?: MessagePart[],
-): boolean {
-  if (prevParts === nextParts) return true;
-  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
-
-  const total = prevParts?.length ?? 0;
-  for (let i = 0; i < total; i++) {
-    const prevPart = prevParts?.[i];
-    const nextPart = nextParts?.[i];
-
-    if (prevPart === nextPart) continue;
-    if (!prevPart || !nextPart) return false;
-
-    if (
-      prevPart.id !== nextPart.id ||
-      prevPart.type !== nextPart.type ||
-      prevPart.text !== nextPart.text ||
-      prevPart.thinking !== nextPart.thinking ||
-      prevPart.synthetic !== nextPart.synthetic ||
-      prevPart.ignored !== nextPart.ignored ||
-      prevPart.tool !== nextPart.tool ||
-      prevPart.callID !== nextPart.callID ||
-      prevPart.mime !== nextPart.mime ||
-      prevPart.filename !== nextPart.filename ||
-      prevPart.url !== nextPart.url ||
-      prevPart.image?.url !== nextPart.image?.url ||
-      prevPart.image?.alt !== nextPart.image?.alt
-    ) {
-      return false;
-    }
-
-    if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
-      return false;
-    }
-    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) {
-      return false;
-    }
-    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 // ============================================================================
 // Main component
 // ============================================================================
@@ -1163,6 +1087,7 @@ export function areChatMessagePartsRenderEqual(
 const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
+const PENDING_QUESTION_RECONCILE_MS = 2_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
 const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
@@ -2198,6 +2123,19 @@ export default function SessionChat({
     checkStatus();
   }, [sessionId, loading, messages, fetchPendingQuestions]);
 
+  // A remote proxy or a reconnect boundary can delay or lose the one-shot
+  // question.asked event. Reconcile only while the session is active; the
+  // hook ignores responses made stale by a newer SSE update.
+  useEffect(() => {
+    if (!sessionId || (!isStreaming && !sending)) return;
+    const timer = setInterval(() => {
+      fetchPendingQuestions(sessionId).catch((err) => {
+        console.warn('[SessionChat] Failed to reconcile pending questions:', err);
+      });
+    }, PENDING_QUESTION_RECONCILE_MS);
+    return () => clearInterval(timer);
+  }, [sessionId, isStreaming, sending, fetchPendingQuestions]);
+
   // Refetch when page becomes visible again
   useEffect(() => {
     if (!sessionId) return;
@@ -2205,11 +2143,14 @@ export default function SessionChat({
       if (document.visibilityState === 'visible') {
         refetch();
         fetchPromptQueue();
+        fetchPendingQuestions(sessionId).catch((err) => {
+          console.warn('[SessionChat] Failed to recover pending questions after visibility change:', err);
+        });
       }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch, fetchPromptQueue]);
+  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
@@ -3546,15 +3487,20 @@ export default function SessionChat({
                       const cursor = e.target.selectionStart ?? val.length;
                       const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
                       const trimmed = val.trimStart();
+                      const slashQuery = trimmed.startsWith('/') ? trimmed.slice(1) : '';
                       if (mention && !trimmed.startsWith('/')) {
                         setMentionRange({ start: mention.start, end: mention.end });
                         setMentionQuery(mention.query);
                         setSelectedMentionIndex(0);
                         setShowCommandDropdown(false);
-                      } else if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
+                      } else if (
+                        trimmed.startsWith('/') &&
+                        !trimmed.includes(' ') &&
+                        (slashQuery === '' || isSlashCommandName(slashQuery)) &&
+                        successfulAttachments.length === 0
+                      ) {
                         void loadCommandsIfNeeded();
-                        const q = trimmed.slice(1);
-                        setCommandQuery(q);
+                        setCommandQuery(slashQuery);
                         setSelectedCommandIndex(0);
                         setShowCommandDropdown(true);
                         setMentionRange(null);
@@ -3955,6 +3901,12 @@ function ChatMessageBubbleInner({
   const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    part.type === 'text' && !String(part.text || '').trim()
+  );
+  const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
+    parts.length === 0 || hasOnlyBlankTextParts
+  );
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
@@ -3972,7 +3924,7 @@ function ChatMessageBubbleInner({
     <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
 
       {/* Empty / loading state */}
-      {parts.length === 0 && (
+      {(parts.length === 0 || shouldRenderAssistantErrorState) && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />

@@ -458,9 +458,13 @@ async def delegate_task_tool(
     if not parent_session:
         return ToolResult(success=False, error="Parent session not found")
 
+    from flocks.project.instance import Instance
+
+    runtime_directory = Instance.get_directory() or parent_session.directory
+
     create_kwargs = dict(
         project_id=parent_session.project_id,
-        directory=parent_session.directory,
+        directory=runtime_directory,
         title=f"{description} (@{agent_to_use} subagent)",
         parent_id=parent_session.id,
         agent=agent_to_use,
@@ -474,6 +478,8 @@ async def delegate_task_tool(
             model_pinned=bool(explicit_model),
         )
     created = await Session.create(**create_kwargs)
+    if ctx.extra.get("workflow_temp_parent") is True:
+        ctx.extra["workflow_child_session_created"] = True
     await Message.create(
         session_id=created.id,
         role=MessageRole.USER,

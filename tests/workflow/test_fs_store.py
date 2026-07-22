@@ -53,6 +53,45 @@ def test_read_workflow_from_fs_refreshes_cached_workspace_root(
     assert fs_store.find_workspace_root() == second_workspace
 
 
+def test_read_workflow_from_fs_prefers_user_workflow_over_project_bundle(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    workflow_id = "shared-workflow"
+    project_root = tmp_path / "project-workflows"
+    user_root = tmp_path / "user-workflows"
+
+    for root, name in (
+        (project_root, "project bundle"),
+        (user_root, "user customization"),
+    ):
+        workflow_dir = root / workflow_id
+        workflow_dir.mkdir(parents=True)
+        (workflow_dir / "workflow.json").write_text(
+            json.dumps(
+                {
+                    "name": name,
+                    "start": "n1",
+                    "nodes": [{"id": "n1", "type": "python", "code": "pass"}],
+                    "edges": [],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    monkeypatch.setattr(
+        fs_store,
+        "resolve_workflow_scan_roots",
+        lambda _workspace: [(project_root, "project"), (user_root, "global")],
+    )
+
+    workflow = fs_store.read_workflow_from_fs(workflow_id)
+
+    assert workflow is not None
+    assert workflow["source"] == "global"
+    assert workflow["workflowJson"]["name"] == "user customization"
+
+
 def test_read_workflow_dir_uses_latest_file_mtime_when_meta_is_stale(
     tmp_path: Path,
 ):

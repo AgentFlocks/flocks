@@ -420,7 +420,16 @@ export default function ToolPage() {
       setTestResult(null);
       const params = JSON.parse(testParams);
       const response = await toolAPI.test(selectedTool.name, params);
-      setTestResult(response.data);
+      const result = response.data;
+      setTestResult(result);
+      if (result.metadata?.disabled === true) {
+        setSelectedTool((current) => (
+          current?.name === selectedTool.name
+            ? { ...current, enabled: false }
+            : current
+        ));
+        void refreshToolDataAfterMutation();
+      }
     } catch (err: any) {
       setTestResult({ success: false, error: err.message });
     } finally {
@@ -3539,6 +3548,12 @@ export function ToolDetailDrawer({
   }, [tool.enabled, tool.enabled_customized, tool.enabled_default]);
 
   useEffect(() => {
+    if (testResult?.metadata?.disabled === true) {
+      setEnabled(false);
+    }
+  }, [testResult]);
+
+  useEffect(() => {
     setFixturesLoading(true);
     toolAPI.listFixtures(tool.name)
       .then((res) => setFixtures(res.data ?? []))
@@ -3799,14 +3814,14 @@ export function ToolDetailDrawer({
               </div>
               <button
                 onClick={onTest}
-                disabled={testing || !tool.enabled || !canDirectTest}
+                disabled={testing || !enabled || !canDirectTest}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
               >
                 {testing
                   ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
                   : <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>}
               </button>
-              {!tool.enabled && (
+              {!enabled && (
                 <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
               )}
               {canDirectTest ? null : (
