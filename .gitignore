@@ -83,8 +83,8 @@ tmp/
 .flocks/.DS_Store
 
 # User-specific configuration (keep only example files)
-.flocks/flocks.json
-.flocks/flocks.jsonc
+# .flocks/flocks.json
+# .flocks/flocks.jsonc
 
 # Flocks built-in MCP servers
 .flocks/mcp_list.json
@@ -98,9 +98,8 @@ tmp/
 .ipynb_checkpoints
 *.ipynb
 
-# Documentation
-docs/_build/
-docs/*.md
+# Documentation (local / agent-generated; not versioned)
+docs/
 site/
 
 # Node.js (TUI)
@@ -108,8 +107,6 @@ node_modules/
 tui/node_modules/
 bun.lockb
 .bun/
-docs/*
-!docs/CHANGELOG.md
 
 # TUI build
 tui/dist/
@@ -136,3 +133,4 @@ changelog.md
 # Integration tests with real host credentials (not for commit)
 tests/integration_ssh_*.py
 .cursor
+.codex/

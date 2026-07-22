@@ -14,16 +14,16 @@ import sys
 import asyncio
 import subprocess
 import shlex
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
     from flocks.sandbox.types import BashSandboxConfig
 
-from flocks.tool.registry import (
-    ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
-)
+from flocks.tool.registry import ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 from flocks.project.instance import Instance
+from flocks.tool.path_utils import get_tool_base_dir, resolve_host_path
 from flocks.utils.log import Log
 
 
@@ -42,40 +42,130 @@ DEFAULT_PATH = os.environ.get(
 
 
 def get_description(directory: str) -> str:
-    """Get tool description with directory placeholder replaced"""
-    return f"""Executes a given bash command in a persistent shell session with optional timeout, ensuring proper handling and security measures.
+    """Get the platform-specific tool description."""
+    if sys.platform == "win32":
+        return _get_powershell_description(directory)
+    return _get_unix_shell_description(directory)
 
-All commands run in {directory} by default. Use the `workdir` parameter if you need to run a command in a different directory. AVOID using `cd <directory> && <command>` patterns - use `workdir` instead.
 
-IMPORTANT: This tool is for terminal operations like git, npm, docker, etc. DO NOT use it for file operations (reading, writing, editing, searching, finding files) - use the specialized tools for this instead.
+def _get_unix_shell_description(directory: str) -> str:
+    """Build the Unix shell description for the bash tool."""
+    return f"""Execute shell commands with optional timeout.
 
-Before executing the command, please follow these steps:
+All commands run in {directory} by default. Use the `workdir` parameter if you need a different directory. Avoid `cd <directory> && <command>` patterns and set `workdir` instead.
 
-1. Directory Verification:
-   - If the command will create new directories or files, first use `ls` to verify the parent directory exists and is the correct location
-   - For example, before running "mkdir foo/bar", first use `ls foo` to check that "foo" exists and is the intended parent directory
+Use this tool for terminal work such as git, uv/pip/npm, docker, builds, tests, servers, scripts, process inspection, system status, networking commands, and shell pipelines or compound commands.
 
-2. Command Execution:
-   - Always quote file paths that contain spaces with double quotes (e.g., rm "path with spaces/file.txt")
-   - Examples of proper quoting:
-     - mkdir "/Users/name/My Documents" (correct)
-     - mkdir /Users/name/My Documents (incorrect - will fail)
-     - python "/path/with spaces/script.py" (correct)
-     - python /path/with spaces/script.py (incorrect - will fail)
-   - After ensuring proper quoting, execute the command.
-   - Capture the output of the command.
+Do not use this tool when a dedicated tool is a better fit:
+- Read file contents -> `read`
+- Write a new file -> `write`
+- Edit an existing file -> `edit`
+- Search file names or directories -> `glob`
+- Search file contents -> `grep`
+
+Before executing commands:
+1. If the command will create files or directories, verify the target location.
+2. Always quote file paths that contain spaces with double quotes.
+   - `mkdir "/Users/name/My Documents"` (correct)
+   - `mkdir /Users/name/My Documents` (incorrect)
 
 Usage notes:
-  - The command argument is required.
-  - You can specify an optional timeout in milliseconds. If not specified, commands will time out after 120000ms (2 minutes).
-  - It is very helpful if you write a clear, concise description of what this command does in 5-10 words.
-  - If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
-  - Avoid using Bash with the `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or `echo` commands. Instead, use the dedicated tools: Glob, Grep, Read, Edit, Write.
-  - When issuing multiple commands:
-    - If the commands are independent and can run in parallel, make multiple Bash tool calls in a single message.
-    - If the commands depend on each other, use a single Bash call with '&&' to chain them together.
-    - Use ';' only when you need to run commands sequentially but don't care if earlier commands fail
-  - AVOID using `cd <directory> && <command>`. Use the `workdir` parameter to change directories instead."""
+- The `command` argument is required.
+- You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
+- It is very helpful to write a clear, concise `description` in 5-10 words.
+- If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
+- Prefer dedicated tools instead of shell equivalents: use `glob` instead of `find` or `ls`, `grep` instead of shell `grep`/`rg`, `read` instead of `cat`/`head`/`tail`, `edit` instead of `sed`/`awk`, and `write` instead of shell redirection or `echo`-based file creation.
+- If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
+- If commands depend on each other, use a single bash tool call with `&&` to chain them together.
+- Use `;` only when you want sequential commands and do not care if earlier ones fail."""
+
+
+def _detect_windows_powershell_shell() -> Optional[str]:
+    """Detect the preferred PowerShell executable on Windows."""
+    for shell in ["pwsh", "powershell"]:
+        if shutil_which(shell):
+            return shell
+    return None
+
+
+def _get_windows_powershell_51_guidance() -> str:
+    """Return Windows PowerShell 5.1 specific notes when relevant."""
+    if _detect_windows_powershell_shell() != "powershell":
+        return ""
+
+    return """
+
+Windows PowerShell 5.1 notes:
+- Pipeline chain operators `&&` and `||` are not available. Run `A; if ($?) {{ B }}` for conditional chaining, or `A; B` for unconditional chaining.
+- Avoid `2>&1` on native executables. PowerShell 5.1 may wrap stderr in `NativeCommandError` records and set `$?` to `$false` even when the executable exits with code 0. stderr is already captured for you.
+- Default file encoding is UTF-16 LE with BOM. If you absolutely must write text for another tool to consume, pass `-Encoding utf8`.
+- `ConvertFrom-Json` returns `PSCustomObject`; `-AsHashtable` is not available.
+"""
+
+
+def _get_powershell_description(directory: str) -> str:
+    """Build the Windows PowerShell description for the bash tool."""
+    powershell_51_guidance = _get_windows_powershell_51_guidance()
+    return f"""Execute PowerShell commands with optional timeout.
+
+All commands run in {directory} by default. Use the `workdir` parameter if you need a different directory. Do not prefix commands with `cd` or `Set-Location`; set `workdir` instead.
+
+Use this tool for terminal work via PowerShell: git, uv/pip/npm, docker, builds, tests, servers, scripts, process inspection, system status, networking commands, native executables, and PowerShell cmdlets.
+
+IMPORTANT: This tool is for terminal operations. Do not use PowerShell for file operations when a dedicated tool is a better fit:
+- Read file contents -> `read`
+- Write a new file -> `write`
+- Edit an existing file -> `edit`
+- Search file names or directories -> `glob`
+- Search file contents -> `grep`
+
+Before executing commands:
+1. If the command will create files or directories, verify the target location first.
+2. Always quote file paths that contain spaces with double quotes.
+   - `New-Item -ItemType Directory "C:\\Users\\...\\My Documents"` (correct)
+   - `New-Item -ItemType Directory C:\\Users\\...\\My Documents` (incorrect)
+
+PowerShell syntax notes:
+- Variables use the `$` prefix: `$name = "value"`.
+- The escape character is backtick (`` ` ``), not backslash.
+- Prefer Verb-Noun cmdlets such as `Get-ChildItem`, `Set-Location`, `New-Item`, `Remove-Item`.
+- Pipes pass objects, not plain text. Use `Select-Object`, `Where-Object`, and `ForEach-Object` for filtering and transformation.
+- Read environment variables with `$env:NAME`; set them with `$env:NAME = "value"`.
+- Use the call operator for native executables whose path contains spaces: `& "C:\\Program Files\\App\\app.exe" arg1 arg2`.
+- Avoid bash-only syntax such as `export NAME=value`, `cat <<'EOF'`, backtick command substitution, or `if [ -f x ]`.
+
+Unix to PowerShell quick reference:
+- `head` / `tail` -> `Get-Content file -TotalCount N` / `Get-Content file -Tail N`
+- `which` -> `(Get-Command name).Source`
+- `touch` -> `if (-not (Test-Path path)) {{ New-Item -ItemType File path }}`
+- `wc -l` -> `(Get-Content file | Measure-Object -Line).Lines`
+- `mkdir -p` -> `New-Item -ItemType Directory -Force path`
+- `rm -rf` -> `Remove-Item -Recurse -Force path`
+- `VAR=x cmd` -> `$env:VAR = 'x'; cmd`
+- `2>/dev/null` -> `2>$null` (usually unnecessary because stderr is already captured)
+
+Interactive and blocking commands:
+- Never use `Read-Host`, `Get-Credential`, `Out-GridView`, `$Host.UI.PromptForChoice`, or `pause`.
+- Destructive cmdlets may prompt for confirmation. Add `-Confirm:$false` when you intend the action to proceed.
+
+Passing multiline strings to native executables:
+- Use a single-quoted here-string so PowerShell does not expand `$` or backticks inside:
+  `git commit -m @'`
+  `Commit message here.`
+  `'@`
+- The closing `'@` must start at column 0 on its own line.
+- Use `@'...'@` unless you explicitly need interpolation.
+- For arguments PowerShell may parse as operators, use the stop-parsing token: `git log --% --format=%H`.
+
+Usage notes:
+- The `command` argument is required.
+- You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
+- It is very helpful to write a clear, concise `description` in 5-10 words.
+- If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
+- Avoid unnecessary `Start-Sleep`. If commands can run immediately, run them immediately. If you must wait, prefer a short polling check over sleeping first.
+- If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
+- If commands depend on each other, chain them in one bash tool call. On PowerShell 7+, `&&` is available. On Windows PowerShell 5.1, use `A; if ($?) {{ B }}` instead.
+- Use `;` only when you want sequential commands and do not care if earlier ones fail.{powershell_51_guidance}"""
 
 
 def _build_error_message(
@@ -106,11 +196,10 @@ def _build_error_message(
 def get_shell() -> str:
     """Get the appropriate shell for the current platform"""
     if sys.platform == "win32":
-        # Prefer PowerShell variants on Windows for better scripting compatibility.
-        for shell in ["pwsh", "powershell", "cmd"]:
-            if shutil_which(shell):
-                return shell
-        return "cmd"
+        shell = _detect_windows_powershell_shell()
+        if shell:
+            return shell
+        raise FileNotFoundError("PowerShell executable not found (expected `pwsh` or `powershell` in PATH)")
     else:
         # Unix-like systems
         return os.environ.get("SHELL", "/bin/bash")
@@ -119,42 +208,64 @@ def get_shell() -> str:
 def shutil_which(cmd: str) -> Optional[str]:
     """Cross-platform which command"""
     import shutil
+
     return shutil.which(cmd)
 
 
 def _get_windows_shell_command(command: str) -> tuple[str, list[str]]:
     """Build an explicit Windows shell invocation for the command."""
     shell = get_shell()
-    if shell in {"pwsh", "powershell"}:
-        return shell, [shell, "-NoProfile", "-NonInteractive", "-Command", command]
-    return "cmd", ["cmd", "/d", "/s", "/c", command]
+    return shell, [shell, "-NoProfile", "-NonInteractive", "-Command", command]
+
+
+def _get_windows_default_workdir_fallback() -> Optional[str]:
+    """Return a safe existing directory for Windows host commands."""
+    for candidate in (
+        os.environ.get("USERPROFILE"),
+        os.path.expanduser("~"),
+        tempfile.gettempdir(),
+        "C:\\",
+    ):
+        if candidate and os.path.isdir(candidate):
+            return candidate
+    return None
+
+
+def _resolve_workdir(base_dir: str, workdir: Optional[str]) -> str:
+    """Resolve command working directory, with Windows-only default cwd fallback."""
+    cwd = resolve_host_path(workdir or base_dir, base_dir=base_dir)
+
+    if sys.platform == "win32" and workdir is None and not os.path.isdir(cwd):
+        if fallback := _get_windows_default_workdir_fallback():
+            log.warn("bash.invalid_default_cwd_fallback", {"invalid_cwd": cwd, "fallback": fallback})
+            return fallback
+
+    return cwd
 
 
 async def kill_process_tree(proc: asyncio.subprocess.Process) -> None:
     """
     Kill a process and all its children
-    
+
     Args:
         proc: Process to kill
     """
     try:
         if sys.platform == "win32":
             # Windows: use taskkill
-            subprocess.run(
-                ["taskkill", "/F", "/T", "/PID", str(proc.pid)],
-                capture_output=True
-            )
+            subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
         else:
             # Unix: send SIGTERM to process group
             import signal
+
             try:
                 os.killpg(proc.pid, signal.SIGTERM)
             except (ProcessLookupError, OSError):
                 pass
-            
+
             # Wait briefly for graceful shutdown
             await asyncio.sleep(0.1)
-            
+
             # Force kill if still running
             try:
                 os.killpg(proc.pid, signal.SIGKILL)
@@ -216,11 +327,7 @@ async def _resolve_sandbox_workdir(
 
         # 将相对路径映射为容器路径
         relative = result.relative.replace(os.sep, "/") if result.relative else ""
-        container_workdir = (
-            f"{sandbox.container_workdir}/{relative}"
-            if relative
-            else sandbox.container_workdir
-        )
+        container_workdir = f"{sandbox.container_workdir}/{relative}" if relative else sandbox.container_workdir
         return result.resolved, container_workdir
     except (ValueError, OSError):
         return fallback, sandbox.container_workdir
@@ -231,30 +338,25 @@ async def _resolve_sandbox_workdir(
     description=get_description(os.getcwd()),
     category=ToolCategory.TERMINAL,
     parameters=[
-        ToolParameter(
-            name="command",
-            type=ParameterType.STRING,
-            description="The command to execute",
-            required=True
-        ),
+        ToolParameter(name="command", type=ParameterType.STRING, description="The command to execute", required=True),
         ToolParameter(
             name="timeout",
             type=ParameterType.INTEGER,
             description="Optional timeout in milliseconds",
             required=False,
-            default=DEFAULT_TIMEOUT_MS
+            default=DEFAULT_TIMEOUT_MS,
         ),
         ToolParameter(
             name="workdir",
             type=ParameterType.STRING,
-            description="The working directory to run the command in. Defaults to project directory.",
-            required=False
+            description="The working directory to run the command in. It may be absolute, use `~`, or be relative to the current project directory.",
+            required=False,
         ),
         ToolParameter(
             name="description",
             type=ParameterType.STRING,
             description="Clear, concise description of what this command does in 5-10 words",
-            required=False
+            required=False,
         ),
         ToolParameter(
             name="host",
@@ -263,7 +365,7 @@ async def _resolve_sandbox_workdir(
             required=False,
             enum=["sandbox", "host"],
         ),
-    ]
+    ],
 )
 async def bash_tool(
     ctx: ToolContext,
@@ -281,20 +383,16 @@ async def bash_tool(
     2. Sandbox execution - inside a Docker container (when sandbox config is present)
     """
     # Resolve working directory
-    base_dir = Instance.get_directory() or os.getcwd()
-    cwd = workdir or base_dir
-    
-    if not os.path.isabs(cwd):
-        cwd = os.path.join(base_dir, cwd)
-    
+    base_dir = get_tool_base_dir()
+    cwd = _resolve_workdir(base_dir, workdir)
+
     # Validate timeout
     timeout_ms = timeout or DEFAULT_TIMEOUT_MS
     if timeout_ms < 0:
         return ToolResult(
-            success=False,
-            error=f"Invalid timeout value: {timeout_ms}. Timeout must be a positive number."
+            success=False, error=f"Invalid timeout value: {timeout_ms}. Timeout must be a positive number."
         )
-    
+
     timeout_sec = timeout_ms / 1000
 
     # Check for sandbox configuration
@@ -354,33 +452,22 @@ async def _execute_host(
     """在宿主机上执行命令（原有逻辑）."""
     # Check if working directory is outside project
     if not Instance.contains_path(cwd):
-        await ctx.ask(
-            permission="external_directory",
-            patterns=[cwd],
-            always=[os.path.dirname(cwd) + "*"],
-            metadata={}
-        )
-    
+        await ctx.ask(permission="external_directory", patterns=[cwd], always=[os.path.dirname(cwd) + "*"], metadata={})
+
     # Request bash permission
-    await ctx.ask(
-        permission="bash",
-        patterns=[command],
-        always=["*"],
-        metadata={}
-    )
-    
-    # Get shell
-    shell = get_shell()
-    
+    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={})
+
     # Initialize metadata
-    ctx.metadata({
-        "metadata": {
-            "output": "",
-            "description": description or command,
-            **(extra_metadata or {}),
+    ctx.metadata(
+        {
+            "metadata": {
+                "output": "",
+                "description": description or command,
+                **(extra_metadata or {}),
+            }
         }
-    })
-    
+    )
+
     # Build environment with UTF-8 encoding for Windows
     env = None
     if sys.platform == "win32":
@@ -404,6 +491,7 @@ async def _execute_host(
                 env=env,
             )
         else:
+            shell = get_shell()
             log.info("bash.execute.host", {"command": command, "cwd": cwd, "shell": shell})
             proc = await asyncio.create_subprocess_shell(
                 command,
@@ -413,12 +501,8 @@ async def _execute_host(
                 start_new_session=True,  # Create new process group
             )
     except Exception as e:
-        return ToolResult(
-            success=False,
-            error=f"Failed to start command: {str(e)}",
-            title=description or command
-        )
-    
+        return ToolResult(success=False, error=f"Failed to start command: {str(e)}", title=description or command)
+
     return await _stream_output(
         ctx=ctx,
         proc=proc,
@@ -449,28 +533,28 @@ async def _execute_sandboxed(
     """
     from flocks.sandbox.docker import build_docker_exec_args, build_sandbox_env
 
-    log.info("bash.execute.sandbox", {
-        "command": command,
-        "container": sandbox.container_name,
-    })
-
-    # Request bash permission (沙箱内也需要权限)
-    await ctx.ask(
-        permission="bash",
-        patterns=[command],
-        always=["*"],
-        metadata={"sandbox": True}
+    log.info(
+        "bash.execute.sandbox",
+        {
+            "command": command,
+            "container": sandbox.container_name,
+        },
     )
 
+    # Request bash permission (沙箱内也需要权限)
+    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={"sandbox": True})
+
     # Initialize metadata
-    ctx.metadata({
-        "metadata": {
-            "output": "",
-            "description": description or command,
-            "sandbox": True,
-            "container": sandbox.container_name,
+    ctx.metadata(
+        {
+            "metadata": {
+                "output": "",
+                "description": description or command,
+                "sandbox": True,
+                "container": sandbox.container_name,
+            }
         }
-    })
+    )
 
     # 解析工作目录 (host → container 路径映射)
     host_workdir, container_workdir = await _resolve_sandbox_workdir(cwd, sandbox)
@@ -534,95 +618,91 @@ async def _stream_output(
     timed_out = False
     aborted = False
 
-    async def read_output():
+    def update_output_metadata() -> None:
+        truncated_output = output
+        if len(truncated_output) > MAX_METADATA_LENGTH:
+            truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
+
+        ctx.metadata(
+            {
+                "metadata": {
+                    "output": truncated_output,
+                    "description": description or command,
+                    **(extra_metadata or {}),
+                }
+            }
+        )
+
+    async def read_stream(stream: asyncio.StreamReader) -> None:
         nonlocal output
         while True:
-            # Read from both stdout and stderr
-            stdout_task = asyncio.create_task(proc.stdout.read(4096))
-            stderr_task = asyncio.create_task(proc.stderr.read(4096))
-            
-            done, pending = await asyncio.wait(
-                [stdout_task, stderr_task],
-                return_when=asyncio.FIRST_COMPLETED
-            )
-            
-            for task in pending:
-                task.cancel()
-            
-            for task in done:
-                try:
-                    chunk = task.result()
-                    if chunk:
-                        output += chunk.decode('utf-8', errors='replace')
-                        
-                        # Update metadata with truncated output
-                        truncated_output = output
-                        if len(truncated_output) > MAX_METADATA_LENGTH:
-                            truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
-                        
-                        ctx.metadata({
-                            "metadata": {
-                                "output": truncated_output,
-                                "description": description or command,
-                                **(extra_metadata or {}),
-                            }
-                        })
-                except asyncio.CancelledError:
-                    pass
-            
-            # Check if process has exited
-            if proc.returncode is not None:
-                # Read any remaining output
-                remaining_stdout = await proc.stdout.read()
-                remaining_stderr = await proc.stderr.read()
-                if remaining_stdout:
-                    output += remaining_stdout.decode('utf-8', errors='replace')
-                if remaining_stderr:
-                    output += remaining_stderr.decode('utf-8', errors='replace')
+            chunk = await stream.read(4096)
+            if not chunk:
                 break
-            
-            # Check for abort
-            if ctx.aborted:
-                break
+            output += chunk.decode("utf-8", errors="replace")
+            update_output_metadata()
 
-    # Create tasks
-    read_task = asyncio.create_task(read_output())
-    
+    async def wait_for_abort() -> None:
+        while not ctx.aborted:
+            await asyncio.sleep(0.1)
+
+    stream_tasks = [
+        asyncio.create_task(read_stream(proc.stdout)),
+        asyncio.create_task(read_stream(proc.stderr)),
+    ]
+    wait_task = asyncio.create_task(proc.wait())
+    completion_task = asyncio.gather(wait_task, *stream_tasks)
+    abort_task = asyncio.create_task(wait_for_abort())
+
     try:
-        await asyncio.wait_for(read_task, timeout=timeout_sec)
+        done, _pending = await asyncio.wait(
+            [completion_task, abort_task],
+            timeout=timeout_sec,
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if not done:
+            timed_out = True
+        elif abort_task in done and ctx.aborted:
+            aborted = True
+        else:
+            completion_task.result()
     except asyncio.TimeoutError:
         timed_out = True
-        read_task.cancel()
-        await kill_process_tree(proc)
-    
+    finally:
+        if timed_out or aborted:
+            await kill_process_tree(proc)
+        for task in (completion_task, abort_task):
+            if not task.done():
+                task.cancel()
+        await asyncio.gather(completion_task, abort_task, return_exceptions=True)
+
     # Check for abort
-    if ctx.aborted:
+    if ctx.aborted and not timed_out:
         aborted = True
-        await kill_process_tree(proc)
-    
+
     # Wait for process to finish
     try:
         await asyncio.wait_for(proc.wait(), timeout=1.0)
     except asyncio.TimeoutError:
         pass
-    
+
     exit_code = proc.returncode
-    
+
     # Build result metadata
     result_metadata = []
     if timed_out:
         result_metadata.append(f"bash tool terminated command after exceeding timeout {timeout_ms} ms")
     if aborted:
         result_metadata.append("User aborted the command")
-    
+
     if result_metadata:
         output += "\n\n<bash_metadata>\n" + "\n".join(result_metadata) + "\n</bash_metadata>"
-    
+
     # Truncate output for metadata
     truncated_output = output
     if len(truncated_output) > MAX_METADATA_LENGTH:
         truncated_output = truncated_output[:MAX_METADATA_LENGTH] + "\n\n..."
-    
+
     # Determine success based on exit code
     success = exit_code == 0 if exit_code is not None else not timed_out and not aborted
     error_message = None
@@ -634,7 +714,7 @@ async def _stream_output(
             timed_out=timed_out,
             aborted=aborted,
         )
-    
+
     return ToolResult(
         success=success,
         output=output,
@@ -647,5 +727,5 @@ async def _stream_output(
             "timed_out": timed_out,
             "aborted": aborted,
             **(extra_metadata or {}),
-        }
+        },
     )

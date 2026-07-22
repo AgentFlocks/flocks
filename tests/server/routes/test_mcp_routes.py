@@ -262,6 +262,49 @@ class TestMcpRoutes:
         assert data["config"]["url"] == "https://example.com/mcp"
 
     @pytest.mark.asyncio
+    async def test_get_mcp_server_info_masks_plaintext_sensitive_values(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        async def fake_get_server_info(name: str):
+            return None
+
+        async def fake_config_get(cls):
+            return type("ConfigStub", (), {"mcp": {}})()
+
+        monkeypatch.setattr(mcp_routes.MCP, "get_server_info", fake_get_server_info)
+        monkeypatch.setattr(
+            mcp_routes.Config,
+            "get",
+            classmethod(fake_config_get),
+        )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://example.com/mcp",
+                "auth": {
+                    "type": "apikey",
+                    "location": "header",
+                    "param_name": "Authorization",
+                    "value": "Bearer token123",
+                },
+                "headers": {
+                    "Authorization": "Bearer token123",
+                    "X-Client": "flocks",
+                },
+            },
+        )
+
+        resp = await client.get("/api/mcp/demo-remote")
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["config"]["auth"]["value"] == "***"
+        assert data["config"]["headers"]["Authorization"] == "***"
+        assert data["config"]["headers"]["X-Client"] == "flocks"
+
+    @pytest.mark.asyncio
     async def test_test_mcp_connection_normalizes_sse_alias_to_remote(
         self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
     ):
@@ -311,6 +354,7 @@ class TestMcpRoutes:
     ):
         stored_configs: dict[str, dict] = {}
         removed_servers: list[str] = []
+        attempted_reconnects: list[tuple[str, dict]] = []
 
         async def fake_config_get(cls):
             return type(
@@ -334,13 +378,27 @@ class TestMcpRoutes:
             removed_servers.append(name)
             return True
 
+        async def fake_connect(name: str, config: dict) -> bool:
+            attempted_reconnects.append((name, dict(config)))
+            return True
+
         monkeypatch.setattr(
             mcp_routes.Config,
             "get",
             classmethod(fake_config_get),
         )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://old.example.com/mcp",
+                "headers": {"Api-Key": "{secret:qianxin_mcp_key}"},
+            },
+        )
         monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
         monkeypatch.setattr(mcp_routes.MCP, "remove", fake_remove)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
         monkeypatch.setattr(
             mcp_routes.ConfigWriter,
             "add_mcp_server",
@@ -358,10 +416,23 @@ class TestMcpRoutes:
         assert data["success"] is True
         assert data["config"]["type"] == "sse"
         assert data["config"]["url"] == "https://new.example.com/mcp"
+        assert data["reconnected"] is True
+        assert data["reconnect_error"] is None
         assert stored_configs["qianxin-mcp"]["type"] == "remote"
         assert stored_configs["qianxin-mcp"]["url"] == "https://new.example.com/mcp"
         assert stored_configs["qianxin-mcp"]["headers"]["Api-Key"] == "{secret:qianxin_mcp_key}"
         assert removed_servers == ["qianxin-mcp"]
+        assert attempted_reconnects == [
+            (
+                "qianxin-mcp",
+                {
+                    "type": "remote",
+                    "url": "https://new.example.com/mcp",
+                    "transport": "sse",
+                    "headers": {"Api-Key": "{secret:qianxin_mcp_key}"},
+                },
+            )
+        ]
 
     @pytest.mark.asyncio
     async def test_update_mcp_server_can_disable_and_persist_state(
@@ -397,6 +468,15 @@ class TestMcpRoutes:
             "get",
             classmethod(fake_config_get),
         )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "local",
+                "command": ["python", "-m", "mcp_panther"],
+                "enabled": True,
+            },
+        )
         monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
         monkeypatch.setattr(mcp_routes.MCP, "remove", fake_remove)
         monkeypatch.setattr(
@@ -414,6 +494,89 @@ class TestMcpRoutes:
         assert resp.status_code == 200, resp.text
         assert stored_configs["panther"]["enabled"] is False
         assert removed_servers == ["panther"]
+
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_returns_warning_when_reconnect_fails(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        stored_configs: dict[str, dict] = {}
+        removed_servers: list[str] = []
+        attempted_reconnects: list[str] = []
+
+        async def fake_config_get(cls):
+            return type(
+                "ConfigStub",
+                (),
+                {
+                    "mcp": {
+                        "GaodeMap": {
+                            "type": "remote",
+                            "url": "https://old.example.com/mcp",
+                            "auth": {
+                                "type": "apikey",
+                                "location": "header",
+                                "param_name": "Authorization",
+                                "value": "{secret:GaodeMap_mcp_key}",
+                            },
+                        }
+                    }
+                },
+            )()
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            return {"GaodeMap": McpStatusInfo(status=McpStatus.CONNECTED)}
+
+        async def fake_remove(name: str) -> bool:
+            removed_servers.append(name)
+            return True
+
+        async def fake_connect(name: str, config: dict) -> bool:
+            attempted_reconnects.append(name)
+            return False
+
+        monkeypatch.setattr(
+            mcp_routes.Config,
+            "get",
+            classmethod(fake_config_get),
+        )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://old.example.com/mcp",
+                "auth": {
+                    "type": "apikey",
+                    "location": "header",
+                    "param_name": "Authorization",
+                    "value": "{secret:GaodeMap_mcp_key}",
+                },
+            },
+        )
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(mcp_routes.MCP, "remove", fake_remove)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        resp = await client.put(
+            "/api/mcp/GaodeMap",
+            json={"config": {"url": "https://new.example.com/mcp"}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["success"] is True
+        assert data["reconnected"] is False
+        assert data["reconnect_error"] == "Failed to reconnect MCP server: GaodeMap"
+        assert "reconnect failed" in data["message"]
+        assert stored_configs["GaodeMap"]["url"] == "https://new.example.com/mcp"
+        assert removed_servers == ["GaodeMap"]
+        assert attempted_reconnects == ["GaodeMap"]
 
     @pytest.mark.asyncio
     async def test_update_mcp_server_extracts_url_api_key_before_persisting(
@@ -444,6 +607,14 @@ class TestMcpRoutes:
             "get",
             classmethod(fake_config_get),
         )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://old.example.com/mcp",
+            },
+        )
         monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
         monkeypatch.setattr(
             mcp_routes.ConfigWriter,
@@ -472,6 +643,268 @@ class TestMcpRoutes:
             stored_configs["demo-mcp"]["url"]
             == "https://example.com/mcp?apikey={secret:demo-mcp_mcp_key}"
         )
+
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_restores_masked_sensitive_values(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        stored_configs: dict[str, dict] = {}
+        saved_secrets: dict[str, str] = {}
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            return {}
+
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://old.example.com/mcp",
+                "auth": {
+                    "type": "apikey",
+                    "location": "header",
+                    "param_name": "Authorization",
+                    "value": "Bearer token123",
+                },
+                "headers": {
+                    "Authorization": "Bearer token123",
+                    "X-Client": "flocks",
+                },
+            },
+        )
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        class SecretManagerStub:
+            def set(self, key: str, value: str) -> None:
+                saved_secrets[key] = value
+
+        monkeypatch.setattr(
+            "flocks.security.get_secret_manager",
+            lambda: SecretManagerStub(),
+        )
+
+        resp = await client.put(
+            "/api/mcp/demo-mcp",
+            json={
+                "config": {
+                    "url": "https://new.example.com/mcp",
+                    "auth": {
+                        "type": "apikey",
+                        "location": "header",
+                        "param_name": "Authorization",
+                        "value": "***",
+                    },
+                    "headers": {
+                        "Authorization": "***",
+                        "X-Client": "flocks-web",
+                    },
+                }
+            },
+        )
+
+        assert resp.status_code == 200, resp.text
+        assert saved_secrets == {
+            "demo-mcp_mcp_key": "token123",
+            "demo-mcp_authorization_header": "Bearer token123",
+        }
+        assert stored_configs["demo-mcp"]["url"] == "https://new.example.com/mcp"
+        assert stored_configs["demo-mcp"]["auth"]["value"] == "{secret:demo-mcp_mcp_key}"
+        assert (
+            stored_configs["demo-mcp"]["headers"]["Authorization"]
+            == "{secret:demo-mcp_authorization_header}"
+        )
+        assert stored_configs["demo-mcp"]["headers"]["X-Client"] == "flocks-web"
+
+    # ---------------------------------------------------------------------
+    # should_reconnect: the contract for ``PUT /api/mcp/{name}`` is that
+    # any save where the new config asks the server to be enabled AND the
+    # config is complete enough to dial must trigger a fresh connect — not
+    # just the "was already connected" case.  These tests cover the three
+    # flows the production fix needs to keep working:
+    #   * first enable (no runtime status entry at all);
+    #   * fixing credentials after a previous FAILED connect;
+    #   * blocked configs (pending {secret:...}) must NOT auto-connect.
+    # ---------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_connects_on_first_enable_without_prior_status(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        stored_configs: dict[str, dict] = {}
+        attempted_connects: list[str] = []
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            # No runtime status — server has never been touched in this
+            # process (the catalog-install + later-enable flow).
+            return {}
+
+        async def fake_connect(name: str, config: dict) -> bool:
+            attempted_connects.append(name)
+            return True
+
+        async def fake_remove(name: str) -> bool:
+            raise AssertionError("remove must not run when there is no runtime state")
+
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "local",
+                "command": ["python", "-m", "mcp_panther"],
+                "enabled": False,
+            },
+        )
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(mcp_routes.MCP, "remove", fake_remove)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        resp = await client.put(
+            "/api/mcp/panther",
+            json={"config": {"enabled": True}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["reconnected"] is True
+        assert data["reconnect_error"] is None
+        assert attempted_connects == ["panther"], (
+            "first enable must trigger a connect — otherwise the user has "
+            "to restart the process for a freshly-enabled server's tools "
+            "to register"
+        )
+        assert stored_configs["panther"]["enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_reconnects_after_previous_failure(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """User fixed credentials, saves the config — the route must dial
+        again even though the prior status was FAILED rather than CONNECTED."""
+        stored_configs: dict[str, dict] = {}
+        attempted_connects: list[str] = []
+        removed: list[str] = []
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            return {
+                "panther": McpStatusInfo(
+                    status=McpStatus.FAILED,
+                    error="Authentication failed",
+                )
+            }
+
+        async def fake_connect(name: str, config: dict) -> bool:
+            attempted_connects.append(name)
+            return True
+
+        async def fake_remove(name: str) -> bool:
+            removed.append(name)
+            return True
+
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "local",
+                "command": ["python", "-m", "mcp_panther"],
+                "enabled": True,
+            },
+        )
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(mcp_routes.MCP, "remove", fake_remove)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        resp = await client.put(
+            "/api/mcp/panther",
+            json={"config": {"command": ["python", "-m", "mcp_panther", "--fixed"]}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert data["reconnected"] is True
+        assert attempted_connects == ["panther"], (
+            "saving a config when the server was FAILED must re-dial — "
+            "otherwise the user has to manually click Connect after fixing "
+            "credentials"
+        )
+        assert removed == ["panther"]
+
+    @pytest.mark.asyncio
+    async def test_update_mcp_server_skips_connect_when_credentials_blank(
+        self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch
+    ):
+        """When the saved config leaves an apikey auth ``value`` blank —
+        which is how the UI represents "I have not entered credentials
+        yet" — ``get_connect_block_reason`` flags the config as pending.
+        The route must NOT auto-connect in that case; those connects
+        would always fail and waste cycles.
+        """
+        stored_configs: dict[str, dict] = {}
+        attempted_connects: list[str] = []
+
+        async def fake_status() -> dict[str, McpStatusInfo]:
+            return {}
+
+        async def fake_connect(name: str, config: dict) -> bool:
+            attempted_connects.append(name)
+            return True
+
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "get_mcp_server",
+            lambda name: {
+                "type": "remote",
+                "url": "https://example.com/mcp",
+                "auth": {
+                    "type": "apikey",
+                    "location": "header",
+                    "param_name": "Authorization",
+                    # Blank value — UI representation for "no credentials
+                    # entered yet"; flagged as pending by
+                    # ``config_has_pending_credentials``.
+                    "value": "",
+                },
+                "enabled": False,
+            },
+        )
+        monkeypatch.setattr(mcp_routes.MCP, "status", fake_status)
+        monkeypatch.setattr(mcp_routes.MCP, "connect", fake_connect)
+        monkeypatch.setattr(
+            mcp_routes.ConfigWriter,
+            "add_mcp_server",
+            lambda name, config: stored_configs.__setitem__(name, config),
+        )
+        monkeypatch.setattr(tool_loader, "save_mcp_config", lambda name, config: None)
+
+        resp = await client.put(
+            "/api/mcp/blocked-mcp",
+            json={"config": {"enabled": True}},
+        )
+
+        assert resp.status_code == 200, resp.text
+        data = resp.json()
+        assert attempted_connects == [], (
+            "configs with blank credential slots must not be auto-connected "
+            "— that would just generate failed login attempts"
+        )
+        assert data["reconnected"] is False
 
     @pytest.mark.asyncio
     async def test_catalog_install_defaults_to_disabled_without_connecting(

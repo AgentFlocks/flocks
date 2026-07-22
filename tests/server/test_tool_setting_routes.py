@@ -14,11 +14,14 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+from flocks.auth.context import AuthUser
+from flocks.server.auth import require_admin
 from flocks.tool.registry import (
     Tool,
     ToolCategory,
@@ -55,7 +58,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     overlay/service-gate combinations without touching real plugin YAML.
     """
     config_dir = tmp_path / ".flocks" / "config"
-    config_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
 
     from flocks.config.config import Config
@@ -65,6 +68,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     saved_tools = dict(ToolRegistry._tools)
     saved_defaults = dict(ToolRegistry._enabled_defaults)
+    saved_failure_state = dict(ToolRegistry._failure_state)
     saved_initialized = ToolRegistry._initialized
 
     enabled_tool = _stub_api_tool("onesec_dns_test", enabled=True)
@@ -77,12 +81,20 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         enabled_tool.info.name: True,
         disabled_tool.info.name: False,
     }
+    ToolRegistry._failure_state = {}
     # Skip plugin discovery — our stub registry is enough.
     ToolRegistry._initialized = True
 
     from flocks.server.routes.tool import router
 
     app = FastAPI()
+    app.dependency_overrides[require_admin] = lambda: AuthUser(
+        id="admin-test",
+        username="admin-test",
+        role="admin",
+        status="active",
+        must_reset_password=False,
+    )
     app.include_router(router, prefix="/api/tools")
     client = TestClient(app, raise_server_exceptions=True)
 
@@ -90,6 +102,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     ToolRegistry._tools = saved_tools
     ToolRegistry._enabled_defaults = saved_defaults
+    ToolRegistry._failure_state = saved_failure_state
     ToolRegistry._initialized = saved_initialized
 
 
@@ -106,7 +119,40 @@ def _read_settings() -> dict:
     return ConfigWriter.list_tool_settings()
 
 
+def _viewer_client() -> TestClient:
+    from flocks.server.routes.tool import router
+
+    app = FastAPI()
+
+    @app.middleware("http")
+    async def _viewer_auth(request, call_next):
+        request.state.auth_user = AuthUser(
+            id="viewer-test",
+            username="viewer-test",
+            role="viewer",
+            status="active",
+            must_reset_password=False,
+        )
+        return await call_next(request)
+
+    app.include_router(router, prefix="/api/tools")
+    return TestClient(app, raise_server_exceptions=True)
+
+
 # ─── Tests ───────────────────────────────────────────────────────────────────
+
+def test_tool_mutation_routes_require_admin():
+    client = _viewer_client()
+
+    responses = [
+        client.patch("/api/tools/anything", json={"enabled": True}),
+        client.post("/api/tools/anything/reset"),
+        client.post("/api/tools/refresh"),
+        client.post("/api/tools/anything/reload"),
+    ]
+
+    assert [response.status_code for response in responses] == [403, 403, 403, 403]
+
 
 class TestToolInfoResponse:
     def test_lists_factory_default_and_no_setting_initially(self, tool_client):
@@ -149,6 +195,24 @@ class TestToolInfoResponse:
 
 
 class TestUpdateTool:
+    def test_manual_reenable_clears_repeated_failure_count(self, tool_client):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        enabled_tool.info.enabled = False
+        ToolRegistry._failure_state[enabled_tool.info.name] = {
+            "key": "same-failure",
+            "count": ToolRegistry._failure_disable_threshold,
+        }
+
+        res = client.patch(
+            f"/api/tools/{enabled_tool.info.name}",
+            json={"enabled": True},
+        )
+
+        assert res.status_code == 200
+        assert res.json()["enabled"] is True
+        assert enabled_tool.info.name not in ToolRegistry._failure_state
+
     def test_overlay_persisted_when_differs_from_default(self, tool_client):
         client, _, disabled_tool = tool_client
         _set_service(enabled=True)
@@ -209,6 +273,64 @@ class TestUpdateTool:
         assert body["enabled"] is False
         assert enabled_tool.info.enabled is False
         assert _read_settings() == {enabled_tool.info.name: {"enabled": False}}
+
+    def test_device_enable_clears_override_and_enables_global_tool(
+        self, tool_client, monkeypatch: pytest.MonkeyPatch
+    ):
+        client, _, disabled_tool = tool_client
+        _set_service(enabled=True)
+        delete_override = AsyncMock(return_value=True)
+        set_override = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.tool.device.store.delete_device_tool_setting",
+            delete_override,
+        )
+        monkeypatch.setattr(
+            "flocks.tool.device.store.set_device_tool_enabled",
+            set_override,
+        )
+
+        res = client.patch(
+            f"/api/tools/{disabled_tool.info.name}?device_id=dev-a",
+            json={"enabled": True},
+        )
+
+        body = res.json()
+        assert res.status_code == 200
+        assert body["enabled"] is True
+        assert disabled_tool.info.enabled is True
+        assert _read_settings() == {disabled_tool.info.name: {"enabled": True}}
+        delete_override.assert_awaited_once_with("dev-a", disabled_tool.info.name)
+        set_override.assert_not_awaited()
+
+    def test_device_disable_writes_false_override_only(
+        self, tool_client, monkeypatch: pytest.MonkeyPatch
+    ):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        delete_override = AsyncMock()
+        set_override = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.tool.device.store.delete_device_tool_setting",
+            delete_override,
+        )
+        monkeypatch.setattr(
+            "flocks.tool.device.store.set_device_tool_enabled",
+            set_override,
+        )
+
+        res = client.patch(
+            f"/api/tools/{enabled_tool.info.name}?device_id=dev-a",
+            json={"enabled": False},
+        )
+
+        body = res.json()
+        assert res.status_code == 200
+        assert body["enabled"] is True
+        assert enabled_tool.info.enabled is True
+        assert _read_settings() == {}
+        set_override.assert_awaited_once_with("dev-a", enabled_tool.info.name, False)
+        delete_override.assert_not_awaited()
 
 
 class TestResetToolSetting:

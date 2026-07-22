@@ -1,5 +1,6 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import client from '@/api/client';
+import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 
 export interface UseSessionChatOptions {
   title: string;
@@ -8,8 +9,19 @@ export interface UseSessionChatOptions {
   contextMessage?: string;
   /** Mock welcome message from assistant */
   welcomeMessage?: string;
+  /** Existing session to resume instead of creating a new one */
+  initialSessionId?: string | null;
   /** Auto-create session when hook mounts */
   autoCreate?: boolean;
+}
+
+/** Options accepted by {@link useSessionChat} `createAndSend`. */
+export interface CreateAndSendOptions {
+  text: string;
+  imageParts?: ImagePartData[];
+  agent?: string;
+  model?: { providerID: string; modelID: string } | null;
+  displayText?: string;
 }
 
 export function useSessionChat({
@@ -17,13 +29,14 @@ export function useSessionChat({
   category,
   contextMessage,
   welcomeMessage,
+  initialSessionId = null,
   autoCreate = false,
 }: UseSessionChatOptions) {
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const sessionIdRef = useRef<string | null>(null);
+  const sessionIdRef = useRef<string | null>(initialSessionId);
   const createPromiseRef = useRef<Promise<string> | null>(null);
   const optionsRef = useRef({ title, category, contextMessage, welcomeMessage });
   optionsRef.current = { title, category, contextMessage, welcomeMessage };
@@ -79,6 +92,15 @@ export function useSessionChat({
     [],
   );
 
+  useEffect(() => {
+    if (initialSessionId === sessionIdRef.current) return;
+    sessionIdRef.current = initialSessionId;
+    createPromiseRef.current = null;
+    setSessionId(initialSessionId);
+    setLoading(false);
+    setError(null);
+  }, [initialSessionId]);
+
   const retry = useCallback(() => {
     setError(null);
     create().catch(() => {});
@@ -93,12 +115,20 @@ export function useSessionChat({
   }, []);
 
   const createAndSend = useCallback(
-    async (text: string, agent?: string): Promise<string> => {
+    async ({
+      text,
+      imageParts,
+      agent,
+      model,
+      displayText,
+    }: CreateAndSendOptions): Promise<string> => {
       const sid = await create();
       const payload: Record<string, unknown> = {
-        parts: [{ type: 'text', text }],
+        parts: buildPromptParts(text, imageParts),
       };
       if (agent) payload.agent = agent;
+      if (model) payload.model = model;
+      if (displayText) payload.displayText = displayText;
       client.post(`/api/session/${sid}/prompt_async`, payload).catch(() => {});
       return sid;
     },

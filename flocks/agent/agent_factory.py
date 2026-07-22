@@ -6,12 +6,15 @@ prompt.md or marks agents for dynamic prompt injection via prompt_builder.py.
 Resolves each agent to a concrete ``tools`` list. If legacy ``permission`` is
 present, it is expanded against the current tool registry for compatibility.
 If neither ``tools`` nor ``permission`` is declared, the static tool list stays
-empty and runtime exposure falls back to always-load tools only.
+empty and runtime exposure falls back to always-load tools only. ``rex`` is the
+special case: an explicitly empty ``tools: []`` expands to all enabled built-in
+tools so the primary orchestrator keeps broad native capabilities by default.
 
 Extension point:
   Built-in agents:         flocks/agent/agents/<name>/          native=True
   Project plugin agents:   <cwd>/.flocks/plugins/agents/<name>/ native=True
   User plugin agents:      ~/.flocks/plugins/agents/<name>/     native=False
+  Agent packs may include nested <pack>/<name>/agent.yaml entries.
 
 The ``native`` field is derived from the loading directory and must NOT be
 declared in agent.yaml.
@@ -41,6 +44,11 @@ try:
     _PLUGIN_AGENTS_DIR = DEFAULT_PLUGIN_ROOT / "agents"
 except ImportError:
     _PLUGIN_AGENTS_DIR = Path.home() / ".flocks" / "plugins" / "agents"
+
+
+def _project_plugin_agents_dir() -> Path:
+    """Return the current project's plugin agent directory."""
+    return Path.cwd() / ".flocks" / "plugins" / "agents"
 
 # ---------------------------------------------------------------------------
 # Prompt metadata parsing
@@ -84,6 +92,8 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
     Permission is generated from the ``tools`` list in agent.yaml.
     If ``tools`` is absent, the agent keeps an empty static tool list and only
     runtime always-load tools remain available until the session expands them.
+    ``rex`` is the exception: an explicit ``tools: []`` expands to all enabled
+    built-in tools.
 
     Args:
         agent_dir: Path to the agent folder.
@@ -105,76 +115,117 @@ def load_agent(agent_dir: Path, native: bool = False) -> Optional[AgentInfo]:
         })
         return None
 
+    if not isinstance(raw, dict):
+        log.warn("agent.factory.yaml_invalid", {
+            "path": str(yaml_path),
+            "hint": "Expected a YAML mapping",
+        })
+        return None
+
     name = raw.get("name") or agent_dir.name
     if not name:
         log.warn("agent.factory.missing_name", {"path": str(yaml_path)})
         return None
 
-    # ── Prompt resolution ──────────────────────────────────────────────────
-    prompt: Optional[str] = None
-    prompt_builder: Optional[str] = None
+    try:
+        # ── Prompt resolution ──────────────────────────────────────────────
+        prompt: Optional[str] = None
+        prompt_builder: Optional[str] = None
 
-    prompt_md = agent_dir / "prompt.md"
-    prompt_builder_py = agent_dir / "prompt_builder.py"
+        prompt_md = agent_dir / "prompt.md"
+        prompt_builder_py = agent_dir / "prompt_builder.py"
 
-    if prompt_md.is_file():
-        prompt = prompt_md.read_text(encoding="utf-8").strip()
-    elif prompt_builder_py.is_file():
-        # Derive Python module path from file location, relative to flocks package root
-        try:
-            rel = prompt_builder_py.relative_to(Path(__file__).parent.parent.parent)
-            module_path = str(rel.with_suffix("")).replace("/", ".").replace("\\", ".")
-        except ValueError:
-            # Fallback: use absolute path notation
-            module_path = str(prompt_builder_py)
-        prompt_builder = f"{module_path}:inject"
+        if prompt_md.is_file():
+            prompt = prompt_md.read_text(encoding="utf-8").strip()
+        elif prompt_builder_py.is_file():
+            # Derive Python module path from file location, relative to flocks package root
+            try:
+                rel = prompt_builder_py.relative_to(Path(__file__).parent.parent.parent)
+                module_path = str(rel.with_suffix("")).replace("/", ".").replace("\\", ".")
+            except ValueError:
+                # Fallback: use absolute path notation
+                module_path = str(prompt_builder_py)
+            prompt_builder = f"{module_path}:inject"
 
-    # ── Tools / legacy permission compatibility ─────────────────────────────
-    tools_list_raw: Optional[List[str]] = raw.get("tools")
-    perm_raw = raw.get("permission")
-    tools_list, legacy_permission = resolve_agent_initial_tools(tools_list_raw, perm_raw)
+        # ── Tools / legacy permission compatibility ─────────────────────────
+        tools_list_raw: Optional[List[str]] = raw.get("tools")
+        perm_raw = raw.get("permission")
+        tools_list, legacy_permission = resolve_agent_initial_tools(
+            tools_list_raw,
+            perm_raw,
+            agent_name=name,
+        )
 
-    # ── Model ────────────────────────────────────────────────────────────────
-    model_raw = raw.get("model")
-    model = AgentModel(**model_raw) if isinstance(model_raw, dict) else None
+        # ── Model ───────────────────────────────────────────────────────────
+        model_raw = raw.get("model")
+        model = AgentModel(**model_raw) if isinstance(model_raw, dict) else None
 
-    desc_cn = raw.get("description_cn")
-    if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
-        desc_cn = raw.get("descriptionCn")
+        desc_cn = raw.get("description_cn")
+        if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
+            desc_cn = raw.get("descriptionCn")
+        name_cn = raw.get("name_cn")
+        if name_cn is None and isinstance(raw.get("nameCn"), str):
+            name_cn = raw.get("nameCn")
 
-    return AgentInfo(
-        name=name,
-        description=raw.get("description"),
-        description_cn=desc_cn,
-        mode=raw.get("mode", "subagent"),
-        native=native,
-        hidden=raw.get("hidden", False),
-        color=raw.get("color"),
-        permission=legacy_permission,
-        model=model,
-        prompt=prompt,
-        prompt_builder=prompt_builder,
-        tools=tools_list,
-        options=raw.get("options", {}),
-        steps=raw.get("steps"),
-        delegatable=raw.get("delegatable"),
-        temperature=raw.get("temperature"),
-        top_p=raw.get("top_p"),
-        prompt_metadata=_parse_prompt_metadata(raw),
-        tags=raw.get("tags", []),
-    )
+        return AgentInfo(
+            name=name,
+            name_cn=name_cn,
+            description=raw.get("description"),
+            description_cn=desc_cn,
+            mode=raw.get("mode", "subagent"),
+            native=native,
+            hidden=raw.get("hidden", False),
+            color=raw.get("color"),
+            permission=legacy_permission,
+            model=model,
+            prompt=prompt,
+            prompt_builder=prompt_builder,
+            tools=tools_list,
+            options=raw.get("options", {}),
+            steps=raw.get("steps"),
+            delegatable=raw.get("delegatable"),
+            temperature=raw.get("temperature"),
+            top_p=raw.get("top_p"),
+            prompt_metadata=_parse_prompt_metadata(raw),
+            tags=raw.get("tags", []),
+        )
+    except Exception as e:
+        log.error("agent.factory.load_failed", {
+            "name": name,
+            "path": str(yaml_path),
+            "error": str(e),
+            "type": type(e).__name__,
+        })
+        return None
 
 
 # ---------------------------------------------------------------------------
 # Directory scanning
 # ---------------------------------------------------------------------------
 
+def _iter_agent_dirs(scan_dir: Path) -> List[Path]:
+    """Return immediate agents and one-level nested agents inside collection packs."""
+    agent_dirs: List[Path] = []
+    for child in sorted(scan_dir.iterdir()):
+        if not child.is_dir() or child.name.startswith("_"):
+            continue
+        if (child / "agent.yaml").is_file():
+            agent_dirs.append(child)
+        for nested in sorted(child.iterdir()):
+            if not nested.is_dir() or nested.name.startswith("_"):
+                continue
+            if (nested / "agent.yaml").is_file():
+                agent_dirs.append(nested)
+    return agent_dirs
+
+
 def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
     """
     Scan agent directories and load all valid agents.
 
-    Scans built-in agents first, then user plugin agents, then project plugin
-    agents.  Name conflicts are skipped with a warning (first wins).
+    Scans built-in agents first, then user plugin agents, then project-bundled
+    agents. The first match wins, so user customizations take precedence over
+    project bundles while core built-ins remain protected.
 
     ``native`` is determined by the source directory, not by agent.yaml:
     - ``_BUILTIN_AGENTS_DIR``           → native=True
@@ -188,36 +239,43 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
     Returns:
         Dict mapping agent name → AgentInfo.
     """
-    # (directory, is_native) pairs — order determines first-wins conflict resolution
-    search_dirs: List[tuple[Path, bool]] = [(_BUILTIN_AGENTS_DIR, True)]
+    # (directory, is_native, source) tuples — order determines first-wins priority.
+    search_dirs: List[tuple[Path, bool, str]] = [(_BUILTIN_AGENTS_DIR, True, "builtin")]
     if _PLUGIN_AGENTS_DIR.exists():
-        search_dirs.append((_PLUGIN_AGENTS_DIR, False))
+        search_dirs.append((_PLUGIN_AGENTS_DIR, False, "user"))
     # Project-level plugin agents: resolved at call time because cwd is dynamic
     project_agents_dir = Path.cwd() / ".flocks" / "plugins" / "agents"
     if project_agents_dir.exists() and project_agents_dir != _PLUGIN_AGENTS_DIR:
-        search_dirs.append((project_agents_dir, True))
+        search_dirs.append((project_agents_dir, True, "project"))
     if dirs:
-        search_dirs.extend((d, False) for d in dirs)
+        search_dirs.extend((d, False, "extra") for d in dirs)
 
     result: Dict[str, AgentInfo] = {}
+    selected_sources: Dict[str, tuple[str, Path]] = {}
 
-    for scan_dir, is_native in search_dirs:
+    for scan_dir, is_native, source in search_dirs:
         if not scan_dir.is_dir():
             continue
-        for agent_dir in sorted(scan_dir.iterdir()):
-            if not agent_dir.is_dir() or agent_dir.name.startswith("_"):
-                continue
+        for agent_dir in _iter_agent_dirs(scan_dir):
             agent = load_agent(agent_dir, native=is_native)
             if agent is None:
                 continue
             if agent.name in result:
-                log.warn("agent.factory.name_conflict", {
+                selected_source, selected_dir = selected_sources[agent.name]
+                details = {
                     "name": agent.name,
-                    "existing_source": "previous scan",
-                    "skipped_source": str(agent_dir),
-                })
+                    "selected_source": selected_source,
+                    "selected_path": str(selected_dir),
+                    "skipped_source": source,
+                    "skipped_path": str(agent_dir),
+                }
+                if source != selected_source and source != "extra":
+                    log.info("agent.factory.lower_priority_skipped", details)
+                else:
+                    log.warn("agent.factory.name_conflict", details)
                 continue
             result[agent.name] = agent
+            selected_sources[agent.name] = (source, agent_dir)
             log.debug("agent.factory.loaded", {
                 "name": agent.name,
                 "dir": str(agent_dir),
@@ -272,16 +330,29 @@ def inject_dynamic_prompts(
 # YAML CRUD helpers (for plugin agents via API routes)
 # ---------------------------------------------------------------------------
 
-def _find_yaml_file(name: str) -> Optional[Path]:
-    """Find the YAML source file for a plugin agent by name."""
-    for suffix in (".yaml", ".yml"):
-        candidate = _PLUGIN_AGENTS_DIR / name / f"agent{suffix}"
-        if candidate.is_file():
-            return candidate
-        # Legacy: flat file layout (name.yaml)
-        flat = _PLUGIN_AGENTS_DIR / f"{name}{suffix}"
-        if flat.is_file():
-            return flat
+def _find_yaml_file(name: str, *, include_project: bool = True, include_user: bool = True) -> Optional[Path]:
+    """Find the YAML source file for a plugin agent by name.
+
+    Search order follows API edit precedence, not full runtime scan order:
+    user-level plugins first, then project-level plugins.
+    """
+    search_roots: List[Path] = []
+    if include_user:
+        search_roots.append(_PLUGIN_AGENTS_DIR)
+    if include_project:
+        project_dir = _project_plugin_agents_dir()
+        if project_dir not in search_roots:
+            search_roots.append(project_dir)
+
+    for root in search_roots:
+        for suffix in (".yaml", ".yml"):
+            candidate = root / name / f"agent{suffix}"
+            if candidate.is_file():
+                return candidate
+            # Legacy: flat file layout (name.yaml)
+            flat = root / f"{name}{suffix}"
+            if flat.is_file():
+                return flat
     return None
 
 
@@ -327,14 +398,22 @@ def yaml_to_agent_info(raw: dict, yaml_path: Path) -> AgentInfo:
     # Tools: prefer new tools list; fall back to old permission dict
     tools_list_raw: Optional[List[str]] = raw.get("tools")
     perm_raw = raw.get("permission")
-    tools_list, legacy_permission = resolve_agent_initial_tools(tools_list_raw, perm_raw)
+    tools_list, legacy_permission = resolve_agent_initial_tools(
+        tools_list_raw,
+        perm_raw,
+        agent_name=name,
+    )
 
     desc_cn = raw.get("description_cn")
     if desc_cn is None and isinstance(raw.get("descriptionCn"), str):
         desc_cn = raw.get("descriptionCn")
+    name_cn = raw.get("name_cn")
+    if name_cn is None and isinstance(raw.get("nameCn"), str):
+        name_cn = raw.get("nameCn")
 
     return AgentInfo(
         name=name,
+        name_cn=name_cn,
         description=raw.get("description"),
         description_cn=desc_cn,
         mode=raw.get("mode", "subagent"),
@@ -425,7 +504,8 @@ def delete_yaml_agent(name: str) -> bool:
 
     Returns True on success, False if not found.
     """
-    path = _find_yaml_file(name)
+    # Deletion remains limited to user-managed plugin agents.
+    path = _find_yaml_file(name, include_project=False, include_user=True)
     if path is None:
         return False
 

@@ -1,0 +1,29 @@
+name: chaitin_safeline_waf_system
+description: Chaitin SafeLine WAF profile and overview queries.
+description_cn: 长亭雷池 WAF 账号信息与概览查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_safeline_waf
+version: "1.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - profile
+        - overview
+        - test
+      description: |
+        - profile: GET /api/ProfileAPI，查询当前账号/API Token 可见的账号信息。
+        - overview: GET /api/OverviewAPI，查询 WAF 统计概览。
+    query:
+      type: object
+      description: GET query 参数；也可直接传 count、offset 等简单字段。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_safeline_waf.handler.py
+  function: system

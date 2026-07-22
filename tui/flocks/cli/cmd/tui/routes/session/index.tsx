@@ -35,9 +35,8 @@ import type { ReadTool } from "@/tool/read"
 import type { WriteTool } from "@/tool/write"
 import { BashTool } from "@/tool/bash"
 import type { GlobTool } from "@/tool/glob"
-import { TodoWriteTool } from "@/tool/todo"
+import { TodoTool } from "@/tool/todo"
 import type { GrepTool } from "@/tool/grep"
-import type { ListTool } from "@/tool/ls"
 import type { EditTool } from "@/tool/edit"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
 import type { WebFetchTool } from "@/tool/webfetch"
@@ -72,6 +71,7 @@ import { Filesystem } from "@/util/filesystem"
 import { Global } from "@/global"
 import { PermissionPrompt } from "./permission"
 import { QuestionPrompt } from "./question"
+import { normalizeQuestionAnswers, normalizeQuestionItems } from "./question-state"
 import { DialogExportOptions } from "../../ui/dialog-export-options"
 import { formatTranscript } from "../../util/transcript"
 
@@ -193,23 +193,6 @@ export function Session() {
   createEffect(() => {
     if (route.initialPrompt && prompt) {
       prompt.set(route.initialPrompt)
-    }
-  })
-
-  let lastSwitch: string | undefined = undefined
-  sdk.event.on("message.part.updated", (evt) => {
-    const part = evt.properties.part
-    if (part.type !== "tool") return
-    if (part.sessionID !== route.sessionID) return
-    if (part.state.status !== "completed") return
-    if (part.id === lastSwitch) return
-
-    if (part.tool === "plan_exit") {
-      local.agent.set("build")
-      lastSwitch = part.id
-    } else if (part.tool === "plan_enter") {
-      local.agent.set("plan")
-      lastSwitch = part.id
     }
   })
 
@@ -1513,14 +1496,8 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "grep"}>
           <Grep {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "list"}>
-          <List {...toolprops} />
-        </Match>
         <Match when={props.part.tool === "webfetch"}>
           <WebFetch {...toolprops} />
-        </Match>
-        <Match when={props.part.tool === "codesearch"}>
-          <CodeSearch {...toolprops} />
         </Match>
         <Match when={props.part.tool === "websearch"}>
           <WebSearch {...toolprops} />
@@ -1534,14 +1511,14 @@ function ToolPart(props: { last: boolean; part: ToolPart; message: AssistantMess
         <Match when={props.part.tool === "task"}>
           <Task {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "delegate_task" || props.part.tool === "call_omo_agent"}>
+        <Match when={props.part.tool === "delegate_task"}>
           <DelegateTask {...toolprops} />
         </Match>
         <Match when={props.part.tool === "apply_patch"}>
           <ApplyPatch {...toolprops} />
         </Match>
-        <Match when={props.part.tool === "todowrite"}>
-          <TodoWrite {...toolprops} />
+        <Match when={props.part.tool === "todo"}>
+          <TodoToolView {...toolprops} />
         </Match>
         <Match when={props.part.tool === "question"}>
           <Question {...toolprops} />
@@ -1822,34 +1799,10 @@ function Grep(props: ToolProps<typeof GrepTool>) {
   )
 }
 
-function List(props: ToolProps<typeof ListTool>) {
-  const dir = createMemo(() => {
-    if (props.input.path) {
-      return normalizePath(props.input.path)
-    }
-    return ""
-  })
-  return (
-    <InlineTool icon="→" pending="Listing directory..." complete={props.input.path !== undefined} part={props.part}>
-      List {dir()}
-    </InlineTool>
-  )
-}
-
 function WebFetch(props: ToolProps<typeof WebFetchTool>) {
   return (
     <InlineTool icon="%" pending="Fetching from the web..." complete={(props.input as any).url} part={props.part}>
       WebFetch {(props.input as any).url}
-    </InlineTool>
-  )
-}
-
-function CodeSearch(props: ToolProps<any>) {
-  const input = props.input as any
-  const metadata = props.metadata as any
-  return (
-    <InlineTool icon="◇" pending="Searching code..." complete={input.query} part={props.part}>
-      Exa Code Search "{input.query}" <Show when={metadata.results}>({metadata.results} results)</Show>
     </InlineTool>
   )
 }
@@ -1872,10 +1825,8 @@ const SUBAGENT_TOOL_ICONS: Record<string, string> = {
   bash: "$",
   glob: "✱",
   grep: "✱",
-  codesearch: "◇",
   websearch: "◈",
   webfetch: "%",
-  list: "→",
 }
 
 function SubagentActivity(props: {
@@ -2216,14 +2167,15 @@ function ApplyPatch(props: ToolProps<typeof ApplyPatchTool>) {
   )
 }
 
-function TodoWrite(props: ToolProps<typeof TodoWriteTool>) {
+function TodoToolView(props: ToolProps<typeof TodoTool>) {
+  const todos = () => props.metadata.newTodos ?? props.metadata.todos ?? props.input.todos ?? []
   return (
     <Switch>
-      <Match when={props.metadata.todos?.length}>
+      <Match when={todos().length}>
         <BlockTool title="# Todos" part={props.part}>
           <box>
-            <For each={props.input.todos ?? []}>
-              {(todo) => <TodoItem status={todo.status} content={todo.content} />}
+            <For each={todos()}>
+              {(todo) => <TodoItem status={todo.status} content={todo.content} activeForm={todo.activeForm} />}
             </For>
           </box>
         </BlockTool>
@@ -2239,7 +2191,9 @@ function TodoWrite(props: ToolProps<typeof TodoWriteTool>) {
 
 function Question(props: ToolProps<typeof QuestionTool>) {
   const { theme } = useTheme()
-  const count = createMemo(() => props.input.questions?.length ?? 0)
+  const questions = createMemo(() => normalizeQuestionItems(props.input.questions))
+  const answers = createMemo(() => normalizeQuestionAnswers(props.metadata.answers))
+  const count = createMemo(() => questions().length)
 
   function format(answer?: string[]) {
     if (!answer?.length) return "(no answer)"
@@ -2248,14 +2202,14 @@ function Question(props: ToolProps<typeof QuestionTool>) {
 
   return (
     <Switch>
-      <Match when={props.metadata.answers}>
+      <Match when={props.part.state.status === "completed" && count() > 0}>
         <BlockTool title="# Questions" part={props.part}>
           <box gap={1}>
-            <For each={props.input.questions ?? []}>
+            <For each={questions()}>
               {(q, i) => (
                 <box flexDirection="column">
                   <text fg={theme.textMuted}>{q.question}</text>
-                  <text fg={theme.text}>{format(props.metadata.answers?.[i()])}</text>
+                  <text fg={theme.text}>{format(answers()[i()])}</text>
                 </box>
               )}
             </For>

@@ -12,6 +12,8 @@ Tests various scenarios:
 import os
 import re
 import socket
+from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pytest
@@ -204,9 +206,74 @@ class TestCommandLinePortConfiguration:
 
         assert result.exit_code == 0
         assert captured["config"].backend_host == "0.0.0.0"
-        assert captured["config"].backend_port == 9000
+        assert captured["config"].backend_port == 5174
         assert captured["config"].frontend_host == "0.0.0.0"
         assert captured["config"].frontend_port == 5174
+        assert captured["config"].legacy_backend_port == 9000
+        assert captured["config"].server_port_migration_hint is True
+
+    def test_start_accepts_public_host_and_port(self, monkeypatch):
+        """Test start command accepts the unified public host/port options."""
+        captured = {}
+
+        def fake_start_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "start_all", fake_start_all)
+
+        result = CliRunner().invoke(
+            cli_main.app,
+            [
+                "start",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8888",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "0.0.0.0"
+        assert captured["config"].backend_port == 8888
+        assert captured["config"].frontend_host == "0.0.0.0"
+        assert captured["config"].frontend_port == 8888
+        assert captured["config"].legacy_backend_port == 8000
+
+    def test_public_host_and_port_override_legacy_options(self, monkeypatch):
+        """Test unified public host/port win over legacy server and WebUI options."""
+        captured = {}
+
+        def fake_start_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "start_all", fake_start_all)
+
+        result = CliRunner().invoke(
+            cli_main.app,
+            [
+                "start",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8888",
+                "--server-host",
+                "127.0.0.1",
+                "--server-port",
+                "9000",
+                "--webui-host",
+                "127.0.0.1",
+                "--webui-port",
+                "5174",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "0.0.0.0"
+        assert captured["config"].backend_port == 8888
+        assert captured["config"].frontend_host == "0.0.0.0"
+        assert captured["config"].frontend_port == 8888
+        assert captured["config"].legacy_backend_host == "127.0.0.1"
+        assert captured["config"].legacy_backend_port == 9000
 
     def test_restart_accepts_server_and_webui_options(self, monkeypatch):
         """Test restart command accepts explicit server and WebUI host/port options."""
@@ -216,6 +283,7 @@ class TestCommandLinePortConfiguration:
             captured["config"] = config
 
         monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "read_supervisor_status", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("down")))
 
         result = CliRunner().invoke(
             cli_main.app,
@@ -234,9 +302,154 @@ class TestCommandLinePortConfiguration:
 
         assert result.exit_code == 0
         assert captured["config"].backend_host == "127.0.0.1"
-        assert captured["config"].backend_port == 9100
+        assert captured["config"].backend_port == 5273
         assert captured["config"].frontend_host == "127.0.0.1"
         assert captured["config"].frontend_port == 5273
+        assert captured["config"].legacy_backend_port == 9100
+
+    def test_restart_accepts_public_host_and_port(self, monkeypatch):
+        """Test restart command accepts the unified public host/port options."""
+        captured = {}
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "read_supervisor_status", lambda **_kwargs: (_ for _ in ()).throw(RuntimeError("down")))
+
+        result = CliRunner().invoke(
+            cli_main.app,
+            [
+                "restart",
+                "--host",
+                "0.0.0.0",
+                "--port",
+                "8888",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "0.0.0.0"
+        assert captured["config"].backend_port == 8888
+        assert captured["config"].frontend_host == "0.0.0.0"
+        assert captured["config"].frontend_port == 8888
+        assert captured["config"].legacy_backend_port == 8000
+
+    def test_restart_reuses_supervisor_recorded_host_and_port(self, monkeypatch, tmp_path: Path):
+        """Test restart reuses supervisor host/port when CLI and env omit them."""
+        captured = {}
+        paths = SimpleNamespace(run_dir=tmp_path)
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
+        monkeypatch.setattr(
+            cli_main,
+            "read_supervisor_status",
+            lambda **_kwargs: {
+                "config": {
+                    "backend_host": "0.0.0.0",
+                    "backend_port": 9000,
+                    "frontend_host": "0.0.0.0",
+                    "frontend_port": 5174,
+                }
+            },
+        )
+        Config._global_config = None
+
+        result = CliRunner().invoke(cli_main.app, ["restart"])
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "0.0.0.0"
+        assert captured["config"].backend_port == 5174
+        assert captured["config"].frontend_host == "0.0.0.0"
+        assert captured["config"].frontend_port == 5174
+        assert captured["config"].legacy_backend_port == 9000
+
+    def test_restart_cli_options_override_supervisor_record(self, monkeypatch, tmp_path: Path):
+        """Test explicit restart CLI options override supervisor host/port."""
+        captured = {}
+        paths = SimpleNamespace(run_dir=tmp_path)
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
+        monkeypatch.setattr(
+            cli_main,
+            "read_supervisor_status",
+            lambda **_kwargs: {
+                "config": {
+                    "backend_host": "0.0.0.0",
+                    "backend_port": 9000,
+                    "frontend_host": "0.0.0.0",
+                    "frontend_port": 5174,
+                }
+            },
+        )
+        Config._global_config = None
+
+        result = CliRunner().invoke(
+            cli_main.app,
+            [
+                "restart",
+                "--server-host",
+                "127.0.0.1",
+                "--server-port",
+                "9100",
+                "--webui-host",
+                "127.0.0.1",
+                "--webui-port",
+                "5273",
+            ],
+        )
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "127.0.0.1"
+        assert captured["config"].backend_port == 5273
+        assert captured["config"].frontend_host == "127.0.0.1"
+        assert captured["config"].frontend_port == 5273
+        assert captured["config"].legacy_backend_port == 9100
+
+    def test_restart_environment_overrides_supervisor_record(self, monkeypatch, tmp_path: Path):
+        """Test restart environment variables still override supervisor host/port."""
+        captured = {}
+        paths = SimpleNamespace(run_dir=tmp_path)
+
+        def fake_restart_all(config, _console):
+            captured["config"] = config
+
+        monkeypatch.setattr(cli_main, "restart_all", fake_restart_all)
+        monkeypatch.setattr(cli_main, "runtime_paths", lambda: paths)
+        monkeypatch.setattr(
+            cli_main,
+            "read_supervisor_status",
+            lambda **_kwargs: {
+                "config": {
+                    "backend_host": "0.0.0.0",
+                    "backend_port": 9000,
+                    "frontend_host": "0.0.0.0",
+                    "frontend_port": 5174,
+                }
+            },
+        )
+        monkeypatch.setenv("FLOCKS_SERVER_HOST", "127.0.0.1")
+        monkeypatch.setenv("FLOCKS_SERVER_PORT", "9101")
+        monkeypatch.setenv("FLOCKS_WEBUI_HOST", "127.0.0.1")
+        monkeypatch.setenv("FLOCKS_WEBUI_PORT", "5275")
+        Config._global_config = None
+
+        result = CliRunner().invoke(cli_main.app, ["restart"])
+
+        assert result.exit_code == 0
+        assert captured["config"].backend_host == "127.0.0.1"
+        assert captured["config"].backend_port == 5275
+        assert captured["config"].frontend_host == "127.0.0.1"
+        assert captured["config"].frontend_port == 5275
+        assert captured["config"].legacy_backend_port == 9101
 
     def test_service_config_prefers_cli_values(self, monkeypatch):
         """Test CLI values override environment and default values."""
@@ -253,10 +466,54 @@ class TestCommandLinePortConfiguration:
             webui_port=5174,
         )
 
-        assert config.backend_host == "0.0.0.0"
-        assert config.backend_port == 9000
+        assert config.backend_host == "127.0.0.1"
+        assert config.backend_port == 5174
         assert config.frontend_host == "127.0.0.1"
         assert config.frontend_port == 5174
+        assert config.legacy_backend_host == "0.0.0.0"
+        assert config.legacy_backend_port == 9000
+
+    def test_service_config_default_public_port_is_webui_port(self, monkeypatch):
+        """Test service startup defaults to the public WebUI port."""
+        monkeypatch.delenv("FLOCKS_HOST", raising=False)
+        monkeypatch.delenv("FLOCKS_PORT", raising=False)
+        monkeypatch.delenv("FLOCKS_PUBLIC_HOST", raising=False)
+        monkeypatch.delenv("FLOCKS_PUBLIC_PORT", raising=False)
+        monkeypatch.delenv("FLOCKS_SERVER_HOST", raising=False)
+        monkeypatch.delenv("FLOCKS_SERVER_PORT", raising=False)
+        monkeypatch.delenv("FLOCKS_WEBUI_HOST", raising=False)
+        monkeypatch.delenv("FLOCKS_WEBUI_PORT", raising=False)
+        Config._global_config = None
+
+        config = cli_main._service_config()
+
+        assert config.backend_host == "127.0.0.1"
+        assert config.backend_port == 5173
+        assert config.frontend_host == "127.0.0.1"
+        assert config.frontend_port == 5173
+        assert config.legacy_backend_port == 8000
+
+    def test_service_config_prefers_public_values(self, monkeypatch):
+        """Test unified public values override legacy CLI and environment values."""
+        monkeypatch.setenv("FLOCKS_WEBUI_HOST", "10.0.0.2")
+        monkeypatch.setenv("FLOCKS_WEBUI_PORT", "5274")
+        Config._global_config = None
+
+        config = cli_main._service_config(
+            host="0.0.0.0",
+            port=8888,
+            server_host="127.0.0.1",
+            server_port=9000,
+            webui_host="127.0.0.1",
+            webui_port=5174,
+        )
+
+        assert config.backend_host == "0.0.0.0"
+        assert config.backend_port == 8888
+        assert config.frontend_host == "0.0.0.0"
+        assert config.frontend_port == 8888
+        assert config.legacy_backend_host == "127.0.0.1"
+        assert config.legacy_backend_port == 9000
 
     def test_service_config_uses_server_and_webui_environment(self, monkeypatch):
         """Test environment variables are used when CLI values are absent."""
@@ -269,9 +526,10 @@ class TestCommandLinePortConfiguration:
         config = cli_main._service_config()
 
         assert config.backend_host == "0.0.0.0"
-        assert config.backend_port == 9001
+        assert config.backend_port == 5175
         assert config.frontend_host == "0.0.0.0"
         assert config.frontend_port == 5175
+        assert config.legacy_backend_port == 9001
 
     def test_service_config_keeps_legacy_env_fallbacks(self, monkeypatch):
         """Test legacy backend/frontend environment variables still work as fallback."""
@@ -288,9 +546,10 @@ class TestCommandLinePortConfiguration:
         config = cli_main._service_config()
 
         assert config.backend_host == "0.0.0.0"
-        assert config.backend_port == 9200
+        assert config.backend_port == 5176
         assert config.frontend_host == "0.0.0.0"
         assert config.frontend_port == 5176
+        assert config.legacy_backend_port == 9200
 
     def test_cli_tui_command_default_port(self):
         """Test that CLI tui command uses correct default port."""
@@ -466,13 +725,13 @@ class TestEnvironmentVariablePortConfig:
         assert port == '7000'
 
     def test_script_port_env_var_default(self):
-        """Test FLOCKS_PORT defaults to 8000 when not set."""
+        """Test FLOCKS_PORT defaults to the public service port when not set."""
         # Temporarily remove the env var if it exists
         old_value = os.environ.pop('FLOCKS_PORT', None)
 
         try:
-            port = int(os.getenv('FLOCKS_PORT', '8000'))
-            assert port == 8000
+            port = int(os.getenv('FLOCKS_PORT', '5173'))
+            assert port == 5173
         finally:
             # Restore old value if it existed
             if old_value is not None:

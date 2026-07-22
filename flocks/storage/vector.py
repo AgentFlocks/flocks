@@ -12,6 +12,7 @@ import json
 import math
 from datetime import datetime
 
+from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 log = Log.create(service="storage.vector")
@@ -99,7 +100,7 @@ async def ensure_vector_tables(db_path: Path) -> Dict[str, Any]:
     }
     
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             # Create vector tables
             await db.executescript(VECTOR_SCHEMA_SQL)
             await db.commit()
@@ -188,7 +189,7 @@ async def vector_search(
     results = []
     
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             # Build query
             query = """
                 SELECT id, path, source, start_line, end_line, text, embedding
@@ -271,7 +272,7 @@ def build_fts_query(raw: str) -> Optional[str]:
         return None
     
     # Quote and combine with AND
-    quoted = [f'"{t.replace("\"", "")}"' for t in tokens]
+    quoted = ['"' + t.replace('"', "") + '"' for t in tokens]
     return ' AND '.join(quoted)
 
 
@@ -298,7 +299,7 @@ async def fts_search(
     results = []
     
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             # Build FTS query
             fts_query = build_fts_query(query)
             if not fts_query:
@@ -370,7 +371,7 @@ async def insert_chunks(
         Number of chunks inserted
     """
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             now = datetime.now().timestamp()
             
             # Insert into chunks table
@@ -442,7 +443,7 @@ async def get_embedding_from_cache(
         Tuple of (embedding, dims) or None if not found
     """
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             cursor = await db.execute("""
                 SELECT embedding, dims
                 FROM memory_embedding_cache
@@ -483,7 +484,7 @@ async def put_embedding_to_cache(
     Put embedding to cache
     """
     try:
-        async with aiosqlite.connect(db_path) as db:
+        async with Storage.connect(db_path) as db:
             now = datetime.now().timestamp()
             await db.execute("""
                 INSERT OR REPLACE INTO memory_embedding_cache

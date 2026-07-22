@@ -5,12 +5,17 @@ Discovers SKILL.md files from Flocks-compatible locations and provides
 access to skill information. Mirrors original Flocks Skill namespace.
 """
 
+import json
+import asyncio
 import os
 import glob
 import re
 import shutil
+import sys
+import tempfile
 import threading
-from typing import Any, Dict, List, Literal, Optional, Set
+from contextlib import contextmanager
+from typing import Any, Dict, Iterator, List, Literal, Optional, Set
 from pathlib import Path
 from pydantic import BaseModel, Field
 
@@ -19,6 +24,101 @@ from flocks.project.instance import Instance
 
 
 log = Log.create(service="skill")
+
+# Process-wide reentrant lock guarding ~/.flocks/config/skill_settings.json.
+# FastAPI runs request handlers on a thread pool, so concurrent toggle calls
+# can race on the JSON file.  We use an RLock so high-level read-modify-write
+# helpers (toggle_disabled, set_disabled, etc.) can hold the lock across the
+# entire load → mutate → save sequence while still calling the lower-level
+# load_disabled / save_disabled primitives, which also acquire it.
+_SETTINGS_LOCK = threading.RLock()
+
+# Sidecar path used purely as a target for OS file-locking primitives.  We
+# don't lock the JSON itself because (a) ``os.replace`` would atomically
+# swap the inode out from under any open handle, and (b) on Windows the
+# real file is briefly absent during ``tempfile.mkstemp + replace``.  A
+# dedicated zero-byte ``.lock`` file gives every process a stable fd to
+# coordinate on.
+_LOCK_FILENAME = "skill_settings.json.lock"
+
+
+def _platform_file_lock(fd: int) -> None:
+    """Acquire an exclusive OS-level lock on ``fd`` (blocking).
+
+    Linux / macOS: ``fcntl.flock`` with ``LOCK_EX``.
+    Windows:       ``msvcrt.locking`` with ``LK_LOCK``.
+
+    Both are advisory and *cross-process*, which is exactly what we need
+    when uvicorn runs with ``--workers N`` and several worker processes
+    might call :meth:`Skill.toggle_disabled` concurrently.
+    """
+    if sys.platform == "win32":  # pragma: no cover - exercised on Windows only
+        import msvcrt
+
+        # ``locking`` requires a non-zero length to lock.  One byte is
+        # enough for an advisory range lock on the sentinel file.
+        msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+    else:
+        import fcntl
+
+        fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def _platform_file_unlock(fd: int) -> None:
+    if sys.platform == "win32":  # pragma: no cover
+        import msvcrt
+
+        try:
+            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        except OSError:
+            pass
+    else:
+        import fcntl
+
+        try:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+
+
+@contextmanager
+def _settings_cross_process_lock(directory: Path) -> Iterator[None]:
+    """Acquire a cross-process advisory lock on a sentinel file.
+
+    The lock file is created lazily inside ``~/.flocks/config/`` and is
+    *never* removed — keeping the inode stable across runs is what makes
+    the lock meaningful.  An empty file is fine; the lock is on the fd,
+    not the contents.
+
+    Best-effort: if the platform refuses to grant a lock (read-only FS,
+    NFS without lockd, sandboxing, …) we log and continue, falling back
+    to the in-process ``_SETTINGS_LOCK`` only.  Better to over-write than
+    to wedge the user's UI on file-lock failure.
+    """
+    directory.mkdir(parents=True, exist_ok=True)
+    lock_path = directory / _LOCK_FILENAME
+    fd: Optional[int] = None
+    locked = False
+    try:
+        # ``O_CREAT`` so the very first caller bootstraps the file.
+        fd = os.open(str(lock_path), os.O_RDWR | os.O_CREAT, 0o600)
+        try:
+            _platform_file_lock(fd)
+            locked = True
+        except OSError as exc:
+            log.warn(
+                "skill.disabled.flock_failed",
+                {"path": str(lock_path), "error": str(exc)},
+            )
+        yield
+    finally:
+        if fd is not None:
+            if locked:
+                _platform_file_unlock(fd)
+            try:
+                os.close(fd)
+            except OSError:
+                pass
 
 
 # ---------------------------------------------------------------------------
@@ -55,6 +155,7 @@ class SkillMetadata(BaseModel):
     os: Optional[List[str]] = None
     homepage: Optional[str] = None
     emoji: Optional[str] = None
+    ui_hidden: Optional[bool] = None
 
 
 class SkillInfo(BaseModel):
@@ -64,6 +165,7 @@ class SkillInfo(BaseModel):
     location: str = Field(..., description="Path to SKILL.md file")
     source: Optional[str] = Field(default=None, description="Discovery source")
     category: Optional[str] = Field(default=None, description="Skill category (e.g. 'system')")
+    ui_hidden: bool = Field(default=False, description="Whether the skill should be omitted from skill management UI")
     native: bool = Field(default=False, description=(
         "True only for project-installed skills (<cwd>/.flocks/plugins/skills/). "
         "All other locations (.flocks/skills/, ~/.flocks/plugins/skills/, .claude/) "
@@ -96,13 +198,51 @@ class Skill:
     Skill discovery and management.
 
     Discovers SKILL.md files from (lowest → highest priority):
-    - .flocks dirs   (global + project-level)
-    - .claude dirs     (global ~/.claude + project-level)
-    - ~/.flocks        (global user-level)
-    - <project>/.flocks (project-level, wins on collision)
+    - .claude dirs
+    - global built-in and project-bundled .flocks dirs
+    - ~/.flocks/plugins (user-level customizations, wins on collision)
     """
 
     _cache: Optional[Dict[str, SkillInfo]] = None
+    _cache_lock = threading.Lock()
+    _cache_generation = 0
+    _cache_loads: Dict[int, threading.Event] = {}
+
+    @classmethod
+    def _all_sync(cls) -> List[SkillInfo]:
+        """Discover skills once per cache generation without stale refills."""
+        while True:
+            with cls._cache_lock:
+                if cls._cache is not None:
+                    return list(cls._cache.values())
+                generation = cls._cache_generation
+                completion = cls._cache_loads.get(generation)
+                should_discover = completion is None
+                if completion is None:
+                    completion = threading.Event()
+                    cls._cache_loads[generation] = completion
+
+            if not should_discover:
+                completion.wait()
+                continue
+
+            try:
+                discovered = cls._discover()
+            except BaseException:
+                with cls._cache_lock:
+                    cls._cache_loads.pop(generation, None)
+                    completion.set()
+                raise
+
+            with cls._cache_lock:
+                if generation == cls._cache_generation and cls._cache is None:
+                    cls._cache = discovered
+                cls._cache_loads.pop(generation, None)
+                completion.set()
+                if generation == cls._cache_generation and cls._cache is not None:
+                    return list(cls._cache.values())
+            # The cache was invalidated while discovery was running. Repeat
+            # against the new generation instead of publishing stale data.
 
     @classmethod
     def _parse_skill_md(cls, filepath: str, source: Optional[str] = None) -> Optional[SkillInfo]:
@@ -126,6 +266,7 @@ class Skill:
             name = (data.get("name") or "").strip()
             description = (data.get("description") or "").strip()
             category = (data.get("category") or "").strip().lower() or None
+            ui_hidden = cls._as_bool(data.get("ui_hidden"))
 
             if not cls._is_valid_name(name) or not cls._is_valid_description(description):
                 return None
@@ -143,6 +284,7 @@ class Skill:
                         skill_metadata = SkillMetadata.model_validate(raw_flocks)
                         install_specs = skill_metadata.install or None
                         requires = skill_metadata.requires or None
+                        ui_hidden = ui_hidden or bool(skill_metadata.ui_hidden)
                     except Exception as exc:
                         log.warn("skill.metadata.parse.error", {
                             "filepath": filepath,
@@ -159,6 +301,7 @@ class Skill:
                 location=filepath,
                 source=source,
                 category=category,
+                ui_hidden=ui_hidden,
                 native=is_native,
                 metadata=skill_metadata,
                 install_specs=install_specs,
@@ -213,6 +356,14 @@ class Skill:
     def _is_valid_description(description: str) -> bool:
         return 1 <= len(description) <= 1024
 
+    @staticmethod
+    def _as_bool(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            return value.strip().lower() in {"1", "true", "yes", "on"}
+        return bool(value)
+
     @classmethod
     def _scan_directory(
         cls,
@@ -240,11 +391,21 @@ class Skill:
                 skill_info = cls._parse_skill_md(match, source=source)
                 if skill_info:
                     if skill_info.name in skills:
-                        log.warn("skill.duplicate", {
-                            "name": skill_info.name,
-                            "existing": skills[skill_info.name].location,
-                            "duplicate": match,
-                        })
+                        existing = skills[skill_info.name]
+                        if existing.source != skill_info.source:
+                            log.info("skill.override", {
+                                "name": skill_info.name,
+                                "selected": match,
+                                "selected_source": skill_info.source,
+                                "replaced": existing.location,
+                                "replaced_source": existing.source,
+                            })
+                        else:
+                            log.warn("skill.duplicate", {
+                                "name": skill_info.name,
+                                "existing": existing.location,
+                                "duplicate": match,
+                            })
 
                     skills[skill_info.name] = skill_info
                     log.debug("skill.found", {
@@ -264,9 +425,10 @@ class Skill:
         Discover all skills. Last wins on name collision.
 
         Scan order (lowest → highest priority):
-          1. .claude dirs       (global ~/.claude + project-level)
-          2. ~/.flocks          (global user-level, overrides .claude)
-          3. <project>/.flocks  (project-level, highest priority)
+          1. .claude dirs
+          2. ~/.flocks/skill[s] built-ins
+          3. <project>/.flocks project-bundled skills
+          4. ~/.flocks/plugins user customizations
 
         Source labels:
           "flocks"   — built-in skills inside .flocks/skills/ directories
@@ -298,16 +460,12 @@ class Skill:
         for claude_dir in cls._find_dirs_up(".claude", current_dir, worktree):
             cls._scan_directory(claude_dir, "skills/**/SKILL.md", skills, source="claude")
 
-        # 2) Global ~/.flocks — overrides .claude
-        #    Built-in skills: source="flocks"; user-installed plugins: source="user"
+        # 2) Global built-in skills — overrides .claude
         if os.path.isdir(global_flocks):
             for pattern in builtin_patterns:
                 cls._scan_directory(global_flocks, pattern, skills, source="flocks")
-            for pattern in plugin_patterns:
-                cls._scan_directory(global_flocks, pattern, skills, source="user")
 
-        # 3) Project-level .flocks — highest priority
-        #    Built-in skills: source="flocks"; project-installed plugins: source="project"
+        # 3) Project-bundled .flocks skills — built-in baseline for this project
         for flocks_dir in cls._find_dirs_up(".flocks", current_dir, worktree):
             if os.path.normpath(flocks_dir) == os.path.normpath(global_flocks):
                 continue
@@ -315,6 +473,11 @@ class Skill:
                 cls._scan_directory(flocks_dir, pattern, skills, source="flocks")
             for pattern in plugin_patterns:
                 cls._scan_directory(flocks_dir, pattern, skills, source="project")
+
+        # 4) User-installed plugins — explicit customizations win over project bundles
+        if os.path.isdir(global_flocks):
+            for pattern in plugin_patterns:
+                cls._scan_directory(global_flocks, pattern, skills, source="user")
 
         log.info("skill.discovery.complete", {"count": len(skills), "names": list(skills.keys())})
         return skills
@@ -336,17 +499,36 @@ class Skill:
     @classmethod
     async def all(cls) -> List[SkillInfo]:
         """
-        Get all available skills
+        Get all available skills (including disabled ones).
 
-        Matches TypeScript Skill.all()
+        Use this for management UIs that need to display the full inventory
+        and reflect each skill's disabled state.  For agent runtime use
+        :meth:`list_enabled` so disabled skills are excluded from the system
+        prompt and the ``skill`` tool's description.
+
+        Matches TypeScript Skill.all().
 
         Returns:
             List of all discovered skills
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
+        return await asyncio.to_thread(cls._all_sync)
 
-        return list(cls._cache.values())
+    @classmethod
+    async def list_enabled(cls) -> List[SkillInfo]:
+        """
+        Get skills that are enabled (i.e. visible to the agent).
+
+        Disabled skills — those whose names appear in
+        ``~/.flocks/config/skill_settings.json`` under ``disabled`` — are
+        filtered out.  Agent loaders and the ``skill`` tool's description
+        builder must use this method so that toggling a skill off in the
+        Skill UI actually removes it from the LLM's system prompt.
+        """
+        skills = await cls.all()
+        disabled = cls.load_disabled()
+        if not disabled:
+            return skills
+        return [s for s in skills if s.name not in disabled]
 
     @classmethod
     async def get(cls, name: str) -> Optional[SkillInfo]:
@@ -361,15 +543,18 @@ class Skill:
         Returns:
             SkillInfo or None if not found
         """
-        if cls._cache is None:
-            cls._cache = cls._discover()
-
-        return cls._cache.get(name)
+        skills = await cls.all()
+        skill = next((item for item in skills if item.name == name), None)
+        if not skill:
+            return None
+        return skill
 
     @classmethod
     def clear_cache(cls) -> None:
         """Clear the skill cache (for testing or forced refresh)"""
-        cls._cache = None
+        with cls._cache_lock:
+            cls._cache = None
+            cls._cache_generation += 1
         log.info("skill.cache.cleared")
 
     @classmethod
@@ -382,6 +567,146 @@ class Skill:
         """
         cls.clear_cache()
         return await cls.all()
+
+    # ----- Disabled state (user preferences) -----
+
+    @staticmethod
+    def settings_path() -> Path:
+        """Path to the user-level skill settings file."""
+        return Path.home() / ".flocks" / "config" / "skill_settings.json"
+
+    @classmethod
+    @contextmanager
+    def _locked_rmw(cls) -> Iterator[None]:
+        """Hold both the in-process RLock and the cross-process file lock.
+
+        Use this around every read-modify-write of the disabled-skills
+        file so multiple worker processes (uvicorn ``--workers N``) cannot
+        interleave their loads / saves and lose each other's updates.
+        Single-shot reads (:meth:`load_disabled`) don't need this — the
+        on-disk file is always a valid JSON snapshot because
+        :meth:`save_disabled` publishes via ``os.replace``.
+        """
+        with _SETTINGS_LOCK:
+            with _settings_cross_process_lock(cls.settings_path().parent):
+                yield
+
+    @classmethod
+    def load_disabled(cls) -> Set[str]:
+        """Return the set of skill names the user has marked as disabled.
+
+        Disabled skills are still discoverable (so the management UI can
+        list them) but are excluded from :meth:`list_enabled`, which is what
+        the agent uses.  Missing or malformed files yield an empty set.
+        """
+        path = cls.settings_path()
+        with _SETTINGS_LOCK:
+            try:
+                if not path.exists():
+                    return set()
+                data = json.loads(path.read_text(encoding="utf-8"))
+                disabled = data.get("disabled", [])
+                if isinstance(disabled, list):
+                    return {str(n) for n in disabled if isinstance(n, str)}
+            except Exception as exc:
+                log.warn("skill.disabled.load_failed", {"error": str(exc)})
+        return set()
+
+    @classmethod
+    def save_disabled(cls, disabled: Set[str]) -> None:
+        """Persist the disabled-skill set, creating parent dirs as needed.
+
+        Write atomically via ``tempfile`` + :func:`os.replace`.  A plain
+        ``write_text`` opens the file in truncate mode, so a crash, SIGKILL,
+        or full disk midway through the write can leave a half-written /
+        empty JSON behind.  On the next ``load_disabled`` call the parser
+        would throw and we would silently fall back to an empty set —
+        wiping every disabled preference the user had configured.  The
+        ``tmp + rename`` dance keeps the on-disk file pointing at a fully
+        written payload until the very last instant.
+        """
+        path = cls.settings_path()
+        with _SETTINGS_LOCK:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {"disabled": sorted(disabled)}
+            fd, tmp_path = tempfile.mkstemp(
+                dir=str(path.parent),
+                prefix=".skill_settings_",
+                suffix=".tmp",
+            )
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as f:
+                    json.dump(payload, f, ensure_ascii=False, indent=2)
+                    f.write("\n")
+                os.replace(tmp_path, str(path))
+            except Exception:
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+                raise
+
+    @classmethod
+    def is_disabled(cls, name: str) -> bool:
+        return name in cls.load_disabled()
+
+    @classmethod
+    def set_disabled(cls, name: str, disabled: bool) -> bool:
+        """Set whether the given skill is disabled.
+
+        The whole read-modify-write runs under :meth:`_locked_rmw` so two
+        concurrent callers — including separate uvicorn workers — cannot
+        lose each other's updates.
+
+        Returns the new disabled state (mirrors the input ``disabled``).
+        """
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if disabled:
+                current.add(name)
+            else:
+                current.discard(name)
+            cls.save_disabled(current)
+        return disabled
+
+    @classmethod
+    def toggle_disabled(cls, name: str) -> bool:
+        """Flip the disabled state of a skill and return the new value."""
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if name in current:
+                current.discard(name)
+                new_value = False
+            else:
+                current.add(name)
+                new_value = True
+            cls.save_disabled(current)
+        return new_value
+
+    @classmethod
+    def forget_disabled(cls, name: str) -> None:
+        """Remove a name from the disabled list (no-op if not present).
+
+        Call this after deleting a skill so its preference does not linger
+        as a ghost record in the settings file.
+        """
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if name in current:
+                current.discard(name)
+                cls.save_disabled(current)
+
+    @classmethod
+    def rename_disabled(cls, old_name: str, new_name: str) -> None:
+        """Migrate a disabled flag from ``old_name`` to ``new_name``."""
+        if old_name == new_name:
+            return
+        with cls._locked_rmw():
+            current = cls.load_disabled()
+            if old_name in current:
+                current.discard(old_name)
+                current.add(new_name)
+                cls.save_disabled(current)
 
     # ----- Eligibility -----
 
@@ -444,6 +769,20 @@ class Skill:
             cls._watcher = None
 
 
+def _skill_event_should_reload(event: object) -> bool:
+    """Return True if a watchdog event affects a ``SKILL.md`` file.
+
+    Atomic-save flows rename a temp file onto the real ``SKILL.md``; we have
+    to consult both ``src_path`` and ``dest_path`` so the watcher reloads on
+    those renames as well.
+    """
+    for attr in ("src_path", "dest_path"):
+        path = getattr(event, attr, "") or ""
+        if path.endswith("SKILL.md"):
+            return True
+    return False
+
+
 class SkillFileWatcher:
     """
     Watches skill directories for SKILL.md changes and auto-invalidates
@@ -454,6 +793,13 @@ class SkillFileWatcher:
     """
 
     _DEBOUNCE_SECONDS = 0.5
+    _FLOCKS_SKILL_DIRS = (
+        "skill",
+        "skills",
+        os.path.join("plugins", "skill"),
+        os.path.join("plugins", "skills"),
+    )
+    _CLAUDE_SKILL_DIRS = ("skills",)
 
     def __init__(self, skill_cls: type):
         self._skill_cls = skill_cls
@@ -479,12 +825,19 @@ class SkillFileWatcher:
 
         watcher = self
 
+        # Only react to actual content-mutation events.  watchdog emits
+        # ``opened``/``closed``/``closed_no_write`` events whenever any code
+        # (including the skill loader itself) reads ``SKILL.md`` files, which
+        # would otherwise cause a self-sustaining cache-invalidation loop.
+        _RELOAD_EVENT_TYPES = frozenset({"modified", "created", "deleted", "moved"})
+
         class _Handler(FileSystemEventHandler):
             def on_any_event(self, event: FileSystemEvent):
                 if event.is_directory:
                     return
-                src = getattr(event, "src_path", "") or ""
-                if src.endswith("SKILL.md"):
+                if getattr(event, "event_type", "") not in _RELOAD_EVENT_TYPES:
+                    return
+                if _skill_event_should_reload(event):
                     watcher._schedule_clear()
 
         handler = _Handler()
@@ -533,7 +886,7 @@ class SkillFileWatcher:
         log.info("skill.watcher.cache_cleared", {"reason": "SKILL.md changed on disk"})
 
     def _collect_watch_dirs(self) -> Set[str]:
-        """Gather all directories that may contain skill files."""
+        """Gather concrete skill roots that may contain SKILL.md files."""
         dirs: Set[str] = set()
         home = os.path.expanduser("~")
 
@@ -546,11 +899,28 @@ class SkillFileWatcher:
         except Exception:
             worktree = current_dir
 
-        for target in (".flocks", ".claude"):
-            for d in Skill._find_dirs_up(target, current_dir, worktree):
-                dirs.add(d)
-            global_dir = os.path.join(home, target)
-            if os.path.isdir(global_dir):
-                dirs.add(global_dir)
+        flocks_roots = Skill._find_dirs_up(".flocks", current_dir, worktree)
+        global_flocks = os.path.join(home, ".flocks")
+        if os.path.isdir(global_flocks):
+            flocks_roots.append(global_flocks)
+        for root in flocks_roots:
+            dirs.update(self._existing_subdirs(root, self._FLOCKS_SKILL_DIRS))
 
-        return {d for d in dirs if os.path.isdir(d)}
+        claude_roots = Skill._find_dirs_up(".claude", current_dir, worktree)
+        global_claude = os.path.join(home, ".claude")
+        if os.path.isdir(global_claude):
+            claude_roots.append(global_claude)
+        for root in claude_roots:
+            dirs.update(self._existing_subdirs(root, self._CLAUDE_SKILL_DIRS))
+
+        return dirs
+
+    @staticmethod
+    def _existing_subdirs(root: str, relative_dirs: tuple[str, ...]) -> Set[str]:
+        """Return existing watch roots below a discovery root, with stable dedupe."""
+        dirs: Set[str] = set()
+        for rel in relative_dirs:
+            candidate = os.path.realpath(os.path.join(root, rel))
+            if os.path.isdir(candidate):
+                dirs.add(candidate)
+        return dirs

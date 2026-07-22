@@ -10,8 +10,98 @@ from pydantic import BaseModel, Field, ConfigDict
 
 PRUNE_MINIMUM = 20_000
 PRUNE_PROTECT = 40_000
-PRUNE_PROTECTED_TOOLS = ["skill"]
+PRUNE_PROTECTED_TOOLS = ["skill_load"]
 PRESERVE_LAST_STEPS = 10
+
+
+# ============================================================================
+# v2 per-tool retention policy (T1 + T2)
+# ----------------------------------------------------------------------------
+# See ``docs/design/context-compaction-v2.md`` §T1 / §T2.
+#
+# Pruning is keyed on the number of *user turns* observed since the most
+# recent message, not the number of assistant steps.  This matters because
+# tool-heavy turns (e.g. 一次溯源 10+ 个工具调用 in one assistant turn) used
+# to bloat the "step" counter and over-eagerly preserve stale tool output.
+#
+# ``TOOL_PRUNE_POLICY`` lets each tool declare how many user turns its
+# completed output is worth keeping for.  The values are:
+#
+#   -1 → never prune (treat as background knowledge)
+#    0 → drop on the same turn (rarely useful — keep at least the current
+#         turn to satisfy provider pairing constraints)
+#    N → keep the result for at most N user turns
+#
+# Wildcard keys ending in ``*`` are treated as prefix matches.  ``*`` alone
+# is the catch-all fallback.
+# ============================================================================
+
+TOOL_RESULT_PRESERVE_USER_TURNS = 3
+"""Default user-turn retention window for tool outputs (overridable by policy)."""
+
+TOOL_PRUNE_POLICY: dict[str, int] = {
+    # ------------------------------------------------------------------
+    # Never prune — anchor / capability tools whose output is the agent's
+    # working knowledge.  Removing them mid-session forces the LLM to
+    # rediscover capabilities and usually makes things worse, not better.
+    # ------------------------------------------------------------------
+    "skill_load":          -1,
+    "memory_get":          -1,
+    "memory_search":       -1,
+    "tool_search":         -1,
+    "flocks_skills":       -1,
+    # ------------------------------------------------------------------
+    # Single-turn tools — large outputs whose value to the next turn is
+    # near-zero (the agent has already extracted what it needs).
+    # ------------------------------------------------------------------
+    "bash":                1,
+    "read":                1,
+    "glob":                1,
+    "grep":                1,
+    "edit":                1,
+    "write":               1,
+    "apply_patch":         1,
+    "webfetch":            1,
+    "doc_parser":          1,
+    "run_workflow":        1,
+    "run_workflow_node":   1,
+    # ------------------------------------------------------------------
+    # Investigation / OSINT tools — keep an extra turn so the agent can
+    # follow up on the same indicator without re-querying.
+    # ------------------------------------------------------------------
+    "websearch":           2,
+    "tdp_*":               2,
+    "threatbook_*":        2,
+    "fofa_*":              2,
+    "quake_*":             2,
+    "ngsoc_*":             2,
+    "onesig_*":            2,
+    "sangfor_*":           2,
+    # ------------------------------------------------------------------
+    # Catch-all — also serves as the value returned when a tool name is
+    # missing or unknown.
+    # ------------------------------------------------------------------
+    "*":                   TOOL_RESULT_PRESERVE_USER_TURNS,
+}
+
+
+def resolve_tool_preserve_turns(tool_name: str) -> int:
+    """Resolve how many user turns ``tool_name``'s completed output should
+    be preserved for.
+
+    Match order: exact → ``prefix*`` → ``*`` catch-all → built-in default.
+    Returns ``-1`` to mean "never prune".
+    """
+    catch_all = TOOL_PRUNE_POLICY.get("*", TOOL_RESULT_PRESERVE_USER_TURNS)
+    if not tool_name:
+        return catch_all
+    exact = TOOL_PRUNE_POLICY.get(tool_name)
+    if exact is not None:
+        return exact
+    for pattern, turns in TOOL_PRUNE_POLICY.items():
+        if pattern.endswith("*") and pattern != "*" and tool_name.startswith(pattern[:-1]):
+            return turns
+    return catch_all
 
 DEFAULT_COMPACTION_PROMPT = """\
 Summarize the conversation above into a structured compaction summary. \
@@ -46,6 +136,44 @@ Rules:
 - Preserve exact identifiers (paths, names, commands) without modification.
 - Omit sections that have no content rather than writing "None".
 """
+
+
+# ============================================================================
+# v2 iterative summary prompt (E1)
+# ----------------------------------------------------------------------------
+# See ``docs/design/context-compaction-v2.md`` §E1.
+#
+# When the previous compaction's summary is available, hand it to the model
+# as authoritative prior context.  The model only needs to merge in the
+# NEW turns since that summary, which significantly shortens the prompt and
+# usually produces a higher-quality summary because the model isn't asked
+# to "reconstruct everything from scratch" each round.
+#
+# Use ``DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS.format(previous_summary=...)``
+# at the call site.  The structural section requirements from
+# ``DEFAULT_COMPACTION_PROMPT`` are kept verbatim so the output schema
+# is unchanged.
+# ============================================================================
+
+DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS = """\
+Below is the PREVIOUS summary of conversation up to an earlier boundary:
+
+<<<PREVIOUS_SUMMARY>>>
+{previous_summary}
+<<<END_PREVIOUS_SUMMARY>>>
+
+Below are NEW conversation turns AFTER that boundary that you must merge \
+into the summary.  Produce an UPDATED summary that supersedes the previous \
+one, preserving ALL critical context from both sides.
+
+""" + DEFAULT_COMPACTION_PROMPT
+
+
+# How many consecutive ``with_previous`` summaries we allow before forcing
+# a full rebuild from scratch (paired with the iterative path in
+# ``SessionCompaction.process``).  Five is a conservative default — every
+# fifth compaction discards drift and re-aligns with the on-disk transcript.
+ITERATIVE_SUMMARY_REBUILD_INTERVAL = 5
 
 
 # ============================================================================

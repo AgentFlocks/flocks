@@ -25,8 +25,12 @@ def test_install_zh_bash_bootstrap_uses_gitee_archive_and_delegates_to_zh_worksp
     assert 'https://astral.org.cn/uv/install.sh' in script
     assert 'FLOCKS_UV_INSTALL_SH_FALLBACK_URL' in script
     assert 'https://uv.agentsmirror.com/install-cn.sh' in script
+    assert 'FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL' in script
+    assert 'https://astral.sh/uv/install.sh' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'https://astral.org.cn/uv/install.ps1' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL' in script
+    assert 'https://astral.sh/uv/install.ps1' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
     assert 'FLOCKS_NVM_INSTALL_SCRIPT_URL' in script
@@ -55,6 +59,8 @@ def test_install_zh_powershell_bootstrap_uses_gitee_archive_and_delegates_to_zh_
     assert 'https://astral.org.cn/uv/install.ps1' in script
     assert 'FLOCKS_UV_INSTALL_PS1_FALLBACK_URL' in script
     assert 'https://uv.agentsmirror.com/install-cn.ps1' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL' in script
+    assert 'https://astral.sh/uv/install.ps1' in script
     assert 'PUPPETEER_CHROME_DOWNLOAD_BASE_URL' in script
     assert 'https://cdn.npmmirror.com/binaries/chrome-for-testing' in script
 
@@ -76,8 +82,14 @@ def test_install_zh_bash_wrapper_sets_cn_sources_and_reuses_main_installer() -> 
     assert 'https://mirrors.aliyun.com/pypi/simple' in script
     assert 'FLOCKS_UV_INSTALL_SH_URL' in script
     assert 'https://astral.org.cn/uv/install.sh' in script
+    assert 'FLOCKS_UV_INSTALL_SH_FALLBACK_URL' in script
+    assert 'https://uv.agentsmirror.com/install-cn.sh' in script
+    assert 'FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL' in script
+    assert 'https://astral.sh/uv/install.sh' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'https://astral.org.cn/uv/install.ps1' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL' in script
+    assert 'https://astral.sh/uv/install.ps1' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
     assert 'FLOCKS_NVM_INSTALL_SCRIPT_URL' in script
@@ -108,6 +120,8 @@ def test_install_zh_powershell_wrapper_sets_cn_sources_and_reuses_main_installer
     assert 'https://astral.org.cn/uv/install.ps1' in script
     assert 'FLOCKS_UV_INSTALL_PS1_FALLBACK_URL' in script
     assert 'https://uv.agentsmirror.com/install-cn.ps1' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL' in script
+    assert 'https://astral.sh/uv/install.ps1' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'https://registry.npmmirror.com/' in script
     assert 'FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL' in script
@@ -123,6 +137,7 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'FLOCKS_UV_INSTALL_SH_URL' in script
     assert 'https://astral.sh/uv/install.sh' in script
     assert 'FLOCKS_UV_INSTALL_SH_FALLBACK_URL' in script
+    assert 'FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL' in script
     assert 'FLOCKS_NPM_REGISTRY' in script
     assert 'Using PyPI index: $UV_DEFAULT_INDEX' in script
     assert 'Using npm registry: $NPM_REGISTRY' in script
@@ -130,12 +145,20 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'Using nvm install script: $NVM_INSTALL_SCRIPT_URL' in script
     assert 'Using uv fallback script' not in script
     assert '使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL' in script
+    assert '使用 uv 官方回退安装脚本: $UV_INSTALL_SH_SECONDARY_FALLBACK_URL' in script
     assert 'pick_fastest_url' not in script
     assert 'Probing PyPI and npm registries to choose the faster source' not in script
-    assert 'npm_config_registry="$NPM_REGISTRY" npm install' in script
-    assert 'npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
-    assert 'npm_config_registry="$NPM_REGISTRY" npm install --global agent-browser' in script
-    assert 'local connector_dir="$ROOT_DIR/.flocks/plugins/channels/dingtalk/dingtalk-openclaw-connector"' in script
+    assert 'NODE_CMD="node"' in script
+    assert 'NPM_CMD="npm"' in script
+    assert 'NPX_CMD="npx"' in script
+    assert 'set_node_toolchain_from_bin_dir()' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" "$NPX_CMD" --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
+    assert 'npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install --global agent-browser' in script
+    assert 'write_install_profile()' in script
+    assert '"Language": "%s"' in script
+    assert 'write_install_profile' in script
+    assert "Failed to write install profile. Continuing with the default installer behavior." in script
     assert "FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL" in script
     assert "https://nodejs.org/en/download" in script
     assert "nodejs_manual_download_hint" in script
@@ -154,6 +177,7 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'curl -fsSL "$NVM_INSTALL_SCRIPT_URL" -o "$install_script"' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_URL" | sh' in script
     assert 'curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh' in script
+    assert 'curl -LsSf "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" | sh' in script
     assert 'nvm install "$MIN_NODE_MAJOR"' in script
     assert 'nvm use "$MIN_NODE_MAJOR" >/dev/null' in script
     assert "Homebrew failed to install Node.js. Falling back to nvm..." in script
@@ -170,6 +194,7 @@ def test_main_powershell_installer_uses_configured_default_sources_and_admin_pre
     assert 'FLOCKS_UV_DEFAULT_INDEX' in script
     assert 'FLOCKS_UV_INSTALL_PS1_URL' in script
     assert 'FLOCKS_UV_INSTALL_PS1_FALLBACK_URL' in script
+    assert 'FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL' in script
     assert 'https://astral.sh/uv/install.ps1' in script
     assert 'https://uv.agentsmirror.com/install-cn.ps1' in script
     assert 'Using PyPI index: $script:UvDefaultIndex' in script
@@ -177,8 +202,13 @@ def test_main_powershell_installer_uses_configured_default_sources_and_admin_pre
     assert 'Using uv install script: $script:UvInstallPs1Url' in script
     assert "irm '$script:UvInstallPs1Url' | iex" in script
     assert "irm '$script:UvInstallPs1FallbackUrl' | iex" in script
+    assert "irm '$script:UvInstallPs1SecondaryFallbackUrl' | iex" in script
     assert 'function Assert-Administrator' in script
     assert 'Assert-Administrator' in script
+    assert 'function Write-InstallProfile' in script
+    assert '[ordered]@{ Language = $language }' in script
+    assert 'Write-InstallProfile' in script
+    assert "Failed to write install profile. Continuing with the default installer behavior." in script
 
 
 def test_windows_bootstrap_installers_detect_system32_and_fall_back_to_home() -> None:
@@ -214,6 +244,20 @@ def test_windows_bootstrap_installers_only_create_missing_parent_directories() -
         script = path.read_text(encoding="utf-8-sig")
         assert "Split-Path -Parent $InstallDir" in script
         assert "Test-Path -LiteralPath $installParent" in script
+
+
+def test_windows_bootstrap_installers_remove_existing_install_directory_before_copy() -> None:
+    for path in (
+        REPO_ROOT / "install.ps1",
+        REPO_ROOT / "install_zh.ps1",
+    ):
+        script = path.read_text(encoding="utf-8-sig")
+        assert "function Remove-ExistingInstallDirectory" in script
+        assert "Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction Stop" in script
+        assert "Remove-ExistingInstallDirectory -TargetDir $InstallDir" in script
+        assert script.index("Remove-ExistingInstallDirectory -TargetDir $InstallDir") < script.index(
+            "Copy-Item -Path $projectRoot -Destination $InstallDir -Recurse -Force"
+        )
 
 
 def test_main_bash_installer_falls_back_to_nvm_when_brew_is_missing_on_macos() -> None:
@@ -539,7 +583,7 @@ def test_main_bash_installer_checks_node_modules_dir_before_accepting_global_pre
     assert result.returncode == 0, output
 
 
-def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> None:
+def test_main_bash_installer_uses_cn_uv_official_fallback_after_agentsmirror() -> None:
     script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
     script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
     test_script = script_without_main + textwrap.dedent(
@@ -549,10 +593,12 @@ def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> 
         export FLOCKS_INSTALL_LANGUAGE="zh-CN"
         export FLOCKS_UV_INSTALL_SH_URL="https://primary.example/install.sh"
         export FLOCKS_UV_INSTALL_SH_FALLBACK_URL="https://uv.agentsmirror.com/install-cn.sh"
+        export FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL="https://astral.sh/uv/install.sh"
         export TEST_LOG="$HOME/install-uv.log"
         INSTALL_LANGUAGE="$FLOCKS_INSTALL_LANGUAGE"
         UV_INSTALL_SH_URL="$FLOCKS_UV_INSTALL_SH_URL"
         UV_INSTALL_SH_FALLBACK_URL="$FLOCKS_UV_INSTALL_SH_FALLBACK_URL"
+        UV_INSTALL_SH_SECONDARY_FALLBACK_URL="$FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL"
 
         has_cmd() {
           case "$1" in
@@ -588,7 +634,7 @@ def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> 
 
         curl() {
           printf '%s\n' "$*" >> "$HOME/curl-commands.log"
-          if [[ "$*" == *"primary.example"* ]]; then
+          if [[ "$*" == *"primary.example"* || "$*" == *"uv.agentsmirror.com"* ]]; then
             return 22
           fi
 
@@ -611,11 +657,19 @@ def test_main_bash_installer_uses_cn_uv_fallback_when_primary_script_fails() -> 
           exit 1
         }
         [[ "$curl_commands" == *"https://uv.agentsmirror.com/install-cn.sh"* ]] || {
-          printf 'fallback uv script was not attempted: %s\n' "$curl_commands" >&2
+          printf 'agentsmirror fallback uv script was not attempted: %s\n' "$curl_commands" >&2
+          exit 1
+        }
+        [[ "$curl_commands" == *"https://astral.sh/uv/install.sh"* ]] || {
+          printf 'official fallback uv script was not attempted: %s\n' "$curl_commands" >&2
           exit 1
         }
         [[ "$install_log" == *"默认 uv 安装脚本失败，正在尝试中国大陆备用源"* ]] || {
-          printf 'fallback log missing: %s\n' "$install_log" >&2
+          printf 'agentsmirror fallback log missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"中国大陆备用源失败，正在尝试官方 uv 安装脚本"* ]] || {
+          printf 'official fallback log missing: %s\n' "$install_log" >&2
           exit 1
         }
         """
@@ -814,6 +868,173 @@ def test_main_bash_installer_prefers_nvm_on_linux_before_package_manager() -> No
         }
         [[ ! -f "$HOME/pkg-commands.log" ]] || {
           printf 'package manager fallback should not run when nvm succeeds: %s\n' "$(<"$HOME/pkg-commands.log")" >&2
+          exit 1
+        }
+        """
+    )
+
+    result = subprocess.run(
+        ["bash", "-c", test_script],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    output = f"{result.stdout}\n{result.stderr}"
+    assert result.returncode == 0, output
+
+
+def test_main_bash_installer_keeps_using_nvm_toolchain_when_shell_node_resolution_stays_stale_on_linux() -> None:
+    script = (SCRIPT_DIR / "install.sh").read_text(encoding="utf-8")
+    script_without_main = re.sub(r'\nmain "\$@"\s*$', "\n", script)
+    test_script = script_without_main + textwrap.dedent(
+        r"""
+
+        export HOME="$(mktemp -d)"
+        unset NVM_DIR
+        export TEST_LOG="$HOME/install-node.log"
+
+        info() {
+          printf 'INFO:%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        warn() {
+          printf 'WARN:%s\n' "$1" >> "$TEST_LOG"
+        }
+
+        fail() {
+          printf 'FAIL:%s\n' "$1" >&2
+          exit 1
+        }
+
+        has_cmd() {
+          case "$1" in
+            curl|pacman)
+              return 0
+              ;;
+            *)
+              command -v "$1" >/dev/null 2>&1
+              ;;
+          esac
+        }
+
+        node() {
+          printf 'v18.20.8\n'
+        }
+
+        npm() {
+          if [[ "${1:-}" == "-v" ]]; then
+            printf '9.9.9\n'
+            return 0
+          fi
+
+          if [[ "${1:-}" == "config" && "${2:-}" == "get" && "${3:-}" == "prefix" ]]; then
+            printf '/usr/local\n'
+            return 0
+          fi
+
+          printf 'stale npm\n'
+        }
+
+        curl() {
+          local output_file=""
+          while [[ $# -gt 0 ]]; do
+            case "$1" in
+              -o)
+                output_file="$2"
+                shift 2
+                ;;
+              *)
+                shift
+                ;;
+            esac
+          done
+
+          cat > "$output_file" <<'EOF'
+        mkdir -p "$HOME/.nvm"
+        cat > "$HOME/.nvm/nvm.sh" <<'EOS'
+        nvm() {
+          printf '%s\n' "$*" >> "$HOME/nvm-commands.log"
+          if [[ "$1" == "install" ]]; then
+            mkdir -p "$HOME/.nvm/versions/node/v22.22.2/bin"
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/node" <<'EON'
+        #!/usr/bin/env bash
+        printf 'v22.22.2\n'
+        EON
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/npm" <<'EON'
+        #!/usr/bin/env bash
+        if [[ "${1:-}" == "-v" ]]; then
+          printf '10.9.7\n'
+          exit 0
+        fi
+        if [[ "${1:-}" == "config" && "${2:-}" == "get" && "${3:-}" == "prefix" ]]; then
+          printf '%s\n' "$HOME/.nvm/versions/node/v22.22.2"
+          exit 0
+        fi
+        printf 'nvm npm\n'
+        EON
+            cat > "$HOME/.nvm/versions/node/v22.22.2/bin/npx" <<'EON'
+        #!/usr/bin/env bash
+        printf 'nvm npx\n'
+        EON
+            chmod +x "$HOME/.nvm/versions/node/v22.22.2/bin/node" \
+              "$HOME/.nvm/versions/node/v22.22.2/bin/npm" \
+              "$HOME/.nvm/versions/node/v22.22.2/bin/npx"
+            return 0
+          fi
+          if [[ "$1" == "use" ]]; then
+            export NVM_BIN="$HOME/.nvm/versions/node/v22.22.2/bin"
+            return 0
+          fi
+          return 0
+        }
+        EOS
+        EOF
+        }
+
+        run_with_privilege() {
+          printf '%s\n' "$*" >> "$HOME/pkg-commands.log"
+          return 0
+        }
+
+        install_nodejs_linux
+
+        stale_node_version="$(node -v)"
+        selected_node_version="$("$NODE_CMD" -v)"
+        selected_npm_version="$("$NPM_CMD" -v)"
+        selected_npm_prefix="$("$NPM_CMD" config get prefix)"
+        install_log="$(<"$TEST_LOG")"
+
+        [[ "$stale_node_version" == "v18.20.8" ]] || {
+          printf 'stale shell node unexpectedly changed: %s\n' "$stale_node_version" >&2
+          exit 1
+        }
+        [[ "$selected_node_version" == "v22.22.2" ]] || {
+          printf 'installer did not select the nvm node runtime: %s\n' "$selected_node_version" >&2
+          exit 1
+        }
+        [[ "$selected_npm_version" == "10.9.7" ]] || {
+          printf 'installer did not select the nvm npm runtime: %s\n' "$selected_npm_version" >&2
+          exit 1
+        }
+        [[ "$selected_npm_prefix" == "$HOME/.nvm/versions/node/v22.22.2" ]] || {
+          printf 'unexpected nvm npm prefix: %s\n' "$selected_npm_prefix" >&2
+          exit 1
+        }
+        [[ "$NODE_CMD" == "$HOME/.nvm/versions/node/v22.22.2/bin/node" ]] || {
+          printf 'NODE_CMD did not pin to the nvm runtime: %s\n' "$NODE_CMD" >&2
+          exit 1
+        }
+        [[ "$NPM_CMD" == "$HOME/.nvm/versions/node/v22.22.2/bin/npm" ]] || {
+          printf 'NPM_CMD did not pin to the nvm runtime: %s\n' "$NPM_CMD" >&2
+          exit 1
+        }
+        [[ "$install_log" == *"WARN:nvm activated Node.js 22, but the current shell still resolves a different node binary. Continuing with the nvm-managed toolchain for this installer run. Open a new shell afterwards."* ]] || {
+          printf 'stale-shell warning missing: %s\n' "$install_log" >&2
+          exit 1
+        }
+        [[ ! -f "$HOME/pkg-commands.log" ]] || {
+          printf 'package manager fallback should not run when nvm runtime is usable: %s\n' "$(<"$HOME/pkg-commands.log")" >&2
           exit 1
         }
         """

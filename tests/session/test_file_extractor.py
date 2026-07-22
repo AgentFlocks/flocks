@@ -11,11 +11,14 @@ Covers pure-function utilities:
 import base64
 import tempfile
 from pathlib import Path
+from urllib.parse import quote
 
 import pytest
 
 from flocks.session.utils.file_extractor import (
     extract_file_text,
+    file_download_url_to_path,
+    file_url_to_path,
     is_text_extractable_mime,
     read_file_part_bytes,
     truncate_extracted_text,
@@ -25,6 +28,7 @@ from flocks.session.utils.file_extractor import (
 # ---------------------------------------------------------------------------
 # read_file_part_bytes
 # ---------------------------------------------------------------------------
+
 
 class TestReadFilePartBytes:
     def test_empty_string_returns_none(self):
@@ -69,46 +73,117 @@ class TestReadFilePartBytes:
         result = read_file_part_bytes(url)
         assert result == b"spaced content"
 
+    def test_windows_drive_file_url_path_does_not_keep_posix_prefix(self):
+        path = file_url_to_path("file:///C:/Users/demo/Pictures/channel%20image.png")
+        assert path == "C:/Users/demo/Pictures/channel image.png"
+
+    def test_macos_file_url_path_is_decoded(self):
+        path = file_url_to_path("file:///Users/demo/Pictures/channel%20image.png")
+        assert path == "/Users/demo/Pictures/channel image.png"
+
+    def test_linux_file_url_path_is_decoded(self):
+        path = file_url_to_path("file:///home/demo/Pictures/channel%20image.png")
+        assert path == "/home/demo/Pictures/channel image.png"
+
+    def test_unc_file_url_path_preserves_host(self):
+        path = file_url_to_path("file://server/share/channel%20image.png")
+        assert path == "//server/share/channel image.png"
+
+    def test_download_url_path_is_extracted(self):
+        path = file_download_url_to_path(
+            "/api/file/download?path=C%3A%2FUsers%2Fdemo%2FPictures%2Fchannel%20image.png"
+        )
+        assert path == "C:/Users/demo/Pictures/channel image.png"
+
+    def test_macos_download_url_path_is_extracted(self):
+        path = file_download_url_to_path(
+            "/api/file/download?path=%2FUsers%2Fdemo%2FPictures%2Fchannel%20image.png"
+        )
+        assert path == "/Users/demo/Pictures/channel image.png"
+
+    def test_linux_download_url_path_is_extracted(self):
+        path = file_download_url_to_path(
+            "/api/file/download?path=%2Fhome%2Fdemo%2FPictures%2Fchannel%20image.png"
+        )
+        assert path == "/home/demo/Pictures/channel image.png"
+
+    def test_unc_download_url_path_is_extracted(self):
+        path = file_download_url_to_path(
+            "/api/file/download?path=%2F%2Fserver%2Fshare%2Fchannel%20image.png"
+        )
+        assert path == "//server/share/channel image.png"
+
+    def test_download_url_reads_file(self, tmp_path):
+        test_file = tmp_path / "channel image.png"
+        test_file.write_bytes(b"image bytes")
+        url = f"/api/file/download?path={quote(test_file.as_posix(), safe='')}"
+        result = read_file_part_bytes(url)
+        assert result == b"image bytes"
+
+    def test_absolute_download_url_reads_file(self, tmp_path):
+        test_file = tmp_path / "channel image.png"
+        test_file.write_bytes(b"image bytes")
+        url = f"http://localhost:5173/api/file/download?path={quote(test_file.as_posix(), safe='')}"
+        result = read_file_part_bytes(url)
+        assert result == b"image bytes"
+
+    def test_external_download_url_is_not_treated_as_local_file(self, tmp_path):
+        test_file = tmp_path / "secret.txt"
+        test_file.write_bytes(b"secret")
+        url = f"https://example.com/api/file/download?path={quote(test_file.as_posix(), safe='')}"
+        assert file_download_url_to_path(url) is None
+        assert read_file_part_bytes(url) is None
+
 
 # ---------------------------------------------------------------------------
 # is_text_extractable_mime
 # ---------------------------------------------------------------------------
 
+
 class TestIsTextExtractableMime:
-    @pytest.mark.parametrize("mime", [
-        "text/plain",
-        "text/html",
-        "text/css",
-        "text/javascript",
-        "text/markdown",
-        "text/csv",
-        "text/xml",
-    ])
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "text/plain",
+            "text/html",
+            "text/css",
+            "text/javascript",
+            "text/markdown",
+            "text/csv",
+            "text/xml",
+        ],
+    )
     def test_text_prefix_is_extractable(self, mime):
         assert is_text_extractable_mime(mime) is True
 
-    @pytest.mark.parametrize("mime", [
-        "application/json",
-        "application/ld+json",
-        "application/xml",
-        "application/yaml",
-        "application/x-yaml",
-        "application/javascript",
-        "application/x-sh",
-        "application/x-shellscript",
-    ])
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "application/json",
+            "application/ld+json",
+            "application/xml",
+            "application/yaml",
+            "application/x-yaml",
+            "application/javascript",
+            "application/x-sh",
+            "application/x-shellscript",
+        ],
+    )
     def test_special_application_mimes_are_extractable(self, mime):
         assert is_text_extractable_mime(mime) is True
 
-    @pytest.mark.parametrize("mime", [
-        "image/png",
-        "image/jpeg",
-        "video/mp4",
-        "audio/mpeg",
-        "application/octet-stream",
-        "application/zip",
-        "application/pdf",  # PDF handled separately
-    ])
+    @pytest.mark.parametrize(
+        "mime",
+        [
+            "image/png",
+            "image/jpeg",
+            "video/mp4",
+            "audio/mpeg",
+            "application/octet-stream",
+            "application/zip",
+            "application/pdf",  # PDF handled separately
+        ],
+    )
     def test_binary_mimes_are_not_extractable(self, mime):
         assert is_text_extractable_mime(mime) is False
 
@@ -119,6 +194,7 @@ class TestIsTextExtractableMime:
 # ---------------------------------------------------------------------------
 # truncate_extracted_text
 # ---------------------------------------------------------------------------
+
 
 class TestTruncateExtractedText:
     def test_short_text_not_truncated(self):
@@ -166,6 +242,7 @@ class TestTruncateExtractedText:
 # ---------------------------------------------------------------------------
 # extract_file_text
 # ---------------------------------------------------------------------------
+
 
 class TestExtractFileText:
     def test_plain_text_file(self, tmp_path):

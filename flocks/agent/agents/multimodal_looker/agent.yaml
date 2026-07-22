@@ -1,4 +1,5 @@
 name: multimodal-looker
+name_cn: 多模态分析智能体
 description: >-
   Analyze media files (PDFs, images, diagrams) that require interpretation
   beyond raw text. Extracts specific information or summaries from documents,

@@ -19,6 +19,7 @@
       "modified": "Modified"
     },
     "download": "Download",
+    "reveal": "Open containing folder",
     "delete": "Delete",
     "edit": "Edit",
     "save": "Save",
@@ -26,7 +27,28 @@
     "close": "Close",
     "uploading": "Uploading...",
     "binaryPreview": "Binary files cannot be previewed",
+    "truncatedPreview": "This file is large, so only the first {{limit}} is previewed. Inline editing is disabled to avoid saving truncated content; download the file for the full contents.",
     "downloadFile": "Download File",
+    "preview": {
+      "previewMode": "Preview",
+      "sourceMode": "Source",
+      "fullscreen": "Fullscreen preview",
+      "resize": "Drag to resize preview",
+      "htmlSandbox": "HTML is rendered in a restricted sandbox. Scripts will not run.",
+      "jsonParseFailed": "JSON parsing failed, so the original text is shown.",
+      "jsonlParseFailed": "{{count}} JSONL line(s) could not be parsed and were kept as original text.",
+      "pdfLoading": "Loading PDF...",
+      "pdfRendering": "Rendering page...",
+      "pdfLoadFailed": "Failed to load PDF preview",
+      "pdfCanvasUnavailable": "Canvas rendering is not available in this environment.",
+      "pageIndicator": "{{page}} / {{total}}",
+      "previousPage": "Previous page",
+      "nextPage": "Next page",
+      "zoomIn": "Zoom in",
+      "zoomOut": "Zoom out",
+      "unsupportedTitle": "This file cannot be previewed",
+      "unsupportedDesc": "This file type is not supported for inline preview. You can download it or open its containing folder."
+    },
     "toast": {
       "loadDirFailed": "Failed to load directory",
       "readFileFailed": "Failed to read file",
@@ -37,7 +59,9 @@
       "uploadSuccess": "Uploaded {{count}} file(s) successfully",
       "uploadPartialFail": "{{count}} file(s) failed to upload",
       "uploadFailed": "Upload failed",
-      "createDirFailed": "Failed to create folder"
+      "createDirFailed": "Failed to create folder",
+      "revealSuccess": "Opened containing folder",
+      "revealFailed": "Failed to open folder"
     },
     "confirm": {
       "deleteTitle": "Confirm Delete",

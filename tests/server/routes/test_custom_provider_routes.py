@@ -37,7 +37,8 @@ def temp_custom_provider_project(tmp_path, monkeypatch):
 @pytest.fixture
 async def client():
     transport = ASGITransport(app=app)
-    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+    headers = {"Authorization": "Bearer abc123", "User-Agent": "curl/8.0"}
+    async with AsyncClient(transport=transport, base_url="http://test", headers=headers) as ac:
         yield ac
 
 
@@ -79,3 +80,29 @@ async def test_create_custom_model_accepts_string_currency(
     assert raw is not None
     assert raw["models"]["minimax:MiniMax-M2.7"]["currency"] == "USD"
     assert Provider._models["minimax:MiniMax-M2.7"].pricing["currency"] == "USD"
+
+
+@pytest.mark.asyncio
+async def test_create_custom_model_defaults_reasoning_on(
+    client: AsyncClient,
+    temp_custom_provider_project,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.provider.provider import Provider
+
+    monkeypatch.setattr(Provider, "_models", Provider._models.copy())
+
+    response = await client.post(
+        "/api/custom/models/custom-tb-inner",
+        json={
+            "model_id": "custom-reasoning-default",
+            "name": "Custom Reasoning Default",
+        },
+    )
+
+    assert response.status_code == 201, response.text
+    raw = ConfigWriter.get_provider_raw("custom-tb-inner")
+    assert raw is not None
+    assert raw["models"]["custom-reasoning-default"]["supports_reasoning"] is True
+    assert Provider._models["custom-reasoning-default"].capabilities.supports_reasoning is True

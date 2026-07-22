@@ -14,22 +14,11 @@ from difflib import unified_diff
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path, safe_relpath as _safe_relpath
 from flocks.utils.log import Log
 
 
 log = Log.create(service="tool.apply_patch")
-
-
-def _safe_relpath(path: str, start: Optional[str]) -> str:
-    """Return a relative path when possible, otherwise keep the absolute path."""
-    if not start:
-        return path
-    try:
-        return os.path.relpath(path, start)
-    except ValueError:
-        return path
-
 
 DESCRIPTION = """Apply a patch to modify files.
 
@@ -303,24 +292,34 @@ async def apply_patch_tool(
             error="No valid hunks found in patch"
         )
     
-    # Resolve base directory
-    base_dir = Instance.get_directory() or os.getcwd()
-    worktree = Instance.get_worktree() or os.getcwd()
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
+    if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
+        return ToolResult(
+            success=False,
+            error=(
+                "Patch is blocked in sandbox read-only workspace mode. "
+                "Set sandbox.workspace_access to 'rw' to allow edits."
+            ),
+        )
     
     # Process hunks and collect changes
     file_changes: List[Dict[str, Any]] = []
     total_diff = ""
     
     for hunk in hunks:
-        filepath = os.path.join(base_dir, hunk.path)
-        
         try:
+            resolution = await resolve_tool_path(ctx, hunk.path)
+            filepath = resolution.resolved_path
+            move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
+
             if hunk.type == "add":
                 old_content = ""
                 new_content = hunk.contents if hunk.contents.endswith("\n") or not hunk.contents else hunk.contents + "\n"
                 diff = generate_diff(filepath, old_content, new_content)
                 
                 file_changes.append({
+                    "displayPath": resolution.display_path,
+                    "permissionPattern": resolution.permission_pattern,
                     "filePath": filepath,
                     "oldContent": old_content,
                     "newContent": new_content,
@@ -345,9 +344,13 @@ async def apply_patch_tool(
                 diff = generate_diff(filepath, old_content, new_content)
                 
                 change_type = "move" if hunk.move_path else "update"
-                move_filepath = os.path.join(base_dir, hunk.move_path) if hunk.move_path else None
+                move_filepath = move_resolution.resolved_path if move_resolution else None
                 
                 file_changes.append({
+                    "displayPath": resolution.display_path,
+                    "permissionPattern": (
+                        move_resolution.permission_pattern if move_resolution else resolution.permission_pattern
+                    ),
                     "filePath": filepath,
                     "oldContent": old_content,
                     "newContent": new_content,
@@ -372,6 +375,8 @@ async def apply_patch_tool(
                 diff = generate_diff(filepath, old_content, "")
                 
                 file_changes.append({
+                    "displayPath": resolution.display_path,
+                    "permissionPattern": resolution.permission_pattern,
                     "filePath": filepath,
                     "oldContent": old_content,
                     "newContent": "",
@@ -382,6 +387,11 @@ async def apply_patch_tool(
                 })
                 total_diff += diff + "\n"
                 
+        except ValueError as e:
+            return ToolResult(
+                success=False,
+                error=f"Invalid patch path for {hunk.path}: {str(e)}"
+            )
         except Exception as e:
             return ToolResult(
                 success=False,
@@ -391,7 +401,7 @@ async def apply_patch_tool(
     # Request permission
     await ctx.ask(
         permission="edit",
-        patterns=[_safe_relpath(c["filePath"], worktree) for c in file_changes],
+        patterns=[c["permissionPattern"] for c in file_changes],
         always=["*"],
         metadata={"diff": total_diff}
     )
@@ -436,7 +446,7 @@ async def apply_patch_tool(
     # Build summary
     summary_lines = []
     for change in file_changes:
-        rel_path = _safe_relpath(change.get("movePath") or change["filePath"], worktree)
+        rel_path = change.get("movePath") and change["permissionPattern"] or change["displayPath"]
         if change["type"] == "add":
             summary_lines.append(f"A {rel_path}")
         elif change["type"] == "delete":

@@ -1,0 +1,90 @@
+name: 360_fw_network
+description: >
+  360 FW v5.5 网络、路由、NAT、QoS、健康检查、策略路由、SD-WAN 和 GRE 工具。
+  写操作需要确认，生产顺序移动和高风险运行态动作由 handler 拦截。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 网络操作名称。
+      enum:
+        - fw_interface_list
+        - fw_interface_get
+        - fw_vlan_list
+        - fw_vlan_create
+        - fw_vlan_update
+        - fw_vlan_delete
+        - fw_vxlan_list
+        - fw_static_route_list
+        - fw_static_route_create
+        - fw_static_route_delete
+        - fw_healthcheck_list
+        - fw_healthcheck_create
+        - fw_healthcheck_update
+        - fw_healthcheck_delete
+        - fw_link_health_check_list
+        - fw_link_health_check_create
+        - fw_link_health_check_update
+        - fw_link_health_check_delete
+        - fw_qos_line_list
+        - fw_qos_line_create
+        - fw_qos_line_update
+        - fw_qos_line_delete
+        - fw_qos_policy_list
+        - fw_qos_policy_create
+        - fw_qos_policy_delete
+        - fw_nat_pool_list
+        - fw_nat_pool_create
+        - fw_nat_pool_delete
+        - fw_nat_rule_src_list
+        - fw_nat_rule_dst_list
+        - fw_nat_rule_static_list
+        - fw_policy_route_list
+        - fw_policy_route_create
+        - fw_policy_route_delete
+        - fw_sdwan_policy_list
+        - fw_sdwan_policy_create
+        - fw_sdwan_policy_delete
+        - fw_sdwan_status_get
+        - fw_woc_policy_state_get
+        - fw_gre_list
+        - fw_gre_create
+        - fw_gre_update
+        - fw_gre_delete
+        - fw_tunnel_monitor_create
+        - fw_tunnel_monitor_delete
+        - fw_network_call
+        - test
+    name:
+      type: string
+      description: 对象名称。
+    dst_ip:
+      type: string
+      description: 静态路由目的地址。
+    nh_ip:
+      type: string
+      description: 下一跳地址。
+    ip_vrf_name:
+      type: string
+      description: 虚拟路由器名称，默认 default。
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE]
+    path:
+      type: string
+    query:
+      type: object
+    body:
+      type: string
+      description: 完整 JSON payload 字符串。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: network

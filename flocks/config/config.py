@@ -13,7 +13,7 @@ import json
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union, Literal
 from enum import Enum
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings
 
 # ==================== Permission System ====================
@@ -29,6 +29,35 @@ class PermissionAction(str, Enum):
 PermissionRule = Union[PermissionAction, Dict[str, Union[PermissionAction, Dict[str, PermissionAction]]]]
 
 
+_LEGACY_TODO_TOOL_NAMES = {"todowrite", "todoread"}
+
+
+def _canonical_permission_tool_name(tool: str) -> str:
+    if tool in _LEGACY_TODO_TOOL_NAMES:
+        return "todo"
+    return tool
+
+
+def _merge_permission_action(existing: Any, incoming: Any) -> Any:
+    """Merge duplicate legacy permission names conservatively."""
+    existing_value = existing.value if hasattr(existing, "value") else existing
+    incoming_value = incoming.value if hasattr(incoming, "value") else incoming
+    if existing_value == PermissionAction.DENY.value or incoming_value == PermissionAction.DENY.value:
+        return PermissionAction.DENY
+    return existing if existing is not None else incoming
+
+
+def _assign_permission(permission_dict: Dict[str, Any], tool: str, action: Any) -> None:
+    canonical_tool = _canonical_permission_tool_name(tool)
+    if canonical_tool in permission_dict:
+        permission_dict[canonical_tool] = _merge_permission_action(
+            permission_dict[canonical_tool],
+            action,
+        )
+        return
+    permission_dict[canonical_tool] = action
+
+
 class PermissionConfig(BaseModel):
     """Permission configuration (simplified for Phase 1-3)"""
     model_config = {"extra": "allow"}  # Allow additional fields
@@ -37,22 +66,27 @@ class PermissionConfig(BaseModel):
     edit: Optional[PermissionRule] = None
     glob: Optional[PermissionRule] = None
     grep: Optional[PermissionRule] = None
-    list: Optional[PermissionRule] = None
     bash: Optional[PermissionRule] = None
     task: Optional[PermissionRule] = None
     external_directory: Optional[PermissionRule] = None
-    todowrite: Optional[PermissionAction] = None
-    todoread: Optional[PermissionAction] = None
+    todo: Optional[PermissionAction] = None
     question: Optional[PermissionAction] = None
     webfetch: Optional[PermissionAction] = None
     websearch: Optional[PermissionAction] = None
-    codesearch: Optional[PermissionAction] = None
     lsp: Optional[PermissionRule] = None
     doom_loop: Optional[PermissionAction] = None
     delegate_task: Optional[PermissionRule] = None
-    call_omo_agent: Optional[PermissionRule] = None
-    background_output: Optional[PermissionRule] = None
-    background_cancel: Optional[PermissionRule] = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def migrate_legacy_todo_permissions(cls, data):
+        if not isinstance(data, dict):
+            return data
+        migrated = dict(data)
+        for legacy_name in _LEGACY_TODO_TOOL_NAMES:
+            if legacy_name in migrated:
+                _assign_permission(migrated, legacy_name, migrated.pop(legacy_name))
+        return migrated
 
 
 # ==================== Agent Configuration ====================
@@ -104,11 +138,11 @@ class AgentConfig(BaseModel):
             
             for tool, enabled in self.tools.items():
                 action = PermissionAction.ALLOW if enabled else PermissionAction.DENY
-                # Map write/edit/patch/multiedit to edit
-                if tool in ["write", "edit", "patch", "multiedit"]:
-                    permission_dict["edit"] = action
+                # Map write/edit/patch to edit
+                if tool in ["write", "edit", "patch"]:
+                    _assign_permission(permission_dict, "edit", action)
                 else:
-                    permission_dict[tool] = action
+                    _assign_permission(permission_dict, tool, action)
             
             self.permission = permission_dict
         
@@ -190,11 +224,14 @@ class McpOAuthConfig(BaseModel):
 
 class McpLocalConfig(BaseModel):
     """MCP local server configuration"""
-    model_config = {"extra": "allow"}
+    model_config = {"extra": "allow", "populate_by_name": True}
     
     type: Literal["local"]
     command: List[str]
-    environment: Optional[Dict[str, str]] = None
+    environment: Optional[Dict[str, str]] = Field(
+        None,
+        validation_alias=AliasChoices("environment", "env"),
+    )
     enabled: Optional[bool] = None
     timeout: Optional[int] = Field(None, gt=0)
 
@@ -206,6 +243,7 @@ class McpRemoteConfig(BaseModel):
     type: Literal["remote", "sse"]
     url: str
     enabled: Optional[bool] = None
+    transport: Optional[Literal["auto", "sse", "http"]] = "auto"
     headers: Optional[Dict[str, str]] = None
     oauth: Optional[Union[McpOAuthConfig, Literal[False]]] = None
     timeout: Optional[int] = Field(None, gt=0)
@@ -266,9 +304,121 @@ class CompactionConfig(BaseModel):
     prune: Optional[bool] = Field(None, description="Enable pruning")
 
 
+class ToolOutputConfig(BaseModel):
+    """Tool output size limits.
+
+    Controls how much content individual tool calls may return before
+    being truncated.  All values are configurable so power users can
+    tune them without patching source code.
+
+    Defaults mirror the hard-coded constants that were previously spread
+    across ``flocks/tool/file/read.py`` and ``flocks/tool/truncation.py``.
+
+    Both camelCase (``readMaxLines``) and snake_case (``read_max_lines``)
+    keys are accepted in ``flocks.json``.
+    """
+
+    model_config = {"populate_by_name": True}
+
+    read_max_lines: Optional[int] = Field(
+        None,
+        alias="readMaxLines",
+        gt=0,
+        description=(
+            "Max lines returned by the read tool per call (default 2000). "
+            "For files longer than this, use offset + limit to page."
+        ),
+    )
+    read_max_bytes: Optional[int] = Field(
+        None,
+        alias="readMaxBytes",
+        gt=0,
+        description=(
+            "Byte cap for a single read tool call (default 51200 = 50 KB). "
+            "Truncation fires whichever limit is hit first."
+        ),
+    )
+    read_max_line_length: Optional[int] = Field(
+        None,
+        alias="readMaxLineLength",
+        gt=0,
+        description=(
+            "Characters per line before the remainder is replaced with '...' "
+            "(default 2000).  Keeps very wide log lines from bloating context."
+        ),
+    )
+
+
+class ToolFailureConfig(BaseModel):
+    """Repeated tool-failure handling."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        True,
+        alias="disableOnRepeatedFailure",
+        description=(
+            "Disable a standalone custom tool after repeated identical failures."
+        ),
+    )
+
+
 class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
+
+
+class FlocksProConfig(BaseModel):
+    """Flocks Pro configuration"""
     url: Optional[str] = None
+
+
+class UIConfig(BaseModel):
+    """WebUI display preferences."""
+
+    model_config = {"populate_by_name": True}
+
+    display_name: Optional[str] = Field(
+        None,
+        alias="displayName",
+        max_length=48,
+        description="Custom product display name used by visible WebUI branding.",
+    )
+    favicon_path: Optional[str] = Field(
+        None,
+        alias="faviconPath",
+        max_length=256,
+        description="Relative path to a custom WebUI favicon stored in the user config directory.",
+    )
+
+    @field_validator("display_name", mode="before")
+    @classmethod
+    def normalize_display_name(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("displayName must be a string")
+        normalized = value.strip()
+        if not normalized:
+            return None
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+            raise ValueError("displayName must not contain control characters")
+        return normalized
+
+    @field_validator("favicon_path", mode="before")
+    @classmethod
+    def normalize_favicon_path(cls, value: Any) -> Optional[str]:
+        if value is None:
+            return None
+        if not isinstance(value, str):
+            raise ValueError("faviconPath must be a string")
+        normalized = value.strip().replace("\\", "/")
+        if not normalized:
+            return None
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            raise ValueError("faviconPath must be a safe relative path")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in normalized):
+            raise ValueError("faviconPath must not contain control characters")
+        return normalized
 
 
 class ExperimentalConfig(BaseModel):
@@ -277,7 +427,6 @@ class ExperimentalConfig(BaseModel):
     
     chat_max_retries: Optional[int] = Field(None, alias="chatMaxRetries")
     disable_paste_summary: Optional[bool] = None
-    batch_tool: Optional[bool] = None
     open_telemetry: Optional[bool] = Field(None, alias="openTelemetry")
     primary_tools: Optional[List[str]] = None
     continue_loop_on_deny: Optional[bool] = None
@@ -532,8 +681,19 @@ class ConfigInfo(BaseModel):
         ),
     )
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
-    enterprise: Optional[EnterpriseConfig] = None
+    flockspro: Optional[FlocksProConfig] = None
+    ui: Optional[UIConfig] = None
     compaction: Optional[CompactionConfig] = None
+    tool_output: Optional[ToolOutputConfig] = Field(
+        None,
+        alias="toolOutput",
+        description="Tool output size limits (read, truncation caps).",
+    )
+    tool_failure: Optional[ToolFailureConfig] = Field(
+        None,
+        alias="toolFailure",
+        description="Repeated tool-failure handling.",
+    )
     experimental: Optional[ExperimentalConfig] = None
     
     # Memory system configuration (added for memory system integration)
@@ -575,6 +735,11 @@ class ConfigInfo(BaseModel):
     updater: Optional[UpdaterConfig] = Field(
         None,
         description="Self-update configuration (GitHub repo, git remote, etc.)",
+    )
+    portal_base_url: Optional[str] = Field(
+        None,
+        alias="portalBaseUrl",
+        description="Console portal base URL used by OSS console account login redirect.",
     )
 
     @model_validator(mode='after')
@@ -619,10 +784,10 @@ class ConfigInfo(BaseModel):
             
             for tool, enabled in self.tools.items():
                 action = PermissionAction.ALLOW if enabled else PermissionAction.DENY
-                if tool in ["write", "edit", "patch", "multiedit"]:
-                    permission_dict["edit"] = action
+                if tool in ["write", "edit", "patch"]:
+                    _assign_permission(permission_dict, "edit", action)
                 else:
-                    permission_dict[tool] = action
+                    _assign_permission(permission_dict, tool, action)
             
             self.permission = permission_dict
         

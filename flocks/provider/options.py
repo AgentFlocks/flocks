@@ -9,7 +9,14 @@ Both ``SessionRunner`` (session/runner.py) and ``AgentExecutor``
 so that provider rules are maintained in exactly one place.
 """
 
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+from flocks.provider.interleaved import (
+    REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
+    REASONING_TRANSPORT_GENERIC_CHAT,
+    resolve_interleaved_capability,
+    resolve_reasoning_transport,
+)
 
 from flocks.utils.log import Log
 
@@ -20,6 +27,11 @@ log = Log.create(service="provider.options")
 # ---------------------------------------------------------------------------
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
+
+_GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS = {
+    "reasoning_content": "enable_thinking",
+    "reasoning_details": "reasoning_split",
+}
 
 
 def _coerce_optional_bool(value: Any) -> Optional[bool]:
@@ -59,6 +71,190 @@ def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool
         return None
 
 
+def _resolve_default_extra_body(provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
+    """Read model-level OpenAI-compatible extra_body from flocks.json."""
+    try:
+        from flocks.provider.model_manager import get_model_manager
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if not setting:
+            return None
+
+        default_parameters = setting.default_parameters or {}
+        extra_body = default_parameters.get("extra_body")
+        return dict(extra_body) if isinstance(extra_body, dict) else None
+    except Exception as exc:
+        log.debug("options.extra_body_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _lookup_raw_model_metadata(provider_id: str, model_id: str) -> Optional[Any]:
+    """Return provider/model metadata without applying inferred defaults."""
+    try:
+        from flocks.provider.provider import Provider
+
+        provider = Provider.get(provider_id)
+        if provider is not None:
+            try:
+                for model in provider.get_model_definitions():
+                    if getattr(model, "id", None) == model_id:
+                        return model
+            except Exception as exc:
+                log.debug("options.raw_model_lookup.definitions_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+            for model in getattr(provider, "_config_models", []):
+                if getattr(model, "id", None) == model_id:
+                    return model
+
+            try:
+                for model in provider.get_models():
+                    if getattr(model, "id", None) == model_id:
+                        return model
+            except Exception as exc:
+                log.debug("options.raw_model_lookup.runtime_failed", {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+
+        return Provider.get_model(model_id)
+    except Exception as exc:
+        log.debug("options.raw_model_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_provider_base_url(provider_id: str) -> Optional[str]:
+    """Return the active provider base URL when configured."""
+    try:
+        from flocks.provider.provider import Provider
+
+        provider = Provider.get(provider_id)
+        if provider is None:
+            return None
+        provider_config = getattr(provider, "_config", None)
+        return (
+            getattr(provider_config, "base_url", None)
+            or getattr(provider, "_base_url", None)
+        )
+    except Exception as exc:
+        log.debug("options.provider_base_url_lookup_failed", {
+            "provider_id": provider_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_model_reasoning_context(
+    provider_id: str,
+    model_id: str,
+) -> Tuple[Optional[Dict[str, Any]], str]:
+    """Resolve replay capability and transport through separate paths."""
+    model = _lookup_raw_model_metadata(provider_id, model_id)
+    capabilities = getattr(model, "capabilities", None) if model else None
+    explicit_interleaved = (
+        getattr(capabilities, "interleaved", None) if capabilities else None
+    )
+    base_url = _resolve_provider_base_url(provider_id)
+    interleaved = resolve_interleaved_capability(
+        provider_id=provider_id,
+        model_id=model_id,
+        explicit_capability=explicit_interleaved,
+        base_url=base_url,
+    )
+    transport = resolve_reasoning_transport(
+        provider_id=provider_id,
+        model_id=model_id,
+        base_url=base_url,
+    )
+    return interleaved, transport
+
+
+def _resolve_interleaved_capability(
+    provider_id: str,
+    model_id: str,
+) -> Optional[Dict[str, Any]]:
+    """Resolve the active model's interleaved replay capability."""
+    interleaved, _transport = _resolve_model_reasoning_context(provider_id, model_id)
+    return interleaved
+
+
+def _resolve_reasoning_transport(provider_id: str, model_id: str) -> str:
+    """Resolve the active model's request transport family."""
+    _interleaved, transport = _resolve_model_reasoning_context(provider_id, model_id)
+    return transport
+
+
+def _build_generic_chat_extra_body(
+    provider_id: str,
+    model_id: str,
+    interleaved_capability: Optional[Dict[str, Any]],
+    reasoning_enabled: Optional[bool],
+) -> Optional[Dict[str, Any]]:
+    """Build OpenAI-compatible reasoning params for the active replay field."""
+    provider_lower = provider_id.lower()
+    model_lower = model_id.lower()
+    enabled = reasoning_enabled is not False
+
+    if "deepseek" in model_lower or provider_lower == "deepseek":
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "glm" in model_lower or provider_lower == "zhipu":
+        return {
+            "thinking": (
+                {"type": "enabled", "clear_thinking": False}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "mimo" in model_lower:
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if "kimi" in model_lower:
+        return {
+            "thinking": (
+                {"type": "enabled"}
+                if enabled
+                else {"type": "disabled"}
+            )
+        }
+
+    if isinstance(interleaved_capability, dict):
+        field = interleaved_capability.get("field")
+        key = _GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS.get(field)
+        if key:
+            return {key: enabled}
+
+    if reasoning_enabled is True:
+        return {"enable_thinking": True}
+
+    return None
+
+
 def build_provider_options(
     provider_id: str,
     model_id: str,
@@ -87,14 +283,23 @@ def build_provider_options(
     """
     options: Dict[str, Any] = {}
     model_lower = model_id.lower()
+    interleaved_capability = _resolve_interleaved_capability(provider_id, model_id)
+    reasoning_transport = _resolve_reasoning_transport(provider_id, model_id)
     reasoning_enabled = (
         _coerce_optional_bool(reasoning_enabled)
         if reasoning_enabled is not None
         else _resolve_reasoning_enabled(provider_id, model_id)
     )
+    configured_extra_body = _resolve_default_extra_body(provider_id, model_id)
+    interleaved_enabled = interleaved_capability is not None
+    if interleaved_enabled and reasoning_enabled is None:
+        reasoning_enabled = True
 
-    # -- Claude extended thinking (any provider, including proxies) ----------
-    if "claude" in model_lower:
+    # -- Anthropic Messages thinking -----------------------------------------
+    if (
+        reasoning_transport == REASONING_TRANSPORT_ANTHROPIC_MESSAGES
+        and "claude" in model_lower
+    ):
         # Use the model's catalog API limit as max_tokens so the full output
         # capacity is available after thinking.  Provider.get_model() returns
         # the catalog entry (catalog takes priority over flocks.json overrides
@@ -133,32 +338,30 @@ def build_provider_options(
         if reasoning_enabled is not False:
             options["thinkingLevel"] = "high"
 
-    # -- Qwen reasoning (ThreatBook-hosted or Alibaba DashScope) -------------
-    elif provider_id in ("threatbook-cn-llm", "threatbook-io-llm", "alibaba", "moonshot"):
-        if "qwen3-max" in model_lower or "qwen3.6-plus" in model_lower:
-            options["extra_body"] = {
-                "enable_thinking": True if reasoning_enabled is None else reasoning_enabled
-            }
-        elif "kimi-k2.5" in model_lower or "kimi-k2.6" in model_lower:
-            # ThreatBook CN defaults hybrid-thinking models to reasoning-on.
-            # Other compatible providers keep direct reply as the default.
-            default_enabled = provider_id == "threatbook-cn-llm"
-            options["extra_body"] = {
-                "enable_thinking": default_enabled if reasoning_enabled is None else reasoning_enabled
-            }
-
-    # -- Amazon Bedrock reasoning -------------------------------------------
-    elif provider_id == "amazon-bedrock":
-        if reasoning_enabled is not False and "anthropic" in model_lower:
-            options["reasoningConfig"] = {
-                "type": "enabled",
-                "budget_tokens": thinking_budget,
-            }
-        elif reasoning_enabled is not False and "nova" in model_lower:
-            options["reasoningConfig"] = {
-                "type": "enabled",
-                "maxReasoningEffort": "high",
-            }
+    # -- Generic-chat (OpenAI-compat) interleaved thinking --------------------
+    # The Anthropic branch above handles ``anthropic_messages`` transport.
+    # Generic-chat endpoints expose provider-specific extra_body toggles:
+    # most reasoning_content models use enable_thinking, while MiniMax's
+    # OpenAI-compatible interleaved format uses reasoning_split so the model
+    # returns reasoning_details that can be replayed in later tool turns.
+    elif reasoning_transport == REASONING_TRANSPORT_GENERIC_CHAT and (
+        configured_extra_body
+        or interleaved_enabled
+        or reasoning_enabled is True
+    ):
+        extra_body = configured_extra_body or _build_generic_chat_extra_body(
+            provider_id,
+            model_id,
+            interleaved_capability,
+            reasoning_enabled,
+        )
+        if extra_body:
+            options["extra_body"] = extra_body
+            log.debug("options.thinking_params.resolved", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "extra_body_keys": list(options["extra_body"].keys()),
+            })
 
     # -- max_tokens fallback from model config ------------------------------
     if resolve_max_tokens and "max_tokens" not in options:
@@ -211,4 +414,3 @@ def _apply_max_tokens_from_config(
             "model_id": model_id,
             "max_tokens": model_info.capabilities.max_tokens,
         })
-

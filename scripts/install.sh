@@ -18,11 +18,15 @@ INSTALL_LANGUAGE="${FLOCKS_INSTALL_LANGUAGE:-en}"
 UV_DEFAULT_INDEX="${FLOCKS_UV_DEFAULT_INDEX:-https://pypi.org/simple}"
 UV_INSTALL_SH_URL="${FLOCKS_UV_INSTALL_SH_URL:-https://astral.sh/uv/install.sh}"
 UV_INSTALL_SH_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_FALLBACK_URL:-}"
+UV_INSTALL_SH_SECONDARY_FALLBACK_URL="${FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL:-https://astral.sh/uv/install.sh}"
 NPM_REGISTRY="${FLOCKS_NPM_REGISTRY:-https://registry.npmjs.org/}"
 NODEJS_MANUAL_DOWNLOAD_URL="${FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL:-https://nodejs.org/en/download}"
 NVM_INSTALL_SCRIPT_URL="${FLOCKS_NVM_INSTALL_SCRIPT_URL:-https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.3/install.sh}"
 NVM_GITEE_REPO_URL="${FLOCKS_NVM_GITEE_REPO_URL:-https://gitee.com/mirrors/nvm.git}"
 NVM_GITEE_RAW_URL_PREFIX="${FLOCKS_NVM_GITEE_RAW_URL_PREFIX:-https://gitee.com/mirrors/nvm/raw}"
+NODE_CMD="node"
+NPM_CMD="npm"
+NPX_CMD="npx"
 
 info() {
   printf '[flocks] %s\n' "$1"
@@ -53,6 +57,30 @@ clear_command_cache() {
   hash -r 2>/dev/null || true
 }
 
+command_exists() {
+  local cmd="$1"
+  [[ -n "$cmd" ]] || return 1
+
+  if [[ "$cmd" == */* ]]; then
+    [[ -x "$cmd" ]]
+    return
+  fi
+
+  command -v "$cmd" >/dev/null 2>&1
+}
+
+node_command_available() {
+  command_exists "$NODE_CMD"
+}
+
+npm_command_available() {
+  command_exists "$NPM_CMD"
+}
+
+npx_command_available() {
+  command_exists "$NPX_CMD"
+}
+
 is_zh_install() {
   [[ "$INSTALL_LANGUAGE" == zh* || "$INSTALL_LANGUAGE" == cn* ]]
 }
@@ -69,6 +97,9 @@ select_install_sources() {
     info "使用 nvm 安装脚本: $NVM_INSTALL_SCRIPT_URL"
     if [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
       info "使用 uv 备用安装脚本: $UV_INSTALL_SH_FALLBACK_URL"
+    fi
+    if [[ -n "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" ]]; then
+      info "使用 uv 官方回退安装脚本: $UV_INSTALL_SH_SECONDARY_FALLBACK_URL"
     fi
   else
     info "Using PyPI index: $UV_DEFAULT_INDEX"
@@ -286,9 +317,9 @@ refresh_path() {
   append_path "$HOME/.bun/bin"
   append_path "$HOME/.npm-global/bin"
 
-  if has_cmd npm; then
+  if npm_command_available; then
     local npm_prefix
-    npm_prefix="$(npm config get prefix 2>/dev/null | tr -d '\r' || true)"
+    npm_prefix="$(get_npm_prefix || true)"
     if [[ -n "$npm_prefix" && "$npm_prefix" != "undefined" && "$npm_prefix" != "null" ]]; then
       append_path "$npm_prefix"
       append_path "$npm_prefix/bin"
@@ -297,12 +328,12 @@ refresh_path() {
 }
 
 get_npm_prefix() {
-  if ! has_cmd npm; then
+  if ! npm_command_available; then
     return 1
   fi
 
   local npm_prefix
-  npm_prefix="$(npm config get prefix 2>/dev/null | tr -d '\r' || true)"
+  npm_prefix="$("$NPM_CMD" config get prefix 2>/dev/null | tr -d '\r' || true)"
   if [[ -z "$npm_prefix" || "$npm_prefix" == "undefined" || "$npm_prefix" == "null" ]]; then
     return 1
   fi
@@ -374,23 +405,48 @@ parse_args() {
   done
 }
 
-get_node_major_version() {
-  if ! has_cmd node; then
-    return 1
-  fi
-
+get_node_major_version_from_cmd() {
+  local node_cmd="$1"
   local version
-  version="$(node -v 2>/dev/null | tr -d '\r' || true)"
+  command_exists "$node_cmd" || return 1
+
+  version="$("$node_cmd" -v 2>/dev/null | tr -d '\r' || true)"
   version="${version#v}"
   version="${version%%.*}"
   [[ "$version" =~ ^[0-9]+$ ]] || return 1
   printf '%s' "$version"
 }
 
-node_version_satisfies_requirement() {
+get_node_major_version() {
+  get_node_major_version_from_cmd "$NODE_CMD"
+}
+
+node_command_satisfies_requirement() {
+  local node_cmd="$1"
   local major
-  major="$(get_node_major_version)" || return 1
+  major="$(get_node_major_version_from_cmd "$node_cmd")" || return 1
   [[ "$major" -ge "$MIN_NODE_MAJOR" ]]
+}
+
+node_version_satisfies_requirement() {
+  node_command_satisfies_requirement "$NODE_CMD"
+}
+
+set_node_toolchain_from_bin_dir() {
+  local bin_dir="$1"
+  [[ -n "$bin_dir" && -d "$bin_dir" ]] || return 1
+  [[ -x "$bin_dir/node" && -x "$bin_dir/npm" ]] || return 1
+
+  NODE_CMD="$bin_dir/node"
+  NPM_CMD="$bin_dir/npm"
+  if [[ -x "$bin_dir/npx" ]]; then
+    NPX_CMD="$bin_dir/npx"
+  else
+    NPX_CMD="npx"
+  fi
+
+  append_path "$bin_dir"
+  clear_command_cache
 }
 
 load_nvm() {
@@ -485,10 +541,20 @@ install_nodejs_with_nvm() {
   fi
   clear_command_cache
 
-  if ! node_version_satisfies_requirement; then
-    warn "nvm activated Node.js ${MIN_NODE_MAJOR}, but the current shell still resolves a different node binary. Open a new shell and retry.$(nodejs_manual_download_hint)"
-    return 1
+  if node_command_satisfies_requirement "node" && npm_command_available; then
+    return 0
   fi
+
+  if [[ -n "${NVM_BIN:-}" ]] \
+    && command_exists "$NVM_BIN/npm" \
+    && node_command_satisfies_requirement "$NVM_BIN/node"; then
+    set_node_toolchain_from_bin_dir "$NVM_BIN"
+    warn "nvm activated Node.js ${MIN_NODE_MAJOR}, but the current shell still resolves a different node binary. Continuing with the nvm-managed toolchain for this installer run. Open a new shell afterwards.$(nodejs_manual_download_hint)"
+    return 0
+  fi
+
+  warn "nvm activated Node.js ${MIN_NODE_MAJOR}, but the nvm-managed runtime is still not usable in this shell.$(nodejs_manual_download_hint)"
+  return 1
 }
 
 install_nodejs_macos() {
@@ -574,11 +640,11 @@ install_nodejs_linux() {
 }
 
 ensure_npm_installed() {
-  if has_cmd npm && node_version_satisfies_requirement; then
+  if npm_command_available && node_version_satisfies_requirement; then
     return
   fi
 
-  if has_cmd node; then
+  if node_command_available; then
     local current_major
     current_major="$(get_node_major_version || true)"
     if [[ -n "$current_major" ]]; then
@@ -601,12 +667,12 @@ ensure_npm_installed() {
   esac
 
   refresh_path
-  has_cmd npm || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry.$(nodejs_manual_download_hint)"
+  npm_command_available || fail "Node.js (including npm) was installed, but npm is still not available. Check PATH and retry.$(nodejs_manual_download_hint)"
   node_version_satisfies_requirement || fail "Detected Node.js version is too old. This project requires Node.js ${MIN_NODE_MAJOR}+.$(nodejs_manual_download_hint)"
 }
 
 ensure_npm_global_prefix_writable() {
-  has_cmd npm || fail "npm was not found. Install Node.js 22+ (including npm) and retry.$(nodejs_manual_download_hint)"
+  npm_command_available || fail "npm was not found. Install Node.js 22+ (including npm) and retry.$(nodejs_manual_download_hint)"
 
   local npm_prefix target_dir user_prefix
   npm_prefix="$(get_npm_prefix || true)"
@@ -623,12 +689,13 @@ ensure_npm_global_prefix_writable() {
   user_prefix="$HOME/.npm-global"
   info "Global npm directory is not writable. Switching to user prefix: $user_prefix"
   mkdir -p "$user_prefix"
-  npm config set prefix "$user_prefix"
+  "$NPM_CMD" config set prefix "$user_prefix"
   refresh_path
 }
 
 install_uv() {
   local primary_install_failed=0
+  local fallback_install_failed=0
   if has_cmd uv; then
     return
   fi
@@ -658,7 +725,31 @@ install_uv() {
     fi
 
     if ! curl -LsSf "$UV_INSTALL_SH_FALLBACK_URL" | sh; then
-      fail "默认 uv 安装脚本和中国大陆备用源都执行失败。请检查网络连通性或 PATH 后重试。"
+      fallback_install_failed=1
+    fi
+    refresh_path
+    ensure_path_persisted "$HOME/.local/bin"
+  fi
+
+  if has_cmd uv; then
+    return
+  fi
+
+  if is_zh_install && [[ -n "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" ]]; then
+    if [[ -n "$UV_INSTALL_SH_FALLBACK_URL" ]]; then
+      if [[ "$fallback_install_failed" -eq 1 ]]; then
+        info "中国大陆备用源失败，正在尝试官方 uv 安装脚本..."
+      else
+        info "中国大陆备用源执行后仍未检测到 uv，正在尝试官方 uv 安装脚本..."
+      fi
+    elif [[ "$primary_install_failed" -eq 1 ]]; then
+      info "默认 uv 安装脚本失败，正在尝试官方 uv 安装脚本..."
+    else
+      info "默认 uv 安装脚本执行后仍未检测到 uv，正在尝试官方 uv 安装脚本..."
+    fi
+
+    if ! curl -LsSf "$UV_INSTALL_SH_SECONDARY_FALLBACK_URL" | sh; then
+      fail "默认 uv 安装脚本、中国大陆备用源和官方 uv 安装脚本都执行失败。请检查网络连通性或 PATH 后重试。"
     fi
     refresh_path
     ensure_path_persisted "$HOME/.local/bin"
@@ -833,36 +924,6 @@ install_bun() {
   has_cmd bun || fail "bun finished installing, but it is still not available. Check PATH and retry."
 }
 
-install_dingtalk_channel_deps() {
-  local connector_dir="$ROOT_DIR/.flocks/plugins/channels/dingtalk/dingtalk-openclaw-connector"
-  [[ -f "$connector_dir/package.json" ]] || return 0
-
-  local node_modules_dir="$connector_dir/node_modules"
-  if [[ -d "$node_modules_dir" ]]; then
-    if is_zh_install; then
-      info "钉钉频道依赖已存在，跳过安装。"
-    else
-      info "DingTalk channel dependencies already exist. Skipping installation."
-    fi
-    return 0
-  fi
-
-  if is_zh_install; then
-    info "检测到钉钉频道插件，正在安装 npm 依赖..."
-  else
-    info "Detected DingTalk channel plugin. Installing npm dependencies..."
-  fi
-  (
-    cd "$connector_dir"
-    npm_config_registry="$NPM_REGISTRY" npm install
-  )
-  if is_zh_install; then
-    info "钉钉频道依赖安装完成。"
-  else
-    info "DingTalk channel dependencies installed."
-  fi
-}
-
 ensure_env_var_persisted() {
   local var_name="$1"
   local var_value="$2"
@@ -884,6 +945,25 @@ ensure_env_var_persisted() {
     PATH_UPDATE_REQUIRED=1
     record_path_update_file "$rc_file"
     info "Added ${var_name} to: $rc_file"
+  fi
+}
+
+write_install_profile() {
+  local config_dir language
+  if [[ -n "${FLOCKS_CONFIG_DIR:-}" ]]; then
+    config_dir="$FLOCKS_CONFIG_DIR"
+  else
+    config_dir="${FLOCKS_ROOT:-$HOME/.flocks}/config"
+  fi
+
+  if is_zh_install; then
+    language="zh-CN"
+  else
+    language="en"
+  fi
+
+  if ! { mkdir -p "$config_dir" && printf '{\n  "Language": "%s"\n}\n' "$language" > "$config_dir/install_profile.json"; }; then
+    warn "Failed to write install profile. Continuing with the default installer behavior."
   fi
 }
 
@@ -945,7 +1025,7 @@ resolve_chrome_for_testing_path_from_dir() {
 
 install_chrome_for_testing() {
   local browser_dir browser_path="" install_status
-  if ! has_cmd npx; then
+  if ! npx_command_available; then
     if is_zh_install; then
       warn "未找到 npx，跳过浏览器安装；这不影响 Flocks 启动，可稍后重新安装。"
     else
@@ -966,7 +1046,7 @@ install_chrome_for_testing() {
   fi
 
   set +e
-  npm_config_registry="$NPM_REGISTRY" npx --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2
+  npm_config_registry="$NPM_REGISTRY" "$NPX_CMD" --yes @puppeteer/browsers install chrome@stable --path "$browser_dir" 1>&2
   install_status=$?
   set -e
 
@@ -1022,7 +1102,7 @@ install_agent_browser() {
   if ! has_cmd agent-browser; then
     ensure_npm_global_prefix_writable
     info "Installing the agent-browser CLI..."
-    npm_config_registry="$NPM_REGISTRY" npm install --global agent-browser
+    npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install --global agent-browser
     refresh_path
     ensure_agent_browser_user_path_if_needed
     has_cmd agent-browser || fail "agent-browser finished installing, but it is still not available. Check PATH and retry."
@@ -1044,6 +1124,7 @@ main() {
   else
     info "Project directory: $ROOT_DIR"
   fi
+  write_install_profile
   install_uv
   ensure_npm_installed
   select_install_sources
@@ -1067,10 +1148,17 @@ main() {
   fi
   (
     cd "$ROOT_DIR/webui"
-    npm_config_registry="$NPM_REGISTRY" npm install
+    npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install
   )
-
-  install_dingtalk_channel_deps
+  if is_zh_install; then
+    info "正在构建 WebUI 静态资源..."
+  else
+    info "Building WebUI static assets..."
+  fi
+  (
+    cd "$ROOT_DIR/webui"
+    "$NPM_CMD" run build
+  )
 
   if [[ "$INSTALL_TUI" -eq 1 ]]; then
     install_bun

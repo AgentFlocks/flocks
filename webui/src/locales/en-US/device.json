@@ -1,0 +1,350 @@
+{
+  "pageTitle": "Device Integration",
+  "pageDescription": "Configure security device API connections so agents can call and control them directly",
+
+  "status": {
+    "disabled": "Disabled",
+    "connected": "Connected",
+    "error": "Connection failed",
+    "unknown": "Not checked"
+  },
+
+  "vendor": {
+    "unspecified": "Unspecified vendor"
+  },
+
+  "sidebar": {
+    "heading": "Rooms",
+    "addRoom": "New room",
+    "allRooms": "All Rooms",
+    "rename": "Rename",
+    "deleteRoom": "Delete room",
+    "deleteDisabled": "{{count}} device(s) present — cannot delete",
+    "roomNamePlaceholder": "Room name...",
+    "deleteHasDevices": "Room \"{{name}}\" still has {{count}} device(s). Move or delete them first."
+  },
+
+  "toolbar": {
+    "refresh": "Refresh",
+    "addDevice": "Add Device",
+    "collapseAll": "Collapse all",
+    "expandAll": "Expand all"
+  },
+
+  "header": {
+    "allRooms": "All Rooms",
+    "deviceCount": "{{count}} device(s) · {{rooms}} room(s)",
+    "connected": "{{count}} connected",
+    "failed": "{{count}} failed",
+    "devices": "{{count}} device(s)"
+  },
+
+  "empty": {
+    "noDevices": "No devices integrated yet",
+    "noDevicesHint": "Once you add a device, agents can call its tools",
+    "addNow": "Add device now",
+    "roomEmpty": "No devices in this room",
+    "roomEmptyHint": "Click \"Add Device\" to integrate a device into this room"
+  },
+
+  "section": {
+    "activeDevices": "Integrated Devices",
+    "ungrouped": "Ungrouped Devices",
+    "ungroupedHint": "Room not found — edit the device to reassign it"
+  },
+
+  "wizard": {
+    "title": "Add Device",
+    "closeAriaLabel": "Close add-device panel",
+    "step1": "1 Select vendor",
+    "step2": "2 Select device",
+    "step3": "3 Fill in config",
+    "modeTitle": "Select access mode",
+    "step1Custom": "1 Select vendor / custom",
+    "step2Custom": "2 Select device / mode",
+    "step3Custom": "3 Fill in details / config",
+    "selectVendorTitle": "Select {{vendor}} device",
+    "tabs": {
+      "rex": "Rex",
+      "manual": "Manual"
+    },
+    "guide": {
+      "workbenchTab": "Workbench",
+      "title": "Rex-assisted integration",
+      "subtitle": "Choose a guide or example. Rex will confirm the integration path, credential fields, and smoke-test steps to help you connect the device.",
+      "customTitle": "Custom device integration",
+      "caseTitle": "Create device",
+      "examples": {
+        "supported": "I want to connect a supported security device",
+        "addressOnly": "I only have the device URL and login method",
+        "noApi": "This device does not expose an API"
+      },
+      "prompts": {
+        "api": "I have selected API integration. Continue with API integration and guide me through confirming the vendor, product name, API docs, Base URL, authentication method, device capabilities to implement, and smoke-test steps.",
+        "browser": "I have selected browser integration. Continue with browser integration and guide me through confirming the product URL, login method, target page behavior, data to collect, and automation validation steps. When generating the device plugin, use auth_state_path for the browser login state; username/password are only for auto re-login after the login state expires and must use storage: secret; inline auth_state, if needed, must use storage: secret and internal: true.",
+        "addressOnly": "I only have the device URL and login method. First help me determine whether an existing template can be used. If information is missing, ask only the most important question at a time, and output a device configuration JSON draft once enough details are available.",
+        "tdp": "I have selected the TDP integration example. Guide me through connecting ThreatBook TDP and confirming the connection URL, API key, secret, SSL verification, and connection test steps.",
+        "onesec": "I have selected the OneSEC integration example. Guide me through connecting OneSEC and confirming the Base URL, API key, secret, SSL verification, and connection test steps."
+      },
+      "actions": {
+        "api": "API integration",
+        "browser": "Browser integration"
+      },
+      "cases": {
+        "tdp": "TDP integration",
+        "onesec": "OneSEC integration",
+        "more": "View more"
+      },
+      "descriptions": {
+        "api": "Use this when the device exposes APIs. Rex will guide API docs, authentication, credential fields, and smoke tests.",
+        "browser": "Use this when the device has no open API. Rex will guide the console URL, login method, page actions, and automation validation.",
+        "tdp": "Continue with the known ThreatBook TDP case, focusing on API key, secret, base URL, and connection testing.",
+        "onesec": "Continue with the known OneSEC case, focusing on the connection URL, credential fields, and connection testing.",
+        "more": "Browse supported device templates. After a template is selected, Rex will continue guiding the configuration."
+      }
+    },
+    "supportedList": {
+      "back": "Back",
+      "title": "Supported devices",
+      "subtitle": "Choose a vendor first, then choose the device to connect. Rex will continue guiding the integration after a device is selected.",
+      "deviceCount": "{{count}} device(s)",
+      "integratedCount": "{{count}} integrated",
+      "templateTooltip": "Rex will continue configuration from this device template. If it is not installed, Rex will guide you to install it from FlockHub first."
+    },
+    "rex": {
+      "title": "Rex-guided device add",
+      "heading": "Rex-guided integration",
+      "subtitle": "Describe the model, integration path, and materials you have. Rex will help confirm the template, credential fields, and test steps.",
+      "welcome": "Tell me the device vendor, model, version, and any API docs, console URL, or authentication details you already have.\n\nIf the device is already supported, I will organize the values needed for the device configuration form. Once there is enough information, I will output a ```json configuration draft that the page can detect and use to fill the form. If there is no matching template yet, I will guide you through creating a custom device integration.",
+      "placeholder": "Describe the device, URL, authentication method, or upload related materials",
+      "pending": "Rex is getting ready...",
+      "manualAction": "Switch to manual",
+      "applyDraft": "Apply to form",
+      "applyDone": "Device config form filled",
+      "extracting": "Extracting...",
+      "extractEmpty": "No Rex output is available to extract yet",
+      "extractNoTemplate": "Could not match a device template from Rex output",
+      "extractFailed": "Extraction failed. Ask Rex to output a ```json device configuration draft and try again.",
+      "installFirst": "This template is not installed yet. Install it from FlockHub first.",
+      "detectedDraft": "Detected a device configuration draft",
+      "detectedInstall": "Detected a device template, but it is not installed yet",
+      "applyDetected": "Fill form",
+      "installDetected": "Install",
+      "dismissDraft": "Dismiss",
+      "guides": {
+        "existing": {
+          "title": "Existing template",
+          "desc": "Organize configuration fields for supported devices",
+          "prompt": "I want to integrate a security device that is already supported by a template. Guide me through confirming the vendor, model, connection URL, credential fields, and connection test steps."
+        },
+        "api": {
+          "title": "Custom API",
+          "desc": "Create a custom device plugin from API docs",
+          "prompt": "I have selected API integration. Help me confirm the API docs, authentication method, device details, and steps for generating a device plugin."
+        },
+        "webcli": {
+          "title": "Browser integration",
+          "desc": "Create integration capability from a web console",
+          "prompt": "I have selected browser integration. Guide me through preparing the product URL, login method, target pages/actions, and browser integration steps. When generating the device plugin, use auth_state_path for the browser login state; username/password are only for auto re-login after the login state expires and must use storage: secret; inline auth_state, if needed, must use storage: secret and internal: true."
+        }
+      }
+    },
+    "vendorHint": "Choose a vendor — {{count}} available",
+    "chooseVendorOrCustom": "Choose a vendor or create a custom device integration",
+    "customCardTitle": "Custom Device",
+    "customCardSubtitle": "API / Browser / Workflow",
+    "customCardCta": "Create a new integration path",
+    "chooseCustomMode": "Choose how this custom device should connect",
+    "customModes": {
+      "api": {
+        "title": "API Integration",
+        "desc": "Use this when the device exposes APIs. Provide API docs and generate a reusable device plugin."
+      },
+      "webcli": {
+        "title": "Browser Integration",
+        "desc": "Use this when the device has no open API. First generate and integrate the skill or CLI asset; for security devices, also generate a device plugin for the device page."
+      },
+      "workflow": {
+        "title": "Workflow Integration",
+        "desc": "Use this for Syslog, Kafka, or Webhook sources. The device page will guide you to the workflow integration screen for the final setup."
+      }
+    },
+    "productCount": "{{count}} product(s)",
+    "instanceCount": "{{count}} integrated",
+    "installState": {
+      "install": "Install in FlockHub first",
+      "update": "Update in FlockHub first",
+      "broken": "Plugin unavailable",
+      "installed": "Installed",
+      "available": "Available",
+      "updateAvailable": "Update",
+      "brokenShort": "Broken",
+      "installing": "Installing",
+      "updating": "Updating",
+      "installingTemplate": "Installing device template \"{{name}}\"",
+      "updatingTemplate": "Updating device template \"{{name}}\"",
+      "installDone": "Device template \"{{name}}\" installed",
+      "updateDone": "Device template \"{{name}}\" updated",
+      "installFailed": "Failed to install device template \"{{name}}\"",
+      "updateFailed": "Failed to update device template \"{{name}}\""
+    },
+    "productHint": "{{count}} product(s) — the same type can be added multiple times"
+  },
+
+  "config": {
+    "closeAriaLabel": "Close device config panel",
+    "newDeviceTitle": "Fill in config",
+    "tabConfig": "Config",
+    "tabTools": "Tools",
+    "tabToolsCount": "Tools ({{count}})",
+    "tabOverview": "Overview",
+    "nameLabel": "Device name",
+    "namePlaceholder": "e.g. HQ AF Firewall",
+    "roomLabel": "Room",
+    "connectionParams": "Connection parameters",
+    "secretRevealFailed": "Failed to reveal credential",
+    "showSecretAction": "Show",
+    "hideSecretAction": "Hide",
+    "showSecretAria": "Show {{label}}",
+    "hideSecretAria": "Hide {{label}}",
+    "sslLabel": "SSL verification",
+    "sslHint": "Disable to reach internal devices with self-signed certificates",
+    "enabledLabel": "Enable device",
+    "enabledHint": "When disabled, agents will not call tools from this device",
+    "aiAssistTitle": "Rex-assisted config",
+    "aiAssistHint": "Use the current form and setup guide so Rex can help you continue configuring this device.",
+    "aiAssistTest": "Test device",
+    "aiAssistTroubleshoot": "Troubleshoot",
+    "aiAssistSaveFirst": "Save the device before Rex can call its tools",
+    "testBtn": "Test connection",
+    "saveBtn": "Save config",
+    "addBtn": "Confirm integration",
+    "deleteBtn": "Delete device",
+    "confirmDelete": "Confirm delete this device config?"
+  },
+
+  "tools": {
+    "empty": "No associated tools",
+    "colName": "Tool name",
+    "colDesc": "Description",
+    "colStatus": "Status",
+    "colAction": "Action",
+    "detail": "Test / Details"
+  },
+
+  "overview": {
+    "serviceName": "Service name",
+    "version": "Version",
+    "toolCount": "Tools",
+    "vendor": "Vendor",
+    "serviceDesc": "Service description",
+    "viewDocs": "View setup guide"
+  },
+
+  "toast": {
+    "loadFailed": "Failed to load",
+    "nameRequired": "Please enter a device name",
+    "saveDone": "Config saved",
+    "addDone": "Device added",
+    "saveFailed": "Save failed",
+    "sslOn": "SSL verification enabled",
+    "sslOff": "SSL verification disabled",
+    "rollback": "Save failed — changes rolled back",
+    "enabledOn": "Device enabled",
+    "enabledOff": "Device disabled",
+    "deleteDone": "Device deleted",
+    "deleteFailed": "Delete failed",
+    "actionFailed": "Action failed"
+  },
+
+  "custom": {
+    "title": {
+      "api": "Custom Device API Integration",
+      "webcli": "Custom Device Browser Integration",
+      "workflow": "Custom Device Workflow Integration"
+    },
+    "subtitle": {
+      "api": "Provide API documentation and generate a reusable device plugin",
+      "webcli": "Provide the product URL and target interfaces to generate a browser-integration device plugin for the device page",
+      "workflow": "Configure Syslog, Kafka, and Webhook entries on the workflow Publish page"
+    },
+    "welcome": {
+      "api": "Please add an API docs URL or upload the docs file directly. I will use the tool-builder skill to generate a device plugin that can be used from the device page.",
+      "webcli": "Please add the product URL, target interfaces, and auth hints. I will use the web2cli skill to build and integrate the CLI or skill assets first, and then generate a device plugin when needed.",
+      "workflow": "Workflow entries are not created here. Go to the workflow Publish page and configure Syslog, Kafka, or Webhook as needed."
+    },
+    "validation": {
+      "deviceNameRequired": "Please enter the device product name",
+      "vendorNameRequired": "Please enter the vendor name",
+      "baseUrlRequired": "Please enter the Base URL",
+      "productUrlRequired": "Please enter the product URL",
+      "targetInterfacesRequired": "Please describe the interfaces or page behaviors to capture"
+    },
+    "toast": {
+      "submitSuccess": "Submitted to Rex. Continue the plugin generation in chat.",
+      "submitFailed": "Failed to submit to Rex"
+    },
+    "details": {
+      "prepareTitle": "Prepare the integration details before sending them to Rex",
+      "prepareIntro": "After submission, you will enter the Rex conversation directly. ",
+      "apiNext": "You can continue to add API doc links, upload documentation files, or explain interface details. Once the plugin is generated, return to the device page to finish the rest of the setup.",
+      "webcliNext": "You can continue to add page actions, capture targets, and authentication details. The final result should be a browser-integration device plugin that the device page can recognize; a CLI can remain as an optional debugging entry."
+    },
+    "rex": {
+      "apiHint": "Upload API docs or describe the endpoints. Rex will clarify key gaps before generating the device plugin.",
+      "webcliHint": "Provide the product URL and target pages/actions. Rex will clarify login, permissions, and risky operations before generating assets.",
+      "placeholder": "Continue adding interface details, authentication information, or debugging notes",
+      "apiPlaceholder": "Provide the product API documentation",
+      "webcliPlaceholder": "Provide the website URL",
+      "pending": "Rex is getting ready..."
+    },
+    "workflow": {
+      "heading": "Workflow integration currently supports Syslog, Kafka, and Webhook",
+      "body": "On the workflow detail page, open the Integration tab, choose Syslog, Kafka, or Webhook for your scenario, and then push data from the device or upstream system into the matching entry point.",
+      "requirementsTitle": "Requirements",
+      "requirement1": "Choose the integration type based on the data source: Syslog for log forwarding, Kafka for message queues, and Webhook for HTTP callbacks.",
+      "requirement2": "Make sure the workflow listener address, topic, or webhook URL is reachable from the device or upstream system, and map the input fields correctly.",
+      "requirement3": "After configuration, check the workflow execution history to confirm that the input data has been received and consumed.",
+      "goToWorkflows": "Go to workflow list"
+    },
+    "actions": {
+      "backToSelection": "Back to mode selection",
+      "backToForm": "Back to details form",
+      "openSessionList": "Open in session list",
+      "submit": "Submit to Rex"
+    },
+    "form": {
+      "common": {
+        "versionLabel": "Product version"
+      },
+      "api": {
+        "deviceNameLabel": "Device product name",
+        "deviceNamePlaceholder": "e.g. Custom bastion host",
+        "vendorNameLabel": "Vendor name",
+        "vendorNamePlaceholder": "e.g. Acme Security",
+        "versionPlaceholder": "e.g. v3.2.1",
+        "baseUrlLabel": "Base URL",
+        "baseUrlPlaceholder": "e.g. https://device.example.com/api",
+        "docsUrlLabel": "API docs URL",
+        "docsUrlPlaceholder": "e.g. https://device.example.com/openapi",
+        "docsUrlHint": "A public URL is optional. After submission, you can keep uploading API docs inside the Rex conversation.",
+        "capabilitiesLabel": "Expected capability scope",
+        "capabilitiesPlaceholder": "All APIs by default, or limit to specific APIs",
+        "capabilitiesHint": "All APIs are used by default. If you only need specific interfaces, describe them here."
+      },
+      "webcli": {
+        "deviceNameLabel": "Device product name",
+        "deviceNamePlaceholder": "e.g. Custom situation awareness platform",
+        "vendorNameLabel": "Vendor name",
+        "vendorNamePlaceholder": "e.g. Acme Security",
+        "versionPlaceholder": "e.g. 2026.05",
+        "productUrlLabel": "Product URL",
+        "productUrlPlaceholder": "e.g. https://device.example.com",
+        "targetInterfacesLabel": "Interfaces or page behaviors to capture",
+        "targetInterfacesPlaceholder": "e.g. alert list API, asset detail API, and the request triggered by the \"Block IP\" button",
+        "authHintLabel": "Authentication or permission hints",
+        "authHintPlaceholder": "e.g. admin role required; request depends on Cookie + X-CSRF-Token"
+      }
+    }
+  }
+}

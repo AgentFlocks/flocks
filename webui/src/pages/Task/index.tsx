@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { ListTodo, Plus, Clock, Calendar, Globe } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
-import { useTaskDashboard, useQueueStatus, useTaskSystemNotice } from '@/hooks/useTasks';
+import { useTaskDashboard, useTaskSystemNotice } from '@/hooks/useTasks';
 import { DashboardCounts } from '@/api/task';
 import { DashboardCards } from './components';
 import QueuedSection from './QueuedSection';
@@ -24,11 +24,9 @@ export default function TaskPage() {
   const [sectionRefreshKey, setSectionRefreshKey] = useState(0);
 
   const { counts, refetch: refetchDashboard } = useTaskDashboard({ pollInterval: 15000 });
-  const { refetch: refetchQueue } = useQueueStatus({ pollInterval: 10000 });
   const { notice } = useTaskSystemNotice();
   const refreshGlobal = () => {
     refetchDashboard();
-    refetchQueue();
   };
 
   const forceRemountSections = () => {

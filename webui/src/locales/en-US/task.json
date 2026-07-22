@@ -131,16 +131,23 @@
     "filterRunning": "Running",
     "filterStopped": "Stopped",
     "emptyTitle": "No API Services",
-    "emptyDescription": "Publish a workflow as an API service from the workflow detail page's \"Run\" tab",
+    "emptyDescription": "Publish a workflow as an API service from the workflow detail page's \"Publish\" tab",
     "publishedAt": "Published {{date}}",
+    "serviceDriver": "Service Driver",
+    "driverLocal": "Local",
+    "driverDocker": "Docker",
     "showKey": "Show",
     "hideKey": "Hide",
     "quickCall": "Quick Call (curl)",
+    "restartService": "Restart Service",
+    "restarting": "Restarting...",
     "stopService": "Stop Service",
     "stopping": "Stopping...",
     "openInNewTab": "Open in new tab",
     "loadFailed": "Load failed",
+    "restartFailed": "Restart failed",
     "stopFailed": "Stop failed",
+    "serviceRestarted": "Service restarted",
     "serviceStopped": "Service stopped"
   },
   "form": {
@@ -181,6 +188,10 @@
     "editTitle": "Edit Scheduled Task",
     "createTitle": "Create Task",
     "agentName": "Agent Name",
+    "workflowParamsLabel": "Workflow Params",
+    "workflowParamsHint": "(JSON object passed as workflow inputs)",
+    "workflowParamsPlaceholder": "{\n  \"keyword\": \"example\"\n}",
+    "workflowParamsInvalid": "Workflow params must be a valid JSON object",
     "urgentLabel": "Urgent",
     "highLabel": "High",
     "normalLabel": "Normal",
@@ -195,7 +206,89 @@
     "selfContainedHint": "Scheduled tasks run in a fresh Rex session and no longer inherit a parent session. Put all required context directly into the description or additional info.",
     "recentRuns": "Recent Runs",
     "recentRunsEmpty": "No execution records yet",
-    "recentRunsLoading": "Loading execution records..."
+    "recentRunsLoading": "Loading execution records...",
+    "create": {
+      "emptyStateTitle": "No creation conversation yet",
+      "guidePanelTitle": "Rex Assisted Task Creation",
+      "guidePanelDesc": "Choose a guide or case. Rex will confirm task goal, executor, schedule, and output requirements, then organize them into a creatable task configuration.",
+      "guideSectionTitle": "Creation Guides",
+      "caseSectionTitle": "Creation Cases",
+      "guideActions": [
+        {
+          "label": "Create Scheduled Task",
+          "description": "Start with goal, executor, frequency, timezone, and output requirements.",
+          "prompt": "Please guide me through creating a Flocks scheduled task. Do not output final JSON immediately. Use the question tool to ask one most important question at a time and help me confirm the task goal, execution mode (Agent or Workflow), concrete execution instructions, schedule mode (now, one-time, or recurring), timezone, priority, and output requirements. After I confirm, summarize the task configuration so it can be extracted into the form."
+        },
+        {
+          "label": "Clarify Instructions",
+          "description": "Turn a fuzzy need into an Agent-ready userPrompt.",
+          "prompt": "Please help me clarify the execution instructions for this task. Ask one question at a time to confirm task goal, input source, processing steps, output format, failure handling, and which context must be written into the task description. Finally, organize it into text suitable for the task additional info field."
+        },
+        {
+          "label": "Choose Schedule",
+          "description": "Confirm one-time, daily, weekly, weekdays, or custom cron.",
+          "prompt": "Please help me choose the schedule for this task. First confirm business timezone, whether it should run now or at a specific time, whether it is recurring, execution windows, and weekend/holiday rules. After confirmation, provide scheduleKind, runAt or cron, timezone, and cronDescription."
+        },
+        {
+          "label": "Choose Executor",
+          "description": "Decide whether an Agent or existing Workflow should run it.",
+          "prompt": "Please help me decide whether this task should be executed by an Agent or a Workflow. First confirm whether the task needs a fixed process, structured input, repeatable nodes, and stable output. If Agent fits, recommend agentName and userPrompt. If Workflow fits, confirm workflowID and context JSON."
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "Daily Security Brief",
+          "description": "Collect security data at a fixed time and generate a daily brief.",
+          "prompt": "I want to create a daily security brief scheduled task that runs every morning at 9:00, summarizes security alerts from the past 24 hours, key asset risks, and response recommendations, and outputs a Markdown report. Please guide me through Agent/Workflow choice, data sources, output format, timezone, and failure handling."
+        },
+        {
+          "label": "IOC Recheck",
+          "description": "Periodically check IOC reputation changes and summarize deltas.",
+          "prompt": "I want to create an IOC recheck task that checks a batch of IPs, domains, URLs, or hashes every day for threat intelligence changes, then outputs newly added risks and response recommendations. Please guide me through input source, Agent or Workflow execution, schedule, output format, and alert thresholds."
+        },
+        {
+          "label": "Weekly Asset Review",
+          "description": "Check asset status, exposure, and unusual changes every week.",
+          "prompt": "I want to create a weekly asset review task that checks key assets for exposure, risk status, and unusual changes, then generates a review summary. Please guide me through review scope, executor, frequency, Workflow params or Agent instructions, and report format."
+        }
+      ]
+    },
+    "edit": {
+      "emptyStateTitle": "No editing conversation yet",
+      "guidePanelTitle": "Rex Assisted Task Editing",
+      "guidePanelDesc": "Choose an editing entry. Rex will use the current task configuration to guide instruction, schedule, executor, and output changes.",
+      "guideSectionTitle": "Editing Guides",
+      "caseSectionTitle": "Editing Cases",
+      "guideActions": [
+        {
+          "label": "Improve Current Task",
+          "description": "Diagnose current configuration, then confirm fields to change.",
+          "prompt": "Please help me edit the current task \"{{name}}\". Start with a short diagnosis based on the current configuration and do not modify it directly. Then use the question tool to ask one most important question at a time to confirm execution instructions, schedule, executor, priority, and output requirements. After confirmation, output a JSON configuration summary that can be extracted into the form."
+        },
+        {
+          "label": "Adjust Schedule",
+          "description": "Change execution time, recurrence, timezone, or display label.",
+          "prompt": "Please help me adjust the schedule of the current task \"{{name}}\". Confirm timezone, recurrence, whether it should be one-time, time windows to avoid, and how cronDescription should be displayed. After confirmation, summarize extractable schedule fields."
+        },
+        {
+          "label": "Rewrite Instructions",
+          "description": "Give the Agent or Workflow fuller execution context.",
+          "prompt": "Please help me rewrite the additional info for the current task \"{{name}}\". First check whether the current instruction explains goal, input, steps, output format, and failure handling, then confirm missing information step by step. After confirmation, organize it into a clearer userPrompt."
+        }
+      ],
+      "caseActions": [
+        {
+          "label": "Reduce Frequency",
+          "description": "Lower execution pressure with a better recurrence.",
+          "prompt": "I want to reduce the execution frequency of the current task \"{{name}}\" because it runs too often. Please recommend a new cron, timezone, and display description based on the task goal, and explain the impact."
+        },
+        {
+          "label": "Switch to Workflow",
+          "description": "Move from free-form Agent instructions to a fixed Workflow.",
+          "prompt": "I want to evaluate whether the current task \"{{name}}\" should be switched to Workflow execution. Please help me confirm fixed process, input parameters, workflowID, context JSON, and output requirements, then summarize extractable configuration."
+        }
+      ]
+    }
   },
   "dashboard": {
     "completedWeek": "Completed (7d)",

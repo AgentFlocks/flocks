@@ -34,7 +34,7 @@ def _load_tool(yaml_name: str):
         / "plugins"
         / "tools"
         / "api"
-        / "onesec"
+        / "onesec_v2_8_2"
         / yaml_name
     )
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))

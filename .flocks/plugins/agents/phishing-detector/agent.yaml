@@ -1,4 +1,5 @@
 name: phishing-detector
+name_cn: 钓鱼邮件检测智能体
 description: >
   Specialized agent for detecting and analyzing phishing emails, extracting IOCs, and assessing threat level.
 
@@ -15,16 +16,13 @@ temperature: 0.3
 
 tools:
   - read
-  - list
   - glob
   - grep
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
-  - file_search
   - websearch
   - webfetch
   - virustotal_ip_query

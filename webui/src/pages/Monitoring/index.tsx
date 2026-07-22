@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import { BarChart3, Activity, Clock, AlertCircle, TrendingUp, Zap } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -13,42 +13,90 @@ export default function MonitoringPage() {
   const [toolPerformance, setToolPerformance] = useState<PerformanceData[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const latestRequestIdRef = useRef(0);
+  const inFlightRef = useRef<Promise<void> | null>(null);
+  const inFlightRequestIdRef = useRef<number | null>(null);
+  const mountedRef = useRef(false);
 
-  useEffect(() => {
-    fetchData();
-    
-    // Auto refresh every 5 seconds
-    const interval = setInterval(fetchData, 5000);
-    return () => clearInterval(interval);
+  const fetchData = useCallback((): Promise<void> => {
+    if (inFlightRef.current) return inFlightRef.current;
+
+    const requestId = ++latestRequestIdRef.current;
+    const request = (async () => {
+      try {
+        setLoading(true);
+        setError(null);
+
+        const [statusResult, metricsResult, llmPerfResult, toolPerfResult] = await Promise.allSettled([
+          monitoringAPI.getStatus(),
+          monitoringAPI.getMetrics(),
+          monitoringAPI.getLLMPerformance(),
+          monitoringAPI.getToolPerformance(),
+        ]);
+
+        const failedResult = [statusResult, metricsResult, llmPerfResult, toolPerfResult]
+          .find((result) => result.status === 'rejected');
+        if (failedResult?.status === 'rejected') {
+          throw failedResult.reason;
+        }
+        if (
+          statusResult.status !== 'fulfilled'
+          || metricsResult.status !== 'fulfilled'
+          || llmPerfResult.status !== 'fulfilled'
+          || toolPerfResult.status !== 'fulfilled'
+        ) return;
+
+        if (!mountedRef.current || latestRequestIdRef.current !== requestId) return;
+        setStatus(statusResult.value.data);
+        setMetrics(metricsResult.value.data);
+        setLlmPerformance(llmPerfResult.value.data);
+        setToolPerformance(toolPerfResult.value.data);
+      } catch (err: any) {
+        if (mountedRef.current && latestRequestIdRef.current === requestId) {
+          setError(err.message);
+        }
+      } finally {
+        if (mountedRef.current && latestRequestIdRef.current === requestId) {
+          setLoading(false);
+        }
+        if (inFlightRequestIdRef.current === requestId) {
+          inFlightRef.current = null;
+          inFlightRequestIdRef.current = null;
+        }
+      }
+    })();
+
+    inFlightRef.current = request;
+    inFlightRequestIdRef.current = requestId;
+    return request;
   }, []);
 
-  const fetchData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      
-      const [statusRes, metricsRes, llmPerfRes, toolPerfRes] = await Promise.all([
-        monitoringAPI.getStatus(),
-        monitoringAPI.getMetrics(),
-        monitoringAPI.getLLMPerformance(),
-        monitoringAPI.getToolPerformance(),
-      ]);
-      
-      setStatus(statusRes.data);
-      setMetrics(metricsRes.data);
-      setLlmPerformance(llmPerfRes.data);
-      setToolPerformance(toolPerfRes.data);
-    } catch (err: any) {
-      setError(err.message);
-    } finally {
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    let cancelled = false;
+    let timerId: number | undefined;
+    mountedRef.current = true;
+
+    const poll = async () => {
+      await fetchData();
+      if (!cancelled) {
+        timerId = window.setTimeout(poll, 5000);
+      }
+    };
+
+    void poll();
+    return () => {
+      cancelled = true;
+      mountedRef.current = false;
+      if (timerId !== undefined) {
+        window.clearTimeout(timerId);
+      }
+    };
+  }, [fetchData]);
 
   if (loading && !status) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -79,6 +127,10 @@ export default function MonitoringPage() {
     return `${minutes}m`;
   };
 
+  const formatRate = (value: number | null | undefined) => (
+    value == null ? t('unavailable') : `${value.toFixed(1)}/min`
+  );
+
   return (
     <div className="h-full flex flex-col overflow-y-auto">
       <PageHeader
@@ -106,7 +158,7 @@ export default function MonitoringPage() {
               {status?.status === 'down' && t('status.down')}
             </span>
           </div>
-          <div className="text-2xl font-bold text-gray-900">{t('systemStatus')}</div>
+          <div className="text-xl font-bold text-gray-900">{t('systemStatus')}</div>
           <div className="text-sm text-gray-600 mt-1">
             {t('uptime')}: {status ? formatUptime(status.uptime) : '-'}
           </div>
@@ -116,8 +168,8 @@ export default function MonitoringPage() {
           <div className="flex items-center justify-between mb-2">
             <Activity className="w-8 h-8 text-red-600" />
           </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {status?.activeSessions || 0}
+          <div className="text-xl font-bold text-gray-900">
+            {status?.activeSessions ?? t('unavailable')}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('activeSessions')}</div>
         </div>
@@ -126,8 +178,8 @@ export default function MonitoringPage() {
           <div className="flex items-center justify-between mb-2">
             <Zap className="w-8 h-8 text-purple-600" />
           </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {status?.activeAgents || 0}
+          <div className="text-xl font-bold text-gray-900">
+            {status?.activeAgents ?? t('unavailable')}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('activeAgents')}</div>
         </div>
@@ -136,8 +188,8 @@ export default function MonitoringPage() {
           <div className="flex items-center justify-between mb-2">
             <TrendingUp className="w-8 h-8 text-orange-600" />
           </div>
-          <div className="text-2xl font-bold text-gray-900">
-            {metrics?.messageRate.toFixed(1) || '0'}
+          <div className="text-xl font-bold text-gray-900">
+            {metrics?.messageRate == null ? t('unavailable') : metrics.messageRate.toFixed(1)}
           </div>
           <div className="text-sm text-gray-600 mt-1">{t('messagesPerMin')}</div>
         </div>
@@ -147,35 +199,41 @@ export default function MonitoringPage() {
       {metrics && (
         <div className="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
           <h3 className="text-lg font-semibold text-gray-900 mb-4">{t('realTimeMetrics')}</h3>
-          <div className="grid grid-cols-1 md:grid-cols-5 gap-6">
+          <div className="grid grid-cols-1 md:grid-cols-3 xl:grid-cols-6 gap-6">
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.messageRate')}</div>
-              <div className="text-2xl font-bold text-gray-900">
-                {metrics.messageRate.toFixed(1)}/min
+              <div className="text-xl font-bold text-gray-900">
+                {formatRate(metrics.messageRate)}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.toolCallRate')}</div>
-              <div className="text-2xl font-bold text-gray-900">
-                {metrics.toolCallRate.toFixed(1)}/min
+              <div className="text-xl font-bold text-gray-900">
+                {formatRate(metrics.toolCallRate)}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.errorRate')}</div>
-              <div className="text-2xl font-bold text-red-600">
-                {metrics.errorRate.toFixed(1)}/min
+              <div className="text-xl font-bold text-red-600">
+                {formatRate(metrics.errorRate)}
+              </div>
+            </div>
+            <div>
+              <div className="text-sm text-gray-600 mb-1">{t('metrics.toolParseFailureRate')}</div>
+              <div className="text-xl font-bold text-red-600">
+                {formatRate(metrics.toolParseFailureRate)}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.avgResponse')}</div>
-              <div className="text-2xl font-bold text-gray-900">
-                {metrics.avgResponseTime.toFixed(0)}ms
+              <div className="text-xl font-bold text-gray-900">
+                {metrics.avgResponseTime == null ? t('unavailable') : `${metrics.avgResponseTime.toFixed(0)}ms`}
               </div>
             </div>
             <div>
               <div className="text-sm text-gray-600 mb-1">{t('metrics.activeRequests')}</div>
-              <div className="text-2xl font-bold text-gray-900">
-                {metrics.activeRequests}
+              <div className="text-xl font-bold text-gray-900">
+                {metrics.activeRequests ?? t('unavailable')}
               </div>
             </div>
           </div>

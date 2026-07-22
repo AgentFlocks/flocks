@@ -2,10 +2,11 @@
 tests/agent/test_prompt_utils.py
 
 单元测试：flocks.agent.prompt_utils 中被修改 / 新增的函数
-- categorize_tools()          : 使用 ToolRegistry 真实 category
-- _format_tools_for_prompt()  : 按 ToolCategory 分组显示所有工具
-- build_tool_selection_table(): 新格式（工具分组 + agent 表格）
-- build_workflows_section()   : workflow 列表渲染
+- categorize_tools()           : 使用 ToolRegistry 真实 category
+- _format_tools_for_prompt()   : 按 ToolCategory 分组显示所有工具
+- build_tool_selection_table() : 仅渲染工具目录
+- build_agent_selection_table(): 单独渲染 agent 调度表
+- build_workflows_section()    : workflow 列表渲染
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import pytest
 from flocks.agent.agent import AvailableAgent, AvailableCategory, AvailableSkill, AvailableTool, AvailableWorkflow
 from flocks.agent.prompt_utils import (
     _format_tools_for_prompt,
+    build_agent_selection_table,
     build_tool_selection_table,
     build_workflows_section,
     categorize_tools,
@@ -73,10 +75,10 @@ class TestCategorizeTools:
         assert result[0].category == "system"
 
     def test_returns_avail_tool_objects(self):
-        mapping = {"skill": _make_tool_entry("skill", "system")}
+        mapping = {"skill_load": _make_tool_entry("skill_load", "system")}
         with patch(self._REGISTRY_GET, side_effect=_registry_side_effect(mapping)), \
              patch(self._REGISTRY_INIT):
-            result = categorize_tools(["skill"])
+            result = categorize_tools(["skill_load"])
         assert all(isinstance(t, AvailableTool) for t in result)
 
     def test_preserves_tool_names(self):
@@ -194,15 +196,6 @@ class TestFormatToolsForPrompt:
 
 class TestBuildToolSelectionTable:
 
-    def _make_agent(self, name: str, cost: str = "CHEAP") -> AvailableAgent:
-        meta = MagicMock()
-        meta.cost = cost
-        meta.category = "general"
-        meta.triggers = []
-        meta.key_trigger = None
-        agent = AvailableAgent(name=name, description=f"{name} agent.", metadata=meta)
-        return agent
-
     def test_contains_available_tools_header(self):
         tools = [AvailableTool(name="bash", category="terminal")]
         output = build_tool_selection_table([], tools)
@@ -217,32 +210,71 @@ class TestBuildToolSelectionTable:
         assert "`read`" in output
         assert "`bash`" in output
 
-    def test_agents_table_present_when_agents_exist(self):
-        agents = [self._make_agent("explore")]
+    def test_agents_not_rendered_in_tools_output(self):
+        meta = MagicMock()
+        meta.cost = "CHEAP"
+        meta.category = "general"
+        meta.triggers = []
+        meta.key_trigger = None
+        agents = [AvailableAgent(name="explore", description="explore agent.", metadata=meta)]
         output = build_tool_selection_table(agents, [])
-        assert "explore" in output
-        assert "CHEAP" in output
-
-    def test_utility_agents_excluded(self):
-        normal = self._make_agent("explore")
-        utility = self._make_agent("utility_agent")
-        utility.metadata.category = "utility"
-        output = build_tool_selection_table([normal, utility], [])
-        assert "explore" in output
-        assert "utility_agent" not in output
-
-    def test_empty_tools_still_renders_agents(self):
-        agents = [self._make_agent("oracle", "EXPENSIVE")]
-        output = build_tool_selection_table(agents, [])
-        assert "oracle" in output
+        assert "explore" not in output
+        assert "When to Use" not in output
 
     def test_empty_inputs_no_crash(self):
         output = build_tool_selection_table([], [])
         assert isinstance(output, str)
 
-    def test_default_flow_hint_present(self):
+    def test_default_flow_hint_removed(self):
         output = build_tool_selection_table([], [])
-        assert "Default flow" in output
+        assert "Default flow" not in output
+
+
+# ===========================================================================
+# build_agent_selection_table
+# ===========================================================================
+
+class TestBuildAgentSelectionTable:
+
+    def _make_agent(self, name: str, cost: str = "CHEAP") -> AvailableAgent:
+        meta = MagicMock()
+        meta.cost = cost
+        meta.category = "general"
+        meta.triggers = []
+        meta.key_trigger = None
+        agent = AvailableAgent(name=name, description=f"{name} agent.", metadata=meta)
+        return agent
+
+    def test_agents_table_present_when_agents_exist(self):
+        agents = [self._make_agent("explore")]
+        output = build_agent_selection_table(agents)
+        assert "explore" in output
+        assert "CHEAP" in output
+        assert "Trigger Signals" in output
+
+    def test_utility_agents_excluded(self):
+        normal = self._make_agent("explore")
+        utility = self._make_agent("utility_agent")
+        utility.metadata.category = "utility"
+        output = build_agent_selection_table([normal, utility])
+        assert "explore" in output
+        assert "utility_agent" not in output
+
+    def test_empty_agents_still_returns_header(self):
+        output = build_agent_selection_table([])
+        assert "Available Agents" in output
+
+    def test_default_flow_hint_absent(self):
+        output = build_agent_selection_table([])
+        assert "Default flow" not in output
+
+    def test_triggers_rendered_when_available(self):
+        agent = self._make_agent("explore")
+        trigger = MagicMock()
+        trigger.trigger = "Find Y"
+        agent.metadata.triggers = [trigger]
+        output = build_agent_selection_table([agent])
+        assert "Find Y" in output
 
 
 # ===========================================================================

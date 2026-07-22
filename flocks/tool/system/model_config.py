@@ -42,6 +42,7 @@ Use this when:
     name="list_providers",
     description=LIST_PROVIDERS_DESC,
     category=ToolCategory.SYSTEM,
+    native=False,
     parameters=[
         ToolParameter(
             name="provider_id",
@@ -130,6 +131,7 @@ Example: add a provider named "MyLLM" with base_url "https://api.myllm.com/v1"
     description=ADD_PROVIDER_DESC,
     category=ToolCategory.SYSTEM,
     requires_confirmation=True,
+    native=False,
     parameters=[
         ToolParameter(
             name="name",
@@ -249,6 +251,7 @@ Examples:
     description=ADD_MODEL_DESC,
     category=ToolCategory.SYSTEM,
     requires_confirmation=True,
+    native=False,
     parameters=[
         ToolParameter(
             name="provider_id",
@@ -350,7 +353,7 @@ async def add_model_tool(
             "supports_vision": supports_vision,
             "supports_tools": supports_tools,
             "supports_streaming": True,
-            "supports_reasoning": False,
+            "supports_reasoning": True,
             "input_price": 0.0,
             "output_price": 0.0,
             "currency": "USD",

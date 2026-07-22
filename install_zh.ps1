@@ -120,6 +120,9 @@ function Show-Usage {
     Write-Host "默认会在当前目录下创建 'flocks' 子目录。"
     Write-Host "如果当前目录是 Windows System32，则会自动回退到用户主目录。"
     Write-Host "请在“以管理员身份运行”的 PowerShell 窗口中执行此安装脚本。"
+    Write-Host "默认会为 scripts/install_zh.ps1 注入国内软件源与 uv 安装镜像。"
+    Write-Host "  uv 备用源: https://uv.agentsmirror.com/install-cn.ps1"
+    Write-Host "  uv 官方回退: https://astral.sh/uv/install.ps1"
     Write-Host ""
     Write-Host "远程使用："
     Write-Host "  curl -fsSL $RawInstallZhShUrl | bash"
@@ -157,6 +160,22 @@ function Unblock-InstallFiles {
         Get-ChildItem -Path $TargetDir -Recurse -File -ErrorAction SilentlyContinue | Unblock-File -ErrorAction SilentlyContinue
     }
     catch {
+    }
+}
+
+function Remove-ExistingInstallDirectory {
+    param([string]$TargetDir)
+
+    if ([string]::IsNullOrWhiteSpace($TargetDir) -or -not (Test-Path -LiteralPath $TargetDir)) {
+        return
+    }
+
+    Write-Info "正在删除历史 Flocks 安装目录: $TargetDir"
+    try {
+        Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Fail "无法删除历史 Flocks 安装目录 '$TargetDir'。请关闭正在运行的 Flocks 进程后重试。错误: $($_.Exception.Message)"
     }
 }
 
@@ -229,11 +248,20 @@ function Set-CnInstallerEnvironment {
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_URL)) {
         $env:FLOCKS_UV_INSTALL_SH_URL = "https://astral.org.cn/uv/install.sh"
     }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_SH_FALLBACK_URL = "https://uv.agentsmirror.com/install-cn.sh"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_SH_SECONDARY_FALLBACK_URL = "https://astral.sh/uv/install.sh"
+    }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_URL)) {
         $env:FLOCKS_UV_INSTALL_PS1_URL = "https://astral.org.cn/uv/install.ps1"
     }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL)) {
         $env:FLOCKS_UV_INSTALL_PS1_FALLBACK_URL = "https://uv.agentsmirror.com/install-cn.ps1"
+    }
+    if ([string]::IsNullOrWhiteSpace($env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL)) {
+        $env:FLOCKS_UV_INSTALL_PS1_SECONDARY_FALLBACK_URL = "https://astral.sh/uv/install.ps1"
     }
     if ([string]::IsNullOrWhiteSpace($env:FLOCKS_NPM_REGISTRY)) {
         $env:FLOCKS_NPM_REGISTRY = "https://registry.npmmirror.com/"
@@ -279,9 +307,7 @@ function Main {
         if ((-not [string]::IsNullOrWhiteSpace($installParent)) -and -not (Test-Path -LiteralPath $installParent)) {
             New-Item -ItemType Directory -Path $installParent -Force | Out-Null
         }
-        if (Test-Path $InstallDir) {
-            Remove-Item -Path $InstallDir -Recurse -Force
-        }
+        Remove-ExistingInstallDirectory -TargetDir $InstallDir
         Copy-Item -Path $projectRoot -Destination $InstallDir -Recurse -Force
         Unblock-InstallFiles -TargetDir $InstallDir
 

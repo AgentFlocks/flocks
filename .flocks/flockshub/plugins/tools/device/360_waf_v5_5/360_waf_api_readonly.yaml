@@ -1,0 +1,30 @@
+name: 360_waf_api_readonly
+description: >
+  360 WAF v5.5 官方 REST 只读调用工具。可用 waf_api_catalog 查看已收录接口，
+  或用 waf_call_raw_readonly 调用已收录的 GET 接口。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: 360_waf
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: REST 只读操作名称。
+      enum:
+        - waf_api_catalog
+        - waf_call_raw_readonly
+        - test
+    path:
+      type: string
+      description: 已收录的 /rest/api/... GET 路径。
+    query:
+      type: object
+      description: 可选的 WAF 查询对象，会编码为 query= JSON。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_waf.handler.py
+  function: api_readonly

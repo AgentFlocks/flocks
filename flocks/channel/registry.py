@@ -32,7 +32,21 @@ class ChannelRegistry:
 
     def register(self, plugin: ChannelPlugin) -> None:
         meta = plugin.meta()
-        self._channels[meta.id.lower()] = plugin
+        key = meta.id.lower()
+        existing = self._channels.get(key)
+        if existing is not None:
+            log.debug(
+                "channel.register.skip_existing",
+                {
+                    "id": meta.id,
+                    "aliases": meta.aliases,
+                    "existing_instance": f"{id(existing):x}",
+                    "candidate_instance": f"{id(plugin):x}",
+                },
+            )
+            return
+
+        self._channels[key] = plugin
         for alias in meta.aliases:
             self._channels[alias.lower()] = plugin
         log.info("channel.registered", {"id": meta.id, "aliases": meta.aliases})
@@ -77,13 +91,19 @@ class ChannelRegistry:
 
     def _register_builtin_channels(self) -> None:
         from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
+        from flocks.channel.builtin.email.channel import EmailChannel
         from flocks.channel.builtin.feishu.channel import FeishuChannel
         from flocks.channel.builtin.telegram.channel import TelegramChannel
         from flocks.channel.builtin.wecom.channel import WeComChannel
+        from flocks.channel.builtin.whatsapp.channel import WhatsAppChannel
+        from flocks.channel.builtin.weixin.channel import WeixinChannel
         self.register(FeishuChannel())
         self.register(WeComChannel())
         self.register(TelegramChannel())
+        self.register(WhatsAppChannel())
         self.register(DingTalkChannel())
+        self.register(WeixinChannel())
+        self.register(EmailChannel())
 
     def _register_plugin_extension_point(self) -> None:
         from flocks.plugin import PluginLoader, ExtensionPoint
@@ -103,6 +123,7 @@ class ChannelRegistry:
             dedup_key=lambda ch: ch.meta().id,
             recursive=True,
             max_depth=2,
+            load_once=True,
         ))
 
     def _load_plugin_channels(self) -> None:

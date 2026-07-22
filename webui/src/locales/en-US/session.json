@@ -14,9 +14,17 @@
   "renameEmpty": "Session name cannot be empty",
   "downloadJson": "Download JSON",
   "downloadFailed": "Download failed",
+  "sharedTag": "Shared",
+  "shareAction": "Share Locally",
+  "unshareAction": "Cancel Sharing",
+  "shareEnabled": "Session is shared to all local accounts as read-only",
+  "shareDisabled": "Session sharing canceled",
+  "shareUpdateFailed": "Failed to update sharing status",
   "moreActions": "More actions",
   "selectMode": "Batch select",
   "cancelSelect": "Cancel",
+  "cancel": "Cancel",
+  "save": "Save",
   "selectAll": "Select All",
   "deselectAll": "Deselect All",
   "deleteSelected": "Delete ({{count}})",
@@ -33,13 +41,51 @@
   "loading": "Loading...",
   "noAgents": "No agents available",
   "smartAssistant": "AI Smart Assistant",
+  "agentPicker": {
+    "title": "Choose Chat Agent",
+    "hint": "New chats start with Rex; type @Agent to route one message",
+    "filter": {
+      "all": "All",
+      "builtin": "Built-in",
+      "custom": "Custom"
+    },
+    "badge": {
+      "primary": "Primary",
+      "builtin": "Built-in",
+      "custom": "Custom"
+    }
+  },
+  "modelPicker": {
+    "title": "Choose Model",
+    "hint": "Overrides the model used when sending this chat message",
+    "empty": "No available models",
+    "count": "{{count}}",
+    "vision": "Vision",
+    "free": "Free",
+    "noCost": "No cost",
+    "contextWindow": "Context window: {{value}}",
+    "contextUnknown": "Context window: Unknown",
+    "addModel": "Add model"
+  },
   "welcome": {
     "title": "Start a new conversation",
     "description": "AI-native security operations assistant — threat analysis, incident response, and security orchestration",
-    "alertTriage": "Alert Triage",
+    "alertOperations": "Alert Operations",
     "threatHunting": "Threat Hunting",
     "incidentResponse": "Incident Response",
-    "alertTriageSuggestion": "Help me analyze an alert: suspicious login activity detected",
+    "alertOperationsSuggestion": "Help me configure the SOC workspace alert operations capability. Please proceed in order:\n\n1. First confirm whether the FlocksHub component `soc-workspace` is installed. If it is not installed, ask me whether to install the SOC workspace component. If I decline, stop. If I confirm, install the component.\n2. After the component is installed, read `~/.flocks/plugins/workflows/stream_alert_denoise/guide.md` and guide me through the denoise workflow configuration. Focus on Syslog settings, whether the Syslog listener should be enabled, and whether the corresponding security device is configured and sending Syslog data.\n3. Then read `~/.flocks/plugins/workflows/stream_alert_triage/guide.md` and guide me through the triage workflow configuration. Focus on whether output should be DB or JSONL, and ask whether to enable scheduled triggering. The default schedule is every 3 minutes.\n4. After both workflows are confirmed, tell me the SOC workspace capability is configured and can be modified later if needed.\n\nAsk only one key question at a time, and show a plan and impact summary before changing configuration.",
+    "socComponentInstallConfirm": "The SOC workspace component is not installed. Install it now?",
+    "socComponentMissing": "Please make sure component:soc-workspace exists in FlocksHub.",
+    "socComponentMissingTitle": "SOC workspace component not found",
+    "socComponentMissingDescription": "Please make sure component:soc-workspace exists in FlocksHub.",
+    "socComponentIncompatibleTitle": "SOC workspace component is incompatible",
+    "socComponentIncompatibleDescription": "This version cannot install the component.",
+    "socComponentInstalled": "SOC workspace component installed",
+    "socComponentInstalledTitle": "SOC workspace component installed",
+    "socComponentInstalledDescription": "The configuration guide will start next.",
+    "socComponentInstallFailed": "Failed to install SOC workspace component",
+    "socComponentInstallFailedTitle": "Failed to install SOC workspace component",
+    "socComponentInstallFailedDescription": "Please try again later or install it from FlocksHub manually.",
     "threatHuntingSuggestion": "Help me query threat intelligence for an IP address",
     "incidentResponseSuggestion": "Help me handle a security incident: ransomware infection detected"
   },
@@ -51,6 +97,36 @@
     "emptyText": "No execution records",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
+    "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",
+    "contextUsageUnknown": "Context usage unknown",
+    "contextUsage": {
+      "title": "Context Usage",
+      "close": "Close",
+      "full": "{{percent}}% Full",
+      "tokens": "~{{used}} / {{total}} Tokens",
+      "excludedTokens": "{{tokens}} excluded",
+      "noAttributedSegments": "No attributed breakdown",
+      "breakdown": {
+        "systemPrompt": "System prompt",
+        "toolDefinitions": "Tool definitions",
+        "tools": "Tool calls",
+        "skillLoad": "Skill loads",
+        "agentDelegation": "Agent delegation",
+        "conversation": "Conversation",
+        "reasoning": "Reasoning",
+        "draft": "Current draft",
+        "compactedHistory": "Compacted history"
+      }
+    },
+    "goal": {
+      "dismiss": "Dismiss goal notice",
+      "status": {
+        "active": "Goal",
+        "completed": "Completed",
+        "blocked": "Blocked",
+        "paused": "Paused"
+      }
+    },
     "edit": "Edit",
     "editRawHint": "You are editing the original unrendered content. Saving updates the raw message text directly.",
     "editRawTitle": "Edit raw content",
@@ -62,11 +138,51 @@
     "regenerate": "Regenerate",
     "thinking": "Thinking...",
     "streaming": "Streaming...",
+    "process": {
+      "title": "Process ({{count}})",
+      "reasoningCount": "{{count}} reasoning",
+      "toolCount": "{{count}} tool calls",
+      "textCount": "{{count}} intermediate replies"
+    },
+    "questionResult": {
+      "answered": "Answered",
+      "unanswered": "Unanswered",
+      "questionLabel": "Question",
+      "answerLabel": "Answer",
+      "yes": "Yes",
+      "no": "No"
+    },
+    "bash": {
+      "command": "Command",
+      "workdir": "Working directory",
+      "duration": "Duration",
+      "timeout": "Timeout",
+      "timedOut": "Timed out",
+      "aborted": "Aborted",
+      "stdout": "Stdout",
+      "stderr": "Stderr",
+      "output": "Output",
+      "noOutput": "No output"
+    },
     "you": "You",
     "sending": "Sending...",
     "contextCompressed": "Context compressed",
     "historyMessages": "{{count}} archived messages",
     "compacting": "Compacting context…",
+    "queue": {
+      "count": "{{count}} Queued",
+      "enqueue": "Add to queue",
+      "edit": "Edit queued prompt",
+      "remove": "Remove queued prompt",
+      "runNow": "Run now",
+      "full": "You can queue up to 50 prompts",
+      "enqueueFailed": "Failed to add to queue",
+      "updateFailed": "Failed to update queued prompt",
+      "removeFailed": "Failed to remove queued prompt",
+      "runNowFailed": "Failed to run queued prompt",
+      "attachmentOnly": "Attachment message",
+      "placeholderStreaming": "Rex is working. Send to add this to the queue…"
+    },
     "compactionStage": {
       "load": "Loaded {{count}} messages",
       "strategyGeneric": "Picked compaction strategy",
@@ -81,6 +197,11 @@
       "summarizeDone": "Summary written ({{chars}} chars)",
       "complete": "Compaction complete"
     },
+    "mention": {
+      "title": "Choose Agent",
+      "navigate": "Navigate",
+      "select": "Select"
+    },
     "removeNodeRef": "Remove node reference",
     "errors": {
       "saveFailed": "Failed to save message",
@@ -89,12 +210,15 @@
     },
     "upload": {
       "select": "Upload documents",
+      "selectWithImage": "Upload files or images",
       "remove": "Remove file",
       "retry": "Retry upload",
       "dropHint": "Drop document files to upload",
       "waiting": "Files are still uploading. Please wait before sending.",
-      "invalidType": "Only txt, md, json, yaml, yml, xml, csv, pdf, doc, and docx files are supported",
-      "errorGeneric": "Upload failed. Please try again."
+      "invalidType": "Only txt, md, json, yaml, yml, xml, csv, pdf, doc, docx, html, htm, ppt, pptx, xls, and xlsx files are supported",
+      "errorGeneric": "Upload failed. Please try again.",
+      "imageNotSupported": "The current model does not support image analysis. Please select a vision-capable model in the model settings.",
+      "imageNotSupportedBanner": "Image analysis is not supported by the current model"
     },
     "tool": {
       "pending": "Pending",
@@ -103,8 +227,86 @@
       "error": "Failed",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
+      "todoStages": "Todo stages",
+      "todoStatus": {
+        "pending": "pending",
+        "inProgress": "in progress",
+        "completed": "completed",
+        "cancelled": "cancelled"
+      },
+      "todoSummary": {
+        "progress": "Progress",
+        "inProgress": "In progress",
+        "completed": "Completed",
+        "done": "Done"
+      },
       "errorLabel": "Error",
-      "elapsed": "Elapsed"
+      "elapsed": "Elapsed",
+      "workflowStage": "Current stage: {{phase}}",
+      "workflowNode": "Node: {{node}}",
+      "workflowLoopIteration": "Loop",
+      "workflowLoopCurrent": "Current",
+      "workflowStep": "Step: {{step}}",
+      "workflowPhase": {
+        "queued": "Queued",
+        "running": "Running",
+        "success": "Completed",
+        "error": "Failed",
+        "timeout": "Timed out",
+        "cancelled": "Cancelled"
+      }
     }
-  }
+  },
+  "groupToday": "Today",
+  "groupYesterday": "Yesterday",
+  "groupThisWeek": "This Week",
+  "groupLastWeek": "Last Week",
+  "groupEarlier": "Earlier",
+  "projectsSection": "Projects",
+  "toggleProjects": "Expand or collapse projects",
+  "tasksSection": "Tasks",
+  "toggleTasks": "Expand or collapse tasks",
+  "selectTasks": "Select tasks",
+  "createTaskSession": "New task",
+  "selectProject": "Select project {{project}}",
+  "createSessionInProject": "New session in project {{project}}",
+  "projectActions": "Project actions",
+  "defaultProject": "Default project",
+  "projectPathUnavailable": "Project directory unavailable",
+  "projectDirectoryFallbackTitle": "Project folder unavailable",
+  "projectDirectoryFallbackDescription": "The original folder is unavailable. This session will continue in {{path}}.",
+  "defaultProjectName": "Default",
+  "noProjectSessions": "No conversations",
+  "projectDialog": {
+    "createTitle": "New Project",
+    "renameTitle": "Rename Project",
+    "renameAction": "Rename",
+    "newSessionAction": "New session",
+    "copyPathAction": "Copy path",
+    "deleteAction": "Delete",
+    "deleteTitle": "Delete Project",
+    "deleteDescription": "Remove project “{{project}}”? Conversations and files will be kept, and its conversations will move to Default.",
+    "confirmDelete": "Remove",
+    "defaultDeleteDisabled": "The default project cannot be deleted",
+    "deleteSuccess": "Project deleted",
+    "deleteFailed": "Failed to delete project",
+    "nameLabel": "Project name",
+    "namePlaceholder": "Enter project name",
+    "nameEmpty": "Project name cannot be empty",
+    "folderLabel": "Project folder",
+    "folderPlaceholder": "Enter an absolute project folder path",
+    "folderEmpty": "Choose a project folder",
+    "chooseFolder": "Choose",
+    "parentFolder": "Parent folder",
+    "selectCurrentFolder": "Select this folder",
+    "noSubfolders": "No accessible subfolders",
+    "folderBrowseFailed": "Failed to read folder",
+    "pathCopied": "Project path copied",
+    "copyPathFailed": "Failed to copy project path",
+    "saveFailed": "Failed to save project"
+  },
+  "filterConversations": "Filter conversations...",
+  "noResults": "No conversations found",
+  "showMore": "Show {{count}} more",
+  "showLess": "Show less"
 }

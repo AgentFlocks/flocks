@@ -72,6 +72,51 @@ _init_lock = asyncio.Lock()
 # Persistent connection shared by all SessionBindingService instances.
 _db_conn: Optional[aiosqlite.Connection] = None
 _db_ready = False
+# PID that owns ``_db_conn``.  Used to detect ``fork()`` (uvicorn
+# ``--reload`` / multi-worker launches) so a child process never reuses
+# its parent's open SQLite file descriptor — a documented SQLite
+# corruption vector.
+_db_owner_pid: Optional[int] = None
+
+
+async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str, str]:
+    """Return ownership kwargs for a channel-created session.
+
+    Channel dispatch runs outside the HTTP auth middleware, so
+    ``Session.create`` cannot infer the owner from ``current_auth_user``.
+    When an existing channel session is being replaced, preserve its owner.
+    Otherwise, attach new channel sessions to the local admin if one exists.
+    Installs without local accounts remain ownerless for backward-compatible
+    no-login operation.
+    """
+    owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
+    owner_username = getattr(source_session, "owner_username", None) if source_session else None
+    if owner_user_id or owner_username:
+        owner_kwargs: dict[str, str] = {}
+        if owner_user_id:
+            owner_kwargs["owner_user_id"] = str(owner_user_id)
+        if owner_username:
+            owner_kwargs["owner_username"] = str(owner_username)
+        return owner_kwargs
+
+    try:
+        from flocks.auth.service import AuthService
+
+        if not await AuthService.has_users():
+            return {}
+        users = await AuthService.list_users()
+    except Exception as exc:
+        log.warn("channel.owner.resolve_failed", {"error": str(exc)})
+        return {}
+
+    admin = next((user for user in users if getattr(user, "role", None) == "admin"), None)
+    if admin is None:
+        return {}
+    return {
+        "owner_user_id": str(admin.id),
+        "owner_username": str(admin.username),
+    }
+
 
 # Register channel_bindings DDL with Storage so the tables are created
 # during Storage.init() as well (idempotent CREATE IF NOT EXISTS).
@@ -88,26 +133,58 @@ async def _get_db() -> aiosqlite.Connection:
     Uses ``Storage.get_db_path()`` to ensure the same database file is
     shared with the rest of the Flocks storage subsystem.
     """
-    global _db_conn, _db_ready
-    if _db_conn is not None and _db_ready:
+    global _db_conn, _db_ready, _db_owner_pid
+
+    from flocks.storage.storage import Storage
+
+    await Storage._ensure_init()
+    current_pid = os.getpid()
+    if (
+        _db_conn is not None
+        and _db_ready
+        and _db_owner_pid is not None
+        and _db_owner_pid == current_pid
+    ):
         return _db_conn
 
     async with _init_lock:
-        if _db_conn is not None and _db_ready:
+        if (
+            _db_conn is not None
+            and _db_ready
+            and _db_owner_pid is not None
+            and _db_owner_pid == current_pid
+        ):
             return _db_conn
 
-        from flocks.storage.storage import Storage
+        if (
+            _db_conn is not None
+            and _db_owner_pid is not None
+            and _db_owner_pid != current_pid
+        ):
+            # Inherited an open handle from a forked parent — drop the
+            # reference without closing it (closing would tear down the
+            # parent's state too) and rebuild a fresh connection.
+            log.warning("channel.binding.fork_detected", {
+                "parent_pid": _db_owner_pid,
+                "child_pid": current_pid,
+            })
+            _db_conn = None
+            _db_ready = False
+            _db_owner_pid = None
+
         db_path = Storage.get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
-        _db_conn = await aiosqlite.connect(str(db_path))
+        _db_conn = await aiosqlite.connect(
+            str(db_path),
+            timeout=Storage._sqlite_timeout_s,
+        )
         _db_conn.row_factory = aiosqlite.Row
-
-        await _db_conn.execute("PRAGMA journal_mode=WAL")
-        await _db_conn.execute("PRAGMA busy_timeout=5000")
+        await Storage.configure_connection(_db_conn)
         await _db_conn.executescript(_DDL)
         await _migrate_legacy_binding_agent_ids(_db_conn)
         _db_ready = True
+        _db_owner_pid = current_pid
         return _db_conn
 
 
@@ -155,16 +232,28 @@ async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
         })
 
 
+async def _close_binding_db_locked(*, suppress_errors: bool) -> None:
+    """Invalidate and close ``_db_conn`` while ``_init_lock`` is held."""
+
+    global _db_conn, _db_ready, _db_owner_pid
+
+    conn = _db_conn
+    _db_conn = None
+    _db_ready = False
+    _db_owner_pid = None
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception:
+            if not suppress_errors:
+                raise
+
+
 async def close_binding_db() -> None:
     """Close the persistent connection (call during shutdown)."""
-    global _db_conn, _db_ready
-    if _db_conn is not None:
-        try:
-            await _db_conn.close()
-        except Exception:
-            pass
-        _db_conn = None
-        _db_ready = False
+
+    async with _init_lock:
+        await _close_binding_db_locked(suppress_errors=True)
 
 
 class SessionBindingService:
@@ -365,6 +454,33 @@ class SessionBindingService:
         rows = await cursor.fetchall()
         return [self._row_to_binding(r) for r in rows]
 
+    async def latest_active_user_binding(
+        self,
+        *,
+        channel_id: str,
+        account_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ) -> Optional[SessionBinding]:
+        """Return the binding only when a channel target resolves uniquely."""
+        from flocks.session.session import Session
+
+        candidates = await self.list_bindings(channel_id=channel_id)
+        if account_id:
+            candidates = [b for b in candidates if b.account_id == account_id]
+        if chat_id:
+            candidates = [b for b in candidates if b.chat_id == chat_id]
+
+        active_candidates: list[SessionBinding] = []
+        for binding in candidates:
+            session = await Session.get_by_id(binding.session_id)
+            if (
+                session
+                and session.status == "active"
+                and session.category == "user"
+            ):
+                active_candidates.append(binding)
+        return active_candidates[0] if len(active_candidates) == 1 else None
+
     # --- internal helpers ---
 
     async def _find_binding(
@@ -452,11 +568,13 @@ class SessionBindingService:
         from flocks.session.session import Session
 
         title = _build_title(msg)
+        owner_kwargs = await resolve_channel_session_owner_kwargs()
         session = await Session.create(
             project_id="channel",
             directory=_resolve_session_directory(directory),
             title=title,
             agent=default_agent,
+            **owner_kwargs,
         )
         return session.id
 

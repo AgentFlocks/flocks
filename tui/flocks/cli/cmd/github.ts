@@ -815,13 +815,11 @@ export const GithubRunCommand = cmd({
 
       function subscribeSessionEvents() {
         const TOOL: Record<string, [string, string]> = {
-          todowrite: ["Todo", UI.Style.TEXT_WARNING_BOLD],
-          todoread: ["Todo", UI.Style.TEXT_WARNING_BOLD],
+          todo: ["Todo", UI.Style.TEXT_WARNING_BOLD],
           bash: ["Bash", UI.Style.TEXT_DANGER_BOLD],
           edit: ["Edit", UI.Style.TEXT_SUCCESS_BOLD],
           glob: ["Glob", UI.Style.TEXT_INFO_BOLD],
           grep: ["Grep", UI.Style.TEXT_INFO_BOLD],
-          list: ["List", UI.Style.TEXT_INFO_BOLD],
           read: ["Read", UI.Style.TEXT_HIGHLIGHT_BOLD],
           write: ["Write", UI.Style.TEXT_SUCCESS_BOLD],
           websearch: ["Search", UI.Style.TEXT_DIM_BOLD],

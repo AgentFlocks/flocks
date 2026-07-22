@@ -8,10 +8,11 @@ declares:
 - how to validate items and detect duplicates,
 - a *consumer* callback that receives the validated items.
 
-``PluginLoader.load_all()`` is called once during startup.  For every
-registered extension point it scans the corresponding subdirectory, loads each
-``.py`` module, extracts and validates the attribute, then hands the items to
-the consumer.
+``PluginLoader.load_all()`` loads every registered extension point.
+``PluginLoader.load_extension("TOOLS")`` loads one registered extension point
+with the same filesystem scanning rules. For every loaded extension point it
+scans the corresponding subdirectory, loads each ``.py`` module, extracts and
+validates the attribute, then hands the items to the consumer.
 
 Safety guarantees
 -----------------
@@ -23,7 +24,9 @@ Safety guarantees
 from __future__ import annotations
 
 import importlib
+import importlib.metadata
 import importlib.util
+import inspect
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
@@ -144,8 +147,8 @@ class ExtensionPoint:
     subdir: str
     """Subdirectory under the plugin root, e.g. ``"agents"``."""
 
-    consumer: Callable[[List[Any], str], None]
-    """Callback ``(items, source_path) -> None`` that receives validated items."""
+    consumer: Callable[[List[Any], str], Optional[List[str]]]
+    """Callback receiving validated items and optionally returning errors."""
 
     item_type: Optional[type] = None
     """If set, only items that are ``isinstance(item, item_type)`` are kept."""
@@ -171,7 +174,16 @@ class ExtensionPoint:
     E.g. ``frozenset({"mcp", "generated"})`` — these are managed by
     dedicated subsystems rather than the generic PluginLoader."""
 
+    load_once: bool = False
+    """When True, skip later ``load_all`` passes after this extension has loaded.
+
+    Stateful extension points, such as channels, own runtime connections and
+    callbacks on their plugin instances. Re-importing those modules can create
+    replacement instances that have not been started.
+    """
+
     _seen_keys: Set[str] = field(default_factory=set, repr=False)
+    _loaded: bool = field(default=False, repr=False)
 
 
 class PluginLoader:
@@ -220,52 +232,57 @@ class PluginLoader:
         4. Validate, dedup, and dispatch to the consumer.
         """
         project_dir = project_dir or Path.cwd()
-        project_plugin_root = project_dir / ".flocks" / "plugins"
 
         for ext in cls._extension_points.values():
-            ext._seen_keys = set()
-
-            # 1. User-level plugin subdirectory (~/.flocks/plugins/{subdir}/)
-            subdir_path = cls._plugin_root / ext.subdir
-            default_sources = scan_directory(
-                subdir_path,
-                recursive=ext.recursive,
-                max_depth=ext.max_depth,
-                exclude_subdirs=ext.exclude_subdirs,
+            cls._load_extension_point(
+                ext,
+                extra_sources=extra_sources,
+                project_dir=project_dir,
+                log_scope="load_all",
             )
-            if default_sources:
-                log.info(
-                    "plugin.scan",
-                    {
-                        "subdir": ext.subdir,
-                        "files": [Path(s).name for s in default_sources],
-                    },
-                )
-            cls._load_sources_for_ext(ext, default_sources, subdir_path)
 
-            # 2. Project-level plugin subdirectory (<project>/.flocks/plugins/{subdir}/)
-            project_subdir_path = project_plugin_root / ext.subdir
-            if project_subdir_path != subdir_path and project_subdir_path.is_dir():
-                project_sources = scan_directory(
-                    project_subdir_path,
-                    recursive=ext.recursive,
-                    max_depth=ext.max_depth,
-                    exclude_subdirs=ext.exclude_subdirs,
-                )
-                if project_sources:
-                    log.info(
-                        "plugin.project.scan",
-                        {
-                            "subdir": ext.subdir,
-                            "project_dir": str(project_dir),
-                            "files": [Path(s).name for s in project_sources],
-                        },
-                    )
-                    cls._load_sources_for_ext(ext, project_sources, project_subdir_path)
+            if ext.load_once:
+                ext._loaded = True
 
-            # 3. Explicit sources from cfg.plugin
-            if extra_sources:
-                cls._load_sources_for_ext(ext, extra_sources, project_dir)
+        # 4. Installed package entry-points
+        cls._load_entry_points()
+
+    @classmethod
+    def load_extension(
+        cls,
+        attr_name: str,
+        extra_sources: Optional[List[str]] = None,
+        project_dir: Optional[Path] = None,
+        *,
+        load_entry_points: bool = False,
+    ) -> List[str]:
+        """Load one registered extension point using normal plugin scan rules.
+
+        This is the scoped counterpart to :meth:`load_all`. It scans the same
+        user-level, project-level, and explicit ``cfg.plugin`` sources, but only
+        dispatches the requested attribute (for example ``"TOOLS"``).
+
+        Set ``load_entry_points`` only for compatibility paths that still need
+        legacy package plugins from the global ``flocks.plugins`` entry-point
+        group.
+        """
+        ext = cls._extension_points.get(attr_name)
+        if ext is None:
+            log.warn("plugin.ext_point.not_found", {"attr": attr_name})
+            return [f"extension point not found: {attr_name}"]
+
+        errors: List[str] = []
+
+        cls._load_extension_point(
+            ext,
+            extra_sources=extra_sources,
+            project_dir=project_dir or Path.cwd(),
+            log_scope="load_extension",
+            errors=errors,
+        )
+        if load_entry_points:
+            cls._load_entry_points(errors=errors)
+        return errors
 
     @classmethod
     def load_for_extension(
@@ -286,14 +303,19 @@ class PluginLoader:
         collected: List[Any] = []
         original_consumer = ext.consumer
 
-        def _collecting_consumer(items: List[Any], source: str) -> None:
+        def _collecting_consumer(
+            items: List[Any],
+            source: str,
+        ) -> Optional[List[str]]:
             collected.extend(items)
-            original_consumer(items, source)
+            return original_consumer(items, source)
 
         ext.consumer = _collecting_consumer
         ext._seen_keys = set()
         try:
             cls._load_sources_for_ext(ext, sources, base_dir)
+            if ext.load_once and sources:
+                ext._loaded = True
         finally:
             ext.consumer = original_consumer
         return collected
@@ -330,17 +352,136 @@ class PluginLoader:
     # ------------------------------------------------------------------
 
     @classmethod
+    def _load_extension_point(
+        cls,
+        ext: ExtensionPoint,
+        *,
+        extra_sources: Optional[List[str]],
+        project_dir: Path,
+        log_scope: str,
+        errors: Optional[List[str]] = None,
+    ) -> None:
+        """Scan and load one registered extension point."""
+        if ext.load_once and ext._loaded:
+            log.debug(
+                f"plugin.{log_scope}.skip_load_once",
+                {
+                    "attr": ext.attr_name,
+                },
+            )
+            return
+
+        ext._seen_keys = set()
+        project_plugin_root = project_dir / ".flocks" / "plugins"
+
+        # 1. User-level plugin subdirectory (~/.flocks/plugins/{subdir}/)
+        subdir_path = cls._plugin_root / ext.subdir
+        default_sources = scan_directory(
+            subdir_path,
+            recursive=ext.recursive,
+            max_depth=ext.max_depth,
+            exclude_subdirs=ext.exclude_subdirs,
+        )
+        if default_sources:
+            log.debug(
+                "plugin.scan",
+                {
+                    "subdir": ext.subdir,
+                    "files": [Path(s).name for s in default_sources],
+                },
+            )
+        cls._load_sources_for_ext(ext, default_sources, subdir_path, errors=errors)
+
+        # 2. Project-level plugin subdirectory (<project>/.flocks/plugins/{subdir}/)
+        project_subdir_path = project_plugin_root / ext.subdir
+        if project_subdir_path != subdir_path and project_subdir_path.is_dir():
+            project_sources = scan_directory(
+                project_subdir_path,
+                recursive=ext.recursive,
+                max_depth=ext.max_depth,
+                exclude_subdirs=ext.exclude_subdirs,
+            )
+            if project_sources:
+                log.debug(
+                    "plugin.project.scan",
+                    {
+                        "subdir": ext.subdir,
+                        "project_dir": str(project_dir),
+                        "files": [Path(s).name for s in project_sources],
+                    },
+                )
+            cls._load_sources_for_ext(
+                ext,
+                project_sources,
+                project_subdir_path,
+                errors=errors,
+            )
+
+        # 3. Explicit sources from cfg.plugin
+        if extra_sources:
+            cls._load_sources_for_ext(ext, extra_sources, project_dir, errors=errors)
+
+        if ext.load_once:
+            ext._loaded = True
+
+    @classmethod
+    def _load_entry_points(cls, errors: Optional[List[str]] = None) -> None:
+        """
+        Load installed package entry-points under ``flocks.plugins``.
+
+        Entry-point target is expected to be callable, supporting either:
+        - ``fn(loader_cls)``, or
+        - ``fn()``.
+        """
+        group = "flocks.plugins"
+        try:
+            eps = importlib.metadata.entry_points().select(group=group)
+        except Exception as e:
+            log.debug("plugin.entrypoints.scan_failed", {"group": group, "error": str(e)})
+            if errors is not None:
+                errors.append(f"entry point scan: {type(e).__name__}: {e}")
+            return
+
+        for ep in eps:
+            try:
+                target = ep.load()
+            except Exception as e:
+                log.warning("plugin.entrypoint.load_failed", {"name": ep.name, "error": str(e)})
+                if errors is not None:
+                    errors.append(f"entry point {ep.name}: {e}")
+                continue
+
+            if not callable(target):
+                log.warning("plugin.entrypoint.not_callable", {"name": ep.name})
+                if errors is not None:
+                    errors.append(f"entry point {ep.name}: target is not callable")
+                continue
+
+            try:
+                signature = inspect.signature(target)
+                if len(signature.parameters) >= 1:
+                    target(cls)
+                else:
+                    target()
+                log.info("plugin.entrypoint.loaded", {"name": ep.name, "group": group})
+            except Exception as e:
+                log.warning("plugin.entrypoint.invoke_failed", {"name": ep.name, "error": str(e)})
+                if errors is not None:
+                    errors.append(f"entry point {ep.name}: {e}")
+
+    @classmethod
     def _load_sources_for_ext(
         cls,
         ext: ExtensionPoint,
         sources: List[str],
         base_dir: Path,
+        errors: Optional[List[str]] = None,
     ) -> None:
         """Load each source module and dispatch matching items to *ext.consumer*."""
         for source in sources:
             source_path = Path(source)
             if source_path.suffix in (".yaml", ".yml"):
-                cls._load_yaml_source(ext, source_path)
+                cls._load_yaml_source(ext, source_path, errors=errors)
                 continue
 
             try:
@@ -354,6 +495,8 @@ class PluginLoader:
                         "type": type(e).__name__,
                     },
                 )
+                if errors is not None:
+                    errors.append(f"{source}: {type(e).__name__}: {e}")
                 continue
 
             raw = getattr(module, ext.attr_name, None)
@@ -368,11 +511,29 @@ class PluginLoader:
                         "attr": ext.attr_name,
                     },
                 )
+                if errors is not None:
+                    errors.append(f"{source}: {ext.attr_name} must be a list")
                 continue
 
-            items = cls._validate_and_dedup(ext, list(raw), source)
+            items = cls._validate_and_dedup(ext, list(raw), source, errors=errors)
             if items:
-                ext.consumer(items, source)
+                try:
+                    consumer_errors = ext.consumer(items, source)
+                except Exception as e:
+                    log.error(
+                        "plugin.consumer_failed",
+                        {
+                            "source": source,
+                            "attr": ext.attr_name,
+                            "error": str(e),
+                        },
+                    )
+                    if errors is None:
+                        raise
+                    errors.append(f"{source}: consumer: {type(e).__name__}: {e}")
+                    continue
+                if errors is not None and consumer_errors:
+                    errors.extend(f"{source}: {error}" for error in consumer_errors)
                 log.info(
                     "plugin.dispatched",
                     {
@@ -383,7 +544,12 @@ class PluginLoader:
                 )
 
     @classmethod
-    def _load_yaml_source(cls, ext: ExtensionPoint, yaml_path: Path) -> None:
+    def _load_yaml_source(
+        cls,
+        ext: ExtensionPoint,
+        yaml_path: Path,
+        errors: Optional[List[str]] = None,
+    ) -> None:
         """Load a YAML config file and dispatch via the extension point's factory."""
         if ext.yaml_item_factory is None:
             log.warn(
@@ -394,28 +560,61 @@ class PluginLoader:
                     "hint": f"Extension point '{ext.attr_name}' has no yaml_item_factory; skipping YAML file",
                 },
             )
+            if errors is not None:
+                errors.append(f"{yaml_path}: YAML is not supported for {ext.attr_name}")
             return
 
         try:
             raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
         except Exception as e:
             log.error("plugin.yaml_parse_failed", {"path": str(yaml_path), "error": str(e)})
+            if errors is not None:
+                errors.append(f"{yaml_path}: {e}")
             return
 
         if not isinstance(raw, dict):
             log.warn("plugin.yaml_invalid", {"path": str(yaml_path), "hint": "Expected a YAML mapping"})
+            if errors is not None:
+                errors.append(f"{yaml_path}: expected a YAML mapping")
             return
 
         try:
             item = ext.yaml_item_factory(raw, yaml_path)
         except Exception as e:
             log.error("plugin.yaml_factory_failed", {"path": str(yaml_path), "error": str(e)})
+            if errors is not None:
+                errors.append(f"{yaml_path}: {e}")
             return
 
-        items = cls._validate_and_dedup(ext, [item], str(yaml_path))
+        items = cls._validate_and_dedup(
+            ext,
+            [item],
+            str(yaml_path),
+            errors=errors,
+        )
         if items:
-            ext.consumer(items, str(yaml_path))
-            log.info(
+            try:
+                consumer_errors = ext.consumer(items, str(yaml_path))
+            except Exception as e:
+                log.error(
+                    "plugin.consumer_failed",
+                    {
+                        "source": str(yaml_path),
+                        "attr": ext.attr_name,
+                        "error": str(e),
+                    },
+                )
+                if errors is None:
+                    raise
+                errors.append(
+                    f"{yaml_path}: consumer: {type(e).__name__}: {e}"
+                )
+                return
+            if errors is not None and consumer_errors:
+                errors.extend(
+                    f"{yaml_path}: {error}" for error in consumer_errors
+                )
+            log.debug(
                 "plugin.yaml_dispatched",
                 {
                     "source": str(yaml_path),
@@ -430,20 +629,27 @@ class PluginLoader:
         ext: ExtensionPoint,
         raw_items: List[Any],
         source: str,
+        errors: Optional[List[str]] = None,
     ) -> List[Any]:
         """Type-check and deduplicate items for an extension point."""
         if ext.item_type is not None:
             valid = [it for it in raw_items if isinstance(it, ext.item_type)]
             if len(valid) < len(raw_items):
+                invalid_count = len(raw_items) - len(valid)
                 log.warn(
                     "plugin.invalid_entries",
                     {
                         "source": source,
                         "attr": ext.attr_name,
                         "expected_type": ext.item_type.__name__,
-                        "invalid_count": len(raw_items) - len(valid),
+                        "invalid_count": invalid_count,
                     },
                 )
+                if errors is not None:
+                    errors.append(
+                        f"{source}: {invalid_count} invalid {ext.attr_name} "
+                        f"entries; expected {ext.item_type.__name__}"
+                    )
         else:
             valid = raw_items
 

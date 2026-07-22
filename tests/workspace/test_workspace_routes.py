@@ -8,8 +8,9 @@ Covered endpoints
 -----------------
 Directory:  GET /tree, GET /list, POST /dir, DELETE /dir
 File:       POST /upload, GET /file, PUT /file, DELETE /file,
-            GET /download, POST /download/zip, POST /move
-Memory:     GET /memory/list, GET /memory/file
+            GET /preview, GET /download, POST /download/zip, POST /move
+Memory:     GET /memory/list, GET /memory/file, GET /memory/preview,
+            GET /memory/download
 Stats:      GET /stats
 """
 
@@ -298,7 +299,7 @@ class TestUpload:
         assert second_item["path"] == "uploads/report.pdf"
         assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
 
-    def test_chat_upload_renames_duplicate_file(self, workspace_client):
+    def test_chat_upload_overwrites_duplicate_file(self, workspace_client):
         client = _client(workspace_client)
         first = client.post(
             "/api/workspace/upload?dest=uploads&purpose=chat",
@@ -313,33 +314,10 @@ class TestUpload:
         first_item = first.json()["uploaded"][0]
         second_item = second.json()["uploaded"][0]
         assert first_item["name"] == "report.pdf"
-        assert second_item["name"] == "report (1).pdf"
+        assert second_item["name"] == "report.pdf"
         assert first_item["path"] == "uploads/report.pdf"
-        assert second_item["path"] == "uploads/report (1).pdf"
-        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"first"
-        assert (_ws(workspace_client) / "uploads" / "report (1).pdf").read_bytes() == b"second"
-
-    def test_chat_upload_returns_error_after_too_many_name_conflicts(self, workspace_client, monkeypatch):
-        from flocks.server.routes import workspace as workspace_routes
-
-        monkeypatch.setattr(workspace_routes, "_MAX_UPLOAD_RENAME_ATTEMPTS", 1)
-        ws = _ws(workspace_client)
-        uploads_dir = ws / "uploads"
-        uploads_dir.mkdir(exist_ok=True)
-        (uploads_dir / "report.pdf").write_bytes(b"first")
-        (uploads_dir / "report (1).pdf").write_bytes(b"second")
-
-        r = _client(workspace_client).post(
-            "/api/workspace/upload?dest=uploads&purpose=chat",
-            files=[("files", ("report.pdf", b"third", "application/pdf"))],
-        )
-
-        assert r.status_code == 409
-        assert "Too many conflicting filenames" in r.json()["detail"]
-        result = r.json()["uploaded"][0]
-        assert "Too many conflicting filenames" in result["error"]
-        assert (uploads_dir / "report.pdf").read_bytes() == b"first"
-        assert (uploads_dir / "report (1).pdf").read_bytes() == b"second"
+        assert second_item["path"] == "uploads/report.pdf"
+        assert (_ws(workspace_client) / "uploads" / "report.pdf").read_bytes() == b"second"
 
     def test_upload_too_large_file_rejected(self, workspace_client, monkeypatch):
         # Set the limit to 0 MB; _max_upload_bytes() reads the env var at
@@ -366,6 +344,29 @@ class TestReadFile:
         data = r.json()
         assert data["path"] == "outputs/note.md"
         assert data["content"] == "# Hello\nWorld"
+
+    def test_read_jsonl_file(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "events.jsonl").write_text('{"id": 1}\n{"id": 2}\n')
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/events.jsonl")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/events.jsonl"
+        assert data["content"] == '{"id": 1}\n{"id": 2}\n'
+        assert data["truncated"] is False
+
+    def test_read_large_text_file_returns_truncated_preview(self, workspace_client, monkeypatch):
+        monkeypatch.setenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", "10")
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "large.jsonl").write_text("0123456789ABCDEF", encoding="utf-8")
+        r = _client(workspace_client).get("/api/workspace/file?path=outputs/large.jsonl")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["path"] == "outputs/large.jsonl"
+        assert data["content"] == "0123456789"
+        assert data["truncated"] is True
+        assert data["size"] == 16
+        assert data["preview_limit_bytes"] == 10
 
     def test_read_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/file?path=ghost.txt")
@@ -488,6 +489,52 @@ class TestDownload:
         assert zf.namelist() == []
 
 
+# ─── File preview ─────────────────────────────────────────────────────────────
+
+class TestPreview:
+    def test_preview_pdf_inline(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "doc.pdf").write_bytes(b"%PDF-1.4")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/doc.pdf")
+        assert r.status_code == 200
+        assert r.content == b"%PDF-1.4"
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_png_inline(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.png")
+        assert r.status_code == 200
+        assert r.content == b"\x89PNG\r\n\x1a\n"
+        assert r.headers["content-type"].startswith("image/png")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_html_rejected(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "demo.html").write_text("<script>alert(1)</script>")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/demo.html")
+        assert r.status_code == 415
+
+    def test_preview_svg_inline_with_security_headers(self, workspace_client):
+        ws = _ws(workspace_client)
+        (ws / "outputs" / "image.svg").write_text("<svg><script>alert(1)</script></svg>")
+        r = _client(workspace_client).get("/api/workspace/preview?path=outputs/image.svg")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert "inline" in r.headers.get("content-disposition", "")
+        assert r.headers["x-content-type-options"] == "nosniff"
+        assert "script-src 'none'" in r.headers["content-security-policy"]
+
+    def test_preview_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/preview?path=missing.pdf")
+        assert r.status_code == 404
+
+    def test_preview_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/preview?path=../../etc/passwd")
+        assert r.status_code == 400
+
+
 # ─── Move / rename ────────────────────────────────────────────────────────────
 
 class TestMove:
@@ -540,6 +587,82 @@ class TestMove:
         assert r.status_code == 400
 
 
+# ─── Reveal in file manager ──────────────────────────────────────────────────
+
+class TestReveal:
+    def test_reveal_file_on_macos_selects_file(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs" / "report.pdf"
+        target.write_bytes(b"%PDF")
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "darwin")
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs/report.pdf"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["opened"] is True
+        assert r.json()["target"] == "file"
+        assert calls == [["open", "-R", str(target)]]
+
+    def test_reveal_directory_on_windows_opens_directory(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs"
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "win32")
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["target"] == "directory"
+        assert calls == [["explorer", str(target)]]
+
+    def test_reveal_file_on_linux_opens_parent_directory(self, workspace_client, monkeypatch):
+        from flocks.server.routes import workspace as workspace_routes
+
+        ws = _ws(workspace_client)
+        target = ws / "outputs" / "report.txt"
+        target.write_text("hello")
+        calls = []
+        monkeypatch.setattr(workspace_routes.sys, "platform", "linux")
+        monkeypatch.setattr(workspace_routes.shutil, "which", lambda name: "/usr/bin/xdg-open" if name == "xdg-open" else None)
+        monkeypatch.setattr(workspace_routes.subprocess, "Popen", lambda args: calls.append(args))
+
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "outputs/report.txt"},
+        )
+
+        assert r.status_code == 200
+        assert r.json()["mode"] == "open"
+        assert calls == [["/usr/bin/xdg-open", str(target.parent)]]
+
+    def test_reveal_nonexistent_returns_404(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "missing.txt"},
+        )
+        assert r.status_code == 404
+
+    def test_reveal_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).post(
+            "/api/workspace/reveal",
+            json={"path": "../../etc/passwd"},
+        )
+        assert r.status_code == 400
+
+
 # ─── Memory view (read-only) ─────────────────────────────────────────────────
 
 class TestMemoryView:
@@ -568,6 +691,26 @@ class TestMemoryView:
         data = r.json()
         assert data["path"] == "MEMORY.md"
         assert "Key facts" in data["content"]
+        assert data["truncated"] is False
+
+    def test_read_memory_binary_returns_400(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=image.png")
+        assert r.status_code == 400
+        assert "Binary file" in r.json()["detail"]
+
+    def test_read_large_memory_file_returns_truncated_preview(self, workspace_client, monkeypatch):
+        monkeypatch.setenv("FLOCKS_WORKSPACE_MAX_READ_BYTES", "8")
+        mem = _mem(workspace_client)
+        (mem / "large.md").write_text("abcdefghijk", encoding="utf-8")
+        r = _client(workspace_client).get("/api/workspace/memory/file?path=large.md")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["content"] == "abcdefgh"
+        assert data["truncated"] is True
+        assert data["size"] == 11
+        assert data["preview_limit_bytes"] == 8
 
     def test_read_memory_nonexistent_returns_404(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/memory/file?path=ghost.md")
@@ -584,6 +727,40 @@ class TestMemoryView:
         r = _client(workspace_client).get("/api/workspace/memory/file?path=daily/2026-03-14.md")
         assert r.status_code == 200
         assert r.json()["content"] == "daily note"
+
+    def test_preview_memory_pdf_inline(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "report.pdf").write_bytes(b"%PDF-1.4\n")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=report.pdf")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("application/pdf")
+        assert "inline" in r.headers.get("content-disposition", "")
+
+    def test_preview_memory_svg_inline_with_security_headers(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "logo.svg").write_text("<svg><script>alert(1)</script></svg>")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=logo.svg")
+        assert r.status_code == 200
+        assert r.headers["content-type"].startswith("image/svg+xml")
+        assert "script-src 'none'" in r.headers["content-security-policy"]
+
+    def test_preview_memory_unsupported_returns_415(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "archive.zip").write_bytes(b"PK\x03\x04")
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=archive.zip")
+        assert r.status_code == 415
+
+    def test_download_memory_file(self, workspace_client):
+        mem = _mem(workspace_client)
+        (mem / "image.png").write_bytes(b"\x89PNG\r\n\x1a\n")
+        r = _client(workspace_client).get("/api/workspace/memory/download?path=image.png")
+        assert r.status_code == 200
+        assert r.content == b"\x89PNG\r\n\x1a\n"
+        assert r.headers["content-type"].startswith("application/octet-stream")
+
+    def test_memory_preview_traversal_rejected(self, workspace_client):
+        r = _client(workspace_client).get("/api/workspace/memory/preview?path=../../etc/passwd")
+        assert r.status_code == 400
 
     def test_memory_write_not_allowed(self, workspace_client):
         """Memory directory has no write endpoint — PUT /file with memory path is confined to workspace."""

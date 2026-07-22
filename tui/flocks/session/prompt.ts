@@ -16,16 +16,13 @@ import { Bus } from "../bus"
 import { ProviderTransform } from "../provider/transform"
 import { SystemPrompt } from "./system"
 import { Plugin } from "../plugin"
-import PROMPT_PLAN from "../session/prompt/plan.txt"
-import BUILD_SWITCH from "../session/prompt/build-switch.txt"
-import MAX_STEPS from "../session/prompt/max-steps.txt"
+import { BUILD_SWITCH, MAX_STEPS, PROMPT_PLAN } from "./prompt-source"
 import { defer } from "../util/defer"
 import { clone } from "remeda"
 import { ToolRegistry } from "../tool/registry"
 import { MCP } from "../mcp"
 import { LSP } from "../lsp"
 import { ReadTool } from "../tool/read"
-import { ListTool } from "../tool/ls"
 import { FileTime } from "../file/time"
 import { Flag } from "../flag/flag"
 import { ulid } from "ulid"
@@ -45,6 +42,7 @@ import { LLM } from "./llm"
 import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
+import { Ripgrep } from "../file/ripgrep"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -52,6 +50,75 @@ globalThis.AI_SDK_LOG_WARNINGS = false
 export namespace SessionPrompt {
   const log = Log.create({ service: "session.prompt" })
   export const OUTPUT_TOKEN_MAX = Flag.FLOCKS_EXPERIMENTAL_OUTPUT_TOKEN_MAX || 32_000
+  const DIRECTORY_LIST_LIMIT = 100
+  const DIRECTORY_LIST_IGNORE_GLOBS = [
+    "!node_modules/*",
+    "!__pycache__/*",
+    "!.git/*",
+    "!dist/*",
+    "!build/*",
+    "!target/*",
+    "!vendor/*",
+    "!bin/*",
+    "!obj/*",
+    "!.idea/*",
+    "!.vscode/*",
+    "!.zig-cache/*",
+    "!zig-out*",
+    "!.coverage*",
+    "!coverage/*",
+    "!tmp/*",
+    "!temp/*",
+    "!.cache/*",
+    "!cache/*",
+    "!logs/*",
+    "!.venv/*",
+    "!venv/*",
+    "!env/*",
+  ]
+
+  async function listAttachedDirectory(searchPath: string) {
+    const files: string[] = []
+    for await (const file of Ripgrep.files({ cwd: searchPath, glob: DIRECTORY_LIST_IGNORE_GLOBS })) {
+      files.push(file)
+      if (files.length >= DIRECTORY_LIST_LIMIT) break
+    }
+
+    const dirs = new Set<string>()
+    const filesByDir = new Map<string, string[]>()
+    for (const file of files) {
+      const dir = path.dirname(file)
+      const parts = dir === "." ? [] : dir.split("/")
+      for (let i = 0; i <= parts.length; i++) {
+        const dirPath = i === 0 ? "." : parts.slice(0, i).join("/")
+        dirs.add(dirPath)
+      }
+      if (!filesByDir.has(dir)) filesByDir.set(dir, [])
+      filesByDir.get(dir)!.push(path.basename(file))
+    }
+
+    function renderDir(dirPath: string, depth: number): string {
+      const indent = "  ".repeat(depth)
+      let output = ""
+      if (depth > 0) {
+        output += `${indent}${path.basename(dirPath)}/\n`
+      }
+      const childIndent = "  ".repeat(depth + 1)
+      const children = Array.from(dirs)
+        .filter((dir) => path.dirname(dir) === dirPath && dir !== dirPath)
+        .sort()
+      for (const child of children) {
+        output += renderDir(child, depth + 1)
+      }
+      const dirFiles = (filesByDir.get(dirPath) ?? []).sort()
+      for (const file of dirFiles) {
+        output += `${childIndent}${file}\n`
+      }
+      return output
+    }
+
+    return `${searchPath}/\n${renderDir(".", 0)}`
+  }
 
   const state = Instance.state(
     () => {
@@ -1073,16 +1140,7 @@ export namespace SessionPrompt {
 
               if (part.mime === "application/x-directory") {
                 const args = { path: filepath }
-                const listCtx: Tool.Context = {
-                  sessionID: input.sessionID,
-                  abort: new AbortController().signal,
-                  agent: input.agent!,
-                  messageID: info.id,
-                  extra: { bypassCwdCheck: true },
-                  metadata: async () => {},
-                  ask: async () => {},
-                }
-                const result = await ListTool.init().then((t) => t.execute(args, listCtx))
+                const output = await listAttachedDirectory(filepath)
                 return [
                   {
                     id: Identifier.ascending("part"),
@@ -1090,7 +1148,7 @@ export namespace SessionPrompt {
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: `Called the list tool with the following input: ${JSON.stringify(args)}`,
+                    text: `Listed attached directory with the following input: ${JSON.stringify(args)}`,
                   },
                   {
                     id: Identifier.ascending("part"),
@@ -1098,7 +1156,7 @@ export namespace SessionPrompt {
                     sessionID: input.sessionID,
                     type: "text",
                     synthetic: true,
-                    text: result.output,
+                    text: output,
                   },
                   {
                     ...part,
@@ -1322,11 +1380,10 @@ Goal: Write your final plan to the plan file (the only file you can edit).
 - Include the paths of critical files to be modified
 - Include a verification section describing how to test the changes end-to-end (run the code, use MCP tools, run tests)
 
-### Phase 5: Call plan_exit tool
-At the very end of your turn, once you have asked the user questions and are happy with your final plan file - you should always call plan_exit to indicate to the user that you are done planning.
-This is critical - your turn should only end with either asking the user a question or calling plan_exit. Do not stop unless it's for these 2 reasons.
+### Phase 5: Final response
+At the very end of your turn, once you have asked the user questions and are happy with your final plan file, summarize the plan path and the recommended next implementation step.
 
-**Important:** Use question tool to clarify requirements/approach, use plan_exit to request plan approval. Do NOT use question tool to ask "Is this plan okay?" - that's what plan_exit does.
+**Important:** Use question tool to clarify requirements or approach details before you finish the plan.
 
 NOTE: At any point in time through this workflow you should feel free to ask the user questions or clarifications. Don't make large assumptions about user intent. The goal is to present a well researched plan to the user, and tie any loose ends before implementation begins.
 </system-reminder>`,

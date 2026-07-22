@@ -1,63 +1,80 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { workflowAPI, Workflow } from '@/api/workflow';
+import { useCallback, useEffect, useMemo, useState } from 'react';
+import { workflowAPI, Workflow, WorkflowSummary } from '@/api/workflow';
+import {
+  createSharedResource,
+  useRefreshOnResume,
+  useSharedResource,
+  type SharedResource,
+} from './useSharedResource';
 
-const POLL_INTERVAL_MS = 10_000;
+const WORKFLOW_LIST_STALE_TIME_MS = 5000;
+const WORKFLOW_LIST_MIN_FETCH_INTERVAL_MS = 1000;
+const MAX_WORKFLOW_LIST_RESOURCES = 80;
+
+const workflowListResources = new Map<string, SharedResource<WorkflowSummary[]>>();
+
+function makeWorkflowListKey(category?: string, status?: string): string {
+  return JSON.stringify({
+    category: category ?? null,
+    status: status ?? null,
+  });
+}
+
+function getWorkflowListResource(category?: string, status?: string): SharedResource<WorkflowSummary[]> {
+  const key = makeWorkflowListKey(category, status);
+  const existing = workflowListResources.get(key);
+  if (existing) {
+    workflowListResources.delete(key);
+    workflowListResources.set(key, existing);
+    return existing;
+  }
+
+  const resource = createSharedResource<WorkflowSummary[]>({
+    initialData: [],
+    staleTimeMs: WORKFLOW_LIST_STALE_TIME_MS,
+    minFetchIntervalMs: WORKFLOW_LIST_MIN_FETCH_INTERVAL_MS,
+    fetcher: async () => {
+      const response = await workflowAPI.listSummaries({ category, status });
+      return Array.isArray(response.data) ? response.data : [];
+    },
+    fallbackDataOnError: [],
+    getErrorMessage: (err) => (err instanceof Error && err.message ? err.message : 'Failed to fetch workflows'),
+  });
+
+  workflowListResources.set(key, resource);
+  if (workflowListResources.size > MAX_WORKFLOW_LIST_RESOURCES) {
+    const oldestKey = workflowListResources.keys().next().value;
+    if (oldestKey) workflowListResources.delete(oldestKey);
+  }
+  return resource;
+}
+
+export function __resetWorkflowResourcesForTesting(): void {
+  workflowListResources.forEach((resource) => resource.resetForTesting());
+  workflowListResources.clear();
+}
+
+export function __getWorkflowResourceCacheSizeForTesting(): number {
+  return workflowListResources.size;
+}
 
 export function useWorkflows(category?: string, status?: string) {
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
-  const loadingRef = useRef(false);
-  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const resource = useMemo(
+    () => getWorkflowListResource(category, status),
+    [category, status],
+  );
+  const {
+    data: workflows,
+    loading,
+    error,
+    refetch: fetchWorkflows,
+  } = useSharedResource(resource);
 
-  const fetchWorkflows = useCallback(async (silent = false) => {
-    if (loadingRef.current) return;
-    loadingRef.current = true;
-    if (!silent) setLoading(true);
-    setError(null);
-    try {
-      const response = await workflowAPI.list({ category, status });
-      if (Array.isArray(response.data)) {
-        setWorkflows(response.data);
-      } else {
-        setWorkflows([]);
-      }
-    } catch (err: any) {
-      setError(err.message || 'Failed to fetch workflows');
-      if (!silent) setWorkflows([]);
-    } finally {
-      loadingRef.current = false;
-      if (!silent) setLoading(false);
-    }
-  }, [category, status]);
-
-  const resetPollTimer = useCallback(() => {
-    if (timerRef.current) clearInterval(timerRef.current);
-    timerRef.current = setInterval(() => fetchWorkflows(true), POLL_INTERVAL_MS);
-  }, [fetchWorkflows]);
-
-  // Initial fetch
-  useEffect(() => {
-    fetchWorkflows();
-  }, [fetchWorkflows]);
-
-  // Polling with resetable timer
-  useEffect(() => {
-    resetPollTimer();
-    return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
-    };
-  }, [resetPollTimer]);
-
-  // Refetch on focus and reset poll timer to avoid immediate double-fetch
-  useEffect(() => {
-    const onFocus = () => {
-      fetchWorkflows(true);
-      resetPollTimer();
-    };
-    window.addEventListener('focus', onFocus);
-    return () => window.removeEventListener('focus', onFocus);
-  }, [fetchWorkflows, resetPollTimer]);
+  const refreshOnResume = useCallback(
+    () => resource.fetch({ silent: true }),
+    [resource],
+  );
+  useRefreshOnResume(refreshOnResume);
 
   return {
     workflows,

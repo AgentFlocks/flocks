@@ -43,43 +43,51 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
-import { useTools } from '@/hooks/useTools';
-import { canDirectlyTestTool, toolAPI, Tool, ToolSource } from '@/api/tool';
+import { useToast } from '@/components/common/Toast';
+import { useToolPage } from '@/hooks/useTools';
+import { useDebouncedValue } from '@/hooks/useDebouncedValue';
+import { canDirectlyTestTool, toolAPI, Tool, ToolFixture } from '@/api/tool';
 import { mcpAPI, MCPServer } from '@/api/mcp';
 import { providerAPI } from '@/api/provider';
 import client from '@/api/client';
 import type { MCPServerDetail, MCPCredentials, MCPCredentialInput, MCPCatalogEntry, MCPCatalogCategory } from '@/types';
-import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields } from './ToolSheets';
+import { MCPSheet, APISheet, GenerateToolSheet, MCPFormFields, buildMCPFormDataFromConfig } from './ToolSheets';
 import type { MCPFormData, ConnStatus as MCPConnStatus } from './ToolSheets';
 import MCPTabContent from './components/MCPTabContent';
 import APITabContent from './components/APITabContent';
 import LocalTabContent from './components/LocalTabContent';
-import { getToolTabCounts } from './tabCounts';
+import { getSourceLabel } from './constants';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
-import { getLocalizedToolDescription } from './toolDisplay';
-import LogViewerModal from '@/components/common/LogViewerModal';
+import { extractErrorMessage } from '@/utils/error';
+import { getLocalizedToolDescription, getLocalizedFixtureLabel } from './toolDisplay';
+import {
+  DEFAULT_TOOL_TAB,
+  TOOL_PAGE_SIZE,
+  getTabSourceFilter,
+  shouldLoadMcpCatalog,
+  type TabKey,
+} from './tabLoading';
+import { getToolTabCounts } from './tabCounts';
 
 // ============================================================================
 // Constants & Config
 // ============================================================================
 
-type TabKey = 'all' | 'mcp' | 'api' | 'local';
-
 interface TabConfig {
   key: TabKey;
   label: string;
   icon: React.ReactNode;
-  sourceFilter?: ToolSource | ToolSource[];
 }
 
-/** 类别 badge (source) - labels for MCP/API are proper nouns; builtin/custom use i18n */
-const SOURCE_BADGE: Record<string, { label: string; className: string }> = {
-  mcp: { label: 'MCP', className: 'bg-slate-100 text-slate-800' },
-  api: { label: 'API', className: 'bg-purple-100 text-purple-800' },
-  plugin_py: { label: 'Local', className: 'bg-blue-100 text-blue-800' },
-  plugin_yaml: { label: 'API Plugin', className: 'bg-violet-100 text-violet-800' },
-  builtin: { label: 'Built-in', className: 'bg-green-100 text-green-800' },
-  custom: { label: 'Custom', className: 'bg-orange-100 text-orange-800' },
+/** 类别 badge (source) - preserve existing Tool page colors while fixing device label rendering */
+const SOURCE_BADGE: Record<string, { className: string }> = {
+  mcp: { className: 'bg-slate-100 text-slate-800' },
+  api: { className: 'bg-purple-100 text-purple-800' },
+  device: { className: 'bg-amber-100 text-amber-800' },
+  plugin_py: { className: 'bg-blue-100 text-blue-800' },
+  plugin_yaml: { className: 'bg-violet-100 text-violet-800' },
+  builtin: { className: 'bg-green-100 text-green-800' },
+  custom: { className: 'bg-orange-100 text-orange-800' },
 };
 
 /** 功能类 label key map (category) - maps category key to i18n key */
@@ -101,9 +109,10 @@ const SOURCE_SORT_ORDER: Record<string, number> = {
   plugin_yaml: 3,
   builtin: 4,
   custom: 5,
+  device: 6,
 };
 
-const PAGE_SIZE = 20;
+const PAGE_SIZE = TOOL_PAGE_SIZE;
 
 /** MCP/API 服务器详情抽屉宽度（px） */
 const DETAIL_DRAWER_WIDTH = 560;
@@ -136,21 +145,31 @@ const EMPTY_FILTERS: ColumnFilters = {
   enabled: new Set(),
 };
 
+function joinFilterValues(values: Set<string>): string | undefined {
+  if (values.size === 0) return undefined;
+  return Array.from(values).sort().join(',');
+}
+
+function mergeFacetKeys(facets: Record<string, number>, activeValues: Set<string> = new Set()): string[] {
+  return Array.from(new Set([...Object.keys(facets), ...Array.from(activeValues)])).sort();
+}
+
 // ============================================================================
 // Main Page
 // ============================================================================
 
 export default function ToolPage() {
   const { t, i18n } = useTranslation('tool');
+  const toast = useToast();
 
   const TABS: TabConfig[] = [
     { key: 'all', label: t('tabs.all'), icon: <Grid className="w-5 h-5" /> },
-    { key: 'mcp', label: t('tabs.mcp'), icon: <Database className="w-5 h-5" />, sourceFilter: 'mcp' },
-    { key: 'api', label: t('tabs.api'), icon: <Cloud className="w-5 h-5" />, sourceFilter: 'api' },
-    { key: 'local', label: t('tabs.local'), icon: <Code className="w-5 h-5" />, sourceFilter: 'plugin_py' },
+    { key: 'mcp', label: t('tabs.mcp'), icon: <Database className="w-5 h-5" /> },
+    { key: 'api', label: t('tabs.api'), icon: <Cloud className="w-5 h-5" /> },
+    { key: 'local', label: t('tabs.local'), icon: <Code className="w-5 h-5" /> },
   ];
 
-  const [activeTab, setActiveTab] = useState<TabKey>('all');
+  const [activeTab, setActiveTab] = useState<TabKey>(DEFAULT_TOOL_TAB);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedTool, setSelectedTool] = useState<Tool | null>(null);
   const [testParams, setTestParams] = useState('{}');
@@ -165,43 +184,107 @@ export default function ToolPage() {
   const [mcpRefreshKey, setMcpRefreshKey] = useState(0);
   const [showAPISheet, setShowAPISheet] = useState(false);
   const [showGenerateSheet, setShowGenerateSheet] = useState(false);
-  const [showLogViewer, setShowLogViewer] = useState(false);
   // Sort: default by 类别 (source) MCP -> API -> 内置
   const [sort, setSort] = useState<SortState>({ field: 'source', dir: 'asc' });
   const [filters, setFilters] = useState<ColumnFilters>(EMPTY_FILTERS);
 
-  const { tools, loading, error, refetch } = useTools();
   const [apiEnabledServicesCount, setApiEnabledServicesCount] = useState(0);
+  const debouncedSearchQuery = useDebouncedValue(searchQuery, 250);
+  const tabSourceFilter = getTabSourceFilter(activeTab);
+  const sourceFilterParam = useMemo(() => {
+    const values = new Set(filters.source);
+    if (tabSourceFilter) {
+      const tabSources = Array.isArray(tabSourceFilter) ? tabSourceFilter : [tabSourceFilter];
+      tabSources.forEach((source) => values.add(source));
+    }
+    return joinFilterValues(values);
+  }, [filters.source, tabSourceFilter]);
+  const toolPageParams = useMemo(() => ({
+    source: sourceFilterParam,
+    category: joinFilterValues(filters.category),
+    sourceName: joinFilterValues(filters.source_name),
+    enabled: joinFilterValues(filters.enabled),
+    q: debouncedSearchQuery.trim() || undefined,
+    sortBy: sort.field,
+    sortDir: sort.dir,
+    offset: (currentPage - 1) * PAGE_SIZE,
+    limit: PAGE_SIZE,
+  }), [
+    sourceFilterParam,
+    filters.category,
+    filters.source_name,
+    filters.enabled,
+    debouncedSearchQuery,
+    sort.field,
+    sort.dir,
+    currentPage,
+  ]);
+  const {
+    tools,
+    total: totalTools,
+    facets: toolFacets,
+    loading,
+    error,
+    initialized: toolPageInitialized,
+    refetch,
+  } = useToolPage(toolPageParams);
+  const [hasLoadedToolPage, setHasLoadedToolPage] = useState(false);
 
   // Catalog data (fetched once at top level, shared with MCP & API tabs)
   const [catalogEntries, setCatalogEntries] = useState<MCPCatalogEntry[]>([]);
   const [catalogCategories, setCatalogCategories] = useState<Record<string, MCPCatalogCategory>>({});
-  const [catalogLoading, setCatalogLoading] = useState(true);
+  const [catalogLoading, setCatalogLoading] = useState(false);
+  const [catalogError, setCatalogError] = useState<string | null>(null);
+  const [catalogRetryKey, setCatalogRetryKey] = useState(0);
   const [configuredIds, setConfiguredIds] = useState<Set<string>>(new Set());
+  const catalogLoadedRef = useRef(false);
 
   useEffect(() => {
+    if (!shouldLoadMcpCatalog(activeTab) || catalogLoadedRef.current) return;
+    let cancelled = false;
+
     const loadCatalog = async () => {
+      let loaded = false;
       try {
         setCatalogLoading(true);
+        setCatalogError(null);
         const [entriesRes, catsRes] = await Promise.all([
           mcpAPI.catalogList(),
           mcpAPI.catalogCategories(),
         ]);
+        if (cancelled) return;
         setCatalogEntries(entriesRes.data);
         setCatalogCategories(catsRes.data);
+        loaded = true;
         // Get currently configured IDs (no auto-setup to avoid re-adding removed entries)
         try {
           const confRes = await mcpAPI.catalogConfigured();
-          setConfiguredIds(new Set(confRes.data));
+          if (!cancelled) setConfiguredIds(new Set(confRes.data));
         } catch { /* ignore */ }
       } catch (err) {
         console.error('Failed to load catalog:', err);
+        if (!cancelled) {
+          setCatalogError(err instanceof Error ? err.message : 'Failed to load MCP catalog');
+        }
       } finally {
-        setCatalogLoading(false);
+        if (!cancelled) {
+          catalogLoadedRef.current = loaded;
+          setCatalogLoading(false);
+        }
       }
     };
-    loadCatalog();
-  }, []);
+    void loadCatalog();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeTab, catalogRetryKey]);
+
+  useEffect(() => {
+    if (!shouldLoadMcpCatalog(activeTab)) {
+      setCatalogLoading(false);
+    }
+  }, [activeTab]);
 
   const onConfiguredChange = useCallback((id: string) => {
     setConfiguredIds(prev => new Set(prev).add(id));
@@ -226,11 +309,30 @@ export default function ToolPage() {
   }, [fetchApiServicesCount]);
 
   const refreshToolData = useCallback(async () => {
-    await Promise.all([
+    const [refreshResult] = await Promise.all([
       refetch(),
       fetchApiServicesCount(),
     ]);
+    return refreshResult;
   }, [refetch, fetchApiServicesCount]);
+
+  const showRefreshOutcome = useCallback((status: 'success' | 'partial' | 'error', message: string) => {
+    if (status === 'partial') {
+      toast.warning(t('alert.refreshPartialTitle'), message || t('alert.refreshPartialDefault'));
+    } else if (status === 'error') {
+      toast.error(t('alert.refreshFailedTitle'), message || t('alert.unknownError'));
+    }
+  }, [t, toast]);
+
+  const refreshToolDataAfterMutation = useCallback(async () => {
+    try {
+      const result = await refreshToolData();
+      showRefreshOutcome(result.status, result.message);
+    } catch (err: unknown) {
+      const message = extractErrorMessage(err, t('alert.unknownError'));
+      toast.error(t('alert.refreshFailedTitle'), message);
+    }
+  }, [refreshToolData, showRefreshOutcome, t, toast]);
 
   // The backend still marks some valid MCP catalog entries as "api" based on category.
   // Until API catalog has its own rendering path, show all catalog entries in the MCP tab.
@@ -238,100 +340,41 @@ export default function ToolPage() {
   // API catalog not yet implemented — keep this empty so entries are not duplicated across tabs.
   const apiCatalogEntries = useMemo(() => [] as MCPCatalogEntry[], []);
 
-  // Compute tab counts: all = active tools; mcp/api = unique active servers/modules
   const tabCounts = useMemo(
-    () => getToolTabCounts(tools, apiEnabledServicesCount),
-    [tools, apiEnabledServicesCount],
+    () => getToolTabCounts(totalTools, toolFacets, apiEnabledServicesCount),
+    [totalTools, toolFacets, apiEnabledServicesCount],
   );
+  const enabledSummary = useMemo(() => ({
+    active: toolFacets.enabled['true'] ?? tools.filter((tool) => tool.enabled).length,
+    inactive: toolFacets.enabled['false'] ?? 0,
+  }), [toolFacets.enabled, tools]);
 
-  // Get unique values for filter options (active tools only)
+  // Filter dropdown options come from server-side facets, plus active values
+  // so a selected filter remains visible even when it narrows the result set.
   const filterOptions = useMemo(() => {
-    const cats = new Set<string>();
-    const sources = new Set<string>();
-    const sourceNames = new Set<string>();
-    tools.forEach((tool) => {
-      cats.add(tool.category);
-      sources.add(tool.source);
-      sourceNames.add(tool.source_name || 'Flocks');
-    });
     return {
-      category: Array.from(cats).sort(),
-      source: Array.from(sources).sort((a, b) => (SOURCE_SORT_ORDER[a] ?? 99) - (SOURCE_SORT_ORDER[b] ?? 99)),
-      source_name: Array.from(sourceNames).sort(),
+      category: mergeFacetKeys(toolFacets.category, filters.category),
+      source: mergeFacetKeys(toolFacets.source, filters.source)
+        .sort((a, b) => (SOURCE_SORT_ORDER[a] ?? 99) - (SOURCE_SORT_ORDER[b] ?? 99)),
+      source_name: mergeFacetKeys(toolFacets.source_name, filters.source_name),
       enabled: ['true', 'false'],
     };
-  }, [tools]);
-
-  // Apply tab filter + search + column filters + sort (All tab shows active tools only)
-  const processedTools = useMemo(() => {
-    let result = [...tools];
-
-    // Tab filter
-    const tabConfig = TABS.find((tab) => tab.key === activeTab);
-    if (tabConfig?.sourceFilter) {
-      const sf = tabConfig.sourceFilter;
-      const allowed = Array.isArray(sf) ? sf : [sf];
-      result = result.filter((tool) => allowed.includes(tool.source));
-    }
-
-    // Search
-    if (searchQuery) {
-      const q = searchQuery.toLowerCase();
-      result = result.filter(
-        (tool) =>
-          tool.name.toLowerCase().includes(q) ||
-          tool.description.toLowerCase().includes(q) ||
-          (tool.description_cn || '').toLowerCase().includes(q) ||
-          (tool.source_name || '').toLowerCase().includes(q)
-      );
-    }
-
-    // Column filters
-    if (filters.category.size > 0) {
-      result = result.filter((tool) => filters.category.has(tool.category));
-    }
-    if (filters.source.size > 0) {
-      result = result.filter((tool) => filters.source.has(tool.source));
-    }
-    if (filters.source_name.size > 0) {
-      result = result.filter((tool) => filters.source_name.has(tool.source_name || 'Flocks'));
-    }
-    if (filters.enabled.size > 0) {
-      result = result.filter((tool) => filters.enabled.has(String(tool.enabled)));
-    }
-
-    // Sort
-    result.sort((a, b) => {
-      let cmp = 0;
-      switch (sort.field) {
-        case 'category': {
-          const la = a.category;
-          const lb = b.category;
-          cmp = la.localeCompare(lb);
-          break;
-        }
-        case 'source':
-          cmp = (SOURCE_SORT_ORDER[a.source] ?? 99) - (SOURCE_SORT_ORDER[b.source] ?? 99);
-          break;
-        case 'source_name':
-          cmp = (a.source_name || 'Flocks').localeCompare(b.source_name || 'Flocks', 'zh');
-          break;
-        case 'enabled':
-          cmp = (a.enabled === b.enabled ? 0 : a.enabled ? -1 : 1);
-          break;
-      }
-      return sort.dir === 'desc' ? -cmp : cmp;
-    });
-
-    return result;
-  }, [tools, activeTab, searchQuery, filters, sort]);
+  }, [toolFacets, filters.category, filters.source, filters.source_name]);
 
   // Pagination
-  const totalPages = Math.ceil(processedTools.length / PAGE_SIZE);
-  const paginatedTools = useMemo(() => {
-    const start = (currentPage - 1) * PAGE_SIZE;
-    return processedTools.slice(start, start + PAGE_SIZE);
-  }, [processedTools, currentPage]);
+  const processedTools = tools;
+  const totalPages = Math.max(1, Math.ceil(totalTools / PAGE_SIZE));
+  const paginatedTools = tools;
+
+  useEffect(() => {
+    if (currentPage > totalPages) setCurrentPage(totalPages);
+  }, [currentPage, totalPages]);
+
+  useEffect(() => {
+    if (toolPageInitialized && !error) {
+      setHasLoadedToolPage(true);
+    }
+  }, [toolPageInitialized, error]);
 
   const handleTabChange = (tab: TabKey) => {
     setActiveTab(tab);
@@ -350,14 +393,20 @@ export default function ToolPage() {
     if (refreshing) return;
     try {
       setRefreshing(true);
-      await Promise.all([
-        toolAPI.refresh().then(() => refetch()),
+      setRefreshDone(false);
+      const [result] = await Promise.all([
+        refreshToolData(),
         new Promise((r) => setTimeout(r, 600)),
       ]);
-      setRefreshDone(true);
-      setTimeout(() => setRefreshDone(false), 2000);
-    } catch (err: any) {
-      alert(t('alert.refreshFailed', { error: err.message }));
+      if (result.status === 'success') {
+        setRefreshDone(true);
+        setTimeout(() => setRefreshDone(false), 2000);
+      } else {
+        showRefreshOutcome(result.status, result.message);
+      }
+    } catch (err: unknown) {
+      const message = extractErrorMessage(err, t('alert.unknownError'));
+      toast.error(t('alert.refreshFailedTitle'), message);
     } finally {
       setRefreshing(false);
     }
@@ -371,7 +420,16 @@ export default function ToolPage() {
       setTestResult(null);
       const params = JSON.parse(testParams);
       const response = await toolAPI.test(selectedTool.name, params);
-      setTestResult(response.data);
+      const result = response.data;
+      setTestResult(result);
+      if (result.metadata?.disabled === true) {
+        setSelectedTool((current) => (
+          current?.name === selectedTool.name
+            ? { ...current, enabled: false }
+            : current
+        ));
+        void refreshToolDataAfterMutation();
+      }
     } catch (err: any) {
       setTestResult({ success: false, error: err.message });
     } finally {
@@ -383,6 +441,15 @@ export default function ToolPage() {
     setSelectedTool(tool);
     setTestParams('{}');
     setTestResult(null);
+    toolAPI.get(tool.name)
+      .then((response) => {
+        setSelectedTool((current) => (
+          current?.name === tool.name ? response.data : current
+        ));
+      })
+      .catch(() => {
+        // Keep the lightweight row data visible; retry happens when reopened.
+      });
   };
 
   const toggleSort = (field: SortField) => {
@@ -409,20 +476,23 @@ export default function ToolPage() {
     setCurrentPage(1);
   };
 
-  if (loading) {
+  const isInitialLoading = loading && !hasLoadedToolPage;
+  const isTabPageLoading = loading && hasLoadedToolPage && !toolPageInitialized;
+
+  if (isInitialLoading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
 
-  if (error) {
+  if (error && !hasLoadedToolPage) {
     return (
       <div className="flex items-center justify-center h-full">
         <div className="text-center">
           <p className="text-red-600 mb-4">{error}</p>
-          <button onClick={() => refetch()} className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800">
+          <button onClick={() => void handleRefresh()} className="px-4 py-2 bg-slate-700 text-white rounded-lg hover:bg-slate-800">
             {t('button.retry')}
           </button>
         </div>
@@ -431,7 +501,7 @@ export default function ToolPage() {
   }
 
   return (
-    <div className="space-y-6">
+    <div className="min-w-0 space-y-6" aria-busy={loading}>
       {/* Page Header */}
       <div className="flex items-center justify-between">
         <div className="flex items-center gap-3">
@@ -441,20 +511,13 @@ export default function ToolPage() {
           <div>
             <h1 className="text-2xl font-bold text-gray-900">{t('pageTitle')}</h1>
           <p className="mt-1 text-sm text-gray-500">
-            <span className="font-semibold text-gray-700">{tools.length}</span> {t('statusBadge.active')}
+            <span className="font-semibold text-gray-700">{enabledSummary.active}</span> {t('statusBadge.active')}
             <span className="mx-1.5 text-gray-300">·</span>
-            <span className="font-semibold text-gray-700">{catalogEntries.length}</span> {t('statusBadge.inactive')}
+            <span className="font-semibold text-gray-700">{enabledSummary.inactive}</span> {t('statusBadge.inactive')}
           </p>
           </div>
         </div>
         <div className="flex items-center gap-2">
-          <button
-            onClick={() => setShowLogViewer(true)}
-            className="inline-flex items-center px-3 py-2 border border-gray-300 rounded-lg text-sm font-medium text-gray-700 bg-white hover:bg-gray-50 transition-colors"
-            title={t('logs.viewLogs')}
-          >
-            <FileText className="w-4 h-4" />
-          </button>
           <button
             onClick={handleRefresh}
             disabled={refreshing}
@@ -493,24 +556,24 @@ export default function ToolPage() {
 
       {/* Tabs row with search */}
       <div className="border-b border-gray-200">
-        <div className="flex items-center justify-between">
+        <div className="flex min-h-14 items-center justify-between">
           <nav className="-mb-px flex space-x-8">
             {TABS.map((tab) => (
               <button
                 key={tab.key}
                 onClick={() => handleTabChange(tab.key)}
-                className={`py-4 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
+                className={`h-14 px-1 border-b-2 font-medium text-sm whitespace-nowrap transition-colors ${
                   activeTab === tab.key
                     ? 'border-slate-600 text-slate-800'
                     : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
                 }`}
               >
-                <div className="flex items-center">
+                <div className="flex h-full items-center">
                   <span className={activeTab === tab.key ? 'text-slate-700' : 'text-gray-400'}>
                     {tab.icon}
                   </span>
                   <span className="ml-2">{tab.label}</span>
-                  <span className="ml-2 bg-gray-100 text-gray-900 py-0.5 px-2.5 rounded-full text-xs font-medium">
+                  <span className="ml-2 inline-flex min-w-10 justify-center rounded-full bg-gray-100 px-2.5 py-0.5 text-xs font-medium tabular-nums text-gray-900">
                     {tabCounts[tab.key] || 0}
                   </span>
                 </div>
@@ -532,94 +595,128 @@ export default function ToolPage() {
         </div>
       </div>
 
-      {/* Tab Content */}
-      {activeTab === 'mcp' ? (
-        <MCPTabContent
-          tools={processedTools}
-          searchQuery={searchQuery}
-          onSelectTool={openDetail}
-          onRefreshTools={refreshToolData}
-          catalogEntries={mcpCatalogEntries}
-          catalogCategories={catalogCategories}
-          catalogLoading={catalogLoading}
-          configuredIds={configuredIds}
-          onConfiguredChange={onConfiguredChange}
-          onConfiguredRemove={onConfiguredRemove}
-          refreshKey={mcpRefreshKey}
-        />
-      ) : activeTab === 'api' ? (
-        <APITabContent
-          tools={processedTools}
-          onSelectTool={openDetail}
-          onRefreshTools={refreshToolData}
-          catalogEntries={apiCatalogEntries}
-          catalogCategories={catalogCategories}
-          catalogLoading={catalogLoading}
-          configuredIds={configuredIds}
-          onConfiguredChange={onConfiguredChange}
-        />
-      ) : activeTab === 'local' ? (
-        <LocalTabContent
-          tools={processedTools}
-          searchQuery={searchQuery}
-          selectedToolName={selectedTool?.name}
-          onSelectTool={openDetail}
-          onRefreshTools={refreshToolData}
-        />
-      ) : (
-        /* All tab: active tools only */
-        <div className="space-y-4">
-          {/* Inactive services callout */}
-          {(mcpCatalogEntries.length > 0 || apiCatalogEntries.length > 0) && !searchQuery && (
-            <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
-              <span className="text-gray-600">
-                <span className="font-medium text-gray-800">{catalogEntries.length}</span> {t('summary.inactiveServicesAvailable')}
-              </span>
-              <div className="flex items-center gap-3">
-                {mcpCatalogEntries.length > 0 && (
-                  <button
-                    onClick={() => handleTabChange('mcp')}
-                    className="flex items-center gap-1 text-slate-700 hover:text-slate-900 font-medium"
-                  >
-                    MCP <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
-                {apiCatalogEntries.length > 0 && (
-                  <button
-                    onClick={() => handleTabChange('api')}
-                    className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
-                  >
-                    API <ChevronRight className="w-4 h-4" />
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-          {processedTools.length === 0 ? (
-            <EmptyState
-              icon={<Wrench className="w-16 h-16" />}
-              title={t('empty.noTools')}
-              description={searchQuery ? t('empty.tryOtherKeywords') : t('empty.noToolsInCategory')}
-            />
-          ) : (
-            <ToolTable
-              tools={paginatedTools}
-              sort={sort}
-              filters={filters}
-              filterOptions={filterOptions}
-              currentPage={currentPage}
-              totalPages={totalPages}
-              totalCount={processedTools.length}
-              pageSize={PAGE_SIZE}
-              onSort={toggleSort}
-              onToggleFilter={toggleFilter}
-              onClearFilter={clearFilter}
-              onPageChange={setCurrentPage}
-              onSelect={openDetail}
-            />
-          )}
+      {error && (
+        <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {error}
         </div>
       )}
+
+      {activeTab === 'mcp' && catalogError && (
+        <div className="flex items-center justify-between rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+          <span>{catalogError}</span>
+          <button
+            type="button"
+            onClick={() => setCatalogRetryKey((value) => value + 1)}
+            className="rounded-md border border-amber-300 bg-white px-3 py-1.5 font-medium hover:bg-amber-100"
+          >
+            {t('button.retry')}
+          </button>
+        </div>
+      )}
+
+      {/* Tab Content */}
+      <div className="min-h-[420px] [scrollbar-gutter:stable]">
+        {isTabPageLoading ? (
+          <div className="flex min-h-[420px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+            <LoadingSpinner delayMs={180} />
+          </div>
+        ) : activeTab === 'mcp' ? (
+          <MCPTabContent
+            tools={processedTools}
+            searchQuery={searchQuery}
+            onSelectTool={openDetail}
+            onRefreshTools={refreshToolDataAfterMutation}
+            catalogEntries={mcpCatalogEntries}
+            catalogCategories={catalogCategories}
+            catalogLoading={catalogLoading}
+            configuredIds={configuredIds}
+            onConfiguredChange={onConfiguredChange}
+            onConfiguredRemove={onConfiguredRemove}
+            refreshKey={mcpRefreshKey}
+          />
+        ) : activeTab === 'api' ? (
+          <APITabContent
+            tools={processedTools}
+            onSelectTool={openDetail}
+            onRefreshTools={refreshToolDataAfterMutation}
+            catalogEntries={apiCatalogEntries}
+            catalogCategories={catalogCategories}
+            catalogLoading={catalogLoading}
+            configuredIds={configuredIds}
+            onConfiguredChange={onConfiguredChange}
+          />
+        ) : activeTab === 'local' ? (
+          <div className="overflow-hidden rounded-lg border border-gray-200 bg-white">
+            <LocalTabContent
+              tools={processedTools}
+              searchQuery={searchQuery}
+              selectedToolName={selectedTool?.name}
+              onSelectTool={openDetail}
+              onRefreshTools={refreshToolDataAfterMutation}
+            />
+            <Pagination
+              currentPage={currentPage}
+              totalPages={totalPages}
+              totalCount={totalTools}
+              pageSize={PAGE_SIZE}
+              onPageChange={setCurrentPage}
+            />
+          </div>
+        ) : (
+          /* All tab: active tools only */
+          <div className="space-y-4">
+            {/* Inactive services callout */}
+            {(mcpCatalogEntries.length > 0 || apiCatalogEntries.length > 0) && !searchQuery && (
+              <div className="flex items-center justify-between px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm">
+                <span className="text-gray-600">
+                  <span className="font-medium text-gray-800">{catalogEntries.length}</span> {t('summary.inactiveServicesAvailable')}
+                </span>
+                <div className="flex items-center gap-3">
+                  {mcpCatalogEntries.length > 0 && (
+                    <button
+                      onClick={() => handleTabChange('mcp')}
+                      className="flex items-center gap-1 text-slate-700 hover:text-slate-900 font-medium"
+                    >
+                      MCP <ChevronRight className="w-4 h-4" />
+                    </button>
+                  )}
+                  {apiCatalogEntries.length > 0 && (
+                    <button
+                      onClick={() => handleTabChange('api')}
+                      className="flex items-center gap-1 text-purple-600 hover:text-purple-700 font-medium"
+                    >
+                      API <ChevronRight className="w-4 h-4" />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+            {totalTools === 0 ? (
+              <EmptyState
+                icon={<Wrench className="w-16 h-16" />}
+                title={t('empty.noTools')}
+                description={searchQuery ? t('empty.tryOtherKeywords') : t('empty.noToolsInCategory')}
+              />
+            ) : (
+              <ToolTable
+                tools={paginatedTools}
+                sort={sort}
+                filters={filters}
+                filterOptions={filterOptions}
+                currentPage={currentPage}
+                totalPages={totalPages}
+                totalCount={totalTools}
+                pageSize={PAGE_SIZE}
+                onSort={toggleSort}
+                onToggleFilter={toggleFilter}
+                onClearFilter={clearFilter}
+                onPageChange={setCurrentPage}
+                onSelect={openDetail}
+              />
+            )}
+          </div>
+        )}
+      </div>
 
       {/* Tool Detail Drawer */}
       {selectedTool && (
@@ -636,17 +733,25 @@ export default function ToolPage() {
           onTest={handleTest}
           onDelete={async (name) => {
             try {
-              await toolAPI.delete(name);
+              const { data: deleteResult } = await toolAPI.delete(name);
               setSelectedTool(null);
               setTestResult(null);
+              if (deleteResult.status === 'partial') {
+                toast.warning(
+                  t('alert.deletePartialTitle'),
+                  deleteResult.errors?.join('; ') || deleteResult.message,
+                );
+              }
               await handleRefresh();
-            } catch (err: any) {
-              alert(t('alert.deleteFailed', { error: err.response?.data?.detail || err.message }));
+            } catch (err: unknown) {
+              alert(t('alert.deleteFailed', {
+                error: extractErrorMessage(err, t('alert.unknownError')),
+              }));
             }
           }}
           onEnabledChange={(name, newEnabled) => {
             setSelectedTool((prev) => prev ? { ...prev, enabled: newEnabled } : prev);
-            refetch();
+            void refreshToolDataAfterMutation();
           }}
         />
       )}
@@ -654,7 +759,10 @@ export default function ToolPage() {
       {/* MCP Sheet */}
       {showMCPSheet && (
         <MCPSheet
-          onClose={() => setShowMCPSheet(false)}
+          onClose={() => {
+            setShowMCPSheet(false);
+            void handleRefresh();
+          }}
           onSaved={() => { setShowMCPSheet(false); handleRefresh(); setMcpRefreshKey(k => k + 1); }}
           onRefresh={handleRefresh}
         />
@@ -663,18 +771,23 @@ export default function ToolPage() {
       {/* API Sheet */}
       {showAPISheet && (
         <APISheet
-          onClose={() => setShowAPISheet(false)}
+          onClose={() => {
+            setShowAPISheet(false);
+            void handleRefresh();
+          }}
         />
       )}
 
       {/* Generate Tool Sheet */}
       {showGenerateSheet && (
         <GenerateToolSheet
-          onClose={() => setShowGenerateSheet(false)}
+          onClose={() => {
+            setShowGenerateSheet(false);
+            void handleRefresh();
+          }}
         />
       )}
 
-      <LogViewerModal open={showLogViewer} onClose={() => setShowLogViewer(false)} />
 
     </div>
   );
@@ -698,6 +811,7 @@ function SortFilterHeader({
   onToggleFilter,
   onClearFilter,
   renderLabel,
+  asDiv = false,
 }: {
   label: string;
   field: SortField;
@@ -708,10 +822,11 @@ function SortFilterHeader({
   onToggleFilter: (f: keyof ColumnFilters, v: string) => void;
   onClearFilter: (f: keyof ColumnFilters) => void;
   renderLabel?: (v: string) => string;
+  asDiv?: boolean;
 }) {
-  const { t, i18n } = useTranslation('tool');
+  const { t } = useTranslation('tool');
   const [open, setOpen] = useState(false);
-  const ref = useRef<HTMLTableHeaderCellElement>(null);
+  const ref = useRef<HTMLElement | null>(null);
 
   // Close dropdown on outside click
   useEffect(() => {
@@ -725,10 +840,9 @@ function SortFilterHeader({
   const isActive = sort.field === field;
   const hasFilter = activeFilters.size > 0;
 
-  return (
-    <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap" ref={ref}>
+  const inner = (
+    <>
       <div className="flex items-center gap-1">
-        {/* Sort button */}
         <button
           onClick={() => onSort(field)}
           className={`flex items-center gap-0.5 hover:text-gray-900 transition-colors ${isActive ? 'text-slate-700' : ''}`}
@@ -736,8 +850,6 @@ function SortFilterHeader({
           {label}
           {isActive && (sort.dir === 'asc' ? <ArrowUp className="w-3 h-3" /> : <ArrowDown className="w-3 h-3" />)}
         </button>
-
-        {/* Filter toggle */}
         <button
           onClick={() => setOpen((v) => !v)}
           className={`p-0.5 rounded hover:bg-gray-200 transition-colors ${hasFilter ? 'text-slate-600' : 'text-gray-400'}`}
@@ -746,7 +858,6 @@ function SortFilterHeader({
         </button>
       </div>
 
-      {/* Filter dropdown */}
       {open && (
         <div className="absolute left-0 top-full mt-1 z-20 bg-white rounded-lg shadow-lg border border-gray-200 py-2 min-w-[160px] max-h-60 overflow-y-auto">
           {hasFilter && (
@@ -774,6 +885,26 @@ function SortFilterHeader({
           })}
         </div>
       )}
+    </>
+  );
+
+  if (asDiv) {
+    return (
+      <div
+        className="relative whitespace-nowrap inline-flex"
+        ref={ref as React.RefObject<HTMLDivElement>}
+      >
+        {inner}
+      </div>
+    );
+  }
+
+  return (
+    <th
+      className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider relative whitespace-nowrap"
+      ref={ref as React.RefObject<HTMLTableCellElement>}
+    >
+      {inner}
     </th>
   );
 }
@@ -1421,18 +1552,11 @@ function MCPServerDetailPanel({
         ) : detailTab === 'overview' ? (
           <div className="space-y-5">
             {(() => {
-              const connType = (serverDetail?.config?.type ?? (server.url ? 'sse' : 'stdio')) as 'stdio' | 'sse';
-              const detailFormData: MCPFormData = {
-                name: server.name,
-                connType,
-                command: Array.isArray(serverDetail?.config?.command)
-                  ? serverDetail.config.command.join(' ')
-                  : (serverDetail?.config?.command ?? ''),
-                args: Array.isArray(serverDetail?.config?.args)
-                  ? serverDetail.config.args.join('\n')
-                  : (typeof serverDetail?.config?.args === 'string' ? serverDetail.config.args : ''),
-                url: serverDetail?.config?.url ?? server.url ?? '',
-              };
+              const detailFormData: MCPFormData = buildMCPFormDataFromConfig(
+                server.name,
+                serverDetail?.config,
+                server.url,
+              );
               const mcpConnStatus: MCPConnStatus = testingConnection
                 ? 'testing'
                 : testResult?.success === true
@@ -1570,6 +1694,16 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
   const [testParams, setTestParams] = useState('{}');
   const [testResult, setTestResult] = useState<any>(null);
   const [testing, setTesting] = useState(false);
+  const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
+  const [fixturesLoading, setFixturesLoading] = useState(true);
+
+  useEffect(() => {
+    setFixturesLoading(true);
+    toolAPI.listFixtures(tool.name)
+      .then((res) => setFixtures(res.data ?? []))
+      .catch(() => setFixtures([]))
+      .finally(() => setFixturesLoading(false));
+  }, [tool.name]);
 
   const handleTest = async () => {
     try {
@@ -1577,7 +1711,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
       setTestResult(null);
       const params = JSON.parse(testParams);
       const res = await toolAPI.test(tool.name, params);
-      setTestResult({ success: true, data: res.data });
+      setTestResult({ success: res.data.success, data: res.data.output, error: res.data.error });
     } catch (err: any) {
       setTestResult({ success: false, error: err.response?.data?.detail ?? err.message });
     } finally {
@@ -1597,7 +1731,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
             <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && (
               <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>
             )}
@@ -1617,7 +1751,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                   : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'
               }`}
             >
-              {tab === 'info' ? <><Info className="w-3.5 h-3.5" />{t('detail.info')}</> : <><TestTube className="w-3.5 h-3.5" />{t('detail.test')}</>}
+              {tab === 'info' ? <><Info className="w-3.5 h-3.5" />{t('toolDetail.tabInfo')}</> : <><TestTube className="w-3.5 h-3.5" />{t('toolDetail.tabTest')}</>}
             </button>
           ))}
         </div>
@@ -1627,22 +1761,22 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
         {section === 'info' ? (
           <div className="space-y-5">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('detail.tableDesc')}</label>
-              <p className="text-sm text-gray-600 leading-relaxed">{tool.description || t('detail.noDescription')}</p>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
+              <p className="text-sm text-gray-600 leading-relaxed">{tool.description || t('toolDetail.noDescription')}</p>
             </div>
             {tool.parameters && tool.parameters.length > 0 && (
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">
-                  {t('detail.parameters')} <span className="text-gray-400 font-normal">({tool.parameters.length})</span>
+                  {t('toolDetail.params', { count: tool.parameters.length })}
                 </label>
                 <div className="rounded-lg border border-gray-200 overflow-hidden">
                   <table className="min-w-full divide-y divide-gray-200">
                     <thead className="bg-gray-50">
                       <tr>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.paramName')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.tableType')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.paramRequired')}</th>
-                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('detail.tableDesc')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramName')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramType')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramRequired')}</th>
+                        <th className="px-4 py-2 text-left text-xs font-medium text-gray-500">{t('toolDetail.paramDesc')}</th>
                       </tr>
                     </thead>
                     <tbody className="divide-y divide-gray-100 bg-white">
@@ -1654,8 +1788,8 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
                           <td className="px-4 py-2.5 text-xs text-gray-500">{param.type}</td>
                           <td className="px-4 py-2.5">
                             {param.required
-                              ? <span className="text-xs text-slate-700 font-medium">{t('detail.yes')}</span>
-                              : <span className="text-xs text-gray-400">{t('detail.no')}</span>}
+                              ? <span className="text-xs text-slate-700 font-medium">{t('toolDetail.yes')}</span>
+                              : <span className="text-xs text-gray-400">{t('toolDetail.no')}</span>}
                           </td>
                           <td className="px-4 py-2.5 text-xs text-gray-600">{param.description}</td>
                         </tr>
@@ -1669,7 +1803,30 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
         ) : (
           <div className="space-y-4">
             <div>
-              <label className="block text-sm font-medium text-gray-700 mb-2">{t('detail.testParamsJson')}</label>
+              <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.selectFixture')}</label>
+              <select
+                value=""
+                disabled={fixturesLoading || fixtures.length === 0}
+                onChange={(e) => {
+                  const idx = parseInt(e.target.value, 10);
+                  if (!isNaN(idx) && fixtures[idx]) {
+                    setTestParams(JSON.stringify(fixtures[idx].params, null, 2));
+                  }
+                }}
+                className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
+              >
+                <option value="">
+                  {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
+                </option>
+                {fixtures.map((f, idx) => (
+                  <option key={idx} value={idx}>
+                    {f.tags.includes('smoke') ? '✦ ' : ''}{getLocalizedFixtureLabel(f, i18n.language)}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
               <textarea
                 value={testParams}
                 onChange={(e) => setTestParams(e.target.value)}
@@ -1684,22 +1841,22 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
               className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
             >
               {testing
-                ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('detail.executing')}</>
-                : <><Play className="w-4 h-4" />{t('detail.runTest')}</>}
+                ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
+                : <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>}
             </button>
             {!tool.enabled && (
-              <p className="text-xs text-amber-600 text-center">{t('detail.toolDisabledNoTest')}</p>
+              <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
             )}
             {testResult && (
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-2">{t('detail.testResults')}</label>
+                <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testResult')}</label>
                 <div className={`rounded-lg border p-4 ${testResult.success ? 'bg-green-50 border-green-200' : 'bg-red-50 border-red-200'}`}>
                   <div className="flex items-center mb-2">
                     {testResult.success
                       ? <CheckCircle className="w-4 h-4 text-green-600 mr-2" />
                       : <XCircle className="w-4 h-4 text-red-600 mr-2" />}
                     <span className={`text-sm font-medium ${testResult.success ? 'text-green-800' : 'text-red-800'}`}>
-                      {testResult.success ? t('detail.testSuccess') : t('detail.testFailed')}
+                      {testResult.success ? t('toolDetail.execSuccess') : t('toolDetail.execFailed')}
                     </span>
                   </div>
                   <pre className="text-xs overflow-auto max-h-48 whitespace-pre-wrap break-all text-gray-700 bg-white/60 rounded p-2">
@@ -3114,119 +3271,147 @@ function ToolTable({
   onPageChange: (page: number) => void;
   onSelect: (tool: Tool) => void;
 }) {
-  const { t, i18n } = useTranslation('tool');
+  const { t } = useTranslation('tool');
+  // Column layout, left-to-right.  Every data column uses ``minmax(min, fr)``
+  // so any leftover width on wide screens is shared *proportionally* across
+  // the table rather than dumped into a single gap between "name" and
+  // "source".  Long names truncate via ``truncate`` on the inner button.
+  //
+  //   1) 32px                       icon
+  //   2) minmax(220px, 3fr)         tool name (dominant column, truncates)
+  //   3) minmax(80px,  1fr)         source badge
+  //   4) minmax(140px, 1.6fr)       provider / source name
+  //   5) minmax(80px,  1fr)         enabled badge
+  //   6) minmax(90px,  1fr)         actions button
+  //
+  // Ratio 3 : 1 : 1.6 : 1 : 1  ≈ keeps the name comfortably wide while
+  // distributing the rest so the small badge columns don't feel orphaned.
+  const GRID_COLS =
+    '32px minmax(220px, 3fr) minmax(80px, 1fr) minmax(140px, 1.6fr) minmax(80px, 1fr) minmax(90px, 1fr)';
+
   return (
     <div className="bg-white rounded-lg border border-gray-200 overflow-hidden flex flex-col">
-      <div className="overflow-x-auto flex-1">
-        <table className="min-w-full divide-y divide-gray-200">
-          <thead className="bg-gray-50">
-            <tr>
-              {/* category - 1st column */}
-              <SortFilterHeader
-                label={t('table.category')}
-                field="category"
-                sort={sort}
-                filterValues={filterOptions.category}
-                activeFilters={filters.category}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-                renderLabel={(v) => t(`category.${CATEGORY_I18N_KEY[v] || v}`, { defaultValue: v })}
-              />
-              {/* source */}
-              <SortFilterHeader
-                label={t('table.source')}
-                field="source"
-                sort={sort}
-                filterValues={filterOptions.source}
-                activeFilters={filters.source}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-                renderLabel={(v) => SOURCE_BADGE[v]?.label || v}
-              />
-              {/* provider (source_name) */}
-              <SortFilterHeader
-                label={t('table.provider')}
-                field="source_name"
-                sort={sort}
-                filterValues={filterOptions.source_name}
-                activeFilters={filters.source_name}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-              />
-              {/* tool name - no sort/filter */}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                {t('table.toolName')}
-              </th>
-              {/* description */}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                {t('table.description')}
-              </th>
-              {/* status (enabled) */}
-              <SortFilterHeader
-                label={t('table.status')}
-                field="enabled"
-                sort={sort}
-                filterValues={filterOptions.enabled}
-                activeFilters={filters.enabled}
-                onSort={onSort}
-                onToggleFilter={onToggleFilter}
-                onClearFilter={onClearFilter}
-                renderLabel={(v) => (v === 'true' ? t('enabledBadge.enabled') : t('enabledBadge.disabled'))}
-              />
-              {/* actions */}
-              <th className="px-6 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">
-                {t('table.actions')}
-              </th>
-            </tr>
-          </thead>
-          <tbody className="bg-white divide-y divide-gray-200">
-            {tools.map((tool) => {
-              const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
-              return (
-                <tr key={tool.name} className="hover:bg-gray-50 cursor-pointer" onClick={() => onSelect(tool)}>
-                  {/* category */}
-                  <td className="px-6 py-4 whitespace-nowrap min-w-[80px]">
-                    <span className="text-sm text-gray-700">{t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category })}</span>
-                  </td>
-                  {/* source */}
-                  <td className="px-6 py-4 whitespace-nowrap min-w-[80px]">
-                    <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium ${sb.className}`}>
-                      {sb.label}
-                    </span>
-                  </td>
-                  {/* provider */}
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="text-sm text-gray-700">{tool.source_name || 'Flocks'}</span>
-                  </td>
-                  {/* tool name */}
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <span className="text-sm font-medium text-gray-900 font-mono">{tool.name}</span>
-                  </td>
-                  {/* description */}
-                  <td className="px-6 py-4">
-                    <span className="text-sm text-gray-600 line-clamp-1 max-w-sm">{tool.description}</span>
-                  </td>
-                  {/* status */}
-                  <td className="px-6 py-4 whitespace-nowrap">
-                    <EnabledBadge enabled={tool.enabled} />
-                  </td>
-                  {/* actions */}
-                  <td className="px-6 py-4 whitespace-nowrap text-sm font-medium">
-                    <button onClick={(e) => { e.stopPropagation(); onSelect(tool); }} className="text-sky-700 hover:text-sky-950 mr-3">
-                      {t('table.test')}
-                    </button>
-                    <button onClick={(e) => { e.stopPropagation(); onSelect(tool); }} className="text-gray-600 hover:text-gray-900">
-                      {t('table.detail')}
-                    </button>
-                  </td>
-                </tr>
-              );
-            })}
-          </tbody>
-        </table>
+      {/* Header */}
+      <div
+        className="grid items-center gap-3 px-4 py-2.5 bg-gray-50 border-b border-gray-200 text-[11px] font-medium text-gray-500 uppercase tracking-wide"
+        style={{ gridTemplateColumns: GRID_COLS }}
+      >
+        <div />
+        <div>{t('table.toolName')}</div>
+        <div className="text-center">
+          <SortFilterHeader
+            label={t('table.source')}
+            field="source"
+            sort={sort}
+            filterValues={filterOptions.source}
+            activeFilters={filters.source}
+            onSort={onSort}
+            onToggleFilter={onToggleFilter}
+            onClearFilter={onClearFilter}
+            renderLabel={(v) => getSourceLabel(v, t)}
+            asDiv
+          />
+        </div>
+        <div>
+          <SortFilterHeader
+            label={t('table.provider')}
+            field="source_name"
+            sort={sort}
+            filterValues={filterOptions.source_name}
+            activeFilters={filters.source_name}
+            onSort={onSort}
+            onToggleFilter={onToggleFilter}
+            onClearFilter={onClearFilter}
+            asDiv
+          />
+        </div>
+        <div className="text-center">
+          <SortFilterHeader
+            label={t('table.status')}
+            field="enabled"
+            sort={sort}
+            filterValues={filterOptions.enabled}
+            activeFilters={filters.enabled}
+            onSort={onSort}
+            onToggleFilter={onToggleFilter}
+            onClearFilter={onClearFilter}
+            renderLabel={(v) => (v === 'true' ? t('enabledBadge.enabled') : t('enabledBadge.disabled'))}
+            asDiv
+          />
+        </div>
+        <div className="text-center">{t('table.actions')}</div>
+      </div>
+
+      {/* Rows */}
+      <div className="flex-1 divide-y divide-gray-100">
+        {tools.map((tool) => {
+          const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
+          const sourceLabel = getSourceLabel(tool.source, t);
+          const categoryLabel = t(`category.${CATEGORY_I18N_KEY[tool.category] || tool.category}`, { defaultValue: tool.category });
+
+          return (
+            <div
+              key={tool.name}
+              className="grid items-center gap-3 px-4 py-3 hover:bg-gray-50 transition-colors"
+              style={{ gridTemplateColumns: GRID_COLS }}
+            >
+              {/* Icon */}
+              <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${tool.enabled ? 'bg-gray-100' : 'bg-gray-50'}`}>
+                <Wrench className={`w-4 h-4 ${tool.enabled ? 'text-gray-700' : 'text-gray-400'}`} />
+              </div>
+
+              {/* Name (no description, kept compact).
+                  Name is a `<button>` rather than a `<span>` so the click
+                  affordance matches the Hub catalog (see ``Hub/index.tsx``
+                  HubTable row), letting users open the tool detail drawer
+                  without hunting for the "manage" action on the right.
+                  Font is `text-xs` (one step smaller than the previous
+                  `text-sm`) because the Tool list is denser than other tabs
+                  and the mono name otherwise visually overpowers the row. */}
+              <div className="min-w-0 flex items-center gap-1.5">
+                <button
+                  type="button"
+                  onClick={() => onSelect(tool)}
+                  title={tool.name}
+                  className="text-xs font-medium text-gray-900 font-mono truncate
+                             hover:text-slate-700 transition-colors
+                             focus:outline-none focus-visible:underline text-left min-w-0"
+                >
+                  {tool.name}
+                </button>
+                <span className="text-[10px] text-gray-400 shrink-0">{categoryLabel}</span>
+              </div>
+
+              {/* Source column */}
+              <div className="text-center">
+                <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium ${sb.className}`}>
+                  {sourceLabel}
+                </span>
+              </div>
+
+              {/* Provider column */}
+              <div className="text-xs text-gray-600 truncate">
+                {tool.source_name || 'Flocks'}
+              </div>
+
+              {/* Status column */}
+              <div className="text-center">
+                <EnabledBadge enabled={tool.enabled} />
+              </div>
+
+              {/* Actions column — manage button */}
+              <div className="w-full flex items-center justify-center">
+                <button
+                  onClick={() => onSelect(tool)}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border border-gray-200 text-gray-600 text-xs font-medium hover:bg-gray-100 hover:text-gray-800 transition-colors"
+                >
+                  <Settings className="w-3 h-3" />
+                  {t('mcp.manage')}
+                </button>
+              </div>
+            </div>
+          );
+        })}
       </div>
 
       <Pagination
@@ -3350,7 +3535,10 @@ export function ToolDetailDrawer({
   const [toggling, setToggling] = useState(false);
   const [resetting, setResetting] = useState(false);
   const [deleting, setDeleting] = useState(false);
+  const [fixtures, setFixtures] = useState<ToolFixture[]>([]);
+  const [fixturesLoading, setFixturesLoading] = useState(true);
   const sb = SOURCE_BADGE[tool.source] || SOURCE_BADGE.custom;
+  const sourceLabel = getSourceLabel(tool.source, t);
   const canDirectTest = canDirectlyTestTool(tool);
 
   useEffect(() => {
@@ -3358,6 +3546,21 @@ export function ToolDetailDrawer({
     setCustomized(!!tool.enabled_customized);
     setEnabledDefault(tool.enabled_default ?? tool.enabled);
   }, [tool.enabled, tool.enabled_customized, tool.enabled_default]);
+
+  useEffect(() => {
+    if (testResult?.metadata?.disabled === true) {
+      setEnabled(false);
+    }
+  }, [testResult]);
+
+  useEffect(() => {
+    setFixturesLoading(true);
+    toolAPI.listFixtures(tool.name)
+      .then((res) => setFixtures(res.data ?? []))
+      .catch(() => setFixtures([]))
+      .finally(() => setFixturesLoading(false));
+  }, [tool.name]);
+
 
   const handleToggleEnabled = async () => {
     if (toggling) return;
@@ -3369,8 +3572,8 @@ export function ToolDetailDrawer({
       setCustomized(!!updated.enabled_customized);
       setEnabledDefault(updated.enabled_default ?? updated.enabled);
       onEnabledChange?.(tool.name, updated.enabled);
-    } catch (err: any) {
-      alert(err.response?.data?.message || err.response?.data?.detail || err.message);
+    } catch {
+      // revert on error
     } finally {
       setToggling(false);
     }
@@ -3414,10 +3617,10 @@ export function ToolDetailDrawer({
               <Wrench className="w-4 h-4 text-gray-600" />
             </div>
             <div className="flex-1 min-w-0">
-              <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+              <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
               <div className="flex items-center gap-2 mt-0.5">
                 <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-xs font-medium ${sb.className}`}>
-                  {sb.label}
+                  {sourceLabel}
                 </span>
                 {tool.source_name && (
                   <span className="text-xs text-gray-500 truncate">{tool.source_name}</span>
@@ -3462,7 +3665,7 @@ export function ToolDetailDrawer({
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.description')}</label>
                 <p className="text-sm text-gray-600 leading-relaxed whitespace-pre-wrap break-words [overflow-wrap:anywhere]">
-                  {getLocalizedToolDescription(tool, i18n.language) || t('detail.noDescription')}
+                  {getLocalizedToolDescription(tool, i18n.language) || t('toolDetail.noDescription')}
                 </p>
               </div>
 
@@ -3577,6 +3780,29 @@ export function ToolDetailDrawer({
           ) : (
             <div className="space-y-4">
               <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1.5">{t('toolDetail.selectFixture')}</label>
+                <select
+                  value=""
+                  disabled={fixturesLoading || fixtures.length === 0}
+                  onChange={(e) => {
+                    const idx = parseInt(e.target.value, 10);
+                    if (!isNaN(idx) && fixtures[idx]) {
+                      onTestParamsChange(JSON.stringify(fixtures[idx].params, null, 2));
+                    }
+                  }}
+                  className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm bg-white focus:outline-none focus:ring-2 focus:ring-slate-400 text-gray-500 disabled:bg-gray-50 disabled:cursor-not-allowed"
+                >
+                  <option value="">
+                    {fixturesLoading ? t('toolDetail.updating') : t('toolDetail.selectFixturePlaceholder')}
+                  </option>
+                  {fixtures.map((f, idx) => (
+                    <option key={idx} value={idx}>
+                      {f.tags.includes('smoke') ? '✦ ' : ''}{getLocalizedFixtureLabel(f, i18n.language)}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
                 <label className="block text-sm font-medium text-gray-700 mb-2">{t('toolDetail.testParams')}</label>
                 <textarea
                   value={testParams}
@@ -3588,14 +3814,14 @@ export function ToolDetailDrawer({
               </div>
               <button
                 onClick={onTest}
-                disabled={testing || !tool.enabled || !canDirectTest}
+                disabled={testing || !enabled || !canDirectTest}
                 className="w-full flex items-center justify-center gap-2 px-4 py-2.5 bg-slate-700 text-white rounded-lg hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed font-medium text-sm transition-colors"
               >
                 {testing
                   ? <><RefreshCw className="w-4 h-4 animate-spin" />{t('toolDetail.executing')}</>
                   : <><Play className="w-4 h-4" />{t('toolDetail.runTest')}</>}
               </button>
-              {!tool.enabled && (
+              {!enabled && (
                 <p className="text-xs text-amber-600 text-center">{t('toolDetail.disabledNote')}</p>
               )}
               {canDirectTest ? null : (
@@ -3705,4 +3931,3 @@ const LANG_COLORS: Record<string, string> = {
 // CatalogBrowser removed — catalog UI is now inline in MCPTabContent / APITabContent
 
 // (CatalogBrowser component removed — catalog UI is inline in MCPTabContent / APITabContent)
-

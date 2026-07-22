@@ -1,6 +1,6 @@
 import React from 'react';
 import { describe, it, expect, vi } from 'vitest';
-import { render, screen } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { ToolDetailDrawer } from './index';
 
 vi.mock('react-i18next', () => ({
@@ -25,6 +25,7 @@ vi.mock('react-i18next', () => ({
         'toolDetail.no': '否',
         'toolDetail.close': '关闭',
         'toolDetail.testTool': '测试工具',
+        'toolDetail.runTest': '执行测试',
         'toolDetail.enabled': '启用',
         'toolDetail.disabled': '禁用',
       };
@@ -40,10 +41,55 @@ vi.mock('@/api/tool', () => ({
   toolAPI: {
     setEnabled: vi.fn(),
     resetSetting: vi.fn(),
+    // ToolDetailDrawer mounts a fixtures-loading effect on every render that
+    // pulls test fixtures via this endpoint.  Without a mock the call throws
+    // `toolAPI.listFixtures is not a function` during the test's async tail
+    // and unrelated assertions fail before they ever run.
+    listFixtures: vi.fn(() => Promise.resolve({ data: [] })),
   },
 }));
 
 describe('ToolDetailDrawer', () => {
+  const enabledTool = {
+    name: 'failing_custom_tool',
+    description: 'Always fails',
+    source: 'plugin_py',
+    category: 'custom',
+    enabled: true,
+    parameters: [],
+  } as any;
+
+  const drawerProps = {
+    tool: enabledTool,
+    testParams: '{}',
+    testResult: null,
+    testing: false,
+    onClose: vi.fn(),
+    onTestParamsChange: vi.fn(),
+    onTest: vi.fn(),
+  };
+
+  it('disables test execution as soon as the result reports auto-disable', async () => {
+    const { rerender } = render(<ToolDetailDrawer {...drawerProps} />);
+    fireEvent.click(screen.getByRole('button', { name: '测试' }));
+    expect(screen.getByRole('button', { name: '执行测试' })).toBeEnabled();
+
+    rerender(
+      <ToolDetailDrawer
+        {...drawerProps}
+        testResult={{
+          success: false,
+          error: 'synthetic repeated failure',
+          metadata: { disabled: true, disabled_reason: 'repeated_error' },
+        }}
+      />,
+    );
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: '执行测试' })).toBeDisabled();
+    });
+  });
+
   it('wraps long descriptions and parameter text without clipping', () => {
     const longDescription = 'OneSEC DNS grouped tool. dns_search_blocked_queries_by_super_long_keyword_with_no_breaks_and_more_details_to_force_wrapping';
     const longParamDescription = 'DNS 分组动作名 dns_search_blocked_queries_by_super_long_keyword_with_no_breaks_and_more_details_to_force_wrapping';
@@ -53,8 +99,8 @@ describe('ToolDetailDrawer', () => {
         tool={{
           name: 'onesec_dns',
           description: longDescription,
-          source: 'custom',
-          source_name: 'OneSEC',
+          source: 'device',
+          source_name: 'TDP',
           category: 'custom',
           enabled: true,
           parameters: [
@@ -78,6 +124,7 @@ describe('ToolDetailDrawer', () => {
     const description = screen.getByText(longDescription);
     expect(description).toHaveClass('whitespace-pre-wrap');
     expect(description).toHaveClass('break-words');
+    expect(screen.getByText('Device')).toBeInTheDocument();
 
     const table = screen.getByRole('table');
     expect(table).toHaveClass('table-fixed');

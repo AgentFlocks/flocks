@@ -17,6 +17,8 @@ const { workflowAPI } = vi.hoisted(() => ({
     unpublish: vi.fn(),
     getKafkaConfig: vi.fn(),
     saveKafkaConfig: vi.fn(),
+    getSyslogConfig: vi.fn(),
+    saveSyslogConfig: vi.fn(),
     getHistory: vi.fn(),
   },
 }));
@@ -48,6 +50,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.testRun': '测试运行',
         'detail.run.stopRun': '停止运行',
         'detail.run.stopping': '停止中...',
+        'detail.run.cancelRequested': '已请求停止，正在等待当前步骤响应取消',
         'detail.run.outputResults': '输出结果',
         'detail.run.savingSampleInputs': '正在保存输入',
         'detail.run.sampleInputsSaved': '输入已保存',
@@ -74,6 +77,15 @@ vi.mock('react-i18next', () => ({
         'detail.run.savedConfig': '已保存',
         'detail.run.saveConfig': '保存配置',
         'detail.run.kafkaHint': 'hint',
+        'detail.run.syslogSection': 'Syslog',
+        'detail.run.syslogExperimental': '实验性',
+        'detail.run.syslogEnabled': '启用',
+        'detail.run.syslogProtocol': '协议',
+        'detail.run.syslogHost': '地址',
+        'detail.run.syslogPort': '端口',
+        'detail.run.syslogFormat': '格式',
+        'detail.run.syslogInputKey': '键名',
+        'detail.run.syslogHint': 'syslog hint',
         'detail.run.historySection': '执行历史',
         'detail.run.noHistory': '暂无执行记录',
         'detail.run.noOutput': '无输出数据',
@@ -130,6 +142,7 @@ describe('RunTab', () => {
     workflowAPI.saveSampleInputs.mockResolvedValue({ data: { ok: true } });
     workflowAPI.getService.mockResolvedValue({ data: null });
     workflowAPI.getKafkaConfig.mockResolvedValue({ data: null });
+    workflowAPI.getSyslogConfig.mockResolvedValue({ data: null });
     workflowAPI.getHistory.mockResolvedValue({ data: [] });
     workflowAPI.run.mockResolvedValue({
       data: {
@@ -174,6 +187,10 @@ describe('RunTab', () => {
     await waitFor(() => {
       expect(workflowAPI.cancelExecution).toHaveBeenCalledWith('wf-1', 'exec-1');
     });
+
+    expect(await screen.findByRole('button', { name: '停止中...' })).toBeDisabled();
+    expect(screen.getByText('cancelling')).toBeInTheDocument();
+    expect(screen.getByText('已请求停止，正在等待当前步骤响应取消')).toBeInTheDocument();
   });
 
   it('keeps the running execution visible when history is temporarily empty', async () => {
@@ -227,6 +244,51 @@ describe('RunTab', () => {
       const copyButtons = screen.getAllByTestId('copy-button');
       expect(copyButtons.some((button) => button.getAttribute('aria-label') === 'copy:{\n  "result": "ok"\n}')).toBe(true);
     });
+  });
+
+  it('expands history execution details directly under the clicked item', async () => {
+    const user = userEvent.setup();
+    const executions = [
+      {
+        id: 'exec-first',
+        workflowId: 'wf-1',
+        inputParams: {},
+        outputResults: { marker: 'first' },
+        status: 'success' as const,
+        startedAt: new Date('2026-01-01T00:00:00Z').getTime(),
+        duration: 1,
+        executionLog: [],
+      },
+      {
+        id: 'exec-second',
+        workflowId: 'wf-1',
+        inputParams: {},
+        outputResults: { marker: 'second' },
+        status: 'success' as const,
+        startedAt: new Date('2026-01-02T00:00:00Z').getTime(),
+        duration: 2,
+        executionLog: [],
+      },
+    ];
+    workflowAPI.getHistory.mockResolvedValue({ data: executions });
+
+    render(
+      <RunTab
+        workflow={baseWorkflow}
+        latestExecution={null}
+        sections={['history']}
+      />,
+    );
+
+    const firstHistoryButton = (await screen.findByText('1.0s')).closest('button');
+    const secondHistoryButton = (await screen.findByText('2.0s')).closest('button');
+    expect(firstHistoryButton).not.toBeNull();
+    expect(secondHistoryButton).not.toBeNull();
+
+    await user.click(firstHistoryButton!);
+
+    const firstDetail = screen.getByText(/"marker": "first"/);
+    expect(firstDetail.compareDocumentPosition(secondHistoryButton!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
 });

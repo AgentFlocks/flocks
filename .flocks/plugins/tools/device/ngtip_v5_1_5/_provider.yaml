@@ -1,0 +1,56 @@
+name: ngtip
+vendor: threatbook
+service_id: ngtip_api
+version: "5.1.5"
+integration_type: device
+description: >
+  NGTIP (Next Generation Threat Intelligence Platform) API service.
+  Covers two endpoint categories: intelligence query (port 8090) and
+  platform functions (management / write). Configure separate APIKEYs
+  and both Base URLs in the credentials form.
+description_cn: >
+  NGTIP 威胁情报平台 API 服务，覆盖情报查询（端口 8090）和平台功能（管理写入）两类接口。
+  可分别配置情报查询 APIKEY、平台功能 APIKEY、平台功能 Base URL 和情报查询 Base URL。
+docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/ngtip-integration"
+auth:
+  type: custom
+  secret: ngtip_query_apikey
+credential_fields:
+  - key: query_apikey
+    label: 情报查询 APIKEY
+    storage: secret
+    config_key: queryApiKey
+    secret_id: ngtip_query_apikey
+    input_type: password
+    required: false
+  - key: platform_apikey
+    label: 平台功能 APIKEY
+    storage: secret
+    config_key: platformApiKey
+    secret_id: ngtip_platform_apikey
+    input_type: password
+    required: false
+  - key: base_url
+    label: 平台功能 Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    default: "http://YOUR_NGTIP_IP"
+  - key: query_base_url
+    label: 情报查询 Base URL
+    storage: config
+    config_key: query_base_url
+    input_type: url
+    default: "http://YOUR_NGTIP_IP:8090"
+defaults:
+  base_url: "http://YOUR_NGTIP_IP"
+  query_base_url: "http://YOUR_NGTIP_IP:8090"
+  timeout: 60
+  category: custom
+  product_version: "5.1.5"
+notes: |
+  NGTIP API 分为两类，Base URL 不同，务必在配置中均填写：
+    - 平台功能接口：base_url（如 http://192.168.1.100）
+    - 情报查询接口：query_base_url（如 http://192.168.1.100:8090）
+  认证：所有接口携带 apikey 参数。情报查询接口使用“情报查询 APIKEY”，平台功能接口使用“平台功能 APIKEY”；
+  旧配置中的单个 apiKey 仍会作为兼容回退值使用。

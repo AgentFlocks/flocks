@@ -26,6 +26,7 @@ from .models import (
     TaskSource,
     TaskStatus,
     TaskTrigger,
+    validate_cron_expression,
 )
 from .queue import TaskQueue
 from .scheduler import TaskScheduler as SchedulerLoop
@@ -176,7 +177,9 @@ class TaskManager:
         created_by: str = "rex",
         dedup_key: Optional[str] = None,
     ) -> TaskScheduler:
-        trigger = trigger or TaskTrigger()
+        trigger = trigger.model_copy(deep=True) if trigger is not None else TaskTrigger()
+        if trigger.cron:
+            trigger.cron = validate_cron_expression(trigger.cron)
         source = source or TaskSource()
         mgr = cls._instance
         retry = mgr._default_retry.model_copy(deep=True) if mgr else RetryConfig()
@@ -281,24 +284,26 @@ class TaskManager:
                 setattr(scheduler, key, value)
         if any(v is not None for v in [cron, timezone, cron_description, run_once, run_at]):
             tz = timezone or scheduler.trigger.timezone
+            normalized_cron = validate_cron_expression(cron) if cron else None
             if run_once is None:
                 run_once = scheduler.mode == SchedulerMode.ONCE
             if run_once:
                 scheduler.mode = SchedulerMode.ONCE
-                scheduler.trigger.cron = cron
+                if cron is not None:
+                    scheduler.trigger.cron = normalized_cron
                 scheduler.trigger.timezone = tz
                 scheduler.trigger.cron_description = cron_description or scheduler.trigger.cron_description
                 scheduler.trigger.run_at = datetime.fromisoformat(run_at) if run_at else scheduler.trigger.run_at
                 scheduler.trigger.next_run = scheduler.trigger.run_at
             else:
-                if not cron:
+                if not normalized_cron:
                     raise ValueError("cron is required for recurring scheduled tasks")
                 scheduler.mode = SchedulerMode.CRON
                 scheduler.trigger.run_at = None
-                scheduler.trigger.cron = cron
+                scheduler.trigger.cron = normalized_cron
                 scheduler.trigger.timezone = tz
                 scheduler.trigger.cron_description = cron_description or scheduler.trigger.cron_description
-                scheduler.trigger.next_run = SchedulerLoop.compute_next_run(cron, tz)
+                scheduler.trigger.next_run = SchedulerLoop.compute_next_run(normalized_cron, tz)
         scheduler = await TaskStore.update_scheduler(scheduler)
         return scheduler
 
@@ -813,33 +818,46 @@ class TaskManager:
 
     @staticmethod
     def _with_db_connection() -> sqlite3.Connection:
-        conn = sqlite3.connect(Storage.get_db_path())
-        conn.row_factory = sqlite3.Row
-        return conn
+        return Storage.connect_sync()
+
+    @staticmethod
+    def _legacy_table_db_paths() -> list[Path]:
+        paths = [Storage.get_db_path(), TaskStore.get_db_path()]
+        unique: list[Path] = []
+        for path in paths:
+            if path not in unique:
+                unique.append(path)
+        return unique
 
     @classmethod
     def _legacy_tables_exist(cls) -> bool:
-        with cls._with_db_connection() as conn:
-            for table_name in ("tasks", "task_execution_records", "task_queue_refs"):
-                row = conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
-                    (table_name,),
-                ).fetchone()
-                if row is not None:
-                    return True
+        for db_path in cls._legacy_table_db_paths():
+            if not db_path.exists():
+                continue
+            with Storage.connect_sync(db_path) as conn:
+                for table_name in ("tasks", "task_execution_records", "task_queue_refs"):
+                    row = conn.execute(
+                        "SELECT 1 FROM sqlite_master WHERE type='table' AND name = ?",
+                        (table_name,),
+                    ).fetchone()
+                    if row is not None:
+                        return True
         return False
 
     @classmethod
     def _drop_legacy_tables(cls) -> None:
-        with cls._with_db_connection() as conn:
-            conn.executescript(
-                """
-                DROP TABLE IF EXISTS task_queue_refs;
-                DROP TABLE IF EXISTS task_execution_records;
-                DROP TABLE IF EXISTS tasks;
-                """
-            )
-            conn.commit()
+        for db_path in cls._legacy_table_db_paths():
+            if not db_path.exists():
+                continue
+            with Storage.connect_sync(db_path) as conn:
+                conn.executescript(
+                    """
+                    DROP TABLE IF EXISTS task_queue_refs;
+                    DROP TABLE IF EXISTS task_execution_records;
+                    DROP TABLE IF EXISTS tasks;
+                    """
+                )
+                conn.commit()
 
     @classmethod
     async def _enqueue_execution(cls, execution: TaskExecution) -> TaskExecution:

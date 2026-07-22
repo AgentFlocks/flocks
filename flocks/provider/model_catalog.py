@@ -132,14 +132,15 @@ def _parse_model_definitions(
             features.append(ModelFeature.TOOL_CALL)
         if caps_raw.get("supports_vision"):
             features.append(ModelFeature.VISION)
-        if caps_raw.get("supports_reasoning"):
+        if caps_raw.get("supports_reasoning", True):
             features.append(ModelFeature.REASONING)
 
         capabilities = ModelCapabilitiesV2(
             features=features,
             supports_tools=caps_raw.get("supports_tools", False),
             supports_vision=caps_raw.get("supports_vision", False),
-            supports_reasoning=caps_raw.get("supports_reasoning", False),
+            supports_reasoning=caps_raw.get("supports_reasoning", True),
+            interleaved=caps_raw.get("interleaved"),
             supports_streaming=caps_raw.get("supports_streaming", True),
         )
 

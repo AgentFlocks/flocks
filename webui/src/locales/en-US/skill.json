@@ -16,25 +16,58 @@
     "noSkills": "No Skills",
     "noResults": "No skills found",
     "createFirst": "Create your first skill",
-    "tryOtherKeywords": "Try different search keywords"
+    "tryOtherKeywords": "Try different search keywords",
+    "tryOtherFilters": "No skills match the current filters — try adjusting or clearing them"
   },
   "section": {
     "custom": "Custom Skills",
     "builtin": "Built-in Skills"
   },
+  "table": {
+    "type": "Type",
+    "name": "Name",
+    "source": "Source",
+    "status": "Status",
+    "enabled": "Enabled",
+    "actions": "Actions",
+    "edit": "Edit",
+    "builtin": "Built-in",
+    "custom": "Custom",
+    "totalCount_one": "{{count}} skill",
+    "totalCount_other": "{{count}} skills"
+  },
+  "pagination": {
+    "info": "Showing {{start}}–{{end}} of {{total}}"
+  },
+  "toggle": {
+    "enabledTip": "Enabled — click to remove from agent system prompt",
+    "disabledTip": "Disabled — click to add to agent system prompt",
+    "failed": "Toggle failed"
+  },
   "eligibility": {
     "ready": "Ready",
     "missingDeps": "Missing deps",
+    "missingDepsInline": "Missing: {{list}}",
     "installDeps": "Install deps",
     "installing": "Installing...",
     "installSuccess": "Dependencies installed",
     "installFailed": "Dependency install failed"
   },
+  "filter": {
+    "aria": "Skill source filter",
+    "all": "All",
+    "builtin": "Built-in",
+    "custom": "Custom",
+    "enabled": "Enabled",
+    "disabled": "Disabled",
+    "showAll": "Show all",
+    "clear": "Clear filter"
+  },
   "installDialog": {
     "title": "Install Skill",
     "sourceLabel": "Source",
-    "sourcePlaceholder": "Enter a source, e.g.:\nclawhub:github\ngithub:owner/repo\nhttps://raw.githubusercontent.com/...\n/local/path/to/skill",
-    "sourceHint": "Supports clawhub, GitHub, URL, local path, and future safeskill: sources",
+    "sourcePlaceholder": "Enter a source, e.g.:\nclawhub:github\ngithub:owner/repo\nsafeskill://tbx/.../onesig-use@1.0.0\nhttps://raw.githubusercontent.com/...\n/local/path/to/skill",
+    "sourceHint": "Supports clawhub, GitHub, SafeSkill, URL, and local path sources",
     "scopeLabel": "Install scope",
     "scopeGlobal": "Global (~/.flocks/plugins/skills/)",
     "scopeProject": "Project (.flocks/plugins/skills/)",
@@ -45,6 +78,47 @@
     "failed": "Install failed: {{error}}",
     "missingDepsWarning": "Skill installed, but missing dependencies: {{missing}}",
     "runInstallDeps": "Click \"Install deps\" to complete setup"
+  },
+  "create": {
+    "emptyStateTitle": "No creation conversation yet",
+    "guidePanelTitle": "Rex Assisted Creation",
+    "guidePanelDesc": "Choose a guide or case. Rex will load the skill-builder skill first, confirm goal, triggers, file structure, and validation before generating files.",
+    "guideSectionTitle": "Creation Guides",
+    "caseSectionTitle": "Creation Cases",
+    "guideActions": [
+      {
+        "label": "How to Create",
+        "description": "Start from purpose, triggers, instruction structure, dependencies, and validation.",
+        "prompt": "Please follow the .flocks/plugins/skills/skill-builder skill to guide me through creating a Flocks Skill. Do not write files yet. Use the question tool to ask one most important question at a time and help me clarify skill name, purpose, trigger scenarios, needed references/scripts, dependencies, output directory, and validation. After I confirm, generate ~/.flocks/plugins/skills/<skill-name>/SKILL.md and any necessary files."
+      },
+      {
+        "label": "Clarify Instructions",
+        "description": "Turn a fuzzy capability into a SKILL.md agents can use correctly.",
+        "prompt": "Please help me structure the skill instructions for SKILL.md. Ask one question at a time to confirm: what problem the skill solves, trigger keywords, when to use or avoid it, execution steps, reference materials, reusable scripts, quality checks, and examples."
+      },
+      {
+        "label": "Dependencies & Checks",
+        "description": "Plan bin/env/install specs, smoke tests, and failure guidance.",
+        "prompt": "Please use the skill-builder skill to help me design dependencies and validation for this Skill. First confirm whether it needs CLI tools, Python/Node packages, environment variables, or external services, then propose install specs, check commands, smoke tests, and user-facing failure guidance."
+      }
+    ],
+    "caseActions": [
+      {
+        "label": "Security Analysis Skill",
+        "description": "Capture threat analysis steps, report format, and constraints as a Skill.",
+        "prompt": "I want to create a security analysis Skill that guides agents through alert or IOC analysis and outputs a structured assessment report. Please follow the skill-builder skill to guide me through triggers, analysis flow, report fields, references, and validation."
+      },
+      {
+        "label": "Code Migration Skill",
+        "description": "Capture cross-file migration, tests, and rollback considerations.",
+        "prompt": "I want to create a code migration Skill for framework upgrades or cross-file migrations. Please follow the skill-builder skill to guide me through applicable scenarios, migration steps, risk checks, test commands, and output format."
+      },
+      {
+        "label": "External System Skill",
+        "description": "Record usage flow, prohibited actions, and tool-call constraints for a system.",
+        "prompt": "I want to create an external system usage Skill that guides agents when operating a business system. Please follow the skill-builder skill to guide me through system name, login/query flow, available tools, prohibited bypasses, sensitive data handling, and acceptance checks."
+      }
+    ]
   },
   "sheet": {
     "entityType": "Skill",

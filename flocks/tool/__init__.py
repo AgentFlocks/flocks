@@ -10,24 +10,19 @@ Core Tools (P0):
 - bash: Execute shell commands
 - grep: Search file contents using regex
 - glob: Find files by pattern
-- list: List directory contents
 
 P1 Tools:
 - webfetch: Fetch web content
-- todoread/todowrite: TODO list management
+- todo: TODO list management
 - question: User interaction
-- plan_enter/plan_exit: Plan mode switching
 
 P2 Tools:
-- multiedit: Batch file edits
 - task: Subagent execution
-- batch: Parallel tool calls
 - lsp: LSP operations
 - skill: Load skills
 
 P3 Tools:
 - websearch: Web search
-- codesearch: Code search
 - apply_patch: Patch application
 
 Usage:

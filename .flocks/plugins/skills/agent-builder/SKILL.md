@@ -127,7 +127,7 @@ prompt_metadata:
 
 | Strategy | Use Case | Tool Scope | Example Agents |
 |----------|----------|------------|----------------|
-| `read_only` | Analysis/consultation only, no file mutations | Read-only tools | oracle, librarian, momus |
+| `read_only` | Analysis/consultation only, no file mutations | Read-only tools | oracle, librarian |
 | `react` | General execution, observe-think-act loop | All tools | general |
 | `plan_and_execute` | Complex tasks requiring planning before execution | All tools | rex, hephaestus |
 | `explore` | Codebase exploration and search | Search/read tools | explore |
@@ -140,7 +140,6 @@ tools:
   - read
   - grep
   - glob
-  - codesearch
 ```
 
 **Read-only + network** (e.g. documentation lookup, threat intelligence):
@@ -152,7 +151,6 @@ tools:
   - bash
   - websearch
   - webfetch
-  - codesearch
 ```
 
 **Full execution** (e.g. code generation, refactoring):
@@ -180,13 +178,8 @@ After generating files, verify:
 1. **YAML syntax**: run `python3 -c "import yaml; from pathlib import Path; yaml.safe_load(Path('~/.flocks/plugins/agents/{name}/agent.yaml').expanduser().read_text(encoding='utf-8'))"`
 2. **Prompt file exists**: confirm `~/.flocks/plugins/agents/{name}/prompt.md` has been created
 3. **Directory structure**: ensure files are inside `~/.flocks/plugins/agents/{name}/`, NOT as flat files like `agents/{name}.yaml`
-4. **Name uniqueness**: ensure no collision with built-in agents (reserved names: rex, hephaestus, oracle, librarian, explore, general, metis, momus, multimodal-looker, rex-junior, build, plan, compaction, title, summary)
+4. **Name uniqueness**: ensure no collision with built-in agents (reserved names: rex, hephaestus, oracle, librarian, explore, prometheus, multimodal-looker, rex-junior, build, plan, compaction, title, summary)
 5. **Tool names**: verify every listed tool exists in the current registry; if the repo exposes a `/tools` or tool listing command, check against that instead of relying on memory
-6. **Trigger reload**: call the refresh API so Rex recognizes the new agent immediately — **no restart needed**:
-   ```bash
-   curl -s -X POST http://localhost:8000/api/agents/refresh
-   ```
-   A successful response looks like `{"count": N}` where N is the total number of loaded agents. If the count increased, the new agent has been picked up correctly.
 
 ### 7. Output
 
@@ -194,7 +187,6 @@ After creation, inform the user:
 - File paths created (e.g. `~/.flocks/plugins/agents/{name}/agent.yaml` and `prompt.md`)
 - Agent name and role
 - Can be invoked via `delegate_task(subagent_type="{name}", ...)`
-- Takes effect immediately after calling `POST /api/agents/refresh` (no restart needed)
 
 ---
 

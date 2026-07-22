@@ -3,15 +3,21 @@ Tool routes - API endpoints for tool management and execution
 """
 
 import asyncio
-from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, HTTPException, status
+from dataclasses import dataclass
+import threading
+import time
+from typing import Annotated, List, Optional, Dict, Any, Literal, Sequence
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 
+from flocks.server.auth import require_admin
+from flocks.server.routes._timing import log_route_timing
 from flocks.utils.log import Log
 from flocks.config.config_writer import ConfigWriter
 from flocks.permission.next import DeniedError, PermissionNext
 from flocks.tool.registry import (
     ToolRegistry,
+    ToolRefreshError,
     ToolInfo,
     ToolSchema,
     ToolResult,
@@ -32,9 +38,11 @@ class ToolInfoResponse(BaseModel):
     description: str = Field(..., description="Tool description")
     description_cn: Optional[str] = Field(None, description="Chinese UI description")
     category: str = Field(..., description="Tool category")
-    source: str = Field("builtin", description="Tool source: builtin, mcp, api, custom")
+    source: str = Field("builtin", description="Tool source: builtin, mcp, api, device, custom")
     source_name: Optional[str] = Field(None, description="Source detail, e.g. MCP server name or API module name")
+    vendor: Optional[str] = Field(None, description="Manufacturer key for device tools (e.g. threatbook, qianxin, sangfor, qingteng)")
     parameters: List[Dict[str, Any]] = Field(default_factory=list, description="Tool parameters")
+    parameters_count: int = Field(0, description="Number of tool parameters")
     enabled: bool = Field(True, description="Effective enabled state (overlay applied, ANDed with API service flag)")
     enabled_default: bool = Field(True, description="Factory default from the YAML/registration source (no overlay)")
     enabled_customized: bool = Field(False, description="True if a user setting is recorded in flocks.json tool_settings")
@@ -112,6 +120,24 @@ class BatchExecuteResponse(BaseModel):
     results: List[ToolExecuteResponse] = Field(..., description="Execution results")
 
 
+class ToolListFacets(BaseModel):
+    """Facet counts for server-side tool list filtering."""
+    category: Dict[str, int] = Field(default_factory=dict)
+    source: Dict[str, int] = Field(default_factory=dict)
+    source_groups: Dict[str, int] = Field(default_factory=dict)
+    source_name: Dict[str, int] = Field(default_factory=dict)
+    enabled: Dict[str, int] = Field(default_factory=dict)
+
+
+class ToolListPageResponse(BaseModel):
+    """Paginated tool list response."""
+    items: List[ToolInfoResponse] = Field(default_factory=list)
+    total: int = Field(0)
+    offset: int = Field(0)
+    limit: int = Field(25)
+    facets: ToolListFacets = Field(default_factory=ToolListFacets)
+
+
 # Helper: determine tool source
 
 _BUILTIN_CATEGORIES = {
@@ -129,17 +155,76 @@ _VERIFIED_CONTEXT_REQUIRED_MESSAGE = (
 )
 
 
+@dataclass(frozen=True)
+class ToolListIndexItem:
+    name: str
+    description: str
+    description_cn: Optional[str]
+    category: str
+    source: str
+    source_name: Optional[str]
+    vendor: Optional[str]
+    parameters_count: int
+    enabled: bool
+    enabled_default: bool
+    enabled_customized: bool
+    requires_confirmation: bool
+
+
+_TOOL_SUMMARY_CACHE_TTL_SECONDS = 5.0
+_tool_summary_cache_lock = threading.Lock()
+_tool_summary_cache_key: tuple[int, tuple[str, ...]] | None = None
+_tool_summary_cache_expires_at = 0.0
+_tool_summary_cache_items: tuple[ToolListIndexItem, ...] = ()
+
+
+def _invalidate_tool_summary_cache() -> None:
+    """Clear the lightweight list snapshot used by ``GET /api/tools/page``."""
+    global _tool_summary_cache_key, _tool_summary_cache_expires_at, _tool_summary_cache_items
+    with _tool_summary_cache_lock:
+        _tool_summary_cache_key = None
+        _tool_summary_cache_expires_at = 0.0
+        _tool_summary_cache_items = ()
+
+
+def _tool_summary_cache_current_key() -> tuple[int, tuple[str, ...]]:
+    return ToolRegistry.snapshot_identity()
+
+
+def _get_tool_summary_items() -> List[ToolListIndexItem]:
+    """Return cached, lightweight tool summaries for list filtering."""
+    global _tool_summary_cache_key, _tool_summary_cache_expires_at, _tool_summary_cache_items
+
+    now = time.monotonic()
+    cache_key = _tool_summary_cache_current_key()
+    with _tool_summary_cache_lock:
+        if (
+            _tool_summary_cache_items
+            and _tool_summary_cache_key == cache_key
+            and now < _tool_summary_cache_expires_at
+        ):
+            return list(_tool_summary_cache_items)
+
+        items = tuple(_build_tool_index_item(t) for t in ToolRegistry.list_tools())
+        _tool_summary_cache_key = cache_key
+        _tool_summary_cache_expires_at = now + _TOOL_SUMMARY_CACHE_TTL_SECONDS
+        _tool_summary_cache_items = items
+        return list(items)
+
+
 def _get_tool_source(tool_info: ToolInfo) -> tuple:
     """
     Determine tool source type and source name.
     
     Returns:
         (source, source_name) tuple where source is one of:
-        'builtin', 'mcp', 'api', 'plugin_yaml', 'plugin_py', 'custom'
+        'builtin', 'mcp', 'api', 'device', 'plugin_yaml', 'plugin_py', 'custom'
     """
     # Use ToolInfo.source field if explicitly set
     if tool_info.source == "api":
         return "api", tool_info.provider
+    if tool_info.source == "device":
+        return "device", tool_info.provider
     if tool_info.source == "plugin_yaml":
         return "plugin_yaml", tool_info.provider
     if tool_info.source == "plugin_py":
@@ -169,12 +254,13 @@ def _get_tool_source(tool_info: ToolInfo) -> tuple:
     return "custom", None
 
 
-def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
+def _build_tool_response(t: ToolInfo, *, include_parameters: bool = True) -> ToolInfoResponse:
     """Build ToolInfoResponse with source info and overlay metadata."""
     source, source_name = _get_tool_source(t)
     setting = ConfigWriter.get_tool_setting(t.name) or {}
     customized = "enabled" in setting
     enabled_default = _get_default_enabled(t)
+    parameters = [p.model_dump() for p in t.parameters] if include_parameters else []
     return ToolInfoResponse(
         name=t.name,
         description=t.description,
@@ -182,12 +268,141 @@ def _build_tool_response(t: ToolInfo) -> ToolInfoResponse:
         category=t.category.value,
         source=source,
         source_name=source_name,
-        parameters=[p.model_dump() for p in t.parameters],
-        enabled=_get_effective_tool_enabled(t),
+        vendor=t.vendor,
+        parameters=parameters,
+        parameters_count=len(t.parameters),
+        enabled=_get_effective_tool_enabled(t, source=source, source_name=source_name),
         enabled_default=enabled_default,
         enabled_customized=customized,
         requires_confirmation=t.requires_confirmation,
     )
+
+
+def _build_tool_index_item(t: ToolInfo) -> ToolListIndexItem:
+    """Build the lightweight index row used by the paged list endpoint."""
+    source, source_name = _get_tool_source(t)
+    setting = ConfigWriter.get_tool_setting(t.name) or {}
+    return ToolListIndexItem(
+        name=t.name,
+        description=t.description,
+        description_cn=t.description_cn,
+        category=t.category.value,
+        source=source,
+        source_name=source_name,
+        vendor=t.vendor,
+        parameters_count=len(t.parameters),
+        enabled=_get_effective_tool_enabled(t, source=source, source_name=source_name),
+        enabled_default=_get_default_enabled(t),
+        enabled_customized="enabled" in setting,
+        requires_confirmation=t.requires_confirmation,
+    )
+
+
+def _tool_index_item_to_response(item: ToolListIndexItem) -> ToolInfoResponse:
+    return ToolInfoResponse(
+        name=item.name,
+        description=item.description,
+        description_cn=item.description_cn,
+        category=item.category,
+        source=item.source,
+        source_name=item.source_name,
+        vendor=item.vendor,
+        parameters=[],
+        parameters_count=item.parameters_count,
+        enabled=item.enabled,
+        enabled_default=item.enabled_default,
+        enabled_customized=item.enabled_customized,
+        requires_confirmation=item.requires_confirmation,
+    )
+
+
+def _split_csv_filter(value: Optional[str]) -> Optional[set[str]]:
+    if value is None:
+        return None
+    parts = {part.strip() for part in value.split(",") if part and part.strip()}
+    return parts or None
+
+
+def _matches_tool_query(tool: ToolInfoResponse | ToolListIndexItem, query: str) -> bool:
+    if not query:
+        return True
+    haystack = " ".join([
+        tool.name,
+        tool.description,
+        tool.description_cn or "",
+        tool.category,
+        tool.source,
+        tool.source_name or "",
+        tool.vendor or "",
+    ]).lower()
+    return query in haystack
+
+
+def _build_tool_facets(items: Sequence[ToolInfoResponse | ToolListIndexItem]) -> ToolListFacets:
+    facets = ToolListFacets()
+    for item in items:
+        facets.category[item.category] = facets.category.get(item.category, 0) + 1
+        facets.source[item.source] = facets.source.get(item.source, 0) + 1
+        source_name = item.source_name or "Flocks"
+        facets.source_name[source_name] = facets.source_name.get(source_name, 0) + 1
+        enabled_key = str(item.enabled).lower()
+        facets.enabled[enabled_key] = facets.enabled.get(enabled_key, 0) + 1
+    return facets
+
+
+def _build_source_group_counts(
+    items: Sequence[ToolInfoResponse | ToolListIndexItem],
+) -> Dict[str, int]:
+    groups: Dict[str, set[str]] = {}
+    for item in items:
+        if not item.source_name:
+            continue
+        groups.setdefault(item.source, set()).add(item.source_name)
+    return {source: len(source_names) for source, source_names in groups.items()}
+
+
+def _sort_tool_items(
+    items: Sequence[ToolInfoResponse | ToolListIndexItem],
+    sort_by: Literal["category", "source", "source_name", "enabled", "name"],
+    sort_dir: Literal["asc", "desc"],
+) -> List[ToolInfoResponse | ToolListIndexItem]:
+    reverse = sort_dir == "desc"
+
+    def sort_key(item: ToolInfoResponse):
+        if sort_by == "enabled":
+            return 0 if item.enabled else 1
+        if sort_by == "source_name":
+            return (item.source_name or "Flocks").lower()
+        return getattr(item, sort_by)
+
+    return sorted(items, key=sort_key, reverse=reverse)
+
+
+def _filter_tool_items(
+    items: Sequence[ToolInfoResponse | ToolListIndexItem],
+    *,
+    category_filter: Optional[set[str]],
+    source_filter: Optional[set[str]],
+    source_name_filter: Optional[set[str]],
+    enabled_filter: Optional[set[str]],
+    query: str,
+    include_category: bool = True,
+    include_source: bool = True,
+    include_source_name: bool = True,
+    include_enabled: bool = True,
+) -> List[ToolInfoResponse | ToolListIndexItem]:
+    result = list(items)
+    if include_category and category_filter:
+        result = [tool for tool in result if tool.category in category_filter]
+    if include_source and source_filter:
+        result = [tool for tool in result if tool.source in source_filter]
+    if include_source_name and source_name_filter:
+        result = [tool for tool in result if (tool.source_name or "Flocks") in source_name_filter]
+    if include_enabled and enabled_filter:
+        result = [tool for tool in result if str(tool.enabled).lower() in enabled_filter]
+    if query:
+        result = [tool for tool in result if _matches_tool_query(tool, query)]
+    return result
 
 
 def _requires_session_backed_context(tool_info: ToolInfo) -> bool:
@@ -406,14 +621,53 @@ def _service_allows_enable(t: ToolInfo) -> bool:
     return bool(svc.get("enabled", False))
 
 
-def _get_effective_tool_enabled(tool_info: ToolInfo) -> bool:
+def _get_effective_tool_enabled(
+    tool_info: ToolInfo,
+    *,
+    source: Optional[str] = None,
+    source_name: Optional[str] = None,
+) -> bool:
     """Compute tool enabled state without mutating the registry object."""
-    source, source_name = _get_tool_source(tool_info)
-    if source != "api" or not source_name:
+    if source is None:
+        source, source_name = _get_tool_source(tool_info)
+    if source not in ("api", "device") or not source_name:
         return tool_info.enabled
     from flocks.server.routes.provider import _get_api_service_enabled
 
     return tool_info.enabled and _get_api_service_enabled(source_name)
+
+
+def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
+    """Persist and apply the global enabled state for a registry tool."""
+    default = _get_default_enabled(tool.info)
+    # Service gate: only matters when the user is trying to enable.
+    # Disabling is always honoured.
+    service_ok = _service_allows_enable(tool.info)
+    new_enabled = desired and service_ok
+
+    if desired == default:
+        removed = ConfigWriter.delete_tool_setting(tool.info.name)
+        log.info("tool.updated.reset_to_default", {
+            "name": tool.info.name,
+            "enabled": new_enabled,
+            "default": default,
+            "removed_overlay": removed,
+        })
+    else:
+        ConfigWriter.set_tool_setting(tool.info.name, {"enabled": desired})
+        log.info("tool.updated", {
+            "name": tool.info.name,
+            "enabled": new_enabled,
+            "requested": desired,
+            "blocked_by_service": desired and not service_ok,
+            "native": tool.info.native,
+            "store": "overlay",
+        })
+
+    tool.info.enabled = new_enabled
+    if new_enabled:
+        ToolRegistry._reset_failure_state(tool.info.name)
+    return new_enabled
 
 
 # Routes
@@ -438,7 +692,8 @@ async def list_tools(
         List of tool information
     """
     # Initialize registry if needed
-    ToolRegistry.init()
+    started_at = time.perf_counter()
+    await ToolRegistry.init_async()
     
     # Parse category filter
     cat_filter = None
@@ -457,8 +712,119 @@ async def list_tools(
     # Apply source filter if specified
     if source:
         result = [t for t in result if t.source == source]
-    
+
+    log_route_timing(log, "tools.list.complete", started_at=started_at, extra={
+        "count": len(result),
+        "category": category,
+        "source": source,
+    })
     return result
+
+
+@router.get(
+    "/page",
+    response_model=ToolListPageResponse,
+    summary="List tools with server-side pagination",
+)
+async def list_tools_page(
+    category: Optional[str] = None,
+    source: Optional[str] = None,
+    source_name: Optional[str] = None,
+    enabled: Optional[str] = None,
+    q: Optional[str] = None,
+    sort_by: Literal["category", "source", "source_name", "enabled", "name"] = "source",
+    sort_dir: Literal["asc", "desc"] = "asc",
+    offset: int = Query(0, ge=0),
+    limit: int = Query(25, ge=1, le=200),
+):
+    """
+    List tools with server-side search/filter/sort/pagination.
+
+    The paged list omits full parameter definitions and exposes
+    `parameters_count`; call `GET /api/tools/{tool_name}` for details.
+    """
+    started_at = time.perf_counter()
+    await ToolRegistry.init_async()
+
+    category_filter = _split_csv_filter(category)
+    source_filter = _split_csv_filter(source)
+    source_name_filter = _split_csv_filter(source_name)
+    enabled_filter = _split_csv_filter(enabled)
+    query = (q or "").strip().lower()
+
+    all_items = _get_tool_summary_items()
+
+    result = _filter_tool_items(
+        all_items,
+        category_filter=category_filter,
+        source_filter=source_filter,
+        source_name_filter=source_name_filter,
+        enabled_filter=enabled_filter,
+        query=query,
+    )
+    source_facet_items = _filter_tool_items(
+        all_items,
+        category_filter=category_filter,
+        source_filter=source_filter,
+        source_name_filter=source_name_filter,
+        enabled_filter=enabled_filter,
+        query=query,
+        include_source=False,
+    )
+    facets = ToolListFacets(
+        category=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_category=False,
+        )).category,
+        source=_build_tool_facets(source_facet_items).source,
+        source_groups=_build_source_group_counts(source_facet_items),
+        source_name=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_source_name=False,
+        )).source_name,
+        enabled=_build_tool_facets(_filter_tool_items(
+            all_items,
+            category_filter=category_filter,
+            source_filter=source_filter,
+            source_name_filter=source_name_filter,
+            enabled_filter=enabled_filter,
+            query=query,
+            include_enabled=False,
+        )).enabled,
+    )
+    result = _sort_tool_items(result, sort_by, sort_dir)
+    total = len(result)
+    items = [
+        _tool_index_item_to_response(item) if isinstance(item, ToolListIndexItem) else item
+        for item in result[offset:offset + limit]
+    ]
+
+    log_route_timing(log, "tools.list_page.complete", started_at=started_at, extra={
+        "count": len(items),
+        "total": total,
+        "category": category,
+        "source": source,
+        "q": q,
+        "offset": offset,
+        "limit": limit,
+    })
+    return ToolListPageResponse(
+        items=items,
+        total=total,
+        offset=offset,
+        limit=limit,
+        facets=facets,
+    )
 
 
 @router.get(
@@ -493,18 +859,38 @@ async def get_tool(tool_name: str):
     response_model=ToolInfoResponse,
     summary="Update tool settings",
 )
-async def update_tool(tool_name: str, request: ToolUpdateRequest):
+async def update_tool(
+    tool_name: str,
+    request: ToolUpdateRequest,
+    device_id: Annotated[
+        Optional[str],
+        Query(
+            description=(
+                "设备实例 UUID。提供时仅修改该设备的工具开关（per-device 覆盖），"
+                "不影响其他同版本设备；省略时修改全局 tool_settings（影响所有设备）。"
+            ),
+        ),
+    ] = None,
+    _admin: object = Depends(require_admin),
+):
     """
     Update tool settings (e.g., enable or disable).
 
-    The ``enabled`` flag is persisted to the user-level overlay in
-    ``flocks.json`` (``tool_settings.<tool_name>.enabled``) instead of
-    mutating the YAML plugin file.  This keeps project-level YAML files
-    (which may be tracked by git and overwritten on upgrade) clean and
-    treats the YAML's ``enabled:`` field as the factory default that the
-    overlay can selectively customise.
+    **Global mode** (``device_id`` omitted):
+    Persists to ``flocks.json`` → ``tool_settings.<tool_name>.enabled``.
+    Affects all device instances that share this tool.
 
-    Two behaviours of note:
+    **Per-device mode** (``device_id`` provided):
+    Persists to the SQLite ``device_tool_settings`` table (one row per
+    device_id × tool_name).  Only affects tool execution when ``device_id``
+    is explicitly targeted, allowing Device A and Device B (same plugin
+    version, different names) to carry independent disabled overrides.
+    ``enabled=true`` clears the per-device disable and follows the global
+    tool setting; if the global tool is disabled, it is enabled first. Rows
+    are removed automatically via ON DELETE CASCADE when the parent device row
+    is deleted.
+
+    Two behaviours of note (global mode only):
 
     * If ``request.enabled`` matches the registration-time default we
       *delete* the overlay entry instead of writing one — the tool is
@@ -515,7 +901,7 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
       ``info.enabled`` flag, mirroring the gate in
       :meth:`ToolRegistry._apply_tool_settings`.
     """
-    ToolRegistry.init()
+    await ToolRegistry.init_async()
 
     tool = ToolRegistry.get(tool_name)
     if not tool:
@@ -525,32 +911,40 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
         )
 
     desired = bool(request.enabled)
-    default = _get_default_enabled(tool.info)
-    # Service gate: only matters when the user is trying to enable.
-    # Disabling is always honoured.
-    service_ok = _service_allows_enable(tool.info)
-    new_enabled = desired and service_ok
 
-    if desired == default:
-        removed = ConfigWriter.delete_tool_setting(tool_name)
-        log.info("tool.updated.reset_to_default", {
-            "name": tool_name,
-            "enabled": new_enabled,
-            "default": default,
-            "removed_overlay": removed,
-        })
-    else:
-        ConfigWriter.set_tool_setting(tool_name, {"enabled": desired})
-        log.info("tool.updated", {
-            "name": tool_name,
-            "enabled": new_enabled,
-            "requested": desired,
-            "blocked_by_service": desired and not service_ok,
-            "native": tool.info.native,
-            "store": "overlay",
-        })
+    # --- Per-device mode ---
+    if device_id:
+        from flocks.tool.device.store import (
+            delete_device_tool_setting,
+            set_device_tool_enabled,
+        )
 
-    tool.info.enabled = new_enabled
+        if desired:
+            if not tool.info.enabled:
+                _set_global_tool_enabled(tool, True)
+            removed = await delete_device_tool_setting(device_id, tool_name)
+            log.info("tool.device.updated.reset_to_global", {
+                "name": tool_name,
+                "device_id": device_id,
+                "removed_override": removed,
+                "enabled_global": tool.info.enabled,
+            })
+        else:
+            await set_device_tool_enabled(device_id, tool_name, False)
+            log.info("tool.device.updated", {
+                "name": tool_name,
+                "device_id": device_id,
+                "enabled": False,
+            })
+        # The in-memory ToolInfo.enabled reflects global state. Per-device
+        # enabled=True is not a supported override; switch-on means clear the
+        # per-device disable and follow the global tool setting.
+        _invalidate_tool_summary_cache()
+        return _build_tool_response(tool.info)
+
+    # --- Global mode (original behaviour) ---
+    _set_global_tool_enabled(tool, desired)
+    _invalidate_tool_summary_cache()
     return _build_tool_response(tool.info)
 
 
@@ -559,7 +953,7 @@ async def update_tool(tool_name: str, request: ToolUpdateRequest):
     response_model=ToolInfoResponse,
     summary="Reset a tool to its YAML/registration default",
 )
-async def reset_tool_setting(tool_name: str):
+async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_admin)):
     """Remove the user setting for ``tool_name`` and restore the default.
 
     Restores the registration-time ``enabled`` value from the registry's
@@ -581,6 +975,7 @@ async def reset_tool_setting(tool_name: str):
     default = _get_default_enabled(tool.info)
     new_enabled = default and _service_allows_enable(tool.info)
     tool.info.enabled = new_enabled
+    _invalidate_tool_summary_cache()
 
     log.info("tool.setting.reset", {
         "name": tool_name,
@@ -746,9 +1141,11 @@ async def execute_batch(request: BatchExecuteRequest):
 
 class RefreshResponse(BaseModel):
     """Tool refresh response"""
-    status: str = Field(..., description="Operation status")
+    status: Literal["success", "partial", "error"] = Field(..., description="Operation status")
     tool_count: int = Field(..., description="Total registered tool count after refresh")
     message: str = Field("", description="Human-readable summary")
+    stages: Dict[str, Literal["success", "error"]] = Field(default_factory=dict)
+    errors: List[str] = Field(default_factory=list)
 
 
 @router.post(
@@ -756,45 +1153,60 @@ class RefreshResponse(BaseModel):
     response_model=RefreshResponse,
     summary="Refresh all plugin and dynamic tools",
 )
-async def refresh_tools():
+async def refresh_tools(_admin: object = Depends(require_admin)):
     """
     Reload all plugin tools (YAML + Python) and dynamically generated tools
     from disk without restarting the service.
 
     This is the batch counterpart to the single-tool ``/{name}/reload`` endpoint.
     """
+    started_at = time.perf_counter()
     ToolRegistry.init()
 
     errors: list[str] = []
+    stages: dict[str, Literal["success", "error"]] = {}
 
-    # 1. Reload generated tools (generated/)
-    try:
-        ToolRegistry.refresh_dynamic_tools()
-    except Exception as e:
-        log.error("tools.refresh.dynamic_error", {"error": str(e)})
-        errors.append(f"dynamic: {e}")
+    for stage, refresh in (
+        ("dynamic", ToolRegistry.refresh_dynamic_tools),
+        ("plugin", ToolRegistry.refresh_plugin_tools),
+    ):
+        try:
+            refresh()
+            stages[stage] = "success"
+        except ToolRefreshError as exc:
+            stages[stage] = "error"
+            stage_errors = [f"{stage}: {error}" for error in exc.errors]
+            errors.extend(stage_errors)
+            log.error(f"tools.refresh.{stage}_error", {"errors": exc.errors})
+        except Exception as exc:
+            stages[stage] = "error"
+            errors.append(f"{stage}: {exc}")
+            log.error(f"tools.refresh.{stage}_error", {"error": str(exc)})
 
-    # 2. Reload plugin tools (api/, python/) — unregisters stale entries first
-    try:
-        ToolRegistry.refresh_plugin_tools()
-    except Exception as e:
-        log.error("tools.refresh.plugin_error", {"error": str(e)})
-        errors.append(f"plugin: {e}")
-
+    _invalidate_tool_summary_cache()
     tool_count = len(ToolRegistry.all_tool_ids())
-    log.info("tools.refresh.done", {"tool_count": tool_count, "errors": len(errors)})
+    log_route_timing(log, "tools.refresh.done", started_at=started_at, extra={
+        "tool_count": tool_count,
+        "errors": len(errors),
+    })
 
-    if errors:
-        return RefreshResponse(
-            status="partial",
-            tool_count=tool_count,
-            message=f"Refreshed with {len(errors)} error(s): {'; '.join(errors)}",
-        )
+    failed_stages = sum(status == "error" for status in stages.values())
+    if failed_stages == 0:
+        outcome: Literal["success", "partial", "error"] = "success"
+        message = f"All tools refreshed successfully ({tool_count} tools registered)"
+    elif failed_stages == len(stages):
+        outcome = "error"
+        message = f"Tool refresh failed: {'; '.join(errors)}"
+    else:
+        outcome = "partial"
+        message = f"Tool refresh completed with errors: {'; '.join(errors)}"
 
     return RefreshResponse(
-        status="success",
+        status=outcome,
         tool_count=tool_count,
-        message=f"All tools refreshed successfully ({tool_count} tools registered)",
+        message=message,
+        stages=stages,
+        errors=errors,
     )
 
 
@@ -880,6 +1292,44 @@ async def test_tool(name: str, request: ToolTestRequest):
 
 
 # =============================================================================
+# Test Fixtures Route
+# =============================================================================
+
+
+class FixtureItemResponse(BaseModel):
+    """One predeclared test sample for a tool."""
+    label: str = Field(..., description="Default (English) sample name for the UI drop-down")
+    label_cn: Optional[str] = Field(None, description="Optional Chinese override; WebUI picks it when locale is zh-*")
+    params: Dict[str, Any] = Field(default_factory=dict, description="Call params, verbatim")
+    tags: List[str] = Field(default_factory=list, description="Semantic labels (smoke, ip, …)")
+    has_assertion: bool = Field(False, description="Whether the sample declares a pass/fail assertion")
+
+
+@router.get(
+    "/{name}/fixtures",
+    response_model=List[FixtureItemResponse],
+    summary="List declared test fixtures for a tool",
+)
+async def list_tool_fixtures(name: str) -> List[FixtureItemResponse]:
+    """Return predeclared test samples sourced from the tool's provider ``_test.yaml``.
+
+    Returns an empty list when no manifest exists or no fixtures are declared.
+    """
+    from flocks.tool.probe_loader import get_tool_fixtures_by_tool_name
+
+    return [
+        FixtureItemResponse(
+            label=f.label,
+            label_cn=f.label_cn,
+            params=f.params,
+            tags=list(f.tags),
+            has_assertion=bool(f.assertion),
+        )
+        for f in get_tool_fixtures_by_tool_name(name)
+    ]
+
+
+# =============================================================================
 # Plugin Tool CRUD Routes
 # =============================================================================
 
@@ -920,7 +1370,7 @@ class PluginToolListResponse(BaseModel):
     status_code=status.HTTP_201_CREATED,
     summary="Create a YAML plugin tool",
 )
-async def create_tool(request: CreateToolRequest):
+async def create_tool(request: CreateToolRequest, _admin: object = Depends(require_admin)):
     """
     Create a new tool via YAML plugin.
 
@@ -970,6 +1420,7 @@ async def create_tool(request: CreateToolRequest):
         ToolRegistry.register(tool)
         if tool.info.name not in ToolRegistry._plugin_tool_names:
             ToolRegistry._plugin_tool_names.append(tool.info.name)
+        _invalidate_tool_summary_cache()
     except Exception as e:
         log.error("tool.create.register_error", {"error": str(e), "name": request.name})
         raise HTTPException(
@@ -996,7 +1447,7 @@ async def create_tool(request: CreateToolRequest):
     response_model=ToolInfoResponse,
     summary="Update a YAML plugin tool",
 )
-async def update_plugin_tool(name: str, request: UpdateToolRequest):
+async def update_plugin_tool(name: str, request: UpdateToolRequest, _admin: object = Depends(require_admin)):
     """
     Update an existing YAML plugin tool.
 
@@ -1043,12 +1494,14 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest):
             if not tool.info.source:
                 tool.info.source = "plugin_yaml"
             ToolRegistry.register(tool)
+            _invalidate_tool_summary_cache()
             return _build_tool_response(tool.info)
     except Exception as e:
         log.error("tool.update.reload_error", {"error": str(e), "name": name})
 
     existing = ToolRegistry.get(name)
     if existing:
+        _invalidate_tool_summary_cache()
         return _build_tool_response(existing.info)
     raise HTTPException(status_code=500, detail="Tool updated but reload failed")
 
@@ -1057,7 +1510,7 @@ async def update_plugin_tool(name: str, request: UpdateToolRequest):
     "/{name}",
     summary="Delete a plugin tool",
 )
-async def delete_tool(name: str):
+async def delete_tool(name: str, _admin: object = Depends(require_admin)):
     """
     Delete a plugin tool.
 
@@ -1088,8 +1541,38 @@ async def delete_tool(name: str):
             detail=f"Plugin tool not found: {name}",
         )
 
-    # Refresh plugin tools so stale decorator-registered python tools are removed too.
-    ToolRegistry.refresh_plugin_tools()
+    # The file deletion is already committed at this point. Keep the Hub
+    # installation record consistent even when the in-memory refresh fails.
+    cleanup_errors: List[str] = []
+    try:
+        ToolRegistry.refresh_plugin_tools()
+    except Exception as e:
+        refresh_error = str(e)
+        cleanup_errors.append(f"registry refresh: {refresh_error}")
+        log.warning("tool.delete.refresh_failed", {
+            "error": refresh_error,
+            "name": name,
+        })
+    _invalidate_tool_summary_cache()
+
+    from flocks.hub import local as hub_local
+
+    try:
+        hub_local.remove_installed_record("tool", name)
+    except Exception as e:
+        hub_error = str(e)
+        cleanup_errors.append(f"Hub record cleanup: {hub_error}")
+        log.warning("tool.delete.hub_cleanup_failed", {
+            "error": hub_error,
+            "name": name,
+        })
+
+    if cleanup_errors:
+        return {
+            "status": "partial",
+            "message": f"Tool {name} deleted, but cleanup was incomplete",
+            "errors": cleanup_errors,
+        }
 
     return {"status": "success", "message": f"Tool {name} deleted"}
 
@@ -1099,7 +1582,7 @@ async def delete_tool(name: str):
     response_model=ToolInfoResponse,
     summary="Reload a YAML plugin tool",
 )
-async def reload_tool(name: str):
+async def reload_tool(name: str, _admin: object = Depends(require_admin)):
     """
     Hot-reload a single YAML plugin tool.
 
@@ -1123,6 +1606,7 @@ async def reload_tool(name: str):
         if not tool.info.source:
             tool.info.source = "plugin_yaml"
         ToolRegistry.register(tool)
+        _invalidate_tool_summary_cache()
         log.info("tool.reloaded", {"name": name})
         return _build_tool_response(tool.info)
     except Exception as e:

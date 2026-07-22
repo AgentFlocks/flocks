@@ -8,10 +8,19 @@ Tests various scenarios:
 4. Provider with config-based models (defers to config merge)
 """
 
-import pytest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
-from flocks.provider.sdk.openai_base import OpenAIBaseProvider, extract_reasoning_content
+
+import pytest
+
+import flocks.provider.sdk.openai_base as openai_base_module
+from flocks.provider.sdk.openai_base import (
+    OpenAIBaseProvider,
+    build_reasoning_metadata,
+    extract_reasoning_content,
+    extract_reasoning_content_with_source,
+    extract_reasoning_details,
+)
 from flocks.provider.provider import ModelInfo, ModelCapabilities, ProviderConfig
 
 
@@ -39,8 +48,23 @@ class MockProviderWithoutCatalog(OpenAIBaseProvider):
         super().__init__(provider_id="custom-provider", name="Custom Provider")
 
 
+class MockProviderPrefersCompletionTokens(MockProviderWithoutCatalog):
+    """Mock OpenAI-compatible provider that opts into newer token naming."""
+
+    PREFER_MAX_COMPLETION_TOKENS = True
+
+
 class TestOpenAIBaseProviderGetModels:
     """Test suite for get_models() method."""
+
+    def test_default_http_timeout_values(self):
+        """OpenAI-style providers share fail-fast read and long write timeouts."""
+        timeout = openai_base_module.DEFAULT_HTTP_TIMEOUT
+
+        assert timeout.connect == 30.0
+        assert timeout.read == 180.0
+        assert timeout.write == 1800.0
+        assert timeout.pool == 60.0
     
     def test_get_models_with_catalog_success(self):
         """Test get_models() returns configured models."""
@@ -352,7 +376,21 @@ class TestOpenAIBaseProviderConfiguration:
 
         provider._get_client()
 
-        mock_http_client.assert_called_once_with(verify=False, timeout=120.0)
+        # Granular timeout supports multimodal payloads; ``trust_env`` defaults
+        # to True so corporate egress proxies work out of the box.
+        # See ``OpenAIBaseProvider._get_client``.
+        assert mock_http_client.call_count == 1
+        kwargs = mock_http_client.call_args.kwargs
+        assert kwargs["verify"] is False
+        assert kwargs["trust_env"] is True
+        timeout_arg = kwargs["timeout"]
+        # Either an httpx.Timeout instance or compatible object: assert the
+        # connect/read/write components rather than equality so future tweaks
+        # to non-essential pool durations don't break the test.
+        assert getattr(timeout_arg, "connect", None) == 30.0
+        assert getattr(timeout_arg, "read", None) == 180.0
+        assert getattr(timeout_arg, "write", None) == 1800.0
+
         mock_async_openai.assert_called_once_with(
             api_key="test-api-key",
             base_url="https://gateway.internal/v1",
@@ -363,6 +401,13 @@ class TestOpenAIBaseProviderConfiguration:
 class TestOpenAIBaseProviderTemperature:
     def _build_provider_with_client(self):
         provider = MockProviderWithoutCatalog()
+        create = AsyncMock()
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = create
+        return provider, create
+
+    def _build_completion_preferring_provider_with_client(self):
+        provider = MockProviderPrefersCompletionTokens()
         create = AsyncMock()
         provider._client = MagicMock()
         provider._client.chat.completions.create = create
@@ -381,7 +426,7 @@ class TestOpenAIBaseProviderTemperature:
         return response
 
     @pytest.mark.asyncio
-    async def test_chat_omits_temperature_when_not_provided(self):
+    async def test_chat_uses_max_tokens_by_default_when_max_tokens_provided(self):
         provider, create = self._build_provider_with_client()
         create.return_value = self._mock_chat_response()
 
@@ -397,6 +442,24 @@ class TestOpenAIBaseProviderTemperature:
         assert "temperature" not in kwargs
         assert kwargs["model"] == "kimi-k2.5"
         assert kwargs["max_tokens"] == 20
+        assert "max_completion_tokens" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_prefers_max_completion_tokens_when_provider_opts_in(self):
+        provider, create = self._build_completion_preferring_provider_with_client()
+        create.return_value = self._mock_chat_response()
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_completion_tokens=20,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 20
+        assert "max_tokens" not in kwargs
 
     @pytest.mark.asyncio
     async def test_chat_passes_explicit_temperature(self):
@@ -414,12 +477,179 @@ class TestOpenAIBaseProviderTemperature:
         kwargs = create.await_args.kwargs
         assert kwargs["temperature"] == 1.0
 
+    @pytest.mark.asyncio
+    async def test_chat_accepts_direct_max_completion_tokens_kwarg(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_completion_tokens=33,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 33
+        assert "max_tokens" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_treats_explicit_max_completion_tokens_as_authoritative(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_tokens=20,
+            max_completion_tokens=33,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 33
+        assert "max_tokens" not in kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_falls_back_to_max_tokens_when_completion_variant_is_rejected(self):
+        provider, create = self._build_provider_with_client()
+        create.side_effect = [
+            ValueError("unsupported parameter: max_completion_tokens"),
+            self._mock_chat_response(),
+        ]
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "gpt-5.4",
+            [ChatMessage(role="user", content="hello")],
+            max_completion_tokens=20,
+        )
+
+        assert create.await_count == 2
+        assert create.await_args_list[0].kwargs["max_completion_tokens"] == 20
+        assert "max_tokens" not in create.await_args_list[0].kwargs
+        assert create.await_args_list[1].kwargs["max_tokens"] == 20
+        assert "max_completion_tokens" not in create.await_args_list[1].kwargs
+
+    @pytest.mark.asyncio
+    async def test_chat_does_not_fallback_for_completion_token_value_errors(self):
+        provider, create = self._build_provider_with_client()
+        create.side_effect = ValueError("max_completion_tokens must be <= 4096")
+
+        from flocks.provider.provider import ChatMessage
+
+        with pytest.raises(ValueError, match="max_completion_tokens must be <= 4096"):
+            await provider.chat(
+                "gpt-5.4",
+                [ChatMessage(role="user", content="hello")],
+                max_completion_tokens=200000,
+            )
+
+        assert create.await_count == 1
+
+    def test_summarise_messages_compacts_long_history(self):
+        summary = openai_base_module._summarise_messages(
+            [
+                {"role": "system", "content": "a" * 10},
+                {"role": "user", "content": "b" * 20},
+                {"role": "assistant", "content": "c" * 30},
+                {"role": "tool", "content": "d" * 40},
+                {"role": "assistant", "content": "e" * 50},
+                {"role": "user", "content": "f" * 60},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "hello"},
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "data:image/png;base64,abcd"},
+                        },
+                    ],
+                },
+                "skipped",
+            ]
+        )
+
+        assert summary["message_count"] == 8
+        assert summary["role_counts"] == {
+            "system": 1,
+            "user": 3,
+            "assistant": 2,
+            "tool": 1,
+        }
+        assert summary["multimodal_messages"] == 1
+        assert summary["block_type_counts"] == {"text": 1, "image_url": 1}
+        assert summary["skipped_types"] == {"str": 1}
+        assert len(summary["tail"]) == 6
+        assert summary["tail"][-1] == {
+            "role": "user",
+            "content_kind": "blocks",
+            "block_count": 2,
+            "block_types": {"text": 1, "image_url": 1},
+            "text_chars": 5,
+            "image_url_chars": 26,
+            "content_chars": 31,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_logs_compact_message_summary(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+        info = Mock()
+
+        from flocks.provider.provider import ChatMessage
+
+        with patch.object(openai_base_module, "log", Mock(info=info)):
+            await provider.chat(
+                "kimi-k2.5",
+                [
+                    ChatMessage(role="system", content="system prompt"),
+                    ChatMessage(role="user", content="hello"),
+                    ChatMessage(role="assistant", content="world"),
+                ],
+                max_tokens=20,
+            )
+
+        event, payload = info.call_args.args
+        assert event == "openai_base.chat.request"
+        assert "message_summary" in payload
+        assert "message_shapes" not in payload
+        assert payload["message_summary"]["message_count"] == 3
+        assert payload["message_summary"]["role_counts"] == {
+            "system": 1,
+            "user": 1,
+            "assistant": 1,
+        }
+
 
 class TestExtractReasoningContent:
     """Regression: some proxies send stream chunks with ``delta is None``."""
 
     def test_extract_reasoning_content_none_delta(self):
         assert extract_reasoning_content(None) is None
+
+    def test_extract_reasoning_content_with_source_uses_model_extra(self):
+        delta = SimpleNamespace(model_extra={"reasoning_content": "deep thought"})
+        reasoning, source = extract_reasoning_content_with_source(delta)
+        assert reasoning == "deep thought"
+        assert source == "reasoning_content"
+
+    def test_extract_reasoning_details_preserves_dicts(self):
+        details = [{"type": "reasoning.summary", "text": "step", "signature": "sig"}]
+        delta = SimpleNamespace(model_extra={"reasoning_details": details})
+        assert extract_reasoning_details(delta) == details
+
+    def test_build_reasoning_metadata_prefers_reasoning_details_field(self):
+        metadata = build_reasoning_metadata(
+            provider_id="openrouter",
+            model_id="minimax-m2.7",
+            reasoning_details=[{"type": "reasoning.summary", "text": "step"}],
+        )
+        assert metadata["reasoningField"] == "reasoning_details"
+        assert metadata["providerID"] == "openrouter"
 
 
 async def _stream_from_chunks(*chunks):
@@ -431,6 +661,14 @@ class TestOpenAIBaseProviderStreamingUsage:
     @staticmethod
     def _build_provider_with_stream():
         provider = MockProviderWithoutCatalog()
+        create = AsyncMock()
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = create
+        return provider, create
+
+    @staticmethod
+    def _build_completion_preferring_provider_with_stream():
+        provider = MockProviderPrefersCompletionTokens()
         create = AsyncMock()
         provider._client = MagicMock()
         provider._client.chat.completions.create = create
@@ -550,6 +788,91 @@ class TestOpenAIBaseProviderStreamingUsage:
         assert create.await_count == 2
         assert "stream_options" in create.await_args_list[0].kwargs
         assert "stream_options" not in create.await_args_list[1].kwargs
+        assert chunks[-1].usage == {
+            "prompt_tokens": 5,
+            "completion_tokens": 3,
+            "total_tokens": 8,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_falls_back_to_max_tokens_when_completion_variant_is_rejected(self):
+        provider, create = self._build_completion_preferring_provider_with_stream()
+
+        create.side_effect = [
+            ValueError("unsupported parameter: max_completion_tokens"),
+            _stream_from_chunks(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="hello", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+                )
+            ),
+        ]
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.4",
+                [ChatMessage(role="user", content="hello")],
+                max_tokens=20,
+            )
+        ]
+
+        assert create.await_count == 2
+        assert create.await_args_list[0].kwargs["max_completion_tokens"] == 20
+        assert "max_tokens" not in create.await_args_list[0].kwargs
+        assert create.await_args_list[1].kwargs["max_tokens"] == 20
+        assert "max_completion_tokens" not in create.await_args_list[1].kwargs
+        assert chunks[-1].usage == {
+            "prompt_tokens": 5,
+            "completion_tokens": 3,
+            "total_tokens": 8,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_chains_completion_and_usage_fallbacks(self):
+        provider, create = self._build_completion_preferring_provider_with_stream()
+
+        create.side_effect = [
+            ValueError("unsupported parameter: max_completion_tokens"),
+            ValueError("unsupported parameter: include_usage"),
+            _stream_from_chunks(
+                SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            delta=SimpleNamespace(content="hello", tool_calls=None),
+                            finish_reason="stop",
+                        )
+                    ],
+                    usage=SimpleNamespace(prompt_tokens=5, completion_tokens=3, total_tokens=8),
+                )
+            ),
+        ]
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.4",
+                [ChatMessage(role="user", content="hello")],
+                max_tokens=20,
+            )
+        ]
+
+        assert create.await_count == 3
+        assert create.await_args_list[0].kwargs["max_completion_tokens"] == 20
+        assert "stream_options" in create.await_args_list[0].kwargs
+        assert create.await_args_list[1].kwargs["max_tokens"] == 20
+        assert "stream_options" in create.await_args_list[1].kwargs
+        assert create.await_args_list[2].kwargs["max_tokens"] == 20
+        assert "stream_options" not in create.await_args_list[2].kwargs
         assert chunks[-1].usage == {
             "prompt_tokens": 5,
             "completion_tokens": 3,

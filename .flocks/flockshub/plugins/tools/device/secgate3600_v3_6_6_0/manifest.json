@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "secgate3600_v3_6_6_0",
+  "type": "device",
+  "name": "SecGate 3600",
+  "description": "Qi-Anxin SecGate 3600 firewall RESTful API integration for V3.6.6.0 family builds.",
+  "descriptionCn": "奇安信网神 SecGate 3600 防火墙 V3.6.6.0 系列 RESTful API 接入。",
+  "version": "3.6.6.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "category": "security",
+  "tags": [
+    "firewall",
+    "device"
+  ],
+  "useCases": [
+    "integration"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "device-integration",
+    "rest-api"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/tools/device/secgate3600_v3_6_6_0"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": true,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "_provider.yaml",
+    "secgate3600.handler.py",
+    "secgate3600_api_catalog.json",
+    "secgate3600_api_readonly.yaml",
+    "secgate3600_api_mutation.yaml"
+  ],
+  "checksums": {}
+}

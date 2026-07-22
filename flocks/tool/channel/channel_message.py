@@ -1,8 +1,9 @@
 """
-channel_message tool — sends a message to the IM channel bound to a given session.
+channel_message tool — sends a message to the messaging channel bound to a given session.
 
 Looks up the SessionBinding for the given session_id to automatically resolve
-the target channel (WeCom / Feishu / DingTalk) and chat_id, so the caller
+the target channel (WeCom / Weixin / Feishu / DingTalk / Telegram / WhatsApp / Email)
+and chat_id, so the caller
 does not need to specify them manually.
 
 The optional channel_type parameter selects a specific channel when a session
@@ -22,8 +23,12 @@ from flocks.tool.registry import (
 
 _CHANNEL_ALIASES: dict[str, list[str]] = {
     "wecom": ["wecom", "企微", "企业微信", "wechat_work", "wxwork"],
+    "weixin": ["weixin", "微信", "wechat", "wx"],
     "feishu": ["feishu", "飞书", "lark"],
     "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
+    "telegram": ["telegram", "tg", "tele"],
+    "whatsapp": ["whatsapp", "wa"],
+    "email": ["email", "mail", "邮件", "imap", "smtp"],
 }
 
 
@@ -38,12 +43,31 @@ def _normalize_channel_type(channel_type: str | None) -> str | None:
     return lower
 
 
+def _get_api_token() -> str | None:
+    """Read the server API token from the secret manager (non-async, best-effort).
+
+    Reuses ``API_TOKEN_SECRET_ID`` from ``flocks.server.auth`` so that the
+    secret id stays in lockstep with what the server-side auth middleware
+    expects; if those drift apart the request will silently start failing
+    with 401.
+    """
+    try:
+        from flocks.security import get_secret_manager
+        from flocks.server.auth import API_TOKEN_SECRET_ID
+        token = get_secret_manager().get(API_TOKEN_SECRET_ID)
+        return token.strip() if token and token.strip() else None
+    except Exception:
+        return None
+
+
 async def _http_session_send(
     port: int,
     session_id: str,
     text: str,
     channel_type: str | None = None,
     media_url: str | None = None,
+    account_id: str | None = None,
+    chat_id: str | None = None,
 ) -> ToolResult | None:
     """Send a message via the running flocks server's /api/channel/session-send endpoint,
     reusing the already-established WebSocket connection.
@@ -59,23 +83,42 @@ async def _http_session_send(
             payload["channel_type"] = channel_type
         if media_url:
             payload["media_url"] = media_url
+        if account_id:
+            payload["account_id"] = account_id
+        if chat_id:
+            payload["chat_id"] = chat_id
+
+        headers: dict[str, str] = {}
+        api_token = _get_api_token()
+        if api_token:
+            headers["Authorization"] = f"Bearer {api_token}"
 
         async with httpx.AsyncClient() as client:
             resp = await client.post(
                 f"http://localhost:{port}/api/channel/session-send",
                 json=payload,
+                headers=headers,
                 timeout=10.0,
             )
             body = resp.json()
             if resp.status_code == 200:
+                resolved_session_id = body.get("session_id") or session_id
                 return ToolResult(
                     success=True,
                     output=(
-                        f"Message sent to session '{session_id}' "
+                        f"Message sent to session '{resolved_session_id}' "
                         f"via channels {body.get('channels', [])}, "
                         f"ids: {body.get('message_ids', [])}"
                     ),
                 )
+            # 401 + we had no token to present: either the secret is unset
+            # or this process can't read it. Either way, the in-process
+            # path bypasses HTTP auth and can still deliver the message,
+            # so we fall back instead of surfacing an error.
+            # (If we DID send a token and it was rejected, fall through
+            # and report the server's detail so misconfiguration is visible.)
+            if resp.status_code == 401 and not api_token:
+                return None
             return ToolResult(
                 success=False,
                 error=f"Send failed (HTTP {resp.status_code}): {body.get('detail', body)}",
@@ -91,7 +134,9 @@ async def _http_session_send(
 @ToolRegistry.register_function(
     name="channel_message",
     description=(
-        "Send a message to the IM channel (WeCom / Feishu / DingTalk) bound to a session. "
+        "Send a message to the messaging channel bound to a session. "
+        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk, "
+        "Telegram=telegram, WhatsApp=whatsapp, Email/邮件=email. "
         "Resolves the target channel and chat automatically from session_id. "
         "Use channel_type to target a specific channel when the session has multiple bindings."
     ),
@@ -113,9 +158,24 @@ async def _http_session_send(
             name="channel_type",
             type=ParameterType.STRING,
             required=False,
-            enum=["wecom", "feishu", "dingtalk", "企微", "飞书", "钉钉"],
+            enum=[
+                "wecom",
+                "weixin",
+                "feishu",
+                "dingtalk",
+                "telegram",
+                "whatsapp",
+                "email",
+                "企微",
+                "企业微信",
+                "微信",
+                "飞书",
+                "钉钉",
+                "邮件",
+            ],
             description=(
-                "Target channel: wecom, feishu, or dingtalk. "
+                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, dingtalk=钉钉, "
+                "telegram=Telegram, whatsapp=WhatsApp, or email=邮件. "
                 "Chinese aliases are accepted. "
                 "If omitted and the session has only one binding, that channel is used automatically. "
                 "If omitted and the session has multiple bindings, the message is sent to all of them."
@@ -127,12 +187,26 @@ async def _http_session_send(
             required=False,
             description="Media URL or local file path (optional).",
         ),
+        ToolParameter(
+            name="account_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
+        ToolParameter(
+            name="chat_id",
+            type=ParameterType.STRING,
+            required=False,
+            description="Optional exact binding filter. Usually supplied by im_send_message after target resolution.",
+        ),
     ],
 )
 async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     session_id: str = kwargs["session_id"]
     message: str = kwargs["message"]
     media: str | None = kwargs.get("media")
+    account_id: str | None = kwargs.get("account_id")
+    chat_id: str | None = kwargs.get("chat_id")
     raw_channel_type: str | None = kwargs.get("channel_type")
     channel_type: str | None = _normalize_channel_type(raw_channel_type)
 
@@ -144,7 +218,15 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     except Exception:
         port = 8000
 
-    result = await _http_session_send(port, session_id, message, channel_type, media)
+    result = await _http_session_send(
+        port,
+        session_id,
+        message,
+        channel_type,
+        media,
+        account_id,
+        chat_id,
+    )
     if result is not None:
         return result
 
@@ -156,13 +238,26 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     svc = SessionBindingService()
     all_bindings = await svc.list_bindings()
     matched = [b for b in all_bindings if b.session_id == session_id]
+    resolved_session_id = session_id
+
+    if not matched and channel_type:
+        latest = await svc.latest_active_user_binding(
+            channel_id=channel_type,
+            account_id=account_id,
+            chat_id=chat_id,
+        )
+        if latest:
+            matched = [latest]
+            resolved_session_id = latest.session_id
 
     if not matched:
         return ToolResult(
             success=False,
             error=(
                 f"No channel binding found for session_id='{session_id}'. "
-                "Make sure the session was initiated via an IM channel."
+                "Resolve the current IM target again with "
+                "im_send_message(resolve_only=true), or ask the user to confirm "
+                "the target IM session."
             ),
         )
 
@@ -181,6 +276,19 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     else:
         targets = matched
 
+    if account_id:
+        targets = [b for b in targets if b.account_id == account_id]
+    if chat_id:
+        targets = [b for b in targets if b.chat_id == chat_id]
+    if (account_id or chat_id) and not targets:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Session '{session_id}' has no binding matching "
+                f"account_id='{account_id}' chat_id='{chat_id}'."
+            ),
+        )
+
     all_results = []
     errors = []
 
@@ -192,7 +300,7 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
             text=message,
             media_url=media,
         )
-        results = await OutboundDelivery.deliver(out_ctx, session_id=session_id)
+        results = await OutboundDelivery.deliver(out_ctx, session_id=resolved_session_id)
         all_results.extend(results)
 
         failed = [r for r in results if not r.success]
@@ -210,7 +318,7 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     return ToolResult(
         success=True,
         output=(
-            f"Message sent to session '{session_id}' "
+            f"Message sent to session '{resolved_session_id}' "
             f"via channels {channels_sent}, "
             f"{len(all_results)} chunk(s), ids: {msg_ids}"
         ),

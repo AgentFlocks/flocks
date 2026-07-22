@@ -17,6 +17,7 @@ import ast
 import importlib.util
 import inspect
 import re
+import sys
 import urllib.parse
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
@@ -51,7 +52,12 @@ TOOL_TYPE_MCP = "mcp"
 """MCP server configurations (type: local/remote). Managed by MCP subsystem."""
 
 TOOL_TYPE_API = "api"
-"""YAML-based HTTP/script tools (handler.type: http|script)."""
+"""YAML-based HTTP/script tools for cloud/intelligence APIs (handler.type: http|script)."""
+
+TOOL_TYPE_DEVICE = "device"
+"""YAML-based HTTP/script tools for on-premises security device APIs.
+Tools here behave identically to TOOL_TYPE_API at runtime but are
+discoverable as security-device integrations (source='device')."""
 
 TOOL_TYPE_PYTHON = "python"
 """Python code tools using @ToolRegistry.register_function."""
@@ -59,7 +65,12 @@ TOOL_TYPE_PYTHON = "python"
 TOOL_TYPE_GENERATED = "generated"
 """Auto-generated tools from API specs. Supports hot-reload."""
 
-ALL_TOOL_TYPES = (TOOL_TYPE_MCP, TOOL_TYPE_API, TOOL_TYPE_PYTHON, TOOL_TYPE_GENERATED)
+ALL_TOOL_TYPES = (TOOL_TYPE_MCP, TOOL_TYPE_API, TOOL_TYPE_DEVICE, TOOL_TYPE_PYTHON, TOOL_TYPE_GENERATED)
+
+# Source values that represent pluggable API/device service tools.
+# Used by registry helpers (get_api_service_ids, _bootstrap_user_api_services, …)
+# and server routes to find provider-linked tools regardless of subdirectory.
+API_LIKE_SOURCES = frozenset({"api", "device"})
 
 
 # ---------------------------------------------------------------------------
@@ -79,6 +90,30 @@ def _load_provider_config(yaml_path: Path) -> Optional[Dict[str, Any]]:
             "path": str(provider_file), "error": str(e),
         })
         return None
+
+
+def extract_provider_version(provider_cfg: Optional[Dict[str, Any]]) -> Optional[str]:
+    """Extract a provider/service version string from a ``_provider.yaml`` dict.
+
+    Lookup order (first non-null wins):
+    1. top-level ``version``
+    2. ``defaults.product_version``
+    3. ``defaults.version``
+
+    Always coerces the result to ``str`` so YAML-decoded floats like ``9.2``
+    (which would otherwise round-trip lossy) are stable.
+    Returns ``None`` when no version is declared anywhere.
+    """
+    if not isinstance(provider_cfg, dict):
+        return None
+    raw = provider_cfg.get("version")
+    if raw is None:
+        defaults = provider_cfg.get("defaults") or {}
+        if isinstance(defaults, dict):
+            raw = defaults.get("product_version") or defaults.get("version")
+    if raw is None:
+        return None
+    return str(raw)
 
 
 def _merge_provider_defaults(raw: dict, provider: Optional[Dict[str, Any]]) -> dict:
@@ -274,6 +309,33 @@ def _build_handler(raw_handler: dict, yaml_path: Path) -> ToolHandler:
         raise ValueError(f"Unknown handler type: {handler_type}")
 
 
+def _build_tcp_connector(verify_ssl: bool) -> "Any":
+    """Create a per-request aiohttp TCPConnector that tears down sockets promptly.
+
+    Declarative HTTP tools (skyeye / tdp / onesec / qingteng / threatbook 等) build a
+    fresh ``ClientSession`` + connector for every call, so connection pooling brings no
+    benefit. Leaving keep-alive enabled lets the remote (often a self-signed HTTPS
+    appliance) send FIN while our socket lingers in ``CLOSE_WAIT``; under rapid back-to-back
+    tool calls — e.g. ``run_workflow`` / ``run_workflow_node`` driving dozens of nodes —
+    these half-closed sockets accumulate (60+ observed) and eventually starve the event loop.
+
+    Mitigations:
+    - ``force_close=True``: close the underlying connection right after each request
+      instead of returning it to the pool, so no idle keep-alive socket can rot into
+      ``CLOSE_WAIT``.
+    - ``enable_cleanup_closed=True``: on CPython < 3.12.7 the asyncio SSL transport leak
+      means TLS sockets are not fully torn down; this aborts them after a short grace
+      period. The flag was made a no-op (with a DeprecationWarning) once the CPython bug
+      was fixed, so we only pass it on the affected interpreters.
+    """
+    import aiohttp
+
+    kwargs: Dict[str, Any] = {"ssl": verify_ssl, "force_close": True}
+    if sys.version_info < (3, 12, 7):
+        kwargs["enable_cleanup_closed"] = True
+    return aiohttp.TCPConnector(**kwargs)
+
+
 def _build_http_handler(cfg: dict) -> ToolHandler:
     """Build an async HTTP request handler from declarative config."""
     method = cfg.get("method", "GET").upper()
@@ -313,9 +375,24 @@ def _build_http_handler(cfg: dict) -> ToolHandler:
             })
             headers.setdefault("Content-Type", "application/json")
 
+        # Resolve the per-device SSL verification preference so it actually
+        # propagates to the HTTP request. When a `device_id` kwarg was
+        # supplied to this tool, ToolRegistry has already activated a
+        # credential override; we read the toggle from that ContextVar.
+        # Falls back to ``True`` (validate) for non-device tool calls.
+        verify_ssl: bool = True
+        try:
+            from flocks.tool.credential_context import get_verify_ssl_override
+            override = get_verify_ssl_override()
+            if override is not None:
+                verify_ssl = override
+        except Exception:
+            pass
+
         try:
             client_timeout = aiohttp.ClientTimeout(total=timeout)
-            async with aiohttp.ClientSession(timeout=client_timeout) as session:
+            connector = _build_tcp_connector(verify_ssl)
+            async with aiohttp.ClientSession(timeout=client_timeout, connector=connector) as session:
                 req_kwargs: Dict[str, Any] = {"headers": headers}
                 if query_params:
                     req_kwargs["params"] = query_params
@@ -370,10 +447,14 @@ def _build_script_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     user_plugins_root = DEFAULT_PLUGIN_ROOT.resolve()
     project_plugins_root = (Path.cwd() / ".flocks" / "plugins").resolve()
     script_str = str(script_path)
-    if not script_str.startswith(str(user_plugins_root)) and not script_str.startswith(str(project_plugins_root)):
+    allowed_prefixes = (
+        str(user_plugins_root),
+        str(project_plugins_root),
+    )
+    if not any(script_str.startswith(prefix) for prefix in allowed_prefixes):
         raise ValueError(
             f"Script path {script_path} is outside the allowed plugins directories. "
-            f"For security, scripts must be under {user_plugins_root} or {project_plugins_root}."
+            f"For security, scripts must be under one of: {', '.join(allowed_prefixes)}."
         )
 
     if not script_path.is_file():
@@ -476,29 +557,14 @@ def _build_execution_handler(cfg: dict, yaml_path: Path) -> ToolHandler:
     if not code or not code.strip():
         raise ValueError(f"Empty execution code in {yaml_path}")
 
-    code_body = code.rstrip()
-    wrapper_lines = ["async def _tool_exec(**_kw_):", "    import asyncio"]
-    for line in code_body.splitlines():
-        wrapper_lines.append(f"    {line}")
-    wrapper_source = "\n".join(wrapper_lines)
-
-    compiled = compile(wrapper_source, str(yaml_path), "exec")
-
     async def handler(ctx: ToolContext, **kwargs: Any) -> ToolResult:
-        ns: Dict[str, Any] = {}
-        exec(compiled, ns)
-        _tool_exec = ns["_tool_exec"]
-        try:
-            result = await _tool_exec(**kwargs)
-            if isinstance(result, ToolResult):
-                return result
-            if isinstance(result, dict):
-                success = result.pop("success", True)
-                error = result.pop("error", None)
-                return ToolResult(success=success, output=result, error=error)
-            return ToolResult(success=True, output=result)
-        except Exception as e:
-            return ToolResult(success=False, error=str(e))
+        return ToolResult(
+            success=False,
+            error=(
+                "Inline YAML execution is disabled for safety. "
+                "Use handler.type=script for trusted Python tool handlers."
+            ),
+        )
 
     return handler
 
@@ -540,9 +606,22 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
     provider_cfg = _load_provider_config(yaml_path)
     raw = _merge_provider_defaults(raw, provider_cfg)
 
-    provider_name = raw.get("provider")
-    if not provider_name and provider_cfg:
-        provider_name = provider_cfg.get("name")
+    service_id = raw.get("provider")
+    if not service_id and provider_cfg:
+        service_id = provider_cfg.get("name")
+
+    provider_version = extract_provider_version(provider_cfg)
+
+    # ``info.provider`` is the lookup key in ``flocks.json`` ``api_services``.
+    # When the plugin declares a version, promote it to a storage key so
+    # multiple versions of the same product can keep credentials side-by-side
+    # (see :mod:`flocks.config.api_versioning`). Without a version
+    # the storage key collapses back to ``service_id`` for full back-compat.
+    if service_id and provider_version:
+        from flocks.config.api_versioning import derive_storage_key
+        storage_key: Optional[str] = derive_storage_key(service_id, provider_version)
+    else:
+        storage_key = service_id
 
     cat_str = raw.get("category", "custom")
     try:
@@ -568,27 +647,41 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
             requires_confirm = True
 
     tool_type = _infer_tool_type(yaml_path)
-    source = "api" if tool_type == TOOL_TYPE_API else None
+    if tool_type == TOOL_TYPE_API:
+        source: Optional[str] = "api"
+    elif tool_type == TOOL_TYPE_DEVICE:
+        source = "device"
+    else:
+        source = None
+
+    vendor: Optional[str] = provider_cfg.get("vendor") if provider_cfg else None
 
     info = ToolInfo(
         name=name,
         description=raw.get("description", ""),
+        description_cn=raw.get("description_cn", "") or None,
         category=category,
         parameters=parameters,
         enabled=raw.get("enabled", True),
         requires_confirmation=requires_confirm,
-        provider=provider_name,
+        provider=storage_key,
+        provider_version=provider_version,
         source=source,
+        vendor=vendor,
     )
 
     tool = Tool(info=info, handler=handler)
     tool._yaml_path = yaml_path  # type: ignore[attr-defined]
-    tool._provider = provider_name  # type: ignore[attr-defined]
+    tool._provider = storage_key  # type: ignore[attr-defined]
+    tool._service_id = service_id  # type: ignore[attr-defined]
+    tool._provider_version = provider_version  # type: ignore[attr-defined]
     tool._source = source or "yaml_plugin"  # type: ignore[attr-defined]
 
-    log.info("tool.yaml.loaded", {
+    log.debug("tool.yaml.loaded", {
         "name": name,
-        "provider": provider_name,
+        "service_id": service_id,
+        "storage_key": storage_key,
+        "provider_version": provider_version,
         "handler_type": handler_type,
         "path": str(yaml_path),
     })
@@ -601,8 +694,18 @@ def yaml_to_tool(raw: dict, yaml_path: Path) -> Tool:
 # ---------------------------------------------------------------------------
 
 def _yaml_tool_search_roots() -> List[Path]:
-    """Return YAML tool roots for both user-level and project-level plugins."""
-    roots = [_TOOLS_SUBDIR, Path.cwd() / ".flocks" / "plugins" / "tools"]
+    """Return YAML tool roots: user-level then project-level.
+
+    Bundled flockshub directories are intentionally NOT included — bundled
+    tool plugins must be installed via the Hub flow (which copies them
+    into ``<plugins>/tools/<type>/<id>/``) before this CRUD-oriented
+    helper is expected to find them. This keeps "installed" the single
+    source of truth for editing/listing.
+    """
+    roots = [
+        _TOOLS_SUBDIR,
+        Path.cwd() / ".flocks" / "plugins" / "tools",
+    ]
     result: List[Path] = []
     seen: set[str] = set()
     for root in roots:
@@ -805,8 +908,16 @@ def delete_yaml_tool(name: str) -> bool:
 
 
 def _python_tool_dirs() -> List[Path]:
-    """Return all plugin python tool directories to search."""
-    dirs = [_TOOLS_SUBDIR / TOOL_TYPE_PYTHON, Path.cwd() / ".flocks" / "plugins" / "tools" / TOOL_TYPE_PYTHON]
+    """Return user- and project-level python tool directories.
+
+    Bundled flockshub directories are intentionally excluded; python
+    tools must be installed via the Hub flow before being picked up
+    by the discovery layer.
+    """
+    dirs = [
+        _TOOLS_SUBDIR / TOOL_TYPE_PYTHON,
+        Path.cwd() / ".flocks" / "plugins" / "tools" / TOOL_TYPE_PYTHON,
+    ]
     result: List[Path] = []
     seen: set[str] = set()
     for directory in dirs:
@@ -829,6 +940,29 @@ def _iter_python_tool_files() -> List[Path]:
                 continue
             files.append(path)
     return files
+
+
+def discover_python_tool_sources() -> Dict[str, Path]:
+    """Map registered python tool names to the plugin file that defines them."""
+    tool_sources: Dict[str, Path] = {}
+    for path in _iter_python_tool_files():
+        try:
+            source = path.read_text(encoding="utf-8")
+            module = ast.parse(source)
+        except Exception as e:
+            log.warn("tool.python.parse_failed", {"path": str(path), "error": str(e)})
+            continue
+
+        for node in ast.walk(module):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            for decorator in node.decorator_list:
+                if not isinstance(decorator, ast.Call):
+                    continue
+                registered_name = _register_function_name(decorator)
+                if registered_name and registered_name not in tool_sources:
+                    tool_sources[registered_name] = path
+    return tool_sources
 
 
 def _register_function_name(call: ast.Call) -> Optional[str]:
@@ -949,7 +1083,7 @@ def list_yaml_tools() -> List[Dict[str, Any]]:
             ):
                 _collect(item, depth + 1, max_depth)
 
-    search_roots = [_TOOLS_SUBDIR, Path.cwd() / ".flocks" / "plugins" / "tools"]
+    search_roots = _yaml_tool_search_roots()
     for root in search_roots:
         _collect(root)
 

@@ -1,4 +1,5 @@
 name: oracle
+name_cn: 架构顾问智能体
 description: >-
   Read-only consultation agent. Reasoning specialist for debugging
   hard problems and high-difficulty architecture design.
@@ -12,19 +13,11 @@ tools:
   - bash
   - grep
   - glob
-  - list
   - webfetch
   - websearch
-  - codesearch
-  - lsp_diagnostics
-  - lsp_find_references
-  - lsp_hover
-  - lsp_goto_definition
-  - lsp_completion
-  - lsp_rename
+  - lsp
   - question
   - memory_search
-  - ast_grep_search
 prompt_metadata:
   category: advisor
   cost: EXPENSIVE

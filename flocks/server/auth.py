@@ -10,6 +10,7 @@ import re
 from typing import Optional
 
 from fastapi import HTTPException, Request, Response, status
+from starlette.requests import HTTPConnection
 
 from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.auth.service import AuthService
@@ -17,16 +18,16 @@ from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
+API_TOKEN_SERVICE_USER_ID = "api-token-service"
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({
     "/",
     "/health",
-    "/docs",
-    "/redoc",
-    "/openapi.json",
     "/favicon.ico",
     "/api/health",
+    "/api/config/ui-display",
+    "/api/config/ui-favicon",
     "/api/auth/login",
     "/api/auth/bootstrap-status",
     "/api/auth/bootstrap-admin",
@@ -64,8 +65,14 @@ PUBLIC_PREFIXES = (
 # downstream handler is fully responsible for its own authentication
 # (signature checks, IP allowlists, replay protection, …).  Do NOT add
 # entries that touch user data without a per-request integrity check.
+#
+# Workflow webhook paths also need to be reachable by external systems that
+# cannot present a browser session.  They are safe to exempt here only because
+# _authorize_webhook_trigger() fails closed unless the trigger config supplies
+# api_key or hmac authentication.  See: https://github.com/AgentFlocks/flocks/issues/454
 PUBLIC_PATH_REGEXES = (
     re.compile(r"^/(?:api/)?channel/[^/]+/webhook/?$"),
+    re.compile(r"^/webhook/workflows/[^/]+/[^/]+/?$"),
 )
 
 
@@ -149,42 +156,44 @@ def password_reset_exempt(path: str) -> bool:
     return path in _PASSWORD_RESET_ALLOWED
 
 
-def _is_browser_like_request(request: Request) -> bool:
+def _has_session_cookie(request: HTTPConnection) -> bool:
+    session_id = request.cookies.get(SESSION_COOKIE_NAME)
+    return bool(session_id and session_id.strip())
+
+
+def _is_browser_like_request(request: HTTPConnection) -> bool:
     """
     Identify browser-originated traffic (must keep strict login checks).
 
     Modern browsers always send `sec-fetch-*` fetch-metadata headers on
     same-origin and cross-origin fetches. We rely on those, plus `origin`
     (covers older Chromium/Safari on some same-origin cases) and `referer`.
-    This is strict: non-browser clients (curl/SDKs/TUI) don't send any of these.
+    Some browser flows seen behind reverse proxies (for example EventSource)
+    can lose a subset of these headers, so we also accept an existing session
+    cookie or a typical browser UA paired with HTML/SSE Accept headers.
     """
     headers = request.headers
     if headers.get("sec-fetch-site") or headers.get("sec-fetch-mode") or headers.get("sec-fetch-dest"):
         return True
     if headers.get("origin"):
         return True
+    if headers.get("referer"):
+        return True
+    if _has_session_cookie(request):
+        return True
+
+    user_agent = (headers.get("user-agent") or "").lower()
+    accept = (headers.get("accept") or "").lower()
+    if "mozilla/" in user_agent and (
+        "text/html" in accept
+        or "application/xhtml+xml" in accept
+        or "text/event-stream" in accept
+    ):
+        return True
     return False
 
 
-def _loopback_hosts() -> frozenset[str]:
-    hosts = {"127.0.0.1", "::1", "localhost"}
-    # FastAPI TestClient reports client host as "testclient"; only trust it in tests.
-    if os.getenv("PYTEST_CURRENT_TEST"):
-        hosts.add("testclient")
-    return frozenset(hosts)
-
-
-def _is_loopback_direct_request(request: Request) -> bool:
-    """
-    Trust only local direct requests (no proxy forwarding headers).
-    """
-    if request.headers.get("x-forwarded-for"):
-        return False
-    client_host = request.client.host if request.client else None
-    return client_host in _loopback_hosts()
-
-
-def _read_api_token_from_request(request: Request) -> Optional[str]:
+def _read_api_token_from_request(request: HTTPConnection) -> Optional[str]:
     """
     Read API token from Authorization Bearer or x-flocks-api-token header.
     """
@@ -220,26 +229,15 @@ def _is_valid_api_token(token: Optional[str]) -> bool:
 def _build_api_token_user() -> AuthUser:
     """Synthetic service identity for API token clients."""
     return AuthUser(
-        id="api-token-service",
-        username="api-token-service",
+        id=API_TOKEN_SERVICE_USER_ID,
+        username=API_TOKEN_SERVICE_USER_ID,
         role="admin",
         status="active",
         must_reset_password=False,
     )
 
 
-def _build_local_service_user() -> AuthUser:
-    """Synthetic local service identity for loopback non-browser clients."""
-    return AuthUser(
-        id="local-service",
-        username="local-service",
-        role="admin",
-        status="active",
-        must_reset_password=False,
-    )
-
-
-async def apply_auth_for_request(request: Request):
+async def apply_auth_for_request(request: HTTPConnection):
     """
     Resolve user from cookie and bind context var.
     Returns (response_if_blocked, token, user).
@@ -251,7 +249,34 @@ async def apply_auth_for_request(request: Request):
         token = set_current_auth_user(None)
         return None, token, None
 
-    # Non-browser clients: local loopback can run without token; remote requires API token.
+    if _has_session_cookie(request):
+        bootstrapped = await AuthService.has_users()
+        if not bootstrapped:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="系统尚未初始化管理员账号，请先完成初始化",
+            )
+
+        session_id = request.cookies.get(SESSION_COOKIE_NAME)
+        if not session_id:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="请先登录")
+
+        user = await AuthService.get_user_by_session_id(session_id)
+        if not user:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
+
+        auth_user = user.to_auth_user()
+        request.state.auth_user = auth_user
+        token = set_current_auth_user(auth_user)
+        if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="当前账号必须先修改密码后才能继续使用",
+            )
+        return None, token, auth_user
+
+    # Non-browser clients must authenticate with an API token because
+    # localhost is not a reliable auth boundary.
     if not _is_browser_like_request(request):
         provided = _read_api_token_from_request(request)
         if provided:
@@ -265,21 +290,15 @@ async def apply_auth_for_request(request: Request):
             token = set_current_auth_user(token_user)
             return None, token, token_user
 
-        if _is_loopback_direct_request(request):
-            local_user = _build_local_service_user()
-            request.state.auth_user = local_user
-            token = set_current_auth_user(local_user)
-            return None, token, local_user
-
         expected = _get_expected_api_token()
         if not expected:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=f"远程非浏览器请求需要 API Token，请先在 .secret.json 中配置 {API_TOKEN_SECRET_ID}",
+                detail=f"非浏览器请求需要 API Token，请先在 .secret.json 中配置 {API_TOKEN_SECRET_ID}",
             )
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="远程非浏览器请求鉴权失败，请在 Authorization 中携带 Bearer API Token",
+            detail="非浏览器请求鉴权失败，请在 Authorization 中携带 Bearer API Token",
         )
 
     bootstrapped = await AuthService.has_users()

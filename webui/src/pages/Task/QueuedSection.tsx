@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   ListTodo, Play, RotateCcw, XCircle, Trash2,
@@ -6,7 +6,6 @@ import {
 } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
-import SessionChat from '@/components/common/SessionChat';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
 import { useTaskExecutions } from '@/hooks/useTasks';
@@ -14,6 +13,17 @@ import { taskAPI, TaskExecution, TaskListParams } from '@/api/task';
 import { copyText } from '@/utils/clipboard';
 import { StatusBadge, PriorityBadge, SourceBadge, ModeBadge, ActionButton } from './components';
 import { formatTime, formatDuration, PAGE_SIZE } from './helpers';
+
+const DETAIL_POLL_INTERVAL_MS = 30000;
+const LazySessionChat = lazy(() => import('@/components/common/SessionChat'));
+
+function SessionChatFallback() {
+  return (
+    <div className="flex flex-1 min-h-0 items-center justify-center text-gray-400">
+      <LoadingSpinner />
+    </div>
+  );
+}
 
 export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: () => void }) {
   const { t } = useTranslation('task');
@@ -35,28 +45,33 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
   const listParams = { ...currentFilter, offset: page * PAGE_SIZE, limit: PAGE_SIZE };
 
   const { tasks, total, loading, error, refetch } = useTaskExecutions(listParams, { pollInterval: 5000 });
+  const effectiveTasks = useMemo(() => {
+    if (!detailTask) return tasks;
+    return tasks.map((task) => (task.id === detailTask.id ? detailTask : task));
+  }, [tasks, detailTask]);
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
   const refresh = useCallback(() => { refetch(); onRefreshGlobal(); }, [refetch, onRefreshGlobal]);
-  const visibleSelectedIds = tasks
+  const visibleSelectedIds = effectiveTasks
     .filter(task => selectedTasks.has(task.id))
     .map(task => task.id);
   const hasVisibleSelection = visibleSelectedIds.length > 0;
-  const allVisibleSelected = tasks.length > 0 && tasks.every(task => selectedTasks.has(task.id));
+  const allVisibleSelected = effectiveTasks.length > 0 && effectiveTasks.every(task => selectedTasks.has(task.id));
 
   // Keep detailTask in sync: update from list data when available,
   // but never clear it just because the task left the current page.
   useEffect(() => {
     if (!selectedId) { setDetailTask(null); return; }
+    if (detailTask?.id === selectedId) return;
     const found = tasks.find(t => t.id === selectedId);
     if (found) setDetailTask(found);
-  }, [tasks, selectedId]);
+  }, [tasks, selectedId, detailTask?.id]);
 
   // Selection is scoped to the current visible list so users never batch
   // operate on hidden rows from a previous page or filter.
   useEffect(() => {
     setSelectedTasks(prev => {
       let changed = false;
-      const visibleIds = new Set(tasks.map(task => task.id));
+      const visibleIds = new Set(effectiveTasks.map(task => task.id));
       const next = new Set<string>();
       prev.forEach(id => {
         if (visibleIds.has(id)) {
@@ -67,7 +82,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       });
       return changed ? next : prev;
     });
-  }, [tasks]);
+  }, [effectiveTasks]);
 
   const markViewedIfNeeded = useCallback(async (task: TaskExecution) => {
     if (task.status !== 'completed' || task.deliveryStatus !== 'unread') {
@@ -100,6 +115,21 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       fetchDetailTask(selectedId);
     }
   }, [refresh, selectedId, fetchDetailTask]);
+
+  // The execution detail drawer must stay in sync even when the selected row
+  // disappears from the current list/filter (for example when a stale
+  // "completed" item becomes running again, or vice versa). Poll by ID while
+  // the drawer is open so the badge and SessionChat live-state reflect the
+  // latest backend truth instead of the last list snapshot.
+  useEffect(() => {
+    if (!selectedId) return;
+
+    const timerId = window.setInterval(() => {
+      void fetchDetailTask(selectedId);
+    }, DETAIL_POLL_INTERVAL_MS);
+
+    return () => window.clearInterval(timerId);
+  }, [selectedId, fetchDetailTask]);
 
   const closeDetail = useCallback(() => {
     setSelectedId(null);
@@ -191,9 +221,9 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(prev => {
       const next = new Set(prev);
       if (allVisibleSelected) {
-        tasks.forEach(task => next.delete(task.id));
+        effectiveTasks.forEach(task => next.delete(task.id));
       } else {
-        tasks.forEach(task => next.add(task.id));
+        effectiveTasks.forEach(task => next.add(task.id));
       }
       return next;
     });
@@ -211,7 +241,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
     setSelectedTasks(new Set());
   };
 
-  if (loading && tasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner /></div>;
+  if (loading && effectiveTasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
   if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
 
   return (
@@ -240,7 +270,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
       </div>
 
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
-        {tasks.length === 0 ? (
+        {effectiveTasks.length === 0 ? (
           <EmptyState
             icon={<ListTodo className="w-8 h-8" />}
             title={t('queued.emptyTitle')}
@@ -268,7 +298,7 @@ export default function QueuedSection({ onRefreshGlobal }: { onRefreshGlobal: ()
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
-                {tasks.map(task => (
+                {effectiveTasks.map(task => (
                   <tr
                     key={task.id}
                     onClick={() => openDetail(task)}
@@ -333,8 +363,8 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
   const DRAWER_MAX_WIDTH = 960;
   const { t } = useTranslation('task');
   const sessionId = task.sessionID;
-  const isActive = ['queued', 'running'].includes(task.status);
   const isWorkflowExecution = task.executionMode === 'workflow';
+  const shouldStreamSession = Boolean(sessionId);
   const emptyText = ['pending', 'queued'].includes(task.status)
     ? t('queued.detailWaiting')
     : t('queued.detailNoRecord');
@@ -432,18 +462,20 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
         {isWorkflowExecution ? (
           <QueuedWorkflowDetail task={task} emptyText={emptyText} />
         ) : (
-          <SessionChat
-            sessionId={sessionId}
-            live={isActive}
-            hideInput
-            emptyText={emptyText}
-            className="flex-1 min-h-0"
-            onSSEEvent={(event) => {
-              if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
-                onRefresh?.();
-              }
-            }}
-          />
+          <Suspense fallback={<SessionChatFallback />}>
+            <LazySessionChat
+              sessionId={sessionId}
+              live={shouldStreamSession}
+              hideInput
+              emptyText={emptyText}
+              className="flex-1 min-h-0"
+              onSSEEvent={(event) => {
+                if (event.type === 'task.updated' && event.properties?.executionID === task.id) {
+                  onRefresh?.();
+                }
+              }}
+            />
+          </Suspense>
         )}
       </div>
     </>

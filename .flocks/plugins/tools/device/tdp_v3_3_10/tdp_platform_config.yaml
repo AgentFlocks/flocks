@@ -1,0 +1,116 @@
+name: tdp_platform_config
+description: >
+  管理 TDP 平台配置相关接口，覆盖资产配置、白名单过滤、级联平台管理和自定义规则。
+  通过 action 可切换到资产列表、资产增删改、白名单搜索与维护、子节点列表、自定义规则和处置日志等子接口；
+  其中 `asset_add`、`asset_update`、`asset_delete`、`white_rule_add`、
+  `white_rule_update`、`white_rule_delete`、`custom_rule_add`、`custom_rule_update`、
+  `custom_rule_delete` 属于写操作，调用前应确认影响范围。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        平台配置子接口动作。`asset_list` / `white_rule_search` 会补默认分页；
+        `asset_delete` 需要非空资产 IP 列表；`cascade_children`
+        使用根级 `keyword` 做子节点模糊查询；`custom_rule_list` 使用独立的
+        `custom_rule_*` 筛选参数，新增与编辑通过 `custom_rule` 传完整规则对象，
+        删除通过 `custom_rule_ids` 传规则标识列表。
+      enum:
+        - asset_list
+        - asset_add
+        - asset_update
+        - asset_delete
+        - white_rule_search
+        - white_rule_add
+        - white_rule_update
+        - white_rule_delete
+        - cascade_children
+        - custom_rule_list
+        - custom_rule_add
+        - custom_rule_update
+        - custom_rule_delete
+        - disposal_log_list
+      default: asset_list
+    condition:
+      type: object
+      description: 条件对象，适用于 `asset_list`、`white_rule_search`、`disposal_log_list`。
+    page:
+      type: object
+      description: 分页对象，适用于 `asset_list`、`white_rule_search`、`disposal_log_list`。
+    asset:
+      type: object
+      description: 资产对象。`asset_add` 直接作为请求体；`asset_update` 会写入 `asset` 字段。
+    lock:
+      type: object
+      description: 锁定配置对象，适用于 `asset_update`。
+    rule:
+      type: object
+      description: 白名单规则对象，适用于 `white_rule_add`、`white_rule_update`；`white_rule_delete` 需要在对象中提供 `id`，可按接口文档传单值或数组。
+    ips:
+      type: array
+      items:
+        type: string
+      description: 资产 IP 列表，适用于 `asset_delete`。
+    keyword:
+      type: string
+      description: 级联平台子节点搜索关键词，适用于 `cascade_children`。
+    custom_rule:
+      type: object
+      description: >
+        自定义规则对象，适用于 `custom_rule_add`、`custom_rule_update`。新增必填字段为
+        `threat_name`、`threat_msg`、`threat_severity`、`threat_type`、`threat_result`、
+        `directions`、`body`、`attacker`、`status`；编辑还必须包含 `suuid`。
+    custom_rule_ids:
+      type: array
+      items:
+        type: string
+      description: 自定义规则 `suuid` 列表，适用于 `custom_rule_delete`。
+    delete_alert_data:
+      type: integer
+      enum: [0, 1]
+      description: 删除自定义规则时是否同时删除关联告警数据；0=否，1=是。
+    custom_rule_status:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1]
+      description: 自定义规则状态筛选；0=禁用，1=启用，适用于 `custom_rule_list`。
+    custom_rule_severity:
+      type: array
+      items:
+        type: integer
+        enum: [1, 2, 3, 4]
+      description: 自定义规则严重级别筛选；1=低危，2=中危，3=高危，4=严重。
+    custom_rule_result:
+      type: array
+      items:
+        type: string
+        enum: [success, failed, unknown]
+      description: 自定义规则检出结果筛选。
+    custom_rule_keyword:
+      type: string
+      description: 自定义规则关键词，handler 会在 `threat_name`、`threat_msg` 字段中模糊查询。
+    cur_page:
+      type: integer
+      description: 当前页码，适用于 `custom_rule_list`。
+    page_size:
+      type: integer
+      description: 每页条数，适用于 `custom_rule_list`。
+    sort_by:
+      type: string
+      description: 排序字段，适用于 `custom_rule_list`，默认 `updated_time`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，适用于 `custom_rule_list`，默认 `desc`。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: platform_config

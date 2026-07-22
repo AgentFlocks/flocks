@@ -7,6 +7,7 @@ This allows using Claude models with Google Cloud authentication and billing.
 Ported from original @ai-sdk/google-vertex/anthropic implementation.
 """
 
+import json
 import os
 from typing import Optional, Dict, Any, List, AsyncIterator
 
@@ -18,6 +19,8 @@ from flocks.provider.provider import (
     ChatResponse,
     StreamChunk,
 )
+from flocks.provider.sdk.anthropic import AnthropicProvider
+from flocks.provider.sdk.openai_base import build_reasoning_metadata
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.vertex-anthropic")
@@ -195,11 +198,29 @@ class VertexAnthropicProvider(BaseProvider):
                     supports_streaming=config.get("supports_streaming", True),
                     supports_tools=config.get("supports_tools", True),
                     supports_vision=config.get("supports_vision", True),
+                    supports_reasoning=True,
+                    interleaved={"field": "thinking", "echo": "tool_calls"},
                     max_tokens=config.get("max_tokens", 4096),
                     context_window=config.get("context_window", 200000),
                 ),
             ))
         return models
+
+    def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
+        if not tools:
+            return None
+
+        anthropic_tools = []
+        for tool in tools:
+            if tool.get("type") != "function":
+                continue
+            func = tool.get("function", {})
+            anthropic_tools.append({
+                "name": func.get("name"),
+                "description": func.get("description", ""),
+                "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+            })
+        return anthropic_tools or None
     
     async def chat(
         self,
@@ -226,18 +247,12 @@ class VertexAnthropicProvider(BaseProvider):
         
         token = await self._get_access_token()
         
-        # Convert messages to Anthropic format
-        system_message = None
-        anthropic_messages = []
-        
-        for msg in messages:
-            if msg.role == "system":
-                system_message = msg.content
-            else:
-                anthropic_messages.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
+        system_message = next(
+            (msg.content for msg in messages if msg.role == "system"),
+            None
+        )
+        anthropic_messages = AnthropicProvider._format_messages_anthropic(messages)
+        tools = self._convert_tools(kwargs.get("tools"))
         
         # Build request payload (Anthropic format)
         payload = {
@@ -248,8 +263,11 @@ class VertexAnthropicProvider(BaseProvider):
         
         if system_message:
             payload["system"] = system_message
-        
-        if "temperature" in kwargs:
+        if tools:
+            payload["tools"] = tools
+        if kwargs.get("thinking"):
+            payload["thinking"] = kwargs["thinking"]
+        elif "temperature" in kwargs:
             payload["temperature"] = kwargs["temperature"]
         
         try:
@@ -273,16 +291,29 @@ class VertexAnthropicProvider(BaseProvider):
                     
                     # Extract content from Anthropic response format
                     content = ""
+                    reasoning = ""
+                    tool_calls = []
                     if "content" in data and data["content"]:
                         for block in data["content"]:
                             if block.get("type") == "text":
                                 content += block.get("text", "")
+                            elif block.get("type") == "thinking":
+                                reasoning += block.get("thinking", "")
+                            elif block.get("type") == "tool_use":
+                                tool_calls.append({
+                                    "id": block.get("id", ""),
+                                    "type": "function",
+                                    "function": {
+                                        "name": block.get("name", ""),
+                                        "arguments": json.dumps(block.get("input", {})),
+                                    },
+                                })
                     
                     return ChatResponse(
                         id=data.get("id", "vertex-anthropic-response"),
                         model=model_id,
                         content=content,
-                        finish_reason=data.get("stop_reason", "end_turn"),
+                        finish_reason="tool_calls" if tool_calls else data.get("stop_reason", "end_turn"),
                         usage={
                             "prompt_tokens": data.get("usage", {}).get("input_tokens", 0),
                             "completion_tokens": data.get("usage", {}).get("output_tokens", 0),
@@ -290,7 +321,9 @@ class VertexAnthropicProvider(BaseProvider):
                                 data.get("usage", {}).get("input_tokens", 0) +
                                 data.get("usage", {}).get("output_tokens", 0)
                             ),
-                        }
+                        },
+                        tool_calls=tool_calls or None,
+                        reasoning=reasoning or None,
                     )
                 else:
                     log.error("vertex_anthropic.chat.error", {
@@ -328,18 +361,12 @@ class VertexAnthropicProvider(BaseProvider):
         
         token = await self._get_access_token()
         
-        # Convert messages to Anthropic format
-        system_message = None
-        anthropic_messages = []
-        
-        for msg in messages:
-            if msg.role == "system":
-                system_message = msg.content
-            else:
-                anthropic_messages.append({
-                    "role": msg.role,
-                    "content": msg.content
-                })
+        system_message = next(
+            (msg.content for msg in messages if msg.role == "system"),
+            None
+        )
+        anthropic_messages = AnthropicProvider._format_messages_anthropic(messages)
+        tools = self._convert_tools(kwargs.get("tools"))
         
         # Build request payload with streaming
         payload = {
@@ -351,15 +378,23 @@ class VertexAnthropicProvider(BaseProvider):
         
         if system_message:
             payload["system"] = system_message
-        
-        if "temperature" in kwargs:
+        if tools:
+            payload["tools"] = tools
+        if kwargs.get("thinking"):
+            payload["thinking"] = kwargs["thinking"]
+        elif "temperature" in kwargs:
             payload["temperature"] = kwargs["temperature"]
         
         try:
             import httpx
-            import json
             
             url = f"{self._get_api_url(model_id)}:streamRawPredict"
+            current_tool_id: Optional[str] = None
+            current_tool_name: Optional[str] = None
+            current_tool_input = ""
+            current_reasoning_signature: Optional[str] = None
+            current_redacted_thinking_data: Optional[str] = None
+            current_reasoning_open = False
             
             async with httpx.AsyncClient() as client:
                 async with client.stream(
@@ -382,13 +417,109 @@ class VertexAnthropicProvider(BaseProvider):
                                 event = json.loads(data)
                                 event_type = event.get("type", "")
                                 
-                                if event_type == "content_block_delta":
+                                if event_type == "content_block_start":
+                                    block = event.get("content_block", {})
+                                    block_type = block.get("type")
+                                    if block_type == "tool_use":
+                                        current_tool_id = block.get("id")
+                                        current_tool_name = block.get("name")
+                                        current_tool_input = ""
+                                    elif block_type == "thinking":
+                                        current_reasoning_open = True
+                                        current_reasoning_signature = None
+                                        current_redacted_thinking_data = None
+                                        yield StreamChunk(
+                                            event_type="reasoning-start",
+                                            metadata=build_reasoning_metadata(
+                                                provider_id=self.id,
+                                                model_id=model_id,
+                                                reasoning_source="vertex_anthropic_thinking",
+                                                reasoning_field="thinking",
+                                            ),
+                                        )
+                                    elif block_type == "redacted_thinking":
+                                        current_reasoning_open = True
+                                        current_reasoning_signature = None
+                                        current_redacted_thinking_data = block.get("data")
+                                        metadata = build_reasoning_metadata(
+                                            provider_id=self.id,
+                                            model_id=model_id,
+                                            reasoning_source="vertex_anthropic_redacted_thinking",
+                                            reasoning_field="thinking",
+                                        ) or {}
+                                        metadata["redactedThinkingData"] = current_redacted_thinking_data
+                                        yield StreamChunk(
+                                            event_type="reasoning-start",
+                                            metadata=metadata,
+                                        )
+
+                                elif event_type == "content_block_delta":
                                     delta = event.get("delta", {})
-                                    if delta.get("type") == "text_delta":
+                                    delta_type = delta.get("type")
+                                    if delta_type == "text_delta":
                                         yield StreamChunk(
                                             delta=delta.get("text", ""),
                                             finish_reason=None,
                                         )
+                                    elif delta_type == "thinking_delta":
+                                        thinking_text = delta.get("thinking", "")
+                                        metadata = build_reasoning_metadata(
+                                            provider_id=self.id,
+                                            model_id=model_id,
+                                            reasoning_content=thinking_text,
+                                            reasoning_source="vertex_anthropic_thinking",
+                                            reasoning_field="thinking",
+                                        )
+                                        yield StreamChunk(
+                                            event_type="reasoning",
+                                            reasoning=thinking_text,
+                                            finish_reason=None,
+                                            metadata=metadata,
+                                        )
+                                    elif delta_type == "signature_delta":
+                                        current_reasoning_signature = delta.get("signature")
+                                    elif delta_type == "input_json_delta":
+                                        current_tool_input += delta.get("partial_json", "")
+
+                                elif event_type == "content_block_stop":
+                                    if current_tool_id and current_tool_name:
+                                        yield StreamChunk(
+                                            delta="",
+                                            finish_reason=None,
+                                            tool_calls=[{
+                                                "id": current_tool_id,
+                                                "type": "function",
+                                                "function": {
+                                                    "name": current_tool_name,
+                                                    "arguments": current_tool_input or "{}",
+                                                },
+                                            }],
+                                        )
+                                        current_tool_id = None
+                                        current_tool_name = None
+                                        current_tool_input = ""
+                                    elif current_reasoning_open:
+                                        metadata = build_reasoning_metadata(
+                                            provider_id=self.id,
+                                            model_id=model_id,
+                                            reasoning_source=(
+                                                "vertex_anthropic_redacted_thinking"
+                                                if current_redacted_thinking_data
+                                                else "vertex_anthropic_thinking"
+                                            ),
+                                            reasoning_field="thinking",
+                                        ) or {}
+                                        if current_reasoning_signature:
+                                            metadata["thinkingSignature"] = current_reasoning_signature
+                                        if current_redacted_thinking_data:
+                                            metadata["redactedThinkingData"] = current_redacted_thinking_data
+                                        yield StreamChunk(
+                                            event_type="reasoning-end",
+                                            metadata=metadata,
+                                        )
+                                        current_reasoning_open = False
+                                        current_reasoning_signature = None
+                                        current_redacted_thinking_data = None
                                 
                                 elif event_type == "message_stop":
                                     yield StreamChunk(

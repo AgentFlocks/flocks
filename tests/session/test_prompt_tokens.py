@@ -2,22 +2,30 @@
 Tests for flocks/session/prompt.py
 
 Covers:
-- SessionPrompt.count_tokens(): token counting with/without tiktoken
+- SessionPrompt.count_tokens(): token counting via chars/4 heuristic
 - SessionPrompt.estimate_tokens(): quick character-based estimate
 - SessionPrompt.count_message_tokens(): multi-message counting
 - SessionPrompt.load_template() / render_template(): template processing
 - SystemPrompt.environment(): env info injection
+- SystemPrompt.runtime_metadata(): session/model/provider tail block
 - SystemPrompt.provider(): model-to-prompt-file routing
 """
 
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from flocks.session.prompt import SessionPrompt, SystemPrompt, PromptTemplate
+from flocks.agent.agent import AgentInfo
+from flocks.session.prompt import (
+    PROMPT_DEFAULT,
+    PromptTemplate,
+    SessionPrompt,
+    SystemPrompt,
+)
 from flocks.session import prompt_strings
 
 
@@ -42,20 +50,14 @@ class TestCountTokens:
         long_ = SessionPrompt.count_tokens("This is a much longer piece of text with many words")
         assert long_ > short
 
-    def test_fallback_estimate_without_tiktoken(self):
-        with patch.object(SessionPrompt, '_get_tokenizer', return_value=None):
-            # Should fall back to char//4 estimate
-            text = "a" * 400
-            result = SessionPrompt.count_tokens(text)
-            assert result == 100  # 400 // 4
+    def test_always_uses_chars_over_4(self):
+        # count_tokens now always uses chars/4 — no tiktoken path remains.
+        text = "a" * 400
+        assert SessionPrompt.count_tokens(text) == 100  # 400 // 4
 
-    def test_with_tiktoken_mock(self):
-        mock_tokenizer = MagicMock()
-        mock_tokenizer.encode.return_value = [1, 2, 3, 4, 5]  # 5 tokens
-        with patch.object(SessionPrompt, '_get_tokenizer', return_value=mock_tokenizer):
-            result = SessionPrompt.count_tokens("test text")
-        assert result == 5
-        mock_tokenizer.encode.assert_called_once_with("test text")
+    def test_short_text_chars_over_4(self):
+        text = "test text"  # 9 chars -> 9 // 4 = 2
+        assert SessionPrompt.count_tokens(text) == len(text) // 4
 
 
 # ---------------------------------------------------------------------------
@@ -194,7 +196,15 @@ class TestSystemPromptEnvironment:
     async def test_includes_working_directory(self):
         result = await SystemPrompt.environment("/my/work/dir")
         combined = "\n".join(result)
-        assert "/my/work/dir" in combined
+        assert "current working directory: /my/work/dir" in combined
+
+    def test_distinguishes_source_code_and_working_directories(self, monkeypatch):
+        monkeypatch.setenv("FLOCKS_REPO_ROOT", "/opt/flocks")
+
+        combined = "\n".join(SystemPrompt.environment_stable("/workspace/project"))
+
+        assert "flocks source code directory: /opt/flocks" in combined
+        assert "current working directory: /workspace/project" in combined
 
     @pytest.mark.asyncio
     async def test_includes_date_info(self):
@@ -212,6 +222,93 @@ class TestSystemPromptEnvironment:
 
 
 # ---------------------------------------------------------------------------
+# SystemPrompt.runtime_metadata()
+# ---------------------------------------------------------------------------
+
+
+class TestSystemPromptRuntimeMetadata:
+    def test_includes_session_model_provider_when_set(self) -> None:
+        block = SystemPrompt.runtime_metadata(
+            session_id="ses_test",
+            model_id="claude-sonnet-4-20250514",
+            provider_id="anthropic",
+        )[0]
+        assert "Session ID: ses_test" in block
+        assert "Model: claude-sonnet-4-20250514" in block
+        assert "Provider: anthropic" in block
+
+    def test_omits_optional_lines_when_unset(self) -> None:
+        block = SystemPrompt.runtime_metadata()[0]
+        assert "Session ID:" not in block
+        assert "Model:" not in block
+        assert "Provider:" not in block
+        assert "## Runtime Metadata" in block
+
+
+class TestBuildSystemPrompts:
+    @pytest.mark.asyncio
+    async def test_builtin_system_subagent_child_uses_minimal_prompt(self):
+        agent = AgentInfo(
+            name="rex-junior",
+            mode="subagent",
+            tags=["system"],
+            prompt="You are Rex Junior.",
+        )
+        with (
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "flocks.session.session.Session.get_by_id",
+                AsyncMock(return_value=SimpleNamespace(parent_id="ses-parent")),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-child",
+                session_directory="/tmp/project",
+                agent_name="rex-junior",
+                agent_prompt="You are Rex Junior.",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+                tool_catalog_prompt_factory=lambda: "SHOULD_NOT_APPEAR",
+            )
+
+        assert len(prompts) == 2
+        assert prompts[0] == "You are Rex Junior."
+        assert "## Environment" in prompts[1]
+        assert "Current working directory: /tmp/project" in prompts[1]
+        assert "Platform:" in prompts[1]
+        assert "Today's date:" in prompts[1]
+        assert "SHOULD_NOT_APPEAR" not in "\n".join(prompts)
+        assert PROMPT_DEFAULT.strip() not in "\n".join(prompts)
+
+    @pytest.mark.asyncio
+    async def test_builtin_system_subagent_root_uses_full_prompt(self):
+        agent = AgentInfo(
+            name="rex-junior",
+            mode="subagent",
+            tags=["system"],
+            prompt="You are Rex Junior.",
+        )
+        with (
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "flocks.session.session.Session.get_by_id",
+                AsyncMock(return_value=SimpleNamespace(parent_id=None)),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-root",
+                session_directory="/tmp/project",
+                agent_name="rex-junior",
+                agent_prompt="You are Rex Junior.",
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        assert len(prompts) > 2
+        assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+
+
+# ---------------------------------------------------------------------------
 # SystemPrompt.provider() — returns List[str]
 # ---------------------------------------------------------------------------
 
@@ -219,18 +316,36 @@ class TestSystemPromptProvider:
     def test_anthropic_model_returns_list(self):
         result = SystemPrompt.provider("claude-3-5-sonnet-20241022")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_gemini_model_returns_list(self):
         result = SystemPrompt.provider("gemini-1.5-pro")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_gpt_model_returns_list(self):
         result = SystemPrompt.provider("gpt-4o")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
 
     def test_unknown_model_returns_list(self):
         result = SystemPrompt.provider("totally-unknown-model")
         assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+        assert "use the ls tool" not in result[0]
+        assert "must call the relevant tool" in result[0]
+
+    def test_minimax_model_uses_minimax_prompt(self):
+        result = SystemPrompt.provider("minimax:MiniMax-M2.5")
+        assert isinstance(result, list)
+        assert len(result) == 1
+        assert result[0].startswith(PROMPT_DEFAULT.strip())
+        assert "prefer actually invoking the needed tool" in result[0]
+        assert "Misleading behavior" in result[0]
 
     def test_none_model_returns_list(self):
         # provider() may raise on None; just verify it returns a list or handle gracefully
@@ -240,23 +355,31 @@ class TestSystemPromptProvider:
         except (AttributeError, TypeError):
             pytest.skip("provider(None) not supported by this implementation")
 
+    def test_provider_prompts_do_not_reference_retired_todo_tools(self):
+        prompt_dir = Path(__file__).resolve().parents[2] / "flocks" / "session" / "prompt"
+        retired = ("TodoWrite", "TodoRead", "todowrite", "todoread")
+
+        for prompt_path in prompt_dir.glob("*.txt"):
+            content = prompt_path.read_text(encoding="utf-8")
+            for name in retired:
+                assert name not in content, f"{prompt_path.name} references retired tool {name}"
+
 
 class TestPromptToolInstructions:
-    def test_windows_includes_shell_rules(self):
-        with patch.object(prompt_strings.platform, "system", return_value="Windows"):
-            instructions = prompt_strings._build_tool_instructions()
+    def test_tool_instructions_are_platform_agnostic(self):
+        instructions = prompt_strings._build_tool_instructions()
 
-        assert "do not assume GNU bash features" in instructions
-        assert "cat > file <<'EOF'" in instructions
-        assert "PowerShell-compatible syntax or Python" in instructions
+        assert "PowerShell" not in instructions
+        assert "must explicitly specify encoding" not in instructions
+        assert "Bash Tool Guidance" not in instructions
 
-    def test_non_windows_keeps_default_strategy(self):
-        with patch.object(prompt_strings.platform, "system", return_value="Darwin"):
-            instructions = prompt_strings._build_tool_instructions()
+    def test_tool_instructions_do_not_hardcode_tool_name_mapping(self):
+        instructions = prompt_strings._build_tool_instructions()
 
-        assert "do not assume GNU bash features" not in instructions
-        assert "PowerShell-compatible syntax or Python" not in instructions
-        assert "must explicitly specify encoding" in instructions
+        assert "callable schema" in instructions
+        assert "Read files: use the 'read' tool" not in instructions
+        assert "Run commands: use the 'bash' tool" not in instructions
+        assert "Search code: use the 'grep' tool" not in instructions
 
 
 # ---------------------------------------------------------------------------
@@ -273,3 +396,67 @@ class TestPromptTemplate:
     def test_empty_variables(self):
         t = PromptTemplate(name="test", content="no vars", variables=[])
         assert t.variables == []
+
+
+# ---------------------------------------------------------------------------
+# estimate_full_context_tokens — B2 overhead + safety margin
+# ---------------------------------------------------------------------------
+
+class TestEstimateFullContextTokens:
+    """estimate_full_context_tokens returns pure chars/4 message sum.
+
+    No overhead fields and no safety margin are applied — the fixed
+    85 % context_window overflow threshold makes them unnecessary.
+    policy and apply_safety_margin parameters are accepted but ignored.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _patch_message_parts(self, monkeypatch: pytest.MonkeyPatch):
+        # ``Message.parts`` requires DB lookup; stub it out so we only exercise
+        # the message-content arithmetic in this suite.
+        from flocks.session import message as message_mod
+
+        async def _fake_parts(message_id, session_id):  # noqa: ARG001
+            return []
+
+        monkeypatch.setattr(message_mod.Message, "parts", staticmethod(_fake_parts))
+        yield
+
+    @pytest.mark.asyncio
+    async def test_empty_messages_returns_zero(self):
+        """No messages → 0 tokens (no overhead added)."""
+        result = await SessionPrompt.estimate_full_context_tokens("ses_x", [])
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_policy_arg_ignored(self):
+        """policy argument is accepted but does not change the result."""
+        from flocks.session.lifecycle.compaction import CompactionPolicy
+
+        policy = CompactionPolicy.from_model(200_000, 8_192)
+        result_with = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [], policy=policy,
+        )
+        result_without = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [],
+        )
+        assert result_with == result_without == 0
+
+    @pytest.mark.asyncio
+    async def test_safety_margin_arg_ignored(self):
+        """apply_safety_margin=False has no effect (margin is never applied)."""
+        from flocks.session.lifecycle.compaction import CompactionPolicy
+
+        policy = CompactionPolicy.from_model(200_000, 8_192)
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", [], policy=policy, apply_safety_margin=False,
+        )
+        assert result == 0
+
+    @pytest.mark.asyncio
+    async def test_message_content_is_counted(self, monkeypatch: pytest.MonkeyPatch):
+        messages = [{"id": "m1", "content": "x" * 400}]  # 400 chars → 100 tokens
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x", messages,
+        )
+        assert result == 100

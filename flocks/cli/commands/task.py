@@ -15,6 +15,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from flocks.storage.storage import Storage
+from flocks.task.formatting import format_task_datetime, resolve_task_timezone_name
 
 task_app = typer.Typer(
     name="task",
@@ -178,6 +179,7 @@ async def _show_task(task_id: str):
         type_value = "once"
     else:
         type_value = "execution"
+    display_tz = resolve_task_timezone_name(task)
     lines = [
         f"[bold]{task.title}[/bold]",
         f"ID:       {task.id}",
@@ -194,18 +196,20 @@ async def _show_task(task_id: str):
         lines.append(f"Skills:   {', '.join(task.skills)}")
     if task.category:
         lines.append(f"Category: {task.category}")
-    lines.append(f"Created:  {task.created_at.isoformat()}")
+    lines.append(f"Created:  {format_task_datetime(task.created_at, display_tz)}")
     if task.description:
         lines.append(f"Desc:     {task.description}")
     if getattr(task, "trigger", None):
         if task.trigger.cron:
             lines.append(f"Cron:     {task.trigger.cron} ({task.trigger.timezone})")
         if task.trigger.next_run:
-            lines.append(f"Next run: {task.trigger.next_run.isoformat()}")
+            lines.append(
+                f"Next run: {format_task_datetime(task.trigger.next_run, display_tz)}"
+            )
     if getattr(task, "started_at", None):
-        lines.append(f"Started:  {task.started_at.isoformat()}")
+        lines.append(f"Started:  {format_task_datetime(task.started_at, display_tz)}")
     if getattr(task, "completed_at", None):
-        lines.append(f"Finished: {task.completed_at.isoformat()}")
+        lines.append(f"Finished: {format_task_datetime(task.completed_at, display_tz)}")
     if getattr(task, "duration_ms", None) is not None:
         lines.append(f"Duration: {_fmt_duration(task.duration_ms)}")
     if getattr(task, "result_summary", None):
@@ -246,6 +250,7 @@ async def _create_task(title, description, task_type, priority, mode, agent, wor
         TaskPriority,
         TaskSource,
         TaskTrigger,
+        build_schedule,
     )
     from flocks.task.store import TaskStore
     await TaskStore.init()
@@ -257,7 +262,11 @@ async def _create_task(title, description, task_type, priority, mode, agent, wor
             console.print("[red]--cron is required for scheduled tasks[/red]")
             raise typer.Exit(1)
         scheduler_mode = SchedulerMode.CRON
-        trigger = TaskTrigger(cron=cron)
+        try:
+            trigger = build_schedule(run_once=False, cron=cron)
+        except ValueError as exc:
+            console.print(f"[red]{exc}[/red]")
+            raise typer.Exit(1) from exc
 
     source = TaskSource(user_prompt=prompt) if prompt else None
 
@@ -352,7 +361,12 @@ async def _scheduled():
     for t in tasks:
         status_icon = "✅" if t.status.value == "active" else "⏸️"
         cron = t.trigger.cron or "-"
-        next_run = t.trigger.next_run.isoformat() if t.trigger.next_run else "-"
+        display_tz = resolve_task_timezone_name(t)
+        next_run = (
+            format_task_datetime(t.trigger.next_run, display_tz)
+            if t.trigger.next_run
+            else "-"
+        )
         table.add_row(status_icon, t.id[:16], t.title, cron, next_run)
 
     console.print(table)

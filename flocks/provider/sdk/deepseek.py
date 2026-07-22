@@ -8,7 +8,8 @@ Reasoning extraction and streaming are handled by the base class
 (OpenAIBaseProvider) via the shared extract_reasoning_content() utility.
 """
 
-from flocks.provider.sdk.openai_base import OpenAIBaseProvider
+from flocks.provider.provider import ChatMessage
+from flocks.provider.sdk.openai_base import OpenAIBaseProvider, format_openai_messages
 
 
 class DeepSeekProvider(OpenAIBaseProvider):
@@ -30,3 +31,12 @@ class DeepSeekProvider(OpenAIBaseProvider):
 
     def __init__(self):
         super().__init__(provider_id="deepseek", name="DeepSeek")
+
+    @staticmethod
+    def _format_messages(messages: list[ChatMessage]) -> list:
+        """DeepSeek requires assistant reasoning_content on replayed tool turns."""
+        return format_openai_messages(
+            messages,
+            include_reasoning=True,
+            reasoning_field="reasoning_content",
+        )

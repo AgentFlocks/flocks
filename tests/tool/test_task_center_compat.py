@@ -4,11 +4,11 @@ from datetime import datetime, timezone
 
 import pytest
 
-import flocks.tool.task.task_center  # noqa: F401
+import flocks.tool.task.schedule_task_center  # noqa: F401
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.task.manager import TaskManager
-from flocks.task.models import SchedulerMode, TaskTrigger
+from flocks.task.models import SchedulerMode, TaskPriority, TaskScheduler, TaskTrigger
 from flocks.task.store import TaskStore
 from flocks.tool.registry import ToolContext, ToolRegistry
 
@@ -51,7 +51,7 @@ async def isolated_task_env(tmp_path: pytest.TempPathFactory, monkeypatch: pytes
 
 class TestTaskCenterCompatibility:
     def test_task_create_schema_allows_legacy_schedule_type(self):
-        schema = ToolRegistry.get_schema("task_create")
+        schema = ToolRegistry.get_schema("schedule_task_create")
 
         assert schema is not None
         assert "schedule_type" in schema.properties
@@ -60,8 +60,22 @@ class TestTaskCenterCompatibility:
         assert "action" in schema.properties
         assert "type" not in schema.required
 
+    def test_task_create_schema_mentions_extended_message_channels(self):
+        tool = ToolRegistry.get("schedule_task_create")
+        schema = ToolRegistry.get_schema("schedule_task_create")
+
+        assert tool is not None
+        assert schema is not None
+        text = (
+            tool.info.description
+            + " "
+            + schema.properties["description"]["description"]
+        ).lower()
+        for value in ("telegram", "whatsapp", "email", "channel_type=telegram", "channel_type=whatsapp", "channel_type=email"):
+            assert value in text
+
     def test_task_update_schema_makes_action_optional_and_exposes_trigger_fields(self):
-        schema = ToolRegistry.get_schema("task_update")
+        schema = ToolRegistry.get_schema("schedule_task_update")
 
         assert schema is not None
         assert "action" not in schema.required
@@ -76,7 +90,7 @@ class TestTaskCenterCompatibility:
     @pytest.mark.asyncio
     async def test_task_create_accepts_legacy_schedule_type_alias(self):
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="每10分钟执行一次",
             description="兼容旧 schedule_type 字段",
@@ -99,7 +113,7 @@ class TestTaskCenterCompatibility:
     @pytest.mark.asyncio
     async def test_task_create_infers_scheduled_type_from_cron(self):
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="终端输出测试",
             description='每4分钟在终端输出"我是 flocks-04"',
@@ -118,7 +132,7 @@ class TestTaskCenterCompatibility:
     @pytest.mark.asyncio
     async def test_task_create_accepts_legacy_schedule_action_and_enabled_fields(self):
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="终端输出测试",
             description='每4分钟在终端输出"我是 flocks-04"',
@@ -150,7 +164,7 @@ class TestTaskCenterCompatibility:
         )
 
         result = await ToolRegistry.execute(
-            "task_update",
+            "schedule_task_update",
             ctx=_make_ctx(),
             task_id=scheduler.id,
             description="更新后的描述",
@@ -180,7 +194,7 @@ class TestTaskCenterCompatibility:
         masking missing-schedule mistakes from legacy clients.
         """
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="缺少时间参数",
             description="只传了 run_once=True 但没给 run_at/cron",
@@ -200,7 +214,7 @@ class TestTaskCenterCompatibility:
         """Legacy clients may serialise run_once as the string "false"/"0" —
         those must be coerced to False, not treated as truthy."""
         result = await ToolRegistry.execute(
-            "task_create",
+            "schedule_task_create",
             ctx=_make_ctx(),
             title="字符串布尔值兼容",
             description="run_once 以字符串 'false' 传入",
@@ -218,6 +232,80 @@ class TestTaskCenterCompatibility:
         assert scheduler.trigger.run_immediately is False
 
     @pytest.mark.asyncio
+    async def test_task_create_rejects_six_field_cron_with_hint(self):
+        result = await ToolRegistry.execute(
+            "task_create",
+            ctx=_make_ctx(),
+            title="每天早上 6 点执行",
+            description="误传了 6 段 Quartz cron",
+            cron="0 0 6 * * *",
+            user_prompt="执行巡检",
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "only 5-field cron is supported" in result.error
+        assert "`0 6 * * *`" in result.error
+
+        _, total = await TaskManager.list_schedulers(limit=10)
+        assert total == 0
+
+    @pytest.mark.asyncio
+    async def test_task_update_rejects_six_field_cron_with_hint(self):
+        scheduler = await TaskManager.create_scheduler(
+            title="待更新的定时任务",
+            mode=SchedulerMode.CRON,
+            trigger=TaskTrigger(
+                cron="*/5 * * * *",
+                timezone="Asia/Shanghai",
+            ),
+        )
+
+        result = await ToolRegistry.execute(
+            "task_update",
+            ctx=_make_ctx(),
+            task_id=scheduler.id,
+            cron="0 0 6 * * *",
+            run_once=False,
+        )
+
+        assert result.success is False
+        assert result.error is not None
+        assert "only 5-field cron is supported" in result.error
+        assert "`0 6 * * *`" in result.error
+
+        unchanged = await TaskManager.get_scheduler(scheduler.id)
+        assert unchanged is not None
+        assert unchanged.trigger.cron == "*/5 * * * *"
+
+    @pytest.mark.asyncio
+    async def test_task_status_formats_scheduler_times_in_schedule_timezone(self):
+        scheduler = TaskScheduler(
+            title="每日主机安全巡检",
+            mode=SchedulerMode.CRON,
+            priority=TaskPriority.NORMAL,
+            trigger=TaskTrigger(
+                cron="0 6 * * *",
+                timezone="Asia/Shanghai",
+                next_run=datetime(2026, 5, 15, 22, 0, tzinfo=timezone.utc),
+            ),
+            created_at=datetime(2026, 5, 15, 1, 53, 8, tzinfo=timezone.utc),
+        )
+        await TaskStore.create_scheduler(scheduler)
+
+        result = await ToolRegistry.execute(
+            "task_status",
+            ctx=_make_ctx(),
+            task_id=scheduler.id,
+        )
+
+        assert result.success is True
+        assert result.output is not None
+        assert "Cron: 0 6 * * * (Asia/Shanghai)" in result.output
+        assert "Next run: 2026-05-16 06:00:00+08:00 (Asia/Shanghai)" in result.output
+        assert "Created: 2026-05-15 09:53:08+08:00 (Asia/Shanghai)" in result.output
+
+    @pytest.mark.asyncio
     async def test_task_update_can_disable_and_enable_scheduled_task(self):
         scheduler = await TaskManager.create_scheduler(
             title="可停止的定时任务",
@@ -229,7 +317,7 @@ class TestTaskCenterCompatibility:
         )
 
         disable_result = await ToolRegistry.execute(
-            "task_update",
+            "schedule_task_update",
             ctx=_make_ctx(),
             task_id=scheduler.id,
             action="stop",
@@ -241,7 +329,7 @@ class TestTaskCenterCompatibility:
         assert disabled.status.value == "disabled"
 
         enable_result = await ToolRegistry.execute(
-            "task_update",
+            "schedule_task_update",
             ctx=_make_ctx(),
             task_id=scheduler.id,
             enabled=True,

@@ -1,0 +1,82 @@
+schema_version: 1
+provider: skyeye_api
+
+# Service-level connectivity probe.
+# `alarm_params` returns alarm enumeration values with no required params;
+# it exercises login → token acquisition → API call in one lightweight request.
+connectivity:
+  tool: skyeye_alarm_params
+  params:
+    data_source: 0
+
+# Tool-level test samples shown in the WebUI ToolDetailDrawer drop-down.
+# `label` is the default (English) display string; `label_cn` is the
+# optional Chinese override picked when the WebUI runs in zh-CN.
+fixtures:
+  skyeye_alarm_params:
+    - label: "Get alarm filter enumerations"
+      label_cn: "获取告警过滤器枚举值"
+      tags: [smoke]
+      params:
+        data_source: 0
+      assert:
+        success: true
+
+  skyeye_dashboard_view:
+    - label: "Overall dashboard view (last 7 days)"
+      label_cn: "整体监控视图（最近 7 天）"
+      tags: [smoke, dashboard]
+      params:
+        name: overall_view
+        interval_time: 7
+      assert:
+        success: true
+
+  skyeye_alarm_list:
+    - label: "List alarms (last 24 hours, page 1)"
+      label_cn: "查询告警列表（最近 24 小时，第 1 页）"
+      tags: [smoke, alarms]
+      params:
+        offset: 1
+        limit: 20
+      assert:
+        success: true
+
+    - label: "List high-severity alarms (last 24 hours)"
+      label_cn: "查询高危告警（最近 24 小时）"
+      tags: [alarms]
+      params:
+        offset: 1
+        limit: 20
+        hazard_level: "3"
+
+  # Download tools require a real alarm_id plus a valid time window;
+  # the placeholder timestamps below cover the last 24 hours and must be
+  # paired with a real alarm_id captured from skyeye_alarm_list.
+  skyeye_download_alarm_report:
+    - label: "Download alarm report (requires real alarm_id)"
+      label_cn: "下载告警报告（需要替换真实 alarm_id）"
+      tags: [download]
+      params:
+        alarm_id: "REPLACE_WITH_REAL_ALARM_ID"
+        export_type: "csv"
+        start_time: 0
+        end_time: 0
+
+  skyeye_download_pcap:
+    - label: "Download PCAP file (requires real alarm_id)"
+      label_cn: "下载 PCAP 抓包文件（需要替换真实 alarm_id）"
+      tags: [download]
+      params:
+        alarm_id: "REPLACE_WITH_REAL_ALARM_ID"
+        start_time: 0
+        end_time: 0
+
+  skyeye_download_uploadfile:
+    - label: "Download uploaded sample (requires real alarm_id)"
+      label_cn: "下载上传样本文件（需要替换真实 alarm_id）"
+      tags: [download]
+      params:
+        alarm_id: "REPLACE_WITH_REAL_ALARM_ID"
+        start_time: 0
+        end_time: 0

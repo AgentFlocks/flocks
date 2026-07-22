@@ -481,6 +481,95 @@ class TestMessageStoreAndParts:
         await asyncio.sleep(0.02)
         persist_mock.assert_awaited_once_with(sid, message_id=msg.id)
 
+    @pytest.mark.asyncio
+    async def test_store_completed_tool_part_caches_prompt_output_and_revision(self):
+        sid = SID + "_completed_cache"
+        msg = await Message.create(sid, MessageRole.ASSISTANT, "")
+        tool_part = ToolPart(
+            sessionID=sid,
+            messageID=msg.id,
+            callID="call_completed",
+            tool="bash",
+            state=ToolStateCompleted(
+                input={"cmd": "echo hi"},
+                output={"stdout": "hello", "exit_code": 0},
+                title="bash",
+                metadata={},
+                time={"start": 1, "end": 2},
+            ),
+        )
+
+        assert Message.get_parts_revision(sid, msg.id) == 0
+        stored_part = await Message.store_part(sid, msg.id, tool_part)
+
+        assert Message.get_parts_revision(sid, msg.id) == 1
+        assert isinstance(stored_part.state.output, str)
+        assert stored_part.state.metadata["llm_output_text"] == stored_part.state.output
+        assert stored_part.state.metadata["llm_output_len"] == len(stored_part.state.output)
+
+        updated = await Message.update_part(
+            sid,
+            msg.id,
+            stored_part.id,
+            state={
+                "status": "completed",
+                "input": {"cmd": "echo hi"},
+                "output": {"stdout": "hello again"},
+                "title": "bash",
+                "metadata": {},
+                "time": {"start": 1, "end": 3},
+            },
+        )
+        assert updated is not None
+        assert Message.get_parts_revision(sid, msg.id) == 2
+        assert updated.state.metadata["llm_output_text"].startswith("{")
+
+    @pytest.mark.asyncio
+    async def test_store_part_does_not_downgrade_terminal_tool_state(self, monkeypatch):
+        sid = SID + "_terminal_guard"
+        msg = await Message.create(sid, MessageRole.ASSISTANT, "")
+        part_id = "part_terminal_guard"
+
+        monkeypatch.setattr("flocks.session.message.Recorder.record_tool_state", AsyncMock())
+
+        completed_part = ToolPart(
+            id=part_id,
+            sessionID=sid,
+            messageID=msg.id,
+            callID="call_terminal_guard",
+            tool="task",
+            state=ToolStateCompleted(
+                input={"prompt": "run"},
+                output="done",
+                title="task",
+                metadata={"sessionId": "ses_child_done"},
+                time={"start": 1000, "end": 2000},
+            ),
+        )
+        stale_running_part = ToolPart(
+            id=part_id,
+            sessionID=sid,
+            messageID=msg.id,
+            callID="call_terminal_guard",
+            tool="task",
+            state=ToolStateRunning(
+                input={"prompt": "run"},
+                title="task",
+                metadata={"sessionId": "ses_child_done", "status": "running"},
+                time={"start": 1000},
+            ),
+        )
+
+        await Message.store_part(sid, msg.id, completed_part)
+        stored = await Message.store_part(sid, msg.id, stale_running_part)
+        parts = await Message.parts(msg.id, sid)
+        tool_parts = [p for p in parts if p.type == "tool" and p.id == part_id]
+
+        assert stored.state.status == "completed"
+        assert len(tool_parts) == 1
+        assert tool_parts[0].state.status == "completed"
+        assert getattr(tool_parts[0].state, "time", {}).get("end") == 2000
+
 
 @pytest.mark.asyncio
 async def test_list_with_parts_keeps_message_info_separate():

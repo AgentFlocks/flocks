@@ -11,11 +11,14 @@ import pytest
 from flocks.cli.commands import task as task_cli_commands
 import flocks.task.background as background_module
 import flocks.task.manager as task_manager_module
+import flocks.task.plugin_sync as plugin_sync_module
 from flocks.server.routes import question as question_routes
 from flocks.config.config import Config
+from flocks.session.message import ToolPart, ToolStateCompleted
 from flocks.storage.storage import Storage
 from flocks.task.background import BackgroundManager, BackgroundTask, LaunchInput
 from flocks.task.executor import TaskExecutor
+from flocks.task.formatting import format_task_datetime
 from flocks.task.manager import TaskManager
 from flocks.task.models import (
     DeliveryStatus,
@@ -29,6 +32,8 @@ from flocks.task.models import (
     TaskStatus,
     TaskTrigger,
 )
+from flocks.task.plugin_models import TaskSpec
+from flocks.task.plugin_sync import upsert_task_specs
 from flocks.task.queue import TaskQueue
 from flocks.task.scheduler import TaskScheduler as SchedulerLoop
 from flocks.task.store import TaskStore
@@ -90,6 +95,39 @@ async def test_immediate_scheduler_creates_single_queued_execution(tmp_path: Pat
 
 
 @pytest.mark.asyncio
+async def test_list_executions_tolerates_legacy_non_utf8_description(
+    tmp_path: Path,
+):
+    legacy_description = "扫描 Windows 主机 192.168.254.1"
+    scheduler = await TaskManager.create_scheduler(
+        title="legacy encoding",
+        description="placeholder",
+        mode=SchedulerMode.ONCE,
+        priority=TaskPriority.NORMAL,
+        trigger=TaskTrigger(run_immediately=True),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+    executions, _ = await TaskManager.list_scheduler_executions(scheduler.id)
+    execution_id = executions[0].id
+
+    db = await TaskStore.raw_db()
+    await db.execute(
+        """
+        UPDATE task_executions
+        SET description = CAST(? AS TEXT)
+        WHERE id = ?
+        """,
+        (legacy_description.encode("gbk"), execution_id),
+    )
+    await db.commit()
+
+    executions, total = await TaskManager.list_executions(limit=20)
+
+    assert total == 1
+    assert executions[0].description == legacy_description
+
+
+@pytest.mark.asyncio
 async def test_once_scheduler_tick_creates_execution_and_disables_scheduler(tmp_path: Path):
     scheduler = await TaskManager.create_scheduler(
         title="单次定时",
@@ -139,6 +177,163 @@ async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: P
     assert total == 1
     assert executions[0].status == TaskStatus.QUEUED
     assert executions[0].trigger_type == ExecutionTriggerType.SCHEDULED
+
+
+@pytest.mark.asyncio
+async def test_create_scheduler_rejects_six_field_cron(tmp_path: Path):
+    with pytest.raises(ValueError, match="only 5-field cron is supported"):
+        await TaskManager.create_scheduler(
+            title="非法 cron",
+            mode=SchedulerMode.CRON,
+            trigger=TaskTrigger(
+                cron="0 0 6 * * *",
+                timezone="Asia/Shanghai",
+            ),
+            workspace_directory=str(tmp_path / "workspace"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_scheduler_rejects_out_of_range_five_field_cron(tmp_path: Path):
+    with pytest.raises(ValueError, match="not a valid 5-field cron"):
+        await TaskManager.create_scheduler(
+            title="越界 cron",
+            mode=SchedulerMode.CRON,
+            trigger=TaskTrigger(
+                cron="70 6 * * *",
+                timezone="Asia/Shanghai",
+            ),
+            workspace_directory=str(tmp_path / "workspace"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_create_scheduler_does_not_mutate_trigger_argument(tmp_path: Path):
+    trigger = TaskTrigger(
+        cron="  0 6 * * *  ",
+        timezone="Asia/Shanghai",
+    )
+
+    scheduler = await TaskManager.create_scheduler(
+        title="不修改调用方 trigger",
+        mode=SchedulerMode.CRON,
+        trigger=trigger,
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+
+    assert trigger.cron == "  0 6 * * *  "
+    assert scheduler.trigger.cron == "0 6 * * *"
+
+
+@pytest.mark.asyncio
+async def test_plugin_sync_skips_new_scheduler_with_invalid_six_field_cron(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    warn_calls: list[tuple[str, dict]] = []
+
+    monkeypatch.setattr(
+        plugin_sync_module.log,
+        "warn",
+        lambda event, props=None: warn_calls.append((event, props or {})),
+    )
+
+    created = await upsert_task_specs(
+        [
+            TaskSpec(
+                dedup_key="builtin:invalid-cron-new",
+                title="无效 cron 新任务",
+                cron="0 0 6 * * *",
+                timezone="Asia/Shanghai",
+            )
+        ]
+    )
+
+    scheduler = await TaskStore.get_scheduler_by_dedup_key("builtin:invalid-cron-new")
+
+    assert created == 0
+    assert scheduler is None
+    assert warn_calls == [
+        (
+            "task.plugin.invalid_cron",
+            {
+                "action": "skipped_entire_spec",
+                "dedup_key": "builtin:invalid-cron-new",
+                "cron": "0 0 6 * * *",
+                "error": (
+                    "Invalid cron expression: only 5-field cron is supported "
+                    "(`minute hour day month weekday`). "
+                    "Example: use `0 6 * * *` for daily 06:00 in Asia/Shanghai. "
+                    "6-field cron (e.g. Quartz format with leading seconds, "
+                    "such as `0 0 6 * * *`) and shortcuts such as `@daily` "
+                    "are not supported."
+                ),
+            },
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_plugin_sync_does_not_overwrite_existing_scheduler_with_invalid_six_field_cron(
+    tmp_path: Path,
+):
+    scheduler = await TaskManager.create_scheduler(
+        title="原始内置任务",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(
+            cron="*/5 * * * *",
+            timezone="Asia/Shanghai",
+        ),
+        workspace_directory=str(tmp_path / "workspace"),
+        dedup_key="builtin:invalid-cron-existing",
+    )
+
+    created = await upsert_task_specs(
+        [
+            TaskSpec(
+                dedup_key="builtin:invalid-cron-existing",
+                title="被拒绝的更新",
+                cron="0 0 6 * * *",
+                timezone="Asia/Shanghai",
+                enabled=False,
+            )
+        ]
+    )
+
+    unchanged = await TaskManager.get_scheduler(scheduler.id)
+
+    assert created == 0
+    assert unchanged is not None
+    assert unchanged.title == "原始内置任务"
+    assert unchanged.trigger.cron == "*/5 * * * *"
+    assert unchanged.status == SchedulerStatus.ACTIVE
+
+
+@pytest.mark.asyncio
+async def test_update_scheduler_with_trigger_run_once_preserves_existing_cron_when_omitted(
+    tmp_path: Path,
+):
+    scheduler = await TaskManager.create_scheduler(
+        title="切成单次任务时保留旧 cron",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(
+            cron="*/5 * * * *",
+            timezone="Asia/Shanghai",
+        ),
+        workspace_directory=str(tmp_path / "workspace"),
+    )
+
+    updated = await TaskManager.update_scheduler_with_trigger(
+        scheduler.id,
+        fields={},
+        run_once=True,
+        run_at="2026-05-16T06:00:00+08:00",
+    )
+
+    assert updated is not None
+    assert updated.mode == SchedulerMode.ONCE
+    assert updated.trigger.cron == "*/5 * * * *"
+    assert updated.trigger.run_at is not None
+    assert updated.trigger.run_at.isoformat() == "2026-05-16T06:00:00+08:00"
 
 
 @pytest.mark.asyncio
@@ -389,6 +584,108 @@ async def test_background_task_uses_unpinned_model_as_runtime_override(
     assert loop_run.await_args.kwargs["model_id"] == "claude-haiku-4-5"
     assert loop_run.await_args.kwargs["callbacks"] is not None
     assert task.status == "completed"
+
+
+@pytest.mark.asyncio
+async def test_background_task_completion_injects_parent_context(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    create_message = AsyncMock()
+    update_part = AsyncMock()
+    parent_loop_run = AsyncMock(return_value=SimpleNamespace(action="stop"))
+    parent_part = ToolPart(
+        id="part-parent-tool",
+        sessionID="ses-parent",
+        messageID="msg-parent",
+        type="tool",
+        callID="call-parent",
+        tool="delegate_task",
+        state=ToolStateCompleted(
+            status="completed",
+            input={
+                "description": "inspect cache",
+                "prompt": "Inspect cache",
+                "subagent_type": "explore",
+                "run_in_background": True,
+            },
+            output="Background task launched",
+            title="inspect cache",
+            metadata={
+                "sessionId": "ses-child",
+                "taskId": "bg_parent_inject",
+                "status": "running",
+                "background": True,
+            },
+            time={"start": 1, "end": 2},
+        ),
+    )
+    monkeypatch.setattr(background_module.Message, "create", create_message)
+    monkeypatch.setattr(background_module.Message, "parts", AsyncMock(return_value=[parent_part]))
+    monkeypatch.setattr(background_module.Message, "update_part", update_part)
+    monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_parent_inject",
+        status="completed",
+        description="inspect cache",
+        prompt="",
+        agent="explore",
+        parent_session_id="ses-parent",
+        parent_message_id="msg-parent",
+        parent_call_id="call-parent",
+        parent_agent="rex",
+        parent_model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+        session_id="ses-child",
+        output="cache keys are built in three files",
+    )
+
+    await manager._inject_parent_completion(task)
+
+    create_message.assert_awaited_once()
+    kwargs = create_message.await_args.kwargs
+    assert kwargs["session_id"] == "ses-parent"
+    assert kwargs["synthetic"] is True
+    assert kwargs["part_metadata"]["kind"] == "background_task_result"
+    assert '<task id="bg_parent_inject" session_id="ses-child" state="completed">' in kwargs["content"]
+    assert "cache keys are built in three files" in kwargs["content"]
+    update_part.assert_awaited_once()
+    update_kwargs = update_part.await_args.kwargs
+    assert update_kwargs["part_id"] == "part-parent-tool"
+    assert update_kwargs["state"].status == "completed"
+    assert update_kwargs["state"].metadata["status"] == "completed"
+    assert update_kwargs["state"].output == "cache keys are built in three files"
+    await asyncio.sleep(0)
+    parent_loop_run.assert_awaited_once()
+    assert parent_loop_run.await_args.kwargs["session_id"] == "ses-parent"
+    assert parent_loop_run.await_args.kwargs["agent_name"] == "rex"
+
+
+@pytest.mark.asyncio
+async def test_background_task_completion_does_not_resume_running_parent(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    parent_loop_run = AsyncMock(return_value=SimpleNamespace(action="stop"))
+    monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
+    monkeypatch.setattr(background_module.SessionLoop, "is_running", lambda _session_id: True)
+
+    manager = BackgroundManager()
+    task = BackgroundTask(
+        id="bg_parent_running",
+        status="completed",
+        description="inspect cache",
+        prompt="",
+        agent="explore",
+        parent_session_id="ses-parent",
+        parent_agent="rex",
+        session_id="ses-child",
+        output="done",
+    )
+
+    manager._schedule_parent_resume(task)
+    await asyncio.sleep(0)
+
+    parent_loop_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -702,6 +999,43 @@ async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.M
     await task_cli_commands._list_tasks("paused", "scheduled", 10, "json")
 
     assert printed
+
+
+@pytest.mark.asyncio
+async def test_cli_show_formats_scheduler_times_in_schedule_timezone(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    scheduler = TaskScheduler(
+        title="CLI 定时任务详情",
+        mode=SchedulerMode.CRON,
+        trigger=TaskTrigger(
+            cron="0 6 * * *",
+            timezone="Asia/Shanghai",
+            next_run=datetime(2026, 5, 15, 22, 0, tzinfo=timezone.utc),
+        ),
+        created_at=datetime(2026, 5, 15, 1, 53, 8, tzinfo=timezone.utc),
+    )
+    await TaskStore.create_scheduler(scheduler)
+
+    rendered: list[object] = []
+    monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: rendered.append(args[0]))
+
+    await task_cli_commands._show_task(scheduler.id)
+
+    assert rendered
+    panel = rendered[0]
+    assert "Created:  2026-05-15 09:53:08+08:00 (Asia/Shanghai)" in panel.renderable
+    assert "Next run: 2026-05-16 06:00:00+08:00 (Asia/Shanghai)" in panel.renderable
+
+
+@pytest.mark.asyncio
+async def test_format_task_datetime_uses_utc_label_when_timezone_not_found():
+    rendered = format_task_datetime(
+        datetime(2026, 5, 15, 1, 53, 8, tzinfo=timezone.utc),
+        "Mars/Base",
+    )
+
+    assert rendered == '2026-05-15 01:53:08+00:00 (UTC ("Mars/Base" not found))'
 
 
 @pytest.mark.asyncio

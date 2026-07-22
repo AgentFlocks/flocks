@@ -8,7 +8,7 @@ from click.testing import CliRunner
 from rich.console import Console
 
 
-SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".flocks" / "skills" / "skyeye-data-fetch" / "scripts"
+SCRIPTS_DIR = Path(__file__).resolve().parents[2] / ".flocks" / "plugins" / "skills" / "skyeye-use" / "scripts"
 
 
 @pytest.fixture
@@ -33,10 +33,14 @@ def cli_module(monkeypatch: pytest.MonkeyPatch):
 
 
 class FakeSkyeyeClient:
+    last_alarm_list_kwargs = None
+    last_alarm_count_kwargs = None
+
     def __init__(self, *args, **kwargs) -> None:
         pass
 
     def get_alarm_list(self, **kwargs):
+        type(self).last_alarm_list_kwargs = kwargs
         return {
             "code": 0,
             "data": {
@@ -56,6 +60,7 @@ class FakeSkyeyeClient:
         }
 
     def get_alarm_count(self, **kwargs):
+        type(self).last_alarm_count_kwargs = kwargs
         return {"code": 0, "data": {"high": 3, "critical": 1}}
 
     def search_log_analysis(self, **kwargs):
@@ -77,6 +82,8 @@ class FakeSkyeyeClient:
 
 def _run_cli(cli_module, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> str:
     output = io.StringIO()
+    FakeSkyeyeClient.last_alarm_list_kwargs = None
+    FakeSkyeyeClient.last_alarm_count_kwargs = None
     monkeypatch.setattr(cli_module, "SkyeyeClient", FakeSkyeyeClient)
     monkeypatch.setattr(
         cli_module,
@@ -86,15 +93,15 @@ def _run_cli(cli_module, monkeypatch: pytest.MonkeyPatch, args: list[str]) -> st
 
     result = CliRunner().invoke(cli_module.cli, args)
     assert result.exit_code == 0, result.output
-    return output.getvalue()
+    return output.getvalue() + result.output
 
 
 @pytest.mark.parametrize(
     ("args", "expected_fragment"),
     [
-        (["--json-output", "alarm", "list", "--days", "1"], '"测试告警"'),
-        (["alarm", "count", "--days", "1"], "告警统计"),
-        (["log", "search", "alarm_sip:(10.0.0.1)", "--mode", "expert_model"], "日志搜索结果"),
+        (["--table", "alarm", "list", "--days", "1"], "测试告警"),
+        (["--table", "alarm", "count", "--days", "1"], "告警统计"),
+        (["--table", "log", "search", "alarm_sip:(10.0.0.1)", "--mode", "expert_model"], "日志搜索结果"),
     ],
 )
 def test_skyeye_skill_cli_commands(
@@ -105,3 +112,31 @@ def test_skyeye_skill_cli_commands(
 ):
     output = _run_cli(cli_module, monkeypatch, args)
     assert expected_fragment in output
+
+
+def test_skyeye_skill_cli_alarm_list_forwards_hazard_level_filter(
+    cli_module,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _run_cli(
+        cli_module,
+        monkeypatch,
+        ["alarm", "list", "--days", "1", "--filter", "hazard_level=3,2"],
+    )
+
+    assert FakeSkyeyeClient.last_alarm_list_kwargs is not None
+    assert FakeSkyeyeClient.last_alarm_list_kwargs["hazard_level"] == "3,2"
+
+
+def test_skyeye_skill_cli_alarm_count_forwards_hazard_level_filter(
+    cli_module,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    _run_cli(
+        cli_module,
+        monkeypatch,
+        ["alarm", "count", "--days", "1", "--filter", "hazard_level=3,2"],
+    )
+
+    assert FakeSkyeyeClient.last_alarm_count_kwargs is not None
+    assert FakeSkyeyeClient.last_alarm_count_kwargs["hazard_level"] == "3,2"

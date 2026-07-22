@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
+import time
 import types
 from pathlib import Path
 from unittest.mock import AsyncMock
@@ -20,7 +22,12 @@ from flocks.channel.builtin.feishu.debounce import get_debouncer
 from flocks.channel.builtin.feishu.dedup import FeishuDedup
 from flocks.channel.builtin.feishu.inbound_media import download_inbound_media
 from flocks.channel.builtin.feishu.media import send_media_feishu
-from flocks.channel.builtin.feishu.monitor import _build_ws_client, _start_single_websocket
+from flocks.channel.builtin.feishu.monitor import (
+    _build_ws_client,
+    _parse_event,
+    _start_single_websocket,
+    start_websocket,
+)
 from flocks.channel.builtin.feishu.send import send_message_feishu
 from flocks.channel.inbound.dispatcher import _resolve_feishu_group_overrides
 from flocks.config.config import ChannelConfig, FeishuGroupConfig
@@ -73,6 +80,55 @@ def test_resolve_feishu_group_overrides_uses_normalized_group_config() -> None:
 
     assert scope == "group_topic"
     assert agent == "specific"
+
+
+def _feishu_text_event(
+    text: str,
+    mentions: list[dict] | None = None,
+) -> dict:
+    return {
+        "header": {"event_type": "im.message.receive_v1"},
+        "event": {
+            "sender": {"sender_id": {"open_id": "ou_sender"}},
+            "message": {
+                "message_id": "om_1",
+                "chat_id": "oc_group",
+                "chat_type": "group",
+                "message_type": "text",
+                "content": json.dumps({"text": text}),
+                "mentions": mentions or [
+                    {"key": "@_user_1", "id": {"open_id": "ou_bot"}},
+                ],
+            },
+        },
+    }
+
+
+def test_parse_event_strips_feishu_mention_key() -> None:
+    msg = _parse_event(
+        _feishu_text_event('@_user_1 "friday@park.example.ai"'),
+        {},
+        bot_open_id="ou_bot",
+    )
+
+    assert msg is not None
+    assert msg.mention_text == '"friday@park.example.ai"'
+
+
+def test_parse_event_preserves_email_when_mention_key_matches_domain() -> None:
+    msg = _parse_event(
+        _feishu_text_event(
+            '@ArchSec "friday@park.example.ai", 邮箱域名是park.example.ai',
+            mentions=[{"key": "@park.example.ai", "id": {"open_id": "ou_bot"}}],
+        ),
+        {},
+        bot_open_id="ou_bot",
+    )
+
+    assert msg is not None
+    assert msg.mention_text == (
+        '@ArchSec "friday@park.example.ai", 邮箱域名是park.example.ai'
+    )
 
 
 def test_resolve_webhook_account_config_matches_named_account_token() -> None:
@@ -388,20 +444,24 @@ async def test_handle_webhook_skips_replayed_requests(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_websocket_card_action_events_are_deduplicated(monkeypatch, tmp_path) -> None:
     abort_event = asyncio.Event()
+    loop = asyncio.get_running_loop()
     on_message = AsyncMock()
     dedup = FeishuDedup(account_id="main", data_dir=tmp_path)
 
     class FakeWSClient:
         def __init__(self, app_id, app_secret, event_handler, log_level):
             self._event_handler = event_handler
+            self._stop_event = threading.Event()
 
         def start(self):
             payload = {"header": {"event_type": "card.action.trigger"}, "event": {}}
             self._event_handler(payload)
             self._event_handler(payload)
-            asyncio.get_running_loop().call_later(0.05, abort_event.set)
+            loop.call_soon_threadsafe(abort_event.set)
+            self._stop_event.wait(timeout=1)
 
         def stop(self):
+            self._stop_event.set()
             return None
 
     fake_lark = types.ModuleType("lark_oapi")
@@ -448,6 +508,45 @@ async def test_websocket_card_action_events_are_deduplicated(monkeypatch, tmp_pa
     )
 
     assert on_message.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_build_ws_client_adapter_branch_surfaces_disconnect_error(monkeypatch) -> None:
+    class FakeWSClient:
+        def __init__(self, app_id, app_secret, event_handler, log_level):
+            self._stop_event = threading.Event()
+
+        def start(self):
+            self._stop_event.wait(timeout=0.05)
+            raise RuntimeError("socket closed")
+
+        def stop(self):
+            self._stop_event.set()
+
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.LogLevel = types.SimpleNamespace(WARNING="warning")
+    fake_adapter = types.ModuleType("lark_oapi.adapter")
+    fake_websocket = types.ModuleType("lark_oapi.adapter.websocket")
+    fake_websocket.WSClient = FakeWSClient
+
+    monkeypatch.setitem(sys.modules, "lark_oapi", fake_lark)
+    monkeypatch.setitem(sys.modules, "lark_oapi.adapter", fake_adapter)
+    monkeypatch.setitem(sys.modules, "lark_oapi.adapter.websocket", fake_websocket)
+
+    ws_client = _build_ws_client(
+        app_id="app-id",
+        app_secret="app-secret",
+        event_handler=lambda _data: None,
+        domain="https://open.feishu.cn",
+    )
+
+    ws_client.start()
+    disconnect_error = await asyncio.wait_for(ws_client.wait_disconnected(), timeout=1.0)
+    ws_client.stop()
+
+    assert isinstance(disconnect_error, RuntimeError)
+    assert str(disconnect_error) == "socket closed"
+    assert ws_client.disconnected_error is disconnect_error
 
 
 def test_build_ws_client_falls_back_to_modern_sdk(monkeypatch) -> None:
@@ -518,6 +617,75 @@ def test_build_ws_client_falls_back_to_modern_sdk(monkeypatch) -> None:
 
     assert captured["domain"] == "https://open.feishu.cn"
     assert dispatched == [{"header": {"event_type": "ping"}}]
+
+
+@pytest.mark.asyncio
+async def test_build_ws_client_surfaces_disconnect_error(monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    class _FakeConnection:
+        async def recv(self):
+            raise RuntimeError("ping timeout")
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            captured["client"] = self
+            self._conn = None
+            self._auto_reconnect = kwargs["auto_reconnect"]
+            self.disconnect_calls = 0
+
+        def start(self):
+            loop = asyncio.get_event_loop()
+            self._conn = _FakeConnection()
+            loop.create_task(self._receive_message_loop())
+            loop.run_forever()
+
+        async def _handle_message(self, _msg):
+            return None
+
+        async def _disconnect(self):
+            self.disconnect_calls += 1
+            self._conn = None
+
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.LogLevel = types.SimpleNamespace(WARNING="warning")
+    fake_ws_client = types.ModuleType("lark_oapi.ws.client")
+    fake_ws_client.Client = _FakeClient
+    fake_ws_client.loop = None
+
+    real_import_module = __import__("importlib").import_module
+
+    def fake_import_module(name, package=None):
+        if name == "lark_oapi":
+            return fake_lark
+        if name == "lark_oapi.ws.client":
+            return fake_ws_client
+        if name == "lark_oapi.adapter.websocket":
+            raise ImportError("legacy websocket adapter missing")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor.importlib.import_module",
+        fake_import_module,
+    )
+
+    ws_client = _build_ws_client(
+        app_id="app-id",
+        app_secret="app-secret",
+        event_handler=lambda _data: None,
+        domain="https://open.feishu.cn",
+    )
+
+    ws_client.start()
+    disconnect_error = await asyncio.wait_for(ws_client.wait_disconnected(), timeout=1.0)
+    ws_client.stop()
+
+    fake_client = captured["client"]
+    assert isinstance(disconnect_error, RuntimeError)
+    assert str(disconnect_error) == "ping timeout"
+    assert ws_client.disconnected_error is disconnect_error
+    assert fake_client.disconnect_calls >= 1
 
 
 def test_build_ws_client_ignores_normal_close_during_stop(monkeypatch) -> None:
@@ -668,6 +836,345 @@ def test_build_ws_client_ignores_conn_cleared_during_stop(monkeypatch) -> None:
     fake_client = captured["client"]
     assert fake_client.disconnect_calls >= 1
     assert ws_client.start_error is None
+
+
+def test_build_ws_client_initializes_legacy_client_on_worker_loop(monkeypatch, caplog) -> None:
+    captured: dict[str, object] = {}
+
+    class _LoopBoundConnection:
+        def __init__(self, client) -> None:
+            self._client = client
+
+        async def recv(self):
+            if asyncio.get_running_loop() is not self._client.bound_loop:
+                future = self._client.bound_loop.create_future()
+                return await future
+            while not self._client.closed:
+                await asyncio.sleep(0.01)
+            return b"ignored"
+
+        async def close(self) -> None:
+            self._client.closed = True
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+            captured["client"] = self
+            self.bound_loop = asyncio.get_event_loop()
+            self.constructed_thread = threading.get_ident()
+            self._conn = None
+            self._auto_reconnect = kwargs["auto_reconnect"]
+            self.closed = False
+            self.disconnect_calls = 0
+
+        def start(self):
+            loop = asyncio.get_event_loop()
+            self._conn = _LoopBoundConnection(self)
+            loop.create_task(self._receive_message_loop())
+            loop.run_forever()
+
+        async def _handle_message(self, _msg):
+            return None
+
+        async def _disconnect(self):
+            self.disconnect_calls += 1
+            self.closed = True
+            self._conn = None
+
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.LogLevel = types.SimpleNamespace(WARNING="warning")
+    fake_ws_client = types.ModuleType("lark_oapi.ws.client")
+    fake_ws_client.Client = _FakeClient
+    fake_ws_client.loop = None
+
+    real_import_module = __import__("importlib").import_module
+
+    def fake_import_module(name, package=None):
+        if name == "lark_oapi":
+            return fake_lark
+        if name == "lark_oapi.ws.client":
+            return fake_ws_client
+        if name == "lark_oapi.adapter.websocket":
+            raise ImportError("legacy websocket adapter missing")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor.importlib.import_module",
+        fake_import_module,
+    )
+
+    ws_client = _build_ws_client(
+        app_id="app-id",
+        app_secret="app-secret",
+        event_handler=lambda _data: None,
+        domain="https://open.feishu.cn",
+    )
+
+    ws_client.start()
+    time.sleep(0.1)
+    ws_client.stop()
+
+    fake_client = captured["client"]
+    assert fake_client.constructed_thread != threading.get_ident()
+    assert fake_client.disconnect_calls >= 1
+    assert "attached to a different loop" not in caplog.text
+
+
+def test_build_ws_client_stop_waits_for_legacy_init_and_skips_start(monkeypatch) -> None:
+    captured: dict[str, object] = {"start_calls": 0}
+
+    class _SlowClient:
+        def __init__(self, **kwargs):
+            time.sleep(0.35)
+            captured.update(kwargs)
+            captured["client"] = self
+            self._conn = None
+            self._auto_reconnect = kwargs["auto_reconnect"]
+            self.disconnect_calls = 0
+
+        def start(self):
+            captured["start_calls"] += 1
+            asyncio.get_event_loop().run_forever()
+
+        async def _disconnect(self):
+            self.disconnect_calls += 1
+            self._conn = None
+
+    fake_lark = types.ModuleType("lark_oapi")
+    fake_lark.LogLevel = types.SimpleNamespace(WARNING="warning")
+    fake_ws_client = types.ModuleType("lark_oapi.ws.client")
+    fake_ws_client.Client = _SlowClient
+    fake_ws_client.loop = None
+
+    real_import_module = __import__("importlib").import_module
+
+    def fake_import_module(name, package=None):
+        if name == "lark_oapi":
+            return fake_lark
+        if name == "lark_oapi.ws.client":
+            return fake_ws_client
+        if name == "lark_oapi.adapter.websocket":
+            raise ImportError("legacy websocket adapter missing")
+        return real_import_module(name, package)
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor.importlib.import_module",
+        fake_import_module,
+    )
+
+    ws_client = _build_ws_client(
+        app_id="app-id",
+        app_secret="app-secret",
+        event_handler=lambda _data: None,
+        domain="https://open.feishu.cn",
+    )
+
+    ws_client.start()
+    assert ws_client._client is None
+
+    ws_client.stop()
+
+    fake_client = captured["client"]
+    assert captured["start_calls"] == 0
+    assert fake_client.disconnect_calls == 0
+    assert ws_client._thread is None
+    assert ws_client._loop is None
+    assert ws_client._client is None
+
+
+@pytest.mark.asyncio
+async def test_start_single_websocket_raises_when_ws_disconnects(monkeypatch) -> None:
+    on_message = AsyncMock()
+    stop_calls: list[str] = []
+
+    class _FakeWSClient:
+        start_error = None
+
+        def start(self):
+            return None
+
+        async def wait_disconnected(self):
+            return RuntimeError("keepalive ping timeout")
+
+        def stop(self):
+            stop_calls.append("stop")
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.identity.get_bot_identity",
+        AsyncMock(return_value=("ou_bot", "bot")),
+    )
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.dedup.get_dedup",
+        AsyncMock(return_value=_FakeDedup()),
+    )
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor._build_ws_client",
+        lambda **kwargs: _FakeWSClient(),
+    )
+
+    with pytest.raises(RuntimeError, match="disconnected for account 'main'"):
+        await _start_single_websocket(
+            {
+                "appId": "main-id",
+                "appSecret": "main-secret",
+                "_account_id": "main",
+            },
+            on_message,
+            asyncio.Event(),
+        )
+
+    assert stop_calls == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_start_single_websocket_abort_wins_over_disconnect_waiter(monkeypatch) -> None:
+    on_message = AsyncMock()
+    stop_calls: list[str] = []
+    abort_event = asyncio.Event()
+
+    class _FakeWSClient:
+        start_error = None
+
+        def start(self):
+            asyncio.get_running_loop().call_soon(abort_event.set)
+
+        async def wait_disconnected(self):
+            await asyncio.Event().wait()
+
+        def stop(self):
+            stop_calls.append("stop")
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.identity.get_bot_identity",
+        AsyncMock(return_value=("ou_bot", "bot")),
+    )
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.dedup.get_dedup",
+        AsyncMock(return_value=_FakeDedup()),
+    )
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor._build_ws_client",
+        lambda **kwargs: _FakeWSClient(),
+    )
+
+    await _start_single_websocket(
+        {
+            "appId": "main-id",
+            "appSecret": "main-secret",
+            "_account_id": "main",
+        },
+        on_message,
+        abort_event,
+    )
+
+    assert stop_calls == ["stop"]
+
+
+@pytest.mark.asyncio
+async def test_start_websocket_keeps_other_accounts_running_after_one_fails(monkeypatch) -> None:
+    events: list[str] = []
+    abort_event = asyncio.Event()
+
+    async def fake_start_single_websocket(config, on_message, abort_event=None):
+        account_id = config["_account_id"]
+        if account_id == "main":
+            await asyncio.sleep(0)
+            events.append("main_failed")
+            raise RuntimeError("socket closed")
+        events.append("backup_started")
+        await abort_event.wait()
+        events.append("backup_stopped")
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor._start_single_websocket",
+        fake_start_single_websocket,
+    )
+
+    task = asyncio.create_task(start_websocket(
+        {
+            "accounts": {
+                "main": {
+                    "appId": "main-id",
+                    "appSecret": "main-secret",
+                    "connectionMode": "websocket",
+                },
+                "backup": {
+                    "appId": "backup-id",
+                    "appSecret": "backup-secret",
+                    "connectionMode": "websocket",
+                },
+            }
+        },
+        AsyncMock(),
+        abort_event,
+    ))
+    for _ in range(10):
+        await asyncio.sleep(0)
+        if "main_failed" in events:
+            break
+
+    assert "main_failed" in events
+    assert "backup_started" in events
+    assert not task.done()
+
+    abort_event.set()
+    await asyncio.wait_for(task, timeout=1.0)
+
+    assert "backup_stopped" in events
+
+
+@pytest.mark.asyncio
+async def test_start_websocket_restarts_failed_account_while_sibling_runs(monkeypatch) -> None:
+    events: list[str] = []
+    abort_event = asyncio.Event()
+    restart_seen = asyncio.Event()
+    attempts: dict[str, int] = {"main": 0, "backup": 0}
+
+    async def fake_start_single_websocket(config, on_message, abort_event=None):
+        account_id = config["_account_id"]
+        attempts[account_id] += 1
+        events.append(f"{account_id}_start_{attempts[account_id]}")
+        if account_id == "main" and attempts[account_id] == 1:
+            raise RuntimeError("socket closed")
+        if account_id == "main":
+            restart_seen.set()
+        await abort_event.wait()
+        events.append(f"{account_id}_stopped")
+
+    monkeypatch.setattr(
+        "flocks.channel.builtin.feishu.monitor._start_single_websocket",
+        fake_start_single_websocket,
+    )
+
+    task = asyncio.create_task(start_websocket(
+        {
+            "websocketReconnectDelaySeconds": 0,
+            "accounts": {
+                "main": {
+                    "appId": "main-id",
+                    "appSecret": "main-secret",
+                    "connectionMode": "websocket",
+                },
+                "backup": {
+                    "appId": "backup-id",
+                    "appSecret": "backup-secret",
+                    "connectionMode": "websocket",
+                },
+            },
+        },
+        AsyncMock(),
+        abort_event,
+    ))
+
+    await asyncio.wait_for(restart_seen.wait(), timeout=1.0)
+
+    assert attempts["main"] == 2
+    assert attempts["backup"] == 1
+    assert "backup_start_1" in events
+    assert not task.done()
+
+    abort_event.set()
+    await asyncio.wait_for(task, timeout=1.0)
 
 
 @pytest.mark.asyncio

@@ -11,7 +11,7 @@ Providers:
 
 - Extended Providers (Batch 3):
   - xAI, DeepInfra, Cerebras, Perplexity, OpenRouter
-  - Amazon Bedrock, Google Vertex, Local
+  - Google Vertex, Local
 
 - Enterprise Providers (Batch 5):
   - Gateway, GitLab
@@ -39,7 +39,6 @@ from flocks.provider.sdk.deepinfra import DeepInfraProvider
 from flocks.provider.sdk.cerebras import CerebrasProvider
 from flocks.provider.sdk.perplexity import PerplexityProvider
 from flocks.provider.sdk.openrouter import OpenRouterProvider
-from flocks.provider.sdk.bedrock import BedrockProvider
 from flocks.provider.sdk.vertex import VertexProvider
 from flocks.provider.sdk.local import LocalProvider
 
@@ -80,7 +79,6 @@ __all__ = [
     "CerebrasProvider",
     "PerplexityProvider",
     "OpenRouterProvider",
-    "BedrockProvider",
     "VertexProvider",
     "LocalProvider",
     # Enterprise providers

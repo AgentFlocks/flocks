@@ -1,0 +1,195 @@
+name: onesec_dns
+description: >
+  OneSEC DNS grouped tool. Use the `action` parameter to access DNS security
+  query and policy APIs. Configure the OneSEC service with separate API Key and
+  Secret credentials.
+description_cn: >
+  OneSEC DNS 分组工具。通过 `action` 参数调用 DNS 安全防护相关接口。请在 OneSEC
+  服务配置中分别填写 API Key、Secret，Base URL 可按需覆盖。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: onesec_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        DNS 分组动作名，可选值：
+        - dns_search_blocked_queries
+          用途: 分页查询 DNS 拦截记录
+          必填: `time_from`、`time_to`、`domain`、`keyword`
+          常用: `public_ip`、`private_ip`、`block_reason`、`show_unblocked_threat`、`threat_level`、`threat_type`、`cur_page`
+          风险提示: 推荐使用 Unix 秒级时间戳；工具会兼容常见 `YYYY-MM-DD HH:MM:SS` 日期字符串。若只传 `domain`，工具会默认将 `keyword` 补成相同值；若仅按 `public_ip` + 时间范围查询最近 24 小时数据，请优先改用 `dns_get_recent_blocked_queries`
+          是否任务型: 否
+        - dns_get_recent_blocked_queries
+          用途: 获取近期 DNS 拦截记录（仅适用于增量同步，有严格时间限制）
+          必填: `time_from`、`time_to`
+          常用: `public_ip`、`block_reason`、`show_unblocked_threat`、`threat_level`
+          ⚠️ 限制: 仅支持最近 24 小时的数据；time_from 超出 24 小时将被服务器拒绝
+          ⚠️ 限制: 不支持 `domain`、`keyword`、`private_ip`、`threat_type` 和分页参数；如需按域名/关键字查询，请改用 `dns_search_blocked_queries`
+          ⚠️ 推荐: 通用查询请优先使用 `dns_search_blocked_queries`
+          是否任务型: 否
+        - dns_search_queries
+          用途: 分页查询 DNS 解析日志
+          必填: `time_from`、`time_to`
+          常用: `domain`、`ip`、`qType`、`rcode`、`cur_page`、`page_items_num`
+          风险提示: 分页字段优先使用原始文档对应的 `page_items_num`
+          是否任务型: 否
+        - dns_search_threatened_endpoint
+          用途: 分页查询受威胁终端
+          必填: `time_from`、`time_to`
+          常用: `fuzzythreatname`、`fuzzyhostip`、`fuzzy_domain`、`evidence_success`、`threattypelist`、`sort_by`、`asc`、`cur_page`、`page_items_num`
+          风险提示: 排序字段优先使用 `sort_by` + `asc`
+          是否任务型: 否
+        - dns_get_public_ip_list
+          用途: 获取验证通过的公网出口列表
+          必填: 无
+          常用: 无
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - dns_add_domains_to_destination_list
+          用途: 向目标地址列表批量添加域名
+          必填: `domains`/`domain_list`、`target_list`
+          常用: `domains`
+          风险提示: 写操作；会直接修改线上目标地址列表
+          是否任务型: 否
+        - dns_delete_domains_from_destination_list
+          用途: 从目标地址列表批量删除域名
+          必填: `domains`/`domain_list`、`target_list`
+          常用: `domains`
+          风险提示: 写操作；会直接修改线上目标地址列表
+          是否任务型: 否
+        - dns_replace_destination_list
+          用途: 替换目标地址列表内容
+          必填: `domains`/`domain_list`、`target_list`
+          常用: `domains`
+          风险提示: 高风险写操作；会整体覆盖目标地址列表现有内容
+          是否任务型: 否
+        - dns_get_all_destination_list
+          用途: 获取全部目标地址列表
+          必填: 无
+          常用: `policy_type`
+          风险提示: `policy_type` 留空表示查询全部
+          是否任务型: 否
+      enum:
+        - dns_search_blocked_queries
+        - dns_get_recent_blocked_queries
+        - dns_search_queries
+        - dns_search_threatened_endpoint
+        - dns_get_public_ip_list
+        - dns_add_domains_to_destination_list
+        - dns_delete_domains_from_destination_list
+        - dns_replace_destination_list
+        - dns_get_all_destination_list
+    time_from:
+      type: integer
+      description: >
+        开始时间戳，Unix 秒级时间戳。必须小于 time_to。可以使用python datetime动态计算。
+        工具会兼容常见日期时间字符串，如 `YYYY-MM-DD HH:MM:SS`。
+        对于 recent 系列接口，time_from 距当前时间不能超过 24 小时。
+    time_to:
+      type: integer
+      description: >
+        结束时间戳，Unix 秒级时间戳。必须大于 time_from。可以使用python datetime动态计算。
+        工具会兼容常见日期时间字符串，如 `YYYY-MM-DD HH:MM:SS`。
+    public_ip:
+      type: array
+      items:
+        type: string
+      description: 公网 IP 列表；当前工具会兼容单个字符串并自动包装为单元素数组
+    private_ip:
+      type: string
+      description: 私网 IP
+    domain:
+      type: string
+      description: 域名
+    keyword:
+      type: string
+      description: 关键词
+    block_reason:
+      type: string
+      description: 拦截原因
+    show_unblocked_threat:
+      type: integer
+      description: 是否返回未拦截的威胁记录，常见取值 `1`
+    threat_level:
+      type: array
+      items:
+        type: integer
+      description: 威胁等级列表
+    threat_type:
+      type: array
+      items:
+        type: string
+      description: 威胁类型列表
+    cur_page:
+      type: integer
+      default: 1
+      description: 页码
+    ip:
+      type: string
+      description: 公网出口 IP
+    qType:
+      type: string
+      description: DNS 查询类型
+    rcode:
+      type: string
+      description: DNS 响应码
+    pageitemsnum:
+      type: integer
+      default: 20
+      description: DNS 分页每页数量，兼容旧字段名
+    page_items_num:
+      type: integer
+      default: 20
+      description: DNS 分页每页数量，原始 OneDNS 文档中的实际字段名
+    fuzzythreatname:
+      type: string
+      description: 恶意名称模糊搜索
+    fuzzyhostip:
+      type: string
+      description: 主机 IP 模糊搜索
+    fuzzy_domain:
+      type: string
+      description: 恶意域名模糊搜索
+    evidence_success:
+      type: boolean
+      description: 是否已取证
+    threattypelist:
+      type: array
+      items:
+        type: string
+      description: 威胁类型列表
+    sort_by:
+      type: string
+      description: 排序字段
+    asc:
+      type: boolean
+      description: 排序方式，`true` 为升序，`false` 为降序
+    sort_order:
+      type: string
+      description: 排序方式兼容字段，支持 `asc` / `desc`
+    domains:
+      type: array
+      items:
+        type: string
+      description: 域名列表
+    domain_list:
+      type: array
+      items:
+        type: string
+      description: 域名列表别名，兼容旧调用方式
+    target_list:
+      type: string
+      description: 目标地址列表名称
+    policy_type:
+      type: string
+      description: 策略类型
+  required:
+    - action
+handler:
+  type: script
+  script_file: onesec.handler.py
+  function: dns

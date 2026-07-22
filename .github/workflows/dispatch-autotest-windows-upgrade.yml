@@ -1,0 +1,500 @@
+name: Dispatch autotest Windows upgrade
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Optional Flocks version tag. Defaults to pyproject.toml version."
+        required: false
+        type: string
+      release_url:
+        description: "Optional source URL. Defaults to the release or commit URL."
+        required: false
+        type: string
+      rollback_version:
+        description: "Optional old version for flocks_autotest to prepare an upgradeable baseline."
+        required: false
+        type: string
+      run_force_fallback:
+        description: "Also ask flocks_autotest to run the force fallback reinstall case."
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+concurrency:
+  group: dispatch-autotest-windows-upgrade-${{ github.event_name }}-${{ github.ref_name || github.run_id }}
+  cancel-in-progress: false
+
+jobs:
+  dispatch:
+    name: Dispatch flocks_autotest Windows upgrade
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Resolve dispatch payload
+        id: payload
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_RELEASE_TAG: ${{ inputs.release_tag }}
+          INPUT_RELEASE_URL: ${{ inputs.release_url }}
+          INPUT_ROLLBACK_VERSION: ${{ inputs.rollback_version }}
+          INPUT_RUN_FORCE_FALLBACK: ${{ inputs.run_force_fallback }}
+          GITHUB_SERVER_URL_VALUE: ${{ github.server_url }}
+          GITHUB_REPOSITORY_VALUE: ${{ github.repository }}
+          GITHUB_SHA_VALUE: ${{ github.sha }}
+          GITHUB_REF_NAME_VALUE: ${{ github.ref_name }}
+          GITHUB_RUN_ID_VALUE: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT_VALUE: ${{ github.run_attempt }}
+        run: |
+          set -euo pipefail
+
+          pyproject_version="$(python3 - <<'PY'
+          import tomllib
+          with open("pyproject.toml", "rb") as f:
+              print(tomllib.load(f)["project"]["version"])
+          PY
+          )"
+
+          release_tag="${INPUT_RELEASE_TAG:-}"
+          release_url="${INPUT_RELEASE_URL:-}"
+
+          if [ -z "$release_tag" ]; then
+            release_tag="$pyproject_version"
+          fi
+          if [ -z "$release_url" ]; then
+            release_url="${GITHUB_SERVER_URL_VALUE}/${GITHUB_REPOSITORY_VALUE}/commit/${GITHUB_SHA_VALUE}"
+          fi
+
+          if [ -z "$release_tag" ]; then
+            echo "release_tag is empty" >&2
+            exit 1
+          fi
+
+          artifact_time="$(printf "%02d" "${GITHUB_RUN_ATTEMPT_VALUE:-1}")"
+          artifact_name="flocks-windows-upgrade-${release_tag}-time${artifact_time}"
+
+          {
+            echo "release_tag=$release_tag"
+            echo "release_url=$release_url"
+            echo "rollback_version=${INPUT_ROLLBACK_VERSION:-}"
+            echo "run_force_fallback=${INPUT_RUN_FORCE_FALLBACK:-false}"
+            echo "artifact_name=$artifact_name"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "### flocks_autotest dispatch payload"
+            echo ""
+            echo "- Event: ${EVENT_NAME}"
+            echo "- Release tag: ${release_tag}"
+            echo "- Release URL: ${release_url}"
+            echo "- Source ref: ${GITHUB_REF_NAME_VALUE}"
+            echo "- Source sha: ${GITHUB_SHA_VALUE}"
+            echo "- Rollback version: ${INPUT_ROLLBACK_VERSION:-}"
+            echo "- Run force fallback: ${INPUT_RUN_FORCE_FALLBACK:-false}"
+            echo "- Expected autotest artifact: ${artifact_name}"
+            echo "- Autotest workflow: https://github.com/AgentFlocks/flocks_autotest/actions/workflows/flocks-release-dispatch.yml"
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Create repository_dispatch payload
+        env:
+          RELEASE_TAG: ${{ steps.payload.outputs.release_tag }}
+          RELEASE_URL: ${{ steps.payload.outputs.release_url }}
+          ROLLBACK_VERSION: ${{ steps.payload.outputs.rollback_version }}
+          RUN_FORCE_FALLBACK: ${{ steps.payload.outputs.run_force_fallback }}
+          ARTIFACT_NAME: ${{ steps.payload.outputs.artifact_name }}
+          SOURCE_REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          SOURCE_SHA: ${{ github.sha }}
+          SOURCE_REF: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY' > "$RUNNER_TEMP/flocks-autotest-dispatch.json"
+          import json
+          import os
+
+          payload = {
+              "event_type": "flocks_main_updated",
+              "client_payload": {
+                  "release_tag": os.environ["RELEASE_TAG"],
+                  "release_url": os.environ["RELEASE_URL"],
+                  "installer_asset_name": "",
+                  "source_repository": os.environ["SOURCE_REPOSITORY"],
+                  "source_run_id": os.environ["SOURCE_RUN_ID"],
+                  "source_sha": os.environ["SOURCE_SHA"],
+                  "source_ref": os.environ["SOURCE_REF"],
+                  "artifact_name": os.environ["ARTIFACT_NAME"],
+                  "rollback_version": os.environ.get("ROLLBACK_VERSION", ""),
+                  "run_force_fallback": os.environ.get("RUN_FORCE_FALLBACK", "false"),
+              },
+          }
+          print(json.dumps(payload, ensure_ascii=False))
+          PY
+
+          cat "$RUNNER_TEMP/flocks-autotest-dispatch.json"
+
+      - name: Dispatch flocks_autotest
+        id: dispatch
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTEST_DISPATCH_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${GH_TOKEN:-}" ]; then
+            echo "Missing AUTOTEST_DISPATCH_TOKEN secret" >&2
+            exit 1
+          fi
+
+          dispatch_started_at="$(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+          echo "started_at=${dispatch_started_at}" >> "$GITHUB_OUTPUT"
+
+          curl --fail-with-body -L -X POST \
+            -H "Accept: application/vnd.github+json" \
+            -H "Authorization: Bearer ${GH_TOKEN}" \
+            -H "X-GitHub-Api-Version: 2022-11-28" \
+            --data-binary "@${RUNNER_TEMP}/flocks-autotest-dispatch.json" \
+            "https://api.github.com/repos/AgentFlocks/flocks_autotest/dispatches"
+
+      - name: Wait for flocks_autotest result
+        id: autotest
+        timeout-minutes: 210
+        env:
+          GH_TOKEN: ${{ secrets.AUTOTEST_DISPATCH_TOKEN }}
+          RELEASE_TAG: ${{ steps.payload.outputs.release_tag }}
+          EXPECTED_ARTIFACT_NAME: ${{ steps.payload.outputs.artifact_name }}
+          SOURCE_RUN_ID: ${{ github.run_id }}
+          DISPATCH_STARTED_AT: ${{ steps.dispatch.outputs.started_at }}
+          AUTOTEST_REPOSITORY: AgentFlocks/flocks_autotest
+          AUTOTEST_WORKFLOW_FILE: flocks-release-dispatch.yml
+          AUTOTEST_POLL_INTERVAL_SECONDS: "30"
+          AUTOTEST_WAIT_TIMEOUT_SECONDS: "10800"
+        run: |
+          set -euo pipefail
+
+          python3 - <<'PY'
+          import json
+          import os
+          import sys
+          import time
+          import urllib.error
+          import urllib.parse
+          import urllib.request
+          from datetime import datetime, timedelta, timezone
+
+          api_root = "https://api.github.com"
+          token = os.environ["GH_TOKEN"]
+          release_tag = os.environ["RELEASE_TAG"]
+          expected_artifact_name = os.environ["EXPECTED_ARTIFACT_NAME"]
+          source_run_id = os.environ["SOURCE_RUN_ID"]
+          dispatch_started_at = os.environ["DISPATCH_STARTED_AT"]
+          autotest_repo = os.environ["AUTOTEST_REPOSITORY"]
+          workflow_file = os.environ["AUTOTEST_WORKFLOW_FILE"]
+          poll_interval = int(os.environ["AUTOTEST_POLL_INTERVAL_SECONDS"])
+          wait_timeout = int(os.environ["AUTOTEST_WAIT_TIMEOUT_SECONDS"])
+          summary_path = os.environ["GITHUB_STEP_SUMMARY"]
+          output_path = os.environ["GITHUB_OUTPUT"]
+          runner_temp = os.environ["RUNNER_TEMP"]
+
+          headers = {
+              "Accept": "application/vnd.github+json",
+              "Authorization": f"Bearer {token}",
+              "X-GitHub-Api-Version": "2022-11-28",
+          }
+
+          def api_json(url):
+              request = urllib.request.Request(url, headers=headers)
+              with urllib.request.urlopen(request, timeout=30) as response:
+                  return json.loads(response.read().decode("utf-8"))
+
+          class NoRedirectHandler(urllib.request.HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          def download(url, destination):
+              request = urllib.request.Request(url, headers=headers)
+              opener = urllib.request.build_opener(NoRedirectHandler)
+              try:
+                  opener.open(request, timeout=30)
+              except urllib.error.HTTPError as error:
+                  if error.code not in (301, 302, 303, 307, 308):
+                      raise
+                  redirect_url = error.headers.get("Location")
+                  if not redirect_url:
+                      raise RuntimeError("Artifact download redirect did not include Location header") from error
+              else:
+                  raise RuntimeError("Artifact download did not return the expected redirect")
+
+              # GitHub returns a short-lived signed URL for the artifact archive.
+              # Do not forward the GitHub PAT to that storage endpoint.
+              redirect_request = urllib.request.Request(
+                  redirect_url,
+                  headers={"Accept": "application/octet-stream"},
+              )
+              with urllib.request.urlopen(redirect_request, timeout=300) as response:
+                  with open(destination, "wb") as f:
+                      f.write(response.read())
+
+          def write_summary(lines):
+              with open(summary_path, "a", encoding="utf-8") as f:
+                  f.write("\n".join(lines))
+                  f.write("\n")
+
+          def write_outputs(values):
+              with open(output_path, "a", encoding="utf-8") as f:
+                  for key, value in values.items():
+                      f.write(f"{key}={value}\n")
+
+          def parse_github_time(value):
+              if not value:
+                  return datetime.min.replace(tzinfo=timezone.utc)
+              return datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+          workflow_ref = urllib.parse.quote(workflow_file, safe="")
+          runs_url = (
+              f"{api_root}/repos/{autotest_repo}/actions/workflows/"
+              f"{workflow_ref}/runs?per_page=50"
+          )
+          version_title_prefix = f"Windows upgrade {release_tag} "
+          version_artifact_prefix = f"flocks-windows-upgrade-{release_tag}-"
+          dispatch_started = parse_github_time(dispatch_started_at) - timedelta(seconds=30)
+          deadline = time.time() + wait_timeout
+          source_discovery_deadline = time.time() + 120
+          matched_run = None
+
+          def list_workflow_runs():
+              return api_json(runs_url).get("workflow_runs", [])
+
+          def latest_successful_version_run(runs=None):
+              if runs is None:
+                  runs = list_workflow_runs()
+              candidates = []
+              for run in runs:
+                  title = run.get("display_title") or run.get("name") or ""
+                  if not title.startswith(version_title_prefix):
+                      continue
+                  if run.get("status") != "completed" or run.get("conclusion") != "success":
+                      continue
+                  candidates.append(run)
+              candidates.sort(key=lambda run: run.get("created_at") or "", reverse=True)
+              return candidates[0] if candidates else None
+
+          def find_artifact(run_id, *, exact_name="", name_prefix="", retry_seconds=120):
+              artifacts_url = (
+                  f"{api_root}/repos/{autotest_repo}/actions/runs/{run_id}/artifacts?per_page=100"
+              )
+              lookup_deadline = time.time() + retry_seconds
+              available_artifact_names = []
+              matching_artifacts = []
+              while True:
+                  artifacts = api_json(artifacts_url).get("artifacts", [])
+                  available_artifact_names = [
+                      artifact.get("name") or ""
+                      for artifact in artifacts
+                      if not artifact.get("expired") and artifact.get("name")
+                  ]
+                  matching_artifacts = [
+                      artifact
+                      for artifact in artifacts
+                      if not artifact.get("expired")
+                      and (
+                          (exact_name and (artifact.get("name") or "") == exact_name)
+                          or (name_prefix and (artifact.get("name") or "").startswith(name_prefix))
+                      )
+                  ]
+                  if matching_artifacts or time.time() >= lookup_deadline:
+                      break
+                  available_text = ", ".join(available_artifact_names) if available_artifact_names else "(none)"
+                  expected_text = exact_name or f"{name_prefix}*"
+                  print(
+                      f"Waiting for artifact {expected_text}. Available artifacts: {available_text}",
+                      flush=True,
+                  )
+                  time.sleep(10)
+              matching_artifacts.sort(key=lambda artifact: artifact.get("created_at") or "", reverse=True)
+              return (matching_artifacts[0] if matching_artifacts else None), available_artifact_names
+
+          selected_run = None
+          selected_artifact = None
+          selected_available_artifacts = []
+          selection_reason = ""
+          source_run_url = ""
+          source_failure = ""
+
+          while time.time() < deadline:
+              runs = list_workflow_runs()
+              source_candidates = []
+              for run in runs:
+                  title = run.get("display_title") or run.get("name") or ""
+                  created_at = parse_github_time(run.get("created_at"))
+                  if f"#{source_run_id}" in title and created_at >= dispatch_started:
+                      source_candidates.append(run)
+              source_candidates.sort(key=lambda run: run.get("created_at") or "", reverse=True)
+              if source_candidates:
+                  matched_run = source_candidates[0]
+                  break
+
+              fallback_run = latest_successful_version_run(runs)
+              if fallback_run and time.time() >= source_discovery_deadline:
+                  selected_run = fallback_run
+                  selection_reason = "version_success_fallback_no_source_run"
+                  print(
+                      f"Using latest successful flocks_autotest run for {release_tag}: "
+                      f"{selected_run.get('html_url')}",
+                      flush=True,
+                  )
+                  break
+
+              print(
+                  f"Waiting for flocks_autotest workflow run with source_run_id={source_run_id}...",
+                  flush=True,
+              )
+              time.sleep(poll_interval)
+
+          if matched_run:
+              run_id = matched_run["id"]
+              run_api_url = matched_run["url"]
+              source_run_url = matched_run["html_url"]
+              print(f"Matched flocks_autotest run: {source_run_url}", flush=True)
+
+              while time.time() < deadline:
+                  matched_run = api_json(run_api_url)
+                  status = matched_run.get("status")
+                  conclusion = matched_run.get("conclusion") or ""
+                  print(
+                      f"flocks_autotest run {run_id}: status={status} conclusion={conclusion}",
+                      flush=True,
+                  )
+                  if status == "completed":
+                      break
+                  time.sleep(poll_interval)
+
+              if matched_run.get("status") != "completed":
+                  source_failure = "timed out waiting for source run completion"
+              elif matched_run.get("conclusion") == "success":
+                  artifact, available_names = find_artifact(
+                      run_id,
+                      exact_name=expected_artifact_name,
+                      retry_seconds=120,
+                  )
+                  if artifact:
+                      selected_run = matched_run
+                      selected_artifact = artifact
+                      selected_available_artifacts = available_names
+                      selection_reason = "source_run_exact_artifact"
+                  else:
+                      available_text = ", ".join(available_names) if available_names else "(none)"
+                      selected_available_artifacts = available_names
+                      source_failure = (
+                          f"source run succeeded but expected artifact was not found; "
+                          f"available artifacts: {available_text}"
+                      )
+              else:
+                  source_failure = f"source run concluded with {matched_run.get('conclusion') or 'unknown'}"
+
+          if not selected_artifact:
+              fallback_run = selected_run or latest_successful_version_run()
+              if fallback_run:
+                  fallback_run_id = fallback_run["id"]
+                  artifact, available_names = find_artifact(
+                      fallback_run_id,
+                      name_prefix=version_artifact_prefix,
+                      retry_seconds=120,
+                  )
+                  if artifact:
+                      selected_run = fallback_run
+                      selected_artifact = artifact
+                      selected_available_artifacts = available_names
+                      if not selection_reason:
+                          selection_reason = "version_success_fallback"
+                      print(
+                          f"Using version fallback artifact from flocks_autotest run "
+                          f"{selected_run.get('html_url')}",
+                          flush=True,
+                      )
+                  else:
+                      available_text = ", ".join(available_names) if available_names else "(none)"
+                      selected_available_artifacts = available_names
+                      source_failure = (
+                          f"{source_failure}; " if source_failure else ""
+                      ) + (
+                          f"latest successful {release_tag} run has no matching artifact; "
+                          f"available artifacts: {available_text}"
+                      )
+
+          artifact_name = ""
+          artifact_html_url = ""
+          artifact_path = ""
+          run_id = ""
+          run_html_url = ""
+          conclusion = "unknown"
+          if selected_run and selected_artifact:
+              run_id = selected_run["id"]
+              run_html_url = selected_run["html_url"]
+              conclusion = selected_run.get("conclusion") or "success"
+              artifact_name = selected_artifact["name"]
+              artifact_html_url = (
+                  f"https://github.com/{autotest_repo}/actions/runs/{run_id}/artifacts/{selected_artifact['id']}"
+              )
+              artifact_path = os.path.join(runner_temp, f"{artifact_name}.zip")
+              download(selected_artifact["archive_download_url"], artifact_path)
+              print(f"Downloaded flocks_autotest artifact: {artifact_path}", flush=True)
+
+          write_outputs(
+              {
+                  "run_id": str(run_id),
+                  "run_url": run_html_url,
+                  "conclusion": conclusion,
+                  "artifact_name": artifact_name,
+                  "artifact_url": artifact_html_url,
+                  "artifact_path": artifact_path,
+              }
+          )
+
+          summary_lines = [
+              "### flocks_autotest result",
+              "",
+              f"- Selection: {selection_reason or 'none'}",
+              f"- Selected run: {run_html_url or 'not found'}",
+              f"- Conclusion: {conclusion}",
+              f"- Source run: {source_run_url or 'not found'}",
+              f"- Source status: {source_failure or 'ok'}",
+              f"- Version fallback prefix: {version_artifact_prefix}",
+              f"- Expected artifact: {expected_artifact_name}",
+          ]
+          if artifact_name:
+              summary_lines.append(f"- Artifact: [{artifact_name}]({artifact_html_url})")
+              summary_lines.append("- Artifact copy: downloaded; upload step will attach it to this flocks workflow run")
+          else:
+              summary_lines.append("- Artifact: not found")
+              available_text = (
+                  ", ".join(selected_available_artifacts)
+                  if selected_available_artifacts
+                  else "(none)"
+              )
+              summary_lines.append(f"- Available artifacts: {available_text}")
+          write_summary(summary_lines)
+
+          if not selected_run:
+              raise SystemExit(source_failure or "flocks_autotest workflow run was not found")
+          if conclusion != "success":
+              raise SystemExit(f"flocks_autotest concluded with {conclusion}")
+          if not artifact_name:
+              raise SystemExit(source_failure or "flocks_autotest artifact was not found")
+          PY
+
+      - name: Upload flocks_autotest artifact copy
+        if: ${{ always() && steps.autotest.outputs.artifact_path != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.autotest.outputs.artifact_name }}
+          path: ${{ steps.autotest.outputs.artifact_path }}
+          if-no-files-found: error

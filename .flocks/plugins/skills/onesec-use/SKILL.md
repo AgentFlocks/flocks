@@ -1,6 +1,6 @@
 ---
 name: onesec-use
-description: 用于处理 OneSEC 终端安全平台相关任务，适合通过API或者结合浏览器进行以下任务: 终端安全调查、威胁事件分析、终端告警检索、行为日志排查、IOC 查询、恶意文件分析、DNS 威胁排查、软件与终端资产查询、任务进度查看、审计日志分析、病毒扫描和常见终端处置场景。只要用户提到 OneSEC、微步 EDR等相关操纵需求时，必须先加载本 skill。本 skill 是 OneSEC 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `onesec_*` tool。
+description: 用于处理 OneSEC/OneDNS 终端安全平台相关任务，适合通过API或者结合浏览器进行以下任务: 终端安全调查、威胁事件分析、终端告警检索、行为日志排查、IOC 查询、恶意文件分析、DNS 威胁排查、软件与终端资产查询、任务进度查看、审计日志分析、病毒扫描和常见终端处置场景。只要用户提到 OneSEC、微步 EDR等相关操纵需求时，必须先加载本 skill。本 skill 是 OneSEC 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `onesec_*` tool。
 ---
 
 # OneSEC Use
@@ -31,9 +31,16 @@ description: 用于处理 OneSEC 终端安全平台相关任务，适合通过AP
 
 ## API模式使用指南
 
+- 时间字段硬规则：凡是本次 API 调用涉及 `time_from` / `time_to` / `begin_time` / `end_time` 等时间字段，必须先在 bash 中执行 `uv run python` 动态计算，再调用对应 tool；禁止手动估算、禁止硬编码、禁止把“今天”“最近 7 天”“最近 24 小时”等自然语言时间直接脑补成数字。
+- OneSEC 的时间入参默认按 Unix 秒级时间戳处理；如果需要“今天”“本周”“最近 N 天”这类窗口，也必须先用 `uv run python` 算出准确边界后再传参。
 - 用户说“威胁事件”“最近有什么事件”“事件详情”“有哪些事件”时，优先走 `onesec_edr` 的事件类 action
 - 用户说“终端告警”“告警日志”“查某终端的告警”“查某进程行为”“行为记录”“时间线”“IOC”“恶意文件”时，优先走 `onesec_edr` 的告警/日志类 action
 - 用户说“DNS 拦截”“DNS 告警”“解析日志”“受威胁终端”“域名放行/阻断”时，优先走 `onesec_dns`
+- 涉及任何时间查询时，必须动态计算 `time_from` / `time_to` / `begin_time` / `end_time`，禁止手动估算时间戳
+- 查询单个域名是否被 DNS 拦截时，优先构造 `dns_search_blocked_queries + domain + time_from + time_to`；未显式给 `keyword` 时，工具会默认复用 `domain`
+- DNS 查询优先使用 Unix 秒级时间戳；如果用户给的是常见日期字符串（如 `2026-05-08 00:00:00`），工具会自动换算
+- 查询指定域名或关键字的 DNS 拦截明细时，优先使用 `dns_search_blocked_queries`
+- `dns_get_recent_blocked_queries` 只用于最近 24 小时增量拉取，不支持 `domain` / `keyword` / `private_ip` / `threat_type` / 分页参数
 - 用户说“安装了什么软件”“哪些终端装了某软件”时，优先走 `onesec_software`
 - 用户说“终端管理”“任务列表”“任务执行进度”“审计日志”“策略范围”时，优先走 `onesec_ops`
 - 用户说“病毒库版本”“病毒扫描”“停止扫描”“升级病毒库”时，优先走 `onesec_threat`

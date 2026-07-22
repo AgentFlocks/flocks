@@ -6,8 +6,9 @@ from typer.testing import CliRunner
 import flocks.cli.commands.export as export_cmd
 import flocks.cli.commands.import_ as import_cmd
 import flocks.mcp.server as mcp_server
-from flocks.session.message import MessageWithParts, TextPart, UserMessageInfo
+from flocks.session.message import Message, MessageWithParts, TextPart, UserMessageInfo
 from flocks.session.session import SessionInfo, SessionTime
+from flocks.storage.storage import Storage
 
 if not hasattr(mcp_server, "get_manager"):
     mcp_server.get_manager = lambda: None
@@ -67,9 +68,9 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
         assert include_archived is False
         return [message]
 
-    stored_entries: list[tuple[str, dict, str | None]] = []
+    stored_entries: list[tuple[str, object, str | None]] = []
 
-    async def fake_set(key: str, value: dict, category: str | None = None):
+    async def fake_set(key: str, value: object, category: str | None = None):
         stored_entries.append((key, value, category))
 
     monkeypatch.setattr(export_cmd.Session, "get_by_id", fake_get_by_id)
@@ -98,8 +99,112 @@ def test_export_and_import_round_trip(monkeypatch, tmp_path) -> None:
 
     stored = {key: (value, category) for key, value, category in stored_entries}
     assert stored["session:proj_imported:ses_export_test"][0]["projectID"] == "proj_imported"
-    assert stored["message:ses_export_test:msg_export_test"][0]["id"] == "msg_export_test"
-    assert stored["part:msg_export_test:part_export_test"][0]["text"] == "hello export"
+    assert stored["message:ses_export_test"][0][0]["id"] == "msg_export_test"
+    assert "message_parts:ses_export_test" not in stored
+    assert stored["message_parts:ses_export_test:msg_export_test"][0][0]["text"] == "hello export"
+    assert stored["message_parts:ses_export_test:msg_export_test"][1] == "message_part"
+
+
+@pytest.mark.asyncio
+async def test_import_writes_messages_in_runtime_storage_format(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    session = _build_session()
+    message = _build_message_with_parts(session.id)
+    payload = {
+        "info": session.model_dump(by_alias=True),
+        "messages": [
+            {
+                "info": message.info.model_dump(by_alias=True),
+                "parts": [part.model_dump() for part in message.parts],
+            }
+        ],
+    }
+    input_path = tmp_path / "session-import.json"
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    await import_cmd._import_session(str(input_path), "proj_imported")
+
+    Message.invalidate_cache(session.id)
+    imported = await Message.list_with_parts(session.id)
+
+    assert len(imported) == 1
+    assert imported[0].info.id == "msg_export_test"
+    assert len(imported[0].parts) == 1
+    assert imported[0].parts[0].id == "part_export_test"
+    assert imported[0].parts[0].text == "hello export"
+    assert await Storage.get(f"message_parts:{session.id}") is None
+    stored_parts = await Storage.get(f"message_parts:{session.id}:msg_export_test")
+    assert stored_parts[0]["text"] == "hello export"
+
+
+@pytest.mark.asyncio
+async def test_import_normalizes_legacy_reasoning_parts(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path))
+
+    session = _build_session()
+    payload = {
+        "info": session.model_dump(by_alias=True),
+        "messages": [
+            {
+                "info": {
+                    "id": "msg_user",
+                    "sessionID": session.id,
+                    "role": "user",
+                    "time": {"created": 1},
+                    "agent": "rex",
+                    "model": {"providerID": "anthropic", "modelID": "claude-sonnet"},
+                },
+                "parts": [
+                    {
+                        "id": "part_user",
+                        "sessionID": session.id,
+                        "messageID": "msg_user",
+                        "type": "text",
+                        "text": "hello",
+                    }
+                ],
+            },
+            {
+                "info": {
+                    "id": "msg_assistant",
+                    "sessionID": session.id,
+                    "role": "assistant",
+                    "time": {"created": 2, "updated": 3},
+                    "parentID": "msg_user",
+                    "modelID": "claude-sonnet",
+                    "providerID": "anthropic",
+                    "mode": "rex",
+                    "agent": "rex",
+                    "path": {"cwd": "./", "root": ""},
+                    "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
+                },
+                "parts": [
+                    {
+                        "id": "part_reasoning",
+                        "sessionID": session.id,
+                        "messageID": "msg_assistant",
+                        "type": "reasoning",
+                        "text": "thinking",
+                        "metadata": {},
+                    }
+                ],
+            },
+        ],
+    }
+    input_path = tmp_path / "legacy-session-import.json"
+    input_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    await import_cmd._import_session(str(input_path), "proj_imported")
+
+    Message.invalidate_cache(session.id)
+    imported = await Message.list_with_parts(session.id, include_archived=True)
+
+    assert len(imported) == 2
+    assert imported[1].parts[0].type == "reasoning"
+    assert imported[1].parts[0].text == "thinking"
+    assert imported[1].parts[0].time.start == 2
+    assert imported[1].parts[0].time.end == 3
 
 
 def test_export_help_does_not_show_project_option() -> None:

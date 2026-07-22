@@ -1,0 +1,94 @@
+name: huorong_clnts
+description: >
+  Huorong EDR endpoint (client) management tool. Use the `action` parameter
+  to query online status, list details, rename, move groups, or check for
+  vulnerabilities.
+description_cn: >
+  火绒终端（客户端）管理工具。通过 `action` 参数调用终端上线查询、详情列表、
+  重命名、分组变更和高危漏洞查询等接口。
+  请在火绒服务配置中分别填写 Access Key ID、Secret Key 和 Base URL。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: huorong_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        终端管理动作名，可选值：
+        - clnts_online
+          用途: 查询当前在线终端列表（分页）
+          必填: 无
+          常用: `offset`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - clnts_list
+          用途: 查询终端详情列表（分页）
+          必填: 无
+          常用: `offset`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - clnts_info
+          用途: 查询指定终端详细信息（v1）
+          必填: `clients`
+          常用: `clients`
+          风险提示: 只读查询接口；`clients` 为终端 client_id 列表
+          是否任务型: 否
+        - clnts_info2
+          用途: 查询指定终端详细信息（v2，字段更丰富）
+          必填: `clients`
+          常用: `clients`
+          风险提示: 只读查询接口；`clients` 为终端 client_id 列表
+          是否任务型: 否
+        - clnts_rename
+          用途: 修改终端名称
+          必填: `client_id`、`client_name`
+          常用: `client_id`、`client_name`
+          风险提示: 写操作；会直接修改终端显示名称
+          是否任务型: 否
+        - clnts_group
+          用途: 修改终端所属分组
+          必填: `group_id`、`clients`
+          常用: `group_id`、`clients`
+          风险提示: 写操作；会将终端移入指定分组
+          是否任务型: 否
+        - clnts_leak
+          用途: 查询存在高危漏洞未修复的终端
+          必填: `clients`
+          常用: `clients`
+          风险提示: 只读查询接口；返回存在高危漏洞的终端信息
+          是否任务型: 否
+      enum:
+        - clnts_online
+        - clnts_list
+        - clnts_info
+        - clnts_info2
+        - clnts_rename
+        - clnts_group
+        - clnts_leak
+    offset:
+      type: integer
+      description: 分页偏移量，从 0 开始
+      default: 0
+    clients:
+      type: array
+      items:
+        type: string
+      description: 终端 client_id 列表（40 字符十六进制字符串）
+    client_id:
+      type: string
+      description: 单个终端 client_id（40 字符十六进制字符串）
+    client_name:
+      type: string
+      description: 终端新名称
+    group_id:
+      type: integer
+      description: 目标分组 ID
+  required:
+    - action
+handler:
+  type: script
+  script_file: huorong.handler.py
+  function: clnts

@@ -414,39 +414,87 @@ async def my_tool(ctx: ToolContext, query: str, limit: int = 10) -> ToolResult:
 
 **You MUST run these steps after creating any tool. Do NOT skip or defer.**
 
-### Step 1: Static Validation
+### Step 0: Metadata & Handler Audit (MUST run first)
 
-Run via bash to confirm file syntax:
+This step exists because the loader silently accepts many degraded
+configurations — invalid `category` is coerced to `custom`, missing
+`type` on a parameter falls back to `string`, undeclared placeholders in
+the URL substitute to an empty string, etc. By the time the smoke test
+runs, the symptoms (404, "missing field", empty result) no longer point
+back to the missing piece of metadata.
 
-**YAML-HTTP tools (Mode A):**
+Run the bundled validator before anything else. It is self-contained
+(stdlib + pyyaml only) and inspects the tool file *plus* its
+`_provider.yaml` and any script handler:
+
 ```bash
-uv run python -c "
-import yaml, sys
-from pathlib import Path
-path = Path('$TOOL_PATH').expanduser()
-data = yaml.safe_load(path.read_text(encoding='utf-8'))
-assert 'name' in data, 'Missing name field'
-assert 'handler' in data, 'Missing handler section'
-handler = data['handler']
-assert handler.get('type') in ('http', 'script'), 'handler.type must be http or script'
-print(f'PASS: YAML valid, name={data[\"name\"]}, handler.type={handler[\"type\"]}')
-"
+SKILL_DIR="$(git rev-parse --show-toplevel)/.flocks/plugins/skills/tool-builder"
+uv run python "$SKILL_DIR/scripts/validator.py" "$TOOL_PATH"
 ```
 
-**Python tools (Mode B):**
+The validator checks (this list is enforced, not aspirational):
+
+**Metadata (every mode)**
+- `name` is present, snake_case, not colliding with a built-in tool
+- `description` is present and long enough to be useful
+- `category` is one of `file | terminal | browser | code | search | system | custom`
+  — the loader silently coerces invalid values to `custom`
+- `enabled: true` is set explicitly so the tool is active immediately
+- For tools under `api/`: a `provider` field or a `_provider.yaml` is reachable
+
+**Parameters / inputSchema**
+- `inputSchema` or `parameters` is declared (not both)
+- Every property has a `type` and a `description`
+- Every name listed in `required:` is also defined in `properties`
+- A required parameter never also has a `default`
+
+**YAML-HTTP handler**
+- `handler.type` is `http` (or `script`)
+- `handler.url` is present
+- Every `{placeholder}` in url / headers / query_params / body matches a
+  declared parameter (or `{base_url}` when a `_provider.yaml` provides it)
+- `response.error_mapping` keys are integers
+- `{secret:xxx}` references are surfaced so you can confirm they exist
+
+**YAML-script handler**
+- `script_file` resolves to an existing file under `~/.flocks/plugins/`
+- `function` exists in that file as `async def`
+- The function signature accepts `(ctx, ...)` and every YAML parameter
+  is either a named arg or `**kwargs`
+- The script imports `ToolResult`
+
+**`_provider.yaml`** (when the tool lives under `api/{provider}/`)
+- File exists in the expected location
+- `name`, `description` are present; `description_cn` is recommended
+- `defaults.base_url` is set (otherwise `{base_url}` substitution silently
+  produces `/path` and every request 404s)
+- `auth.secret` and `auth.inject_as` are set when an `auth:` block exists
+
+**Python tools (Mode B)**
+- `from flocks.tool.registry import ...` is present
+- `@ToolRegistry.register_function` is on at least one function
+- The decorator carries `name`, `description`, `category`, `parameters`
+- Every `ToolParameter(name=...)` matches an actual function argument
+  (and the function is `async def`, with `ctx` as the first parameter)
+- The function returns a `ToolResult(...)`
+
+The output is a per-section report ending with
+`Summary: N FAIL, M WARN`. **Do not proceed past this step until
+`FAIL` is `0`.** Fix the file and re-run the validator. WARN items
+should also be addressed unless you have a deliberate reason to leave
+them — note the reason when reporting back.
+
+For a CI-style check that fails on warnings too:
+
 ```bash
-uv run python -c "
-import py_compile
-py_compile.compile('$TOOL_PATH', doraise=True)
-print('PASS: Python syntax valid')
-"
+uv run python "$SKILL_DIR/scripts/validator.py" --strict "$TOOL_PATH"
 ```
 
-If validation fails: **fix the file immediately** and re-validate.
-
-### Step 2: Load Test
+### Step 1: Load Test
 
 Attempt to load the tool into the registry to catch schema/handler errors:
+
+A tool is not considered complete unless it can be successfully discovered, loaded, and registered by the tool system, not just written to disk or pass static validation.
 
 **YAML-HTTP tools (Mode A):**
 ```bash
@@ -496,71 +544,31 @@ else:
 
 If load fails: **read the error, fix the root cause**, and re-run.
 
-### Step 3: Smoke Test
+### Step 2: Smoke Test
 
-Execute the tool with **safe, minimal test parameters** to confirm end-to-end functionality:
+Confirm the tool works in the real agent flow with **safe, minimal test parameters**:
 
-**YAML-HTTP tools (Mode A):**
-```bash
-uv run python -c "
-import asyncio
-from pathlib import Path
-from flocks.tool.tool_loader import yaml_to_tool, _read_yaml_raw
-from flocks.tool.registry import ToolContext
+1. Use `tool_search` to load the tool into the current callable set.
+2. Then call the tool directly with the prepared smoke-test parameters.
 
-yaml_path = Path('$TOOL_PATH').expanduser()
-raw = _read_yaml_raw(yaml_path)
-tool = yaml_to_tool(raw, yaml_path)
-ctx = ToolContext(session_id='test', message_id='test')
+Use exact-select form so the session loads the intended tool rather than a fuzzy match:
 
-# Replace with actual safe test parameters
-test_params = {$TEST_PARAMS}
-
-async def run():
-    result = await tool.execute(ctx, **test_params)
-    print(f'Success: {result.success}')
-    if result.error:
-        print(f'Error: {result.error}')
-    if result.output:
-        output_str = str(result.output)
-        print(f'Output: {output_str[:500]}')
-    return result.success
-
-ok = asyncio.run(run())
-if not ok:
-    print('WARN: Smoke test returned success=False (may be expected for auth errors with unconfigured API keys)')
-"
+```text
+tool_search(query="select:$TOOL_NAME")
 ```
 
-**Python tools (Mode B):**
-```bash
-uv run python -c "
-import asyncio
-from flocks.tool.registry import ToolRegistry, ToolContext
-import importlib.util
-from pathlib import Path
+Then invoke the tool itself:
 
-path = Path('$TOOL_PATH').expanduser()
-spec = importlib.util.spec_from_file_location(f'_test_{path.stem}', str(path))
-mod = importlib.util.module_from_spec(spec)
-spec.loader.exec_module(mod)
-
-ctx = ToolContext(session_id='test', message_id='test')
-test_params = {$TEST_PARAMS}
-
-async def run():
-    result = await ToolRegistry.execute('$TOOL_NAME', ctx, **test_params)
-    print(f'Success: {result.success}')
-    if result.error:
-        print(f'Error: {result.error}')
-    if result.output:
-        output_str = str(result.output)
-        print(f'Output: {output_str[:500]}')
-    return result.success
-
-asyncio.run(run())
-"
+```text
+$TOOL_NAME(...)
 ```
+
+Smoke-test rules:
+
+- Do not stop at static validation or registry import success; the tool must be callable through the normal tool interface.
+- Prefer the smallest harmless happy-path input that still exercises the real handler.
+- If `tool_search` does not return the new tool, treat that as a failure in discovery/loading and fix it before proceeding.
+- If the tool call returns an auth error because the API key is not configured yet, that is an acceptable `WARN` for API tools. Record it explicitly.
 
 ### Choosing test parameters
 
@@ -568,7 +576,7 @@ asyncio.run(run())
 - **Python tools**: use the simplest valid input that exercises the happy path. For destructive tools (delete, write), create a temp file first.
 - If the tool requires an API key that hasn't been configured yet, the smoke test may return an auth error — that's **acceptable**. Report it to the user and note the tool structure is correct.
 
-### Step 4: Report Results
+### Step 3: Report Results
 
 After all steps, summarize to the user:
 
@@ -576,8 +584,9 @@ After all steps, summarize to the user:
 Tool created: {name}
   Mode: {A/B}
   Path: {file_path}
-  Static validation: PASS
+  Metadata & handler audit: {PASS/WARN/FAIL} — {N FAIL, M WARN}
   Load test: PASS
+  Tool system registration: PASS
   Smoke test: {PASS/WARN/FAIL} — {details}
   Hot-reload: automatic (file watcher active — no restart or manual refresh needed)
 
@@ -598,7 +607,7 @@ Tool created: {name}
 
 1. Output path is under `~/.flocks/plugins/tools/{type}/`
 2. **If the tool calls an external HTTP API → MUST be under `api/` (Mode A), NEVER `python/` (Mode B)**
-3. Tool name is `snake_case` and unique (no collision with builtins: read, write, edit, bash, grep, glob, todo, question, plan, task, websearch, webfetch, codesearch, skill, etc.)
+3. Tool name is `snake_case` and unique (no collision with builtins: read, write, edit, bash, grep, glob, todo, question, plan, task, websearch, webfetch, skill, etc.)
 4. Description follows "outcomes over operations" style
 5. Category is one of: `file`, `terminal`, `browser`, `code`, `search`, `system`, `custom`
 6. Parameters have clear descriptions
@@ -608,3 +617,4 @@ Tool created: {name}
 10. For API integrations: endpoint inventory completed; every discovered endpoint is implemented or explicitly skipped
 11. Tool name / filename / function name preserve endpoint vocabulary
 12. API tool output does not drop upstream fields unless the user explicitly asked for a reduced result
+13. **Step 0 of the Verification Protocol (validator.py) was run and ended with `0 FAIL`** — every WARN is either fixed or explicitly justified in your report

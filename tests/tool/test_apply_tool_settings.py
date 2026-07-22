@@ -409,3 +409,91 @@ def test_unregister_dynamic_tools_drops_enabled_default(temp_config, isolated_re
         "_unregister_dynamic_tools must pop the snapshot entry to keep "
         "the factory-default lifecycle symmetric with plugin tools"
     )
+
+
+# ---------------------------------------------------------------------------
+# Bi-directional sync: re-enabling a service must restore its tools to the
+# factory default. Without this, deleting and re-adding a device would leave
+# its tools silently disabled because ``_sync_api_service_states`` used to
+# only flip ``enabled = False`` and never flip back to True.
+# ---------------------------------------------------------------------------
+
+def test_sync_restores_tool_when_service_re_enabled(
+    temp_config, isolated_registry
+):
+    """Regression: tool whose factory default is True should bounce back
+    to True after the owning service is re-enabled."""
+    tool = _stub_api_tool("onesec_dns", enabled=True, provider="onesec_api")
+    ToolRegistry.register(tool)
+    assert ToolRegistry.get_default_enabled("onesec_dns") is True
+
+    _set_api_service("onesec_api", enabled=False)
+    ToolRegistry._sync_api_service_states()
+    assert tool.info.enabled is False
+
+    _set_api_service("onesec_api", enabled=True)
+    ToolRegistry._sync_api_service_states()
+    assert tool.info.enabled is True, (
+        "service flipping enabled=False→True must restore the tool to its "
+        "factory default — otherwise re-adding a device leaves its tools "
+        "permanently off"
+    )
+
+
+def test_sync_does_not_resurrect_user_disabled_tool(
+    temp_config, isolated_registry
+):
+    """A user that explicitly turned a tool off via ``tool_settings`` must
+    keep that choice across service-state flips.  ``_sync_api_service_states``
+    restores the YAML default, then ``_apply_tool_settings`` re-applies
+    the user's disable; the net result is still disabled."""
+    from flocks.config.config_writer import ConfigWriter
+
+    tool = _stub_api_tool("onesec_dns", enabled=True, provider="onesec_api")
+    ToolRegistry.register(tool)
+    ConfigWriter.set_tool_setting("onesec_dns", {"enabled": False})
+
+    _set_api_service("onesec_api", enabled=False)
+    ToolRegistry._sync_api_service_states()
+    ToolRegistry._apply_tool_settings()
+    assert tool.info.enabled is False
+
+    _set_api_service("onesec_api", enabled=True)
+    ToolRegistry._sync_api_service_states()
+    ToolRegistry._apply_tool_settings()
+    assert tool.info.enabled is False, (
+        "the user's explicit disable in tool_settings must win over "
+        "service-state bounce-back"
+    )
+
+
+def test_sync_does_not_flip_factory_disabled_tool(
+    temp_config, isolated_registry
+):
+    """A tool whose factory default is ``enabled=False`` must NOT be
+    flipped on by ``_sync_api_service_states`` when the service is
+    enabled — the sync's job is to honour the YAML default, not to
+    re-enable everything blindly."""
+    tool = _stub_api_tool("onesec_admin", enabled=False, provider="onesec_api")
+    ToolRegistry.register(tool)
+    assert ToolRegistry.get_default_enabled("onesec_admin") is False
+
+    _set_api_service("onesec_api", enabled=True)
+    ToolRegistry._sync_api_service_states()
+    assert tool.info.enabled is False, (
+        "tools whose YAML default is enabled=false must stay off when "
+        "the service is enabled — only an explicit user overlay can open them"
+    )
+
+
+def test_sync_leaves_already_enabled_tool_alone(
+    temp_config, isolated_registry
+):
+    """When a tool is already enabled and its service is enabled, the
+    sync must be a true no-op for it — no spurious writes or log spam."""
+    tool = _stub_api_tool("onesec_dns", enabled=True, provider="onesec_api")
+    ToolRegistry.register(tool)
+
+    _set_api_service("onesec_api", enabled=True)
+    ToolRegistry._sync_api_service_states()
+    assert tool.info.enabled is True

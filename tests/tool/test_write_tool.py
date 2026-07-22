@@ -12,8 +12,10 @@ import os
 import pytest
 from pathlib import Path
 from unittest.mock import patch
+import datetime as dt
 
 from flocks.tool.registry import ToolRegistry, ToolContext
+from flocks.workspace.manager import WorkspaceManager
 
 
 def _make_ctx(**extra_kwargs) -> ToolContext:
@@ -111,6 +113,80 @@ async def test_creates_parent_directory(tmp_path):
     assert result.success, f"write failed: {result.error}"
     assert target.exists()
     assert target.read_text() == "nested"
+
+
+@pytest.mark.asyncio
+async def test_write_expands_tilde_path(tmp_path, monkeypatch):
+    """Write should expand ~/ paths before writing."""
+    monkeypatch.setenv("HOME", str(tmp_path))
+    target = Path(tmp_path) / "tilde-write.txt"
+
+    ctx = _make_ctx()
+    result = await ToolRegistry.execute(
+        "write", ctx, filePath="~/tilde-write.txt", content="home"
+    )
+
+    assert result.success, f"write failed: {result.error}"
+    assert target.exists()
+    assert target.read_text() == "home"
+
+
+@pytest.mark.asyncio
+async def test_filename_only_redirects_to_default_outputs(tmp_path, monkeypatch):
+    """Bare filename should go to workspace default outputs, not source dir."""
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    WorkspaceManager._instance = None
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+
+    ctx = _make_ctx()
+    with patch("flocks.tool.path_utils.Instance.get_directory", return_value=str(project_dir)):
+        result = await ToolRegistry.execute("write", ctx, filePath="hello.txt", content="hello")
+
+    assert result.success, f"write failed: {result.error}"
+    expected = tmp_path / "workspace" / "outputs" / dt.date.today().isoformat() / "hello.txt"
+    assert expected.exists()
+    assert expected.read_text() == "hello"
+    assert not (project_dir / "hello.txt").exists()
+
+
+@pytest.mark.asyncio
+async def test_source_root_absolute_basename_redirects_to_default_outputs(tmp_path, monkeypatch):
+    """Absolute source-root basename should be treated as filename-only intent."""
+    monkeypatch.setenv("FLOCKS_WORKSPACE_DIR", str(tmp_path / "workspace"))
+    WorkspaceManager._instance = None
+
+    project_dir = tmp_path / "project"
+    project_dir.mkdir(parents=True, exist_ok=True)
+    source_root_target = project_dir / "report.txt"
+
+    ctx = _make_ctx()
+    with patch("flocks.tool.path_utils.Instance.get_directory", return_value=str(project_dir)):
+        result = await ToolRegistry.execute(
+            "write", ctx, filePath=str(source_root_target), content="report"
+        )
+
+    assert result.success, f"write failed: {result.error}"
+    expected = tmp_path / "workspace" / "outputs" / dt.date.today().isoformat() / "report.txt"
+    assert expected.exists()
+    assert expected.read_text() == "report"
+    assert not source_root_target.exists()
+
+
+@pytest.mark.asyncio
+async def test_relative_with_subdir_keeps_project_path(tmp_path):
+    """Relative paths with explicit directory should keep existing semantics."""
+    target = tmp_path / "project" / "notes" / "x.txt"
+    target.parent.mkdir(parents=True, exist_ok=True)
+
+    ctx = _make_ctx()
+    with patch("flocks.tool.path_utils.Instance.get_directory", return_value=str(tmp_path / "project")):
+        result = await ToolRegistry.execute("write", ctx, filePath="notes/x.txt", content="x")
+
+    assert result.success, f"write failed: {result.error}"
+    assert target.exists()
+    assert target.read_text() == "x"
 
 
 def test_filepath_parameter_references_env():

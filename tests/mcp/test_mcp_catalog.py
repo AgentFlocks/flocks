@@ -13,6 +13,7 @@ from flocks.mcp.catalog import (
     EnvVarSpec,
     InstallSpec,
     McpCatalog,
+    RemoteConfigSpec,
 )
 from flocks.mcp.installer import managed_python_bin_dir, managed_python_executable
 
@@ -126,10 +127,26 @@ class TestCatalogEntry:
         assert config["environment"]["API_KEY"] == "my-secret-key"
 
     def test_to_mcp_config_remote(self):
-        entry = self._make_entry(transport="remote")
+        entry = self._make_entry(
+            transport="remote",
+            remote=RemoteConfigSpec(
+                url="https://example.com/mcp?apikey={secret:api_key}",
+                transport="sse",
+                auth={
+                    "type": "apikey",
+                    "location": "header",
+                    "param_name": "Authorization",
+                    "value": "Bearer {secret:api_key}",
+                },
+                oauth=False,
+            ),
+        )
         config = entry.to_mcp_config({"url": "https://example.com/mcp"})
         assert config["type"] == "remote"
         assert config["url"] == "https://example.com/mcp"
+        assert config["transport"] == "sse"
+        assert config["auth"]["param_name"] == "Authorization"
+        assert config["oauth"] is False
 
     def test_to_mcp_config_local_console_script_uses_managed_venv(self):
         entry = self._make_entry(

@@ -35,15 +35,29 @@ def update_command(
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
-    from flocks.updater import check_update, perform_update, detect_deploy_mode
+    from flocks.updater import check_update, detect_deploy_mode, perform_update
+    from flocks.cli.install_profile import is_cn_install_language
 
-    with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
-        info = await check_update(region=region)
+    if region is None and is_cn_install_language():
+        region = "cn"
 
-    if info.error:
-        append_upgrade_text_log(f"ERROR version_check: {info.error}")
-        console.print(f"[red]检查失败：{info.error}[/red]")
-        raise typer.Exit(1)
+    if not yes and not check and region is None:
+        use_cn_mirror = typer.confirm("\n是否使用中国镜像进行升级？", default=False)
+        if use_cn_mirror:
+            region = "cn"
+
+    async def _load_update_info(selected_region: str | None):
+        with console.status("[cyan]正在检查版本...[/cyan]", spinner="dots"):
+            info = await check_update(region=selected_region)
+
+        if info.error:
+            append_upgrade_text_log(f"ERROR version_check: {info.error}")
+            console.print(f"[red]检查失败：{info.error}[/red]")
+            raise typer.Exit(1)
+
+        return info
+
+    info = await _load_update_info(region)
 
     _print_version_table(info)
 
@@ -87,13 +101,11 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
     stage_labels = {
         "fetching":    "下载最新源码包",
         "backing_up":  "备份当前版本",
-        "applying":    f"应用 v{info.latest_version}",
-        "syncing":     "同步依赖",
-        "building":    "构建前端",
+        "applying":    "应用新版本",
         "restarting":  "重启服务",
         "done":        "完成",
     }
-    total_steps = 6
+    total_steps = 3
     seen_stages: set[str] = set()
     step = 0
     active_stage: str | None = None
@@ -112,8 +124,11 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         version_to_apply,
         zipball_url=info.zipball_url,
         tarball_url=info.tarball_url,
-        restart=False,
+        bundle_sha256=info.bundle_sha256,
+        bundle_format=info.bundle_format,
+        restart=True,
         region=region,
+        wait_for_handoff=True,
     ):
         if progress.stage == "error":
             _finish_active(success=False)
@@ -122,9 +137,9 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
         if progress.stage == "done":
             _finish_active(success=True)
-            step += 1
-            console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
-            console.print("[green]✓[/green]")
+            continue
+
+        if progress.stage == "restarting":
             continue
 
         if progress.stage not in seen_stages:
@@ -137,7 +152,6 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
 
     append_upgrade_text_log(f"OK cli_update_completed version={version_to_apply}")
     console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
-    console.print("[dim]如有后台服务正在运行，请执行 [bold]flocks restart[/bold] 重启服务[/dim]")
 
 
 def _print_version_table(info) -> None:

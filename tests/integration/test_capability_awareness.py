@@ -14,8 +14,9 @@ tests/integration/test_capability_awareness.py
    - build_workflows_section() 能把它渲染成 prompt 片段
    - inject_dynamic_prompts() 将 AvailableWorkflow 传递给 prompt builder
 
-3. Rex prompt 包含 workflow 段落
-   - Rex agent 加载后，其 prompt 包含 "Available Workflows" 字样（前提：存在工作流）
+3. Rex prompt 保留 agent 调度上下文，并恢复轻量 skills/workflows 能力目录
+   - Rex agent 加载后，其 prompt 包含常见 subagent / specialist 信息
+   - Rex agent prompt 包含轻量 skills/workflows section，但仍不内嵌完整 tools 目录
 
 4. /skills slash command 端到端（真实 Skill 扫描）
    - run_slash_command_tool("skills") 成功返回技能列表，不报错
@@ -135,7 +136,7 @@ class TestToolVisibility:
             "bash": _make_tool_entry("bash", "terminal"),
             "grep": _make_tool_entry("grep", "search"),
             "webfetch": _make_tool_entry("webfetch", "browser"),
-            "skill": _make_tool_entry("skill", "system"),
+            "skill_load": _make_tool_entry("skill_load", "system"),
         }
         with patch("flocks.tool.registry.ToolRegistry.get", side_effect=lambda n: tool_map.get(n)), \
              patch("flocks.tool.registry.ToolRegistry.init"):
@@ -257,20 +258,22 @@ class TestWorkflowInjectionPipeline:
 
 
 # ===========================================================================
-# 3. Rex prompt 包含 workflow 段落（存在工作流时）
+# 3. Rex prompt 保留 agent 调度上下文，但移除完整目录段落
 # ===========================================================================
 
 @pytest.mark.integration
-class TestRexPromptWorkflowAwareness:
+class TestRexPromptAwareness:
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_tools_section(self):
-        """Rex prompt 必须包含工具信息（基础能力感知）。"""
+        """Rex prompt 仍应是非空且包含基础编排骨架。"""
         from flocks.agent.registry import Agent
         rex = await Agent.get("rex")
         assert rex is not None
         assert rex.prompt is not None
         assert len(rex.prompt) > 100
+        assert "<Routing>" in rex.prompt
+        assert "## 2. Path Selection" in rex.prompt
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_subagents_section(self):
@@ -280,36 +283,80 @@ class TestRexPromptWorkflowAwareness:
         assert rex is not None
         # Rex should know about at least one of its common subagents
         prompt = rex.prompt or ""
-        assert any(name in prompt for name in ["explore", "oracle", "metis", "momus"]), (
+        assert any(name in prompt for name in ["explore", "oracle", "prometheus"]), (
             "Rex prompt does not reference any known subagents"
         )
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_skills_section(self):
-        """Rex prompt 必须包含 skills 相关信息。"""
-        from flocks.agent.registry import Agent
-        rex = await Agent.get("rex")
-        prompt = (rex.prompt or "").lower()
-        assert "skill" in prompt
-
-    @pytest.mark.asyncio
-    async def test_rex_prompt_has_workflow_placeholder_or_section(self):
-        """Rex prompt 应包含 workflow 相关内容（已注入或有占位结构）。"""
-        from flocks.agent.registry import Agent
-        rex = await Agent.get("rex")
-        prompt = (rex.prompt or "").lower()
-        # Either the section was injected or the 'run_workflow' tool is mentioned
-        assert "workflow" in prompt or "run_workflow" in prompt
-
-    @pytest.mark.asyncio
-    async def test_rex_prompt_prefers_direct_ioc_lookup_before_delegation(self):
-        """单 IOC 情报查询应在提示词中优先走 Rex 直查路径。"""
+        """Rex prompt 应包含轻量 skills section。"""
         from flocks.agent.registry import Agent
         rex = await Agent.get("rex")
         prompt = rex.prompt or ""
-        assert "Single IOC basic lookup only" in prompt
+        assert "### Available Skills" in prompt
+        assert "Call `skill_load` when the task clearly matches a skill's domain expertise." in prompt
+        assert "Category + Skills Delegation System" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_points_to_im_send_tool(self):
+        """Rex prompt 应只指向 im_send_message 工具，不内嵌完整 IM SOP。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "im_send_message" in prompt
+        assert 'skill_load(name="im-send")' not in prompt
+        assert "### IM Send Protocol" not in prompt
+        assert "Execute this exact sequence" not in prompt
+        assert "IM Session Resolution for schedule_task_create" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_contains_workflow_section(self):
+        """Rex prompt 应包含 workflow section。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "### Available Workflows" in prompt
+        assert "run_workflow" in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_does_not_embed_full_tools_table(self):
+        """Rex prompt 不再内嵌完整工具目录表。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "### Available Tools:" not in prompt
+        assert "Tool & Agent Selection" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_does_not_include_codebase_assessment_phase(self):
+        """Rex prompt 不再包含独立的 Codebase Assessment 阶段。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "## Phase 1 - Codebase Assessment" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_merges_agent_selection_and_delegation(self):
+        """Rex prompt 使用单一 agent 路由表，不再单独保留 Delegation Table。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "### Available Agents:" in prompt
+        assert "Default flow" in prompt
+        assert "### Delegation Table:" not in prompt
+
+    @pytest.mark.asyncio
+    async def test_rex_prompt_prefers_direct_ioc_lookup_before_delegation(self):
+        """单 IOC 情报查询应保留“先直查、再委派”的稳定语义。"""
+        from flocks.agent.registry import Agent
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+        assert "### Security Routing" in prompt
+        assert "Direct path: exactly one IOC" in prompt
+        assert "Delegate path: multiple indicators" in prompt
+        assert "**Lightweight direct lookup rules (Rex handles directly):**" in prompt
         assert '"查询 8.8.8.8 的情报" -> Rex should directly query TI tools' in prompt
-        assert "tool_search` if needed -> direct TI query tool -> answer" in prompt
+        assert "`tool_search` first" in prompt
 
 
 # ===========================================================================

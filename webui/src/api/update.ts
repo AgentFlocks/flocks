@@ -4,13 +4,31 @@ import client from './client';
 // Types
 // ======================================================================
 
-export type UpdateStage = 'fetching' | 'backing_up' | 'applying' | 'syncing' | 'building' | 'restarting' | 'done' | 'error';
+export type UpdateStage =
+  | 'checking'
+  | 'reporting'
+  | 'fetching'
+  | 'backing_up'
+  | 'applying'
+  | 'syncing'
+  | 'downgrading'
+  | 'restarting'
+  | 'done'
+  | 'error';
 
 export type DeployMode = 'docker' | 'source';
+export type UpdateEdition = 'flocks' | 'flockspro';
 
 export interface VersionInfo {
   current_version: string;
   latest_version: string | null;
+  current_core_version?: string | null;
+  latest_core_version?: string | null;
+  current_bundle_version?: string | null;
+  latest_bundle_version?: string | null;
+  current_pro_component_version?: string | null;
+  latest_pro_component_version?: string | null;
+  edition?: 'flocks' | 'flockspro';
   has_update: boolean;
   release_notes: string | null;
   release_url: string | null;
@@ -23,15 +41,28 @@ export interface UpdateProgress {
   stage: UpdateStage;
   message: string;
   success: boolean | null;
+  bundle_filename?: string | null;
+  pro_component_filename?: string | null;
+  downloaded_bytes?: number | null;
+  total_bytes?: number | null;
+  percent?: number | null;
 }
 
 // ======================================================================
 // API
 // ======================================================================
 
-export const checkUpdate = async (locale?: string): Promise<VersionInfo> => {
+export const checkUpdate = async (
+  locale?: string,
+  edition?: UpdateEdition,
+  force?: boolean,
+): Promise<VersionInfo> => {
   const response = await client.get<VersionInfo>('/api/update/check', {
-    params: locale ? { locale } : undefined,
+    params: {
+      ...(locale ? { locale } : {}),
+      ...(edition ? { edition } : {}),
+      ...(force ? { force: true } : {}),
+    },
   });
   return response.data;
 };
@@ -49,6 +80,7 @@ export const applyUpdate = (
   targetVersion: string,
   onProgress: (progress: UpdateProgress) => void,
   locale?: string,
+  edition?: UpdateEdition,
 ): Promise<void> => {
   return new Promise((resolve, reject) => {
     const params = new URLSearchParams({
@@ -56,6 +88,9 @@ export const applyUpdate = (
     });
     if (locale) {
       params.set('locale', locale);
+    }
+    if (edition) {
+      params.set('edition', edition);
     }
     const url = `/api/update/apply?${params.toString()}`;
     fetch(url, { method: 'POST' })

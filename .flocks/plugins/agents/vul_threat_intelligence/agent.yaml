@@ -1,4 +1,5 @@
 name: vul-threat-intelligence
+name_cn: 漏洞情报智能体
 description: >-
   Vulnerability threat intelligence subagent for querying and analyzing vulnerability data.
   Understands natural language queries, extracts structured parameters, and retrieves accurate
@@ -18,14 +19,12 @@ tags:
   - vulnerability
 tools:
   - read
-  - list
   - glob
   - grep
   - edit
   - write
   - bash
-  - todoread
-  - todowrite
+  - todo
   - tool_search
   - threatbook_mcp_vulnlist_query
   - threatbook_mcp_vuln_query
@@ -39,7 +38,6 @@ tools:
   - threatbook_mcp_threat_actor_query
   - threatbook_mcp_threat_actor_list_query
   - threatbook_mcp_hrti_query
-  - file_search
   - websearch
   - webfetch
   - virustotal_ip_query

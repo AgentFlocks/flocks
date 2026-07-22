@@ -1,4 +1,5 @@
 name: explore
+name_cn: 代码探索智能体
 description: >-
   Fast agent specialized for exploring codebases. Use this when you need to
   quickly find files by patterns (eg. "src/components/**/*.tsx"), search code
@@ -13,11 +14,9 @@ delegatable: true
 tools:
   - grep
   - glob
-  - list
   - bash
   - webfetch
   - websearch
-  - codesearch
   - read
 prompt_metadata:
   category: exploration
@@ -34,4 +33,4 @@ prompt_metadata:
     - You know exactly what to search
     - Single keyword/pattern suffices
     - Known file location
-  key_trigger: "2+ modules involved -> fire `explore` background"
+  key_trigger: "2+ modules involved -> delegate to `explore`"

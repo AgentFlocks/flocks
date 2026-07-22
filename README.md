@@ -1,8 +1,18 @@
-# Flocks
+<h1 align="center">Flocks</h1>
 
-**English** | [简体中文](README_zh.md)
+<p align="center">
+  AI-Native SecOps Platform
+</p>
 
-AI-Native SecOps Platform
+<p align="center">
+  <a href="https://agentflocks.github.io/flocks-docs/"><img alt="Docs" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
+  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
+</p>
+
+<p align="center">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/lang-English-e33f44?style=for-the-badge"></a>
+  <a href="README_zh.md"><img alt="Chinese" src="https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-e33f44?style=for-the-badge"></a>
+</p>
 
 ![Flocks WebUI](assets/flocks.webp)
 
@@ -114,10 +124,9 @@ flocks restart
 flocks stop
 ```
 
-The default service URLs are:
-- Backend API: `http://127.0.0.1:8000` by default
-- WebUI: `http://127.0.0.1:5173` by default
-- Remote access configurable via `flocks start --server-host <ip> --webui-host <ip>`
+The default service address is:
+- Flocks WebUI: `http://127.0.0.1:5173`
+- Remote access configurable via `flocks start --host <ip>`
 
 Flocks CLI usage: `flocks --help`
 
@@ -140,9 +149,8 @@ macOS / Linux
 ```bash
 docker run -d \
   --name flocks \
-  -p 8000:8000 \
   -p 5173:5173 \
-  --shm-size 2gb \
+  --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
   ghcr.io/agentflocks/flocks:latest
 ```
@@ -151,14 +159,13 @@ Windows PowerShell
 ```powershell
 docker run -d `
   --name flocks `
-  -p 8000:8000 `
   -p 5173:5173 `
-  --shm-size 2gb `
+  --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```
 
-`EXPOSE` in the image only documents container ports. You still need `-p 8000:8000 -p 5173:5173` to access the service from the host browser.
+`EXPOSE` in the image only documents container ports. You still need `-p 5173:5173` to access the service from the host browser.
 
 ## 4. FAQ
 
@@ -180,9 +187,12 @@ default = true
 ### 4.2 Docker Issues
 
 Docker registry mirror in China
-``` bash
-ghcr.nju.edu.cn/agentflocks/flocks:latest
-```
+
+- 1ms GHCR: `docker pull ghcr.1ms.run/agentflocks/flocks:latest`
+- dockerproxy GHCR: `docker pull ghcr.dockerproxy.net/agentflocks/flocks:latest`
+- gh-proxy prefix: `docker pull docker.gh-proxy.com/ghcr.io/agentflocks/flocks:latest`
+- milu GHCR: `docker pull ghcr.milu.moe/agentflocks/flocks:latest`
+- NJU GHCR: `docker pull ghcr.nju.edu.cn/agentflocks/flocks:latest`
 
 Permission issues for `/home/flocks/.flocks` after startup:
 
@@ -199,10 +209,20 @@ sudo chown -R <uid>:<gid> ~/.flocks
 
 ### 4.3 Remote Access to Flocks Service
 ```bash
-__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=<your_domain> \
-flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
+flocks start --host 0.0.0.0
 ```
 If remote access from a virtual machine fails, please specify the host as the virtual machine's IP.
+
+The WebUI and API share the same service address and port. API requests use the
+same-origin `/api` path, keeping browser cookies and SSE on a single origin for
+LAN access and reverse-proxy deployments.
+
+Only enable direct browser-to-backend URLs when you explicitly need them:
+
+```bash
+FLOCKS_WEBUI_DIRECT_BACKEND_URLS=1 \
+flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
+```
 
 ### 4.4 Authentication & API Token
 
@@ -219,11 +239,9 @@ Initial setup:
 
 Non-browser clients (TUI, SDKs, scripts):
 
-- **Local loopback** (`127.0.0.1` / `::1` / `localhost`, no
-  `x-forwarded-for` header) is auto-trusted as `local-service` admin. This
-  covers TUI, plugin sub-processes, and CLI calls running on the same host.
-- **Remote** clients must present an API token. The token lives in
-  `~/.flocks/config/.secret.json` under the secret id `server_api_token`.
+- All non-browser clients, including local loopback clients, must present an
+  API token. The token lives in `~/.flocks/config/.secret.json` under the
+  secret id `server_api_token`.
 
   On the **server**, generate (or rotate) the token — it is persisted on
   the server's local secret store:
@@ -260,6 +278,11 @@ Reverse-proxy deployments:
   proxy is in front.
 - For HTTPS termination, also forward `X-Forwarded-Proto: https` so that
   the secure-cookie flag is set correctly.
+- Prefer same-origin proxying for browser traffic: keep the WebUI on `/` and
+  route backend traffic through `/api` (and `/event` if needed). Do not set
+  `VITE_API_BASE_URL` in reverse-proxy deployments unless you intentionally
+  want the browser to bypass the proxy and talk to the backend origin directly.
+- For SSE endpoints, disable proxy buffering and keep HTTP/1.1 enabled. 
 
 Recovery / lost password:
 
@@ -292,6 +315,10 @@ Scan the QR code with **WeChat** to join our official discussion group.
 
 ![WeCom official community QR code](assets/community-wecom-qr.png)
 
-## 6. License
+## 6. Contributing
+
+See [`CONTRIBUTING.md`](CONTRIBUTING.md) for development setup, coding standards, testing expectations, and Pull Request guidelines.
+
+## 7. License
 
 Apache License 2.0

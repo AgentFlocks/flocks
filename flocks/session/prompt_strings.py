@@ -9,8 +9,6 @@ Previously defined in flocks.agent.prompts.base; moved here because they
 belong to session management, not to the agent orchestration layer.
 """
 
-import platform
-
 # =============================================================================
 # Compaction prompt
 # =============================================================================
@@ -222,37 +220,17 @@ Response must include:
 
 Any attempt to use tools is a critical violation. Respond with text ONLY."""
 
-WINDOWS_SHELL_RULES = (
-    "- On Windows, do not assume GNU bash features such as heredoc (`<<EOF`) are available.\n"
-    "- On Windows, do not generate shell file writes such as `cat > file <<'EOF'`; prefer the `write`"
-    " or `edit` tool, and use PowerShell-compatible syntax or Python only when a shell command is truly"
-    " required.\n"
-    "- On Windows, do not assume Unix shell path expansion or mixed slash styles (for example `$HOME`,"
-    " `$USERPROFILE/...`) will behave like a Unix shell.\n"
-)
-
-
 def _build_tool_instructions() -> str:
-    windows_rules = WINDOWS_SHELL_RULES if platform.system().lower() == "windows" else ""
-    return f"""
-You have access to tools to help accomplish tasks. When you need to:
-- Read files: use the 'read' tool
-- Write files: use the 'write' tool
-- Edit files: use the 'edit' tool
-- Run commands: use the 'bash' tool
-- Search code: use the 'grep' tool
-- List files: use the 'list' or 'glob' tool
+    return """
+## Tool Calling Rules
+
+You have access to tools to help accomplish tasks.
 
 IMPORTANT RULES:
-- Call each tool ONLY ONCE per request unless explicitly asked to retry
 - NEVER call the same tool multiple times with identical parameters in a single response
-- After calling a tool, wait for its result before proceeding
-- After receiving a tool result, respond to the user with a direct answer
 - Do not repeat tool calls just to explain what you're doing - call the tool once and explain after
-- Schema precheck before calling a tool: read the callable schema for that tool and copy parameter names EXACTLY (including case).
-- Never guess parameter names from semantics. If uncertain, use `tool_search` first, then call only with names shown in the callable schema.
-- For all tools, treat schema as strict: unknown parameter names will fail.
-{windows_rules}- On Windows, any Python command that reads text files must explicitly specify encoding. Never generate commands like `yaml.safe_load(open(path))`, `json.load(open(path))`, or `open(path).read()` without `encoding=...`; prefer `Path(path).read_text(encoding="utf-8-sig")`.
+- Never guess parameter names from semantics. If uncertain, use `tool_search` first, then read the callable schema for that tool and copy parameter names EXACTLY (including case)..
+- For all tools, treat schema as strict: unknown parameter names will fail, empty parameter values will fail.
 
 CRITICAL - TOOL CALLING FORMAT:
 - ALWAYS invoke tools using the native API tool-calling mechanism ONLY
@@ -265,6 +243,26 @@ CRITICAL - TOOL CALLING FORMAT:
 - Such text formats are NOT parsed or executed — they appear as raw, broken markup in the UI
 - If you need to describe what you are about to do, do it in plain prose, then invoke the tool natively
 """
+
+
+def _build_minimax_tool_instructions() -> str:
+    return (
+        "## Tool Calling Rules\n\n"
+        "You have access to tools, but for this model you MUST call them using "
+        "MiniMax XML embedded in text instead of native API tool-calling.\n\n"
+        "Required format:\n"
+        "<minimax:tool_call>\n"
+        "<invoke name=\"tool_name\">\n"
+        "<parameter name=\"param_name\">json_or_string_value</parameter>\n"
+        "</invoke>\n"
+        "</minimax:tool_call>\n\n"
+        "Rules:\n"
+        "- Emit exactly one tool call block when you need a tool.\n"
+        "- Use valid tool names only.\n"
+        "- Parameter values must be valid JSON scalars/objects/arrays when appropriate.\n"
+        "- After tool results are returned, continue the task instead of repeating the same call.\n"
+        "- Do not use native API tool-calling for this model.\n"
+    )
 
 
 PROMPT_TOOL_INSTRUCTIONS = _build_tool_instructions()

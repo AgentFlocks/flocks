@@ -270,7 +270,7 @@ class TaskExecutor:
             header = (
                 "[Scheduled task automated execution — "
                 "complete the task described below and return your findings. "
-                "Do NOT call task_create or schedule any new tasks.]\n\n"
+                "Do NOT call schedule_task_create or schedule any new tasks.]\n\n"
             )
             return header + clean_body
         body = base_body

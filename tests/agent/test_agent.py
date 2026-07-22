@@ -16,8 +16,8 @@ from flocks.session.prompt_strings import PROMPT_COMPACTION, PROMPT_TITLE, PROMP
 # =============================================================================
 
 BUILTIN_AGENTS = [
-    "rex", "hephaestus", "plan", "explore",
-    "oracle", "librarian", "metis", "momus", "multimodal-looker",
+    "rex", "hephaestus", "explore",
+    "oracle", "librarian", "prometheus", "multimodal-looker",
     "self-enhance", "rex-junior", "host-forensics", "host-forensics-fast",
 ]
 
@@ -35,7 +35,7 @@ class TestAgentDefinitions:
     @pytest.mark.asyncio
     async def test_agent_count(self):
         agents = await Agent.list()
-        assert len(agents) >= 12, f"Should have at least 12 agents, got {len(agents)}"
+        assert len(agents) >= 11, f"Should have at least 11 agents, got {len(agents)}"
 
     @pytest.mark.asyncio
     async def test_no_legacy_agents(self):
@@ -92,6 +92,22 @@ class TestSubagents:
         assert agent is not None
         assert agent.mode == "subagent"
         assert agent.delegatable is False
+
+    @pytest.mark.asyncio
+    async def test_prometheus_agent(self):
+        agent = await Agent.get("prometheus")
+        assert agent is not None
+        assert agent.mode == "subagent"
+        assert agent.delegatable is True
+        assert agent.hidden is False
+        assert agent.prompt is not None and len(agent.prompt) > 0
+        assert "delegate_task" not in (agent.tools or [])
+        edit_rules = [
+            rule for rule in (agent.permission or [])
+            if getattr(rule, "permission", None) == "edit"
+        ]
+        assert edit_rules
+        assert any(getattr(rule, "pattern", None) == ".flocks/plans/*" for rule in edit_rules)
 
     @pytest.mark.asyncio
     async def test_self_enhance_agent(self):
@@ -169,6 +185,23 @@ class TestAgentListing:
         assert await delegatable("explore") is True
         assert await delegatable("hephaestus") is True
         assert await delegatable("oracle") is True
+
+    @pytest.mark.asyncio
+    async def test_is_delegatable_respects_sidecar_override(self, tmp_path, monkeypatch):
+        settings_file = tmp_path / "agent_delegatable_settings.json"
+        monkeypatch.setattr("flocks.agent.delegatable_settings.settings_path", lambda: settings_file)
+
+        import flocks.agent.delegatable_settings as delegatable_settings
+        from flocks.agent.registry import Agent as AgentRegistry, is_delegatable
+
+        AgentRegistry._delegatable_settings_mtime = 0.0
+        delegatable_settings.set_override("explore", False)
+        AgentRegistry.invalidate_cache()
+
+        agent = await AgentRegistry.get("explore")
+        assert agent is not None
+        assert agent.delegatable is False
+        assert is_delegatable("explore") is False
 
     @pytest.mark.asyncio
     async def test_list_names(self):

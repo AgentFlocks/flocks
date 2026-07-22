@@ -6,24 +6,243 @@ Model objects must include: id, name, providerID, attachment, reasoning,
 temperature, tool_call, limit, etc.
 """
 
-import time
+import asyncio
 import json
 import re
+import threading
+import time
 from pathlib import Path
-from typing import List, Optional, Dict, Any
-from fastapi import APIRouter, Body, HTTPException, Query, status
+from typing import Any, Dict, List, Optional
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel, Field, ConfigDict
 
+from flocks.audit import emit_audit_event
+from flocks.auth.context import AuthUser
 from flocks.utils.log import Log
 from flocks.provider.provider import Provider, ModelInfo as ProviderModelInfo
 from flocks.security.secrets import SecretManager
+from flocks.server.auth import get_request_ip, get_request_user_agent, require_admin
 from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.storage.storage import Storage
+from flocks.tool.tool_loader import extract_provider_version
+from flocks.tool.schema import api_service_schema as api_service_schema_helpers
+
+# Schema helpers are re-exported from flocks.tool.schema.api_service_schema (canonical
+# home). Existing callers — tests, onboarding, device migration — keep importing
+# them from this module without churn.
+from flocks.tool.schema.api_service_schema import (
+    APIServiceCredentialField,
+    _build_api_service_credential_schema,
+    _default_api_service_field_label,
+    _extract_secret_id,
+    _get_api_service_default_secret_id,
+    _get_api_service_schema_field,
+    _get_api_service_secret_candidates,
+    _get_api_service_secret_field_names,
+    _get_compound_secret_metadata,
+    _normalize_api_service_credential_field,
+    _should_persist_secondary_secret,
+)
 
 
 router = APIRouter()
 log = Log.create(service="provider-routes")
+_api_service_summary_metadata_cache_lock = threading.Lock()
+_api_service_summary_metadata_cache: Dict[str, tuple[tuple[Any, ...], Optional[Dict[str, Any]]]] = {}
+_provider_initialization_lock = asyncio.Lock()
+_provider_initialization_task: asyncio.Task[None] | None = None
+_dynamic_provider_load_tasks: set[asyncio.Task[None]] = set()
+
+
+async def _run_provider_initialization() -> None:
+    async with _provider_initialization_lock:
+        if Provider._initialized:
+            return
+        await asyncio.to_thread(Provider._ensure_initialized)
+
+
+async def _ensure_provider_initialized() -> None:
+    """Run synchronous provider discovery without blocking the event loop."""
+    global _provider_initialization_task
+
+    if Provider._initialized:
+        return
+
+    task = _provider_initialization_task
+    if task is None or task.done():
+        task = asyncio.create_task(_run_provider_initialization())
+        _provider_initialization_task = task
+
+        def clear_completed(completed: asyncio.Task[None]) -> None:
+            global _provider_initialization_task
+            if _provider_initialization_task is completed:
+                _provider_initialization_task = None
+            if not completed.cancelled():
+                completed.exception()
+
+        task.add_done_callback(clear_completed)
+
+    await asyncio.shield(task)
+
+
+async def _run_dynamic_provider_load() -> None:
+    async with _provider_initialization_lock:
+        await asyncio.to_thread(Provider._load_dynamic_providers)
+
+
+async def _load_dynamic_providers() -> None:
+    """Queue one serialized config scan per trigger without blocking the event loop."""
+    task = asyncio.create_task(_run_dynamic_provider_load())
+    _dynamic_provider_load_tasks.add(task)
+
+    def clear_completed(completed: asyncio.Task[None]) -> None:
+        _dynamic_provider_load_tasks.discard(completed)
+        if not completed.cancelled():
+            completed.exception()
+
+    task.add_done_callback(clear_completed)
+
+    await asyncio.shield(task)
+
+
+def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper for callers patching provider-route helpers."""
+    return api_service_schema_helpers._load_provider_yaml_metadata(provider_id)
+
+
+def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Compatibility wrapper preserving the historical patch seam in this module."""
+    merged: Dict[str, Any] = {}
+
+    config_data = ConfigWriter.get_api_service_raw(provider_id)
+    if isinstance(config_data, dict):
+        merged.update(config_data)
+
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if meta_file.is_file():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata_data = api_service_schema_helpers.json.load(f)
+        if isinstance(metadata_data, dict):
+            merged = {**metadata_data, **merged}
+
+    yaml_data = _load_provider_yaml_metadata(provider_id)
+    if isinstance(yaml_data, dict):
+        merged = {**yaml_data, **merged}
+
+    return merged or None
+
+
+def _clear_api_service_summary_metadata_cache(provider_id: Optional[str] = None) -> None:
+    with _api_service_summary_metadata_cache_lock:
+        if provider_id is None:
+            _api_service_summary_metadata_cache.clear()
+        else:
+            _api_service_summary_metadata_cache.pop(provider_id, None)
+
+
+def _provider_yaml_cache_key(provider_id: str) -> tuple[str, int]:
+    descriptor = _find_api_service_descriptor(provider_id)
+    if descriptor is None:
+        return "", 0
+    try:
+        return str(descriptor.provider_yaml), descriptor.provider_yaml.stat().st_mtime_ns
+    except OSError:
+        return str(descriptor.provider_yaml), 0
+
+
+def _legacy_metadata_cache_key(provider_id: str) -> tuple[str, int]:
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if not meta_file.is_file():
+        return "", 0
+    try:
+        return str(meta_file), meta_file.stat().st_mtime_ns
+    except OSError:
+        return str(meta_file), 0
+
+
+def _api_service_summary_metadata_cache_key(provider_id: str) -> tuple[Any, ...]:
+    config_data = ConfigWriter.get_api_service_raw(provider_id) or {}
+    return (
+        json.dumps(config_data, sort_keys=True, default=str),
+        _legacy_metadata_cache_key(provider_id),
+        _provider_yaml_cache_key(provider_id),
+    )
+
+
+def _find_api_service_descriptor(provider_id: str):
+    from flocks.config.api_versioning import discover_api_service_descriptors
+
+    return next(
+        (
+            d
+            for d in discover_api_service_descriptors()
+            if provider_id in (d.storage_key, d.service_id)
+        ),
+        None,
+    )
+
+
+def _load_provider_yaml_summary_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
+    descriptor = _find_api_service_descriptor(provider_id)
+    if descriptor is None:
+        return None
+    try:
+        prov = api_service_schema_helpers.yaml.safe_load(
+            descriptor.provider_yaml.read_text(encoding="utf-8")
+        )
+    except Exception as e:
+        log.debug("api_service.summary_metadata.provider_yaml_failed", {
+            "provider_id": provider_id,
+            "path": str(descriptor.provider_yaml),
+            "error": str(e),
+        })
+        return None
+    if not isinstance(prov, dict):
+        return None
+    return {
+        "name": prov.get("name", provider_id),
+        "service_id": prov.get("service_id", provider_id),
+        "version": extract_provider_version(prov),
+        "description": prov.get("description"),
+        "description_cn": prov.get("description_cn"),
+        "defaults": prov.get("defaults", {}),
+        "integration_type": prov.get("integration_type"),
+        "vendor": prov.get("vendor"),
+    }
+
+
+def _load_api_service_summary_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
+    """Load only metadata needed by the API service list endpoint."""
+    cache_key = _api_service_summary_metadata_cache_key(provider_id)
+    with _api_service_summary_metadata_cache_lock:
+        cached = _api_service_summary_metadata_cache.get(provider_id)
+        if cached and cached[0] == cache_key:
+            return dict(cached[1]) if isinstance(cached[1], dict) else cached[1]
+
+    merged: Dict[str, Any] = {}
+    config_data = ConfigWriter.get_api_service_raw(provider_id)
+    if isinstance(config_data, dict):
+        merged.update(config_data)
+
+    meta_file = api_service_schema_helpers._LEGACY_METADATA_DIR / f"{provider_id}.json"
+    if meta_file.is_file():
+        with open(meta_file, "r", encoding="utf-8") as f:
+            metadata_data = api_service_schema_helpers.json.load(f)
+        if isinstance(metadata_data, dict):
+            merged = {**metadata_data, **merged}
+
+    yaml_data = _load_provider_yaml_summary_metadata(provider_id)
+    if isinstance(yaml_data, dict):
+        merged = {**yaml_data, **merged}
+
+    result = merged or None
+    with _api_service_summary_metadata_cache_lock:
+        _api_service_summary_metadata_cache[provider_id] = (
+            cache_key,
+            dict(result) if isinstance(result, dict) else result,
+        )
+    return result
 
 
 _EMAIL_KEY_PAIR_PATTERN = re.compile(
@@ -62,22 +281,6 @@ def _split_compound_service_credentials(raw_value: str) -> Optional[tuple[str, s
     if not email or not api_key:
         return None
     return api_key, email
-
-
-def _get_compound_secret_metadata(metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
-    if not isinstance(metadata, dict):
-        return {}
-    compound_secret = metadata.get("compound_secret")
-    if isinstance(compound_secret, dict):
-        return compound_secret
-    return {}
-
-
-def _should_persist_secondary_secret(metadata: Optional[Dict[str, Any]]) -> bool:
-    compound_secret = _get_compound_secret_metadata(metadata)
-    if compound_secret.get("persist_secondary_secret") is False:
-        return False
-    return True
 
 
 #: Sentinel value persisted when a user saves an OpenAI-compatible / custom
@@ -324,8 +527,9 @@ async def list_providers() -> ProviderListResponse:
         List of providers with their models
     """
     try:
-        # Ensure providers are initialized
-        Provider._ensure_initialized()
+        # Initial discovery imports provider modules and uses a threading lock.
+        # Keep that synchronous work off the server event loop.
+        await _ensure_provider_initialized()
         
         # Get config for enabled/disabled providers
         try:
@@ -516,7 +720,8 @@ async def get_all_provider_auth() -> Dict[str, List[Any]]:
 )
 async def oauth_authorize(
     provider_id: str,
-    method: int = 0
+    method: int = 0,
+    _admin: object = Depends(require_admin),
 ) -> Optional[Dict[str, Any]]:
     """
     Initiate OAuth authorization
@@ -539,7 +744,8 @@ async def oauth_authorize(
 async def oauth_callback(
     provider_id: str,
     method: int,
-    code: Optional[str] = None
+    code: Optional[str] = None,
+    _admin: object = Depends(require_admin),
 ) -> bool:
     """
     Handle OAuth callback
@@ -569,6 +775,7 @@ async def list_api_services_route():
 async def update_api_service_route(
     provider_id: str,
     request: Dict[str, Any] = Body(...),
+    _admin: object = Depends(require_admin),
 ):
     return await update_api_service(provider_id, APIServiceUpdateRequest.model_validate(request))
 
@@ -579,7 +786,10 @@ async def update_api_service_route(
     summary="Delete API service",
     description="Delete an API service configuration and its stored credential."
 )
-async def delete_api_service_route(provider_id: str):
+async def delete_api_service_route(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     return await delete_api_service(provider_id)
 
 
@@ -600,7 +810,7 @@ async def get_provider(provider_id: str) -> ProviderInfo:
         Provider information
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -657,7 +867,7 @@ async def list_models(provider_id: str) -> List[Dict[str, Any]]:
         List of models in Flocks-compatible format
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         if provider_id not in ConfigWriter.list_provider_ids():
             return []
         config = await Config.get()
@@ -690,7 +900,11 @@ class ProviderConfigRequest(BaseModel):
     summary="Configure provider",
     description="Configure provider with API key and settings"
 )
-async def configure_provider(provider_id: str, config: ProviderConfigRequest) -> ProviderInfo:
+async def configure_provider(
+    provider_id: str,
+    config: ProviderConfigRequest,
+    _admin: object = Depends(require_admin),
+) -> ProviderInfo:
     """
     Configure provider
     
@@ -702,7 +916,7 @@ async def configure_provider(provider_id: str, config: ProviderConfigRequest) ->
         Updated provider information
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -741,7 +955,10 @@ async def configure_provider(provider_id: str, config: ProviderConfigRequest) ->
     summary="Test provider",
     description="Test provider connection"
 )
-async def test_provider(provider_id: str) -> Dict[str, Any]:
+async def test_provider(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+) -> Dict[str, Any]:
     """
     Test provider connection
     
@@ -752,7 +969,7 @@ async def test_provider(provider_id: str) -> Dict[str, Any]:
         Test result
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -796,14 +1013,18 @@ async def test_provider(provider_id: str) -> Dict[str, Any]:
     summary="Update provider",
     description="Update provider configuration"
 )
-async def update_provider(provider_id: str, config: ProviderConfigRequest) -> ProviderInfo:
+async def update_provider(
+    provider_id: str,
+    config: ProviderConfigRequest,
+    _admin: object = Depends(require_admin),
+) -> ProviderInfo:
     """
     Update provider configuration
     
     Updates the provider's API key, base URL, and custom settings.
     """
     try:
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         
         if not provider:
@@ -828,7 +1049,6 @@ async def update_provider(provider_id: str, config: ProviderConfigRequest) -> Pr
         config_key = f"provider_config/{provider_id}"
         await Storage.write(config_key, {
             "provider_id": provider_id,
-            "api_key": config.api_key,
             "base_url": config.base_url,
             "custom_settings": config.custom_settings,
         })
@@ -870,6 +1090,7 @@ class APIServiceSummary(BaseModel):
     """API service summary for the Tool API page."""
     id: str
     name: str
+    version: Optional[str] = None
     enabled: bool = True
     status: str = "unknown"
     message: Optional[str] = None
@@ -880,301 +1101,14 @@ class APIServiceSummary(BaseModel):
     description_cn: Optional[str] = None
     builtin: bool = False
     verify_ssl: bool = False
+    integration_type: Optional[str] = None  # e.g. "device" for security device APIs
+    vendor: Optional[str] = None  # Manufacturer key (threatbook, qianxin, sangfor, qingteng, ...)
 
 
 class APIServiceUpdateRequest(BaseModel):
     """API service update request."""
     enabled: bool = Field(..., description="Enable or disable the API service")
     verify_ssl: Optional[bool] = Field(None, description="SSL verification for HTTP requests (default: False)")
-
-
-class APIServiceCredentialField(BaseModel):
-    """Credential field definition exposed to the WebUI."""
-
-    key: str
-    label: str
-    description: Optional[str] = None
-    storage: str = "config"
-    sensitive: bool = False
-    required: bool = False
-    input_type: str = "text"
-    config_key: str
-    secret_id: Optional[str] = None
-    default_value: Optional[str] = None
-
-
-def _default_api_service_field_label(field_key: str) -> str:
-    labels = {
-        "api_key": "API Key",
-        "base_url": "Base URL",
-        "secret": "Secret",
-        "username": "Username",
-        "password": "Password",
-    }
-    return labels.get(field_key, field_key.replace("_", " ").title())
-
-
-def _extract_secret_id(secret_ref: Any) -> Optional[str]:
-    if isinstance(secret_ref, str) and secret_ref.startswith("{secret:") and secret_ref.endswith("}"):
-        return secret_ref[len("{secret:"):-1]
-    return None
-
-
-def _load_api_service_metadata_data(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Load raw API service metadata from config, metadata JSON, or YAML provider."""
-    merged: Dict[str, Any] = {}
-
-    config_data = ConfigWriter.get_api_service_raw(provider_id)
-    if isinstance(config_data, dict):
-        merged.update(config_data)
-
-    metadata_dirs = [
-        Path(__file__).parent.parent.parent / "tool" / "security" / "metadata",
-    ]
-    for md in metadata_dirs:
-        meta_file = md / f"{provider_id}.json"
-        if meta_file.is_file():
-            with open(meta_file, "r", encoding="utf-8") as f:
-                metadata_data = json.load(f)
-            if isinstance(metadata_data, dict):
-                merged = {**metadata_data, **merged}
-            break
-
-    yaml_data = _load_provider_yaml_metadata(provider_id)
-    if isinstance(yaml_data, dict):
-        merged = {**yaml_data, **merged}
-
-    return merged or None
-
-
-def _normalize_api_service_credential_field(
-    provider_id: str,
-    raw_field: Dict[str, Any],
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[APIServiceCredentialField]:
-    if not isinstance(raw_field, dict):
-        return None
-
-    key = raw_field.get("key")
-    if not isinstance(key, str) or not key.strip():
-        return None
-    key = key.strip()
-
-    storage = raw_field.get("storage")
-    if storage not in {"config", "secret"}:
-        storage = "secret" if key in {"api_key", "secret", "password", "token", "client_secret"} else "config"
-
-    config_key = raw_field.get("config_key")
-    if not isinstance(config_key, str) or not config_key.strip():
-        config_key = "apiKey" if key == "api_key" else key
-
-    label = raw_field.get("label")
-    if not isinstance(label, str) or not label.strip():
-        label = _default_api_service_field_label(key)
-
-    input_type = raw_field.get("input_type")
-    if input_type not in {"text", "password", "url"}:
-        if storage == "secret":
-            input_type = "password"
-        elif key.endswith("url"):
-            input_type = "url"
-        else:
-            input_type = "text"
-
-    sensitive = raw_field.get("sensitive")
-    if sensitive is None:
-        sensitive = storage == "secret"
-    else:
-        sensitive = bool(sensitive)
-
-    secret_id = raw_field.get("secret_id")
-    if storage == "secret":
-        if not isinstance(secret_id, str) or not secret_id.strip():
-            secret_id = _get_api_service_default_secret_id(provider_id, field_name=key)
-        else:
-            secret_id = secret_id.strip()
-    else:
-        secret_id = None
-
-    default_value = raw_field.get("default_value")
-    if default_value is None:
-        default_value = raw_field.get("default")
-    if default_value is None and key == "base_url":
-        defaults = (metadata or {}).get("defaults", {})
-        if isinstance(defaults, dict):
-            default_value = defaults.get("base_url")
-        if default_value is None:
-            default_value = (metadata or {}).get("base_url")
-    if default_value is not None and not isinstance(default_value, str):
-        default_value = str(default_value)
-
-    description = raw_field.get("description")
-    if description is not None and not isinstance(description, str):
-        description = str(description)
-
-    return APIServiceCredentialField(
-        key=key,
-        label=label,
-        description=description,
-        storage=storage,
-        sensitive=sensitive,
-        required=bool(raw_field.get("required", False)),
-        input_type=input_type,
-        config_key=config_key,
-        secret_id=secret_id,
-        default_value=default_value,
-    )
-
-
-def _build_api_service_credential_schema(
-    provider_id: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> List[APIServiceCredentialField]:
-    metadata = metadata or _load_api_service_metadata_data(provider_id) or {}
-    raw_fields = metadata.get("credential_fields")
-    normalized_fields: List[APIServiceCredentialField] = []
-
-    if isinstance(raw_fields, list):
-        for raw_field in raw_fields:
-            field = _normalize_api_service_credential_field(provider_id, raw_field, metadata)
-            if field:
-                normalized_fields.append(field)
-    else:
-        auth = metadata.get("authentication") or metadata.get("auth")
-        if isinstance(auth, dict):
-            api_secret_id = auth.get("secret_key") or auth.get("api_key_secret") or auth.get("secret")
-            if api_secret_id:
-                normalized_fields.append(
-                    APIServiceCredentialField(
-                        key="api_key",
-                        label="API Key",
-                        storage="secret",
-                        sensitive=True,
-                        input_type="password",
-                        config_key="apiKey",
-                        secret_id=str(api_secret_id).strip(),
-                    )
-                )
-            secondary_secret_id = auth.get("secret_secret")
-            if secondary_secret_id and _should_persist_secondary_secret(metadata):
-                normalized_fields.append(
-                    APIServiceCredentialField(
-                        key="secret",
-                        label="Secret",
-                        storage="secret",
-                        sensitive=True,
-                        input_type="password",
-                        config_key="secret",
-                        secret_id=str(secondary_secret_id).strip(),
-                    )
-                )
-
-        defaults = metadata.get("defaults", {})
-        base_url = None
-        if isinstance(defaults, dict):
-            base_url = defaults.get("base_url")
-        if base_url or metadata.get("base_url"):
-            normalized_fields.append(
-                APIServiceCredentialField(
-                    key="base_url",
-                    label="Base URL",
-                    storage="config",
-                    sensitive=False,
-                    input_type="url",
-                    config_key="base_url",
-                    default_value=str(base_url or metadata.get("base_url")),
-                )
-            )
-
-    deduped: List[APIServiceCredentialField] = []
-    seen_keys: set[str] = set()
-    for field in normalized_fields:
-        if field.key in seen_keys:
-            continue
-        deduped.append(field)
-        seen_keys.add(field.key)
-    return deduped
-
-
-def _get_api_service_schema_field(
-    provider_id: str,
-    field_name: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> Optional[APIServiceCredentialField]:
-    for field in _build_api_service_credential_schema(provider_id, metadata):
-        if field.key == field_name:
-            return field
-    return None
-
-
-def _get_api_service_secret_field_names(
-    provider_id: str,
-    metadata: Optional[Dict[str, Any]] = None,
-) -> List[str]:
-    return [
-        field.key
-        for field in _build_api_service_credential_schema(provider_id, metadata)
-        if field.storage == "secret"
-    ]
-
-
-def _get_api_service_default_secret_id(provider_id: str, field_name: str = "api_key") -> str:
-    """Return the canonical secret id for an API service credential field."""
-    metadata = _load_api_service_metadata_data(provider_id) or {}
-    raw_fields = metadata.get("credential_fields")
-    if isinstance(raw_fields, list):
-        for raw_field in raw_fields:
-            if not isinstance(raw_field, dict):
-                continue
-            if raw_field.get("key") != field_name:
-                continue
-            storage = raw_field.get("storage")
-            if storage == "config":
-                break
-            secret_id = raw_field.get("secret_id")
-            if isinstance(secret_id, str):
-                secret_id = secret_id.strip()
-                if secret_id:
-                    return secret_id
-
-    auth = metadata.get("authentication") or metadata.get("auth")
-    if isinstance(auth, dict):
-        if field_name == "api_key":
-            secret_id = auth.get("secret_key") or auth.get("api_key_secret") or auth.get("secret")
-        else:
-            secret_id = auth.get("secret_secret") or auth.get(f"{field_name}_secret")
-        if isinstance(secret_id, str):
-            secret_id = secret_id.strip()
-            if secret_id:
-                return secret_id
-    if field_name == "api_key":
-        return f"{provider_id}_api_key"
-    return f"{provider_id}_{field_name}"
-
-
-def _get_api_service_secret_candidates(
-    provider_id: str,
-    raw_service: Optional[Dict[str, Any]] = None,
-    field_name: str = "api_key",
-) -> List[str]:
-    """Return candidate secret ids for an API service, ordered by preference."""
-    candidates: List[str] = []
-    if raw_service is None:
-        raw_service = ConfigWriter.get_api_service_raw(provider_id) or {}
-
-    ref_key = "apiKey" if field_name == "api_key" else field_name
-    secret_ref = raw_service.get(ref_key, "")
-    if isinstance(secret_ref, str) and secret_ref.startswith("{secret:") and secret_ref.endswith("}"):
-        candidates.append(secret_ref[len("{secret:"):-1])
-
-    candidates.append(_get_api_service_default_secret_id(provider_id, field_name=field_name))
-    candidates.append(f"{provider_id}_{field_name}")
-
-    deduped: List[str] = []
-    for candidate in candidates:
-        if candidate and candidate not in deduped:
-            deduped.append(candidate)
-    return deduped
 
 
 def _get_api_service_enabled(provider_id: str) -> bool:
@@ -1192,7 +1126,7 @@ def _get_api_service_tool_infos(provider_id: str) -> List[Any]:
     matched_tools: List[Any] = []
     for tool_info in ToolRegistry.list_tools():
         source, source_name = _get_tool_source(tool_info)
-        if source == "api" and source_name == provider_id:
+        if source in ("api", "device") and source_name == provider_id:
             matched_tools.append(tool_info)
     return matched_tools
 
@@ -1200,12 +1134,40 @@ def _get_api_service_tool_infos(provider_id: str) -> List[Any]:
 def _is_api_service_builtin(provider_id: str, tools: Optional[List[Any]] = None) -> bool:
     """Check if an API service is built-in (project-level or core).
 
-    A service is built-in if it has at least one registered tool and ALL of
-    its tools have native=True (project-level .flocks/plugins/ or core code).
-    User-level tools (~/.flocks/plugins/) have native=False.
+    Prefer the ``_provider.yaml`` descriptor location when available: a
+    descriptor under ``<cwd>/.flocks/plugins/tools/api`` is project-level
+    (built-in for delete-protection purposes), while a descriptor under
+    ``~/.flocks/plugins/tools/api`` is user-installed and therefore
+    deletable.  This avoids false positives when the in-memory tool
+    registry still carries stale ``native=True`` flags for the same
+    provider from an earlier refresh.
+
+    When no descriptor exists (for older/core registrations), fall back to
+    the historical rule: the service is built-in if it has at least one
+    registered tool and ALL of its tools have ``native=True``.
 
     Pass pre-fetched *tools* to avoid a redundant registry scan.
     """
+    from flocks.config.api_versioning import discover_api_service_descriptors
+
+    project_root = Path.cwd() / ".flocks" / "plugins" / "tools" / "api"
+    user_root = Path.home() / ".flocks" / "plugins" / "tools" / "api"
+
+    for descriptor in discover_api_service_descriptors():
+        if descriptor.storage_key != provider_id:
+            continue
+        provider_dir = descriptor.provider_yaml.parent.resolve()
+        try:
+            provider_dir.relative_to(project_root.resolve())
+            return True
+        except ValueError:
+            pass
+        try:
+            provider_dir.relative_to(user_root.resolve())
+            return False
+        except ValueError:
+            pass
+
     if tools is None:
         tools = _get_api_service_tool_infos(provider_id)
     if not tools:
@@ -1218,6 +1180,16 @@ def _set_api_service_tools_enabled(provider_id: str, enabled: bool) -> int:
     matched_tools = _get_api_service_tool_infos(provider_id)
     for tool_info in matched_tools:
         tool_info.enabled = enabled
+    if matched_tools:
+        try:
+            from flocks.server.routes.tool import _invalidate_tool_summary_cache
+
+            _invalidate_tool_summary_cache()
+        except Exception as e:
+            log.debug("tool.summary_cache.invalidate_failed", {
+                "provider_id": provider_id,
+                "error": str(e),
+            })
     return len(matched_tools)
 
 
@@ -1260,7 +1232,7 @@ def _build_api_service_summary(
     raw_statuses: Dict[str, Any],
 ) -> APIServiceSummary:
     """Build API service summary used by the Tool API page."""
-    meta = _load_api_service_metadata_data(provider_id) or {}
+    meta = _load_api_service_summary_metadata_data(provider_id) or {}
     enabled = _get_api_service_enabled(provider_id)
     cached_status = raw_statuses.get(provider_id) or {}
     matched_tools = _get_api_service_tool_infos(provider_id)
@@ -1273,9 +1245,12 @@ def _build_api_service_summary(
         verify_ssl = verify_ssl_raw.strip().lower() in {"1", "true", "yes", "on"}
     else:
         verify_ssl = bool(verify_ssl_raw)
+    version = extract_provider_version(meta)
+
     return APIServiceSummary(
         id=provider_id,
         name=meta.get("name", provider_id),
+        version=version,
         enabled=enabled,
         status=status,
         message=cached_status.get("message"),
@@ -1286,24 +1261,101 @@ def _build_api_service_summary(
         description_cn=meta.get("description_cn"),
         builtin=_is_api_service_builtin(provider_id, matched_tools),
         verify_ssl=verify_ssl,
+        integration_type=meta.get("integration_type"),
+        vendor=meta.get("vendor"),
     )
+
+
+def _disambiguate_summary_names(summaries: List[APIServiceSummary]) -> None:
+    """Append ``" (v<version>)"`` to multi-version entries so users can
+    tell sibling installs apart in the Tools UI.
+
+    Two scenarios drive this:
+
+    * **Same ``name`` field** — e.g. two ``onesig`` plugins where each
+      ``_provider.yaml`` carries ``name: onesig`` for different
+      versions. Without a suffix the UI shows two identical rows.
+    * **Multiple versions of the same ``service_id``** — sibling
+      installs may already have distinct names (one author baked
+      the version into ``name``, the other did not). We still append
+      the suffix to the *short* name(s) so users see consistent
+      version labelling across all rows of a service family.
+
+    The suffix is skipped when the existing ``name`` already
+    contains the version string verbatim (avoids ``onesig_v2_5_3
+    (v2.5.3)`` noise when authors embed the version in ``name``).
+    Single-version entries are left untouched.
+    """
+    from collections import defaultdict
+
+    by_name: Dict[str, List[APIServiceSummary]] = defaultdict(list)
+    for item in summaries:
+        by_name[item.name].append(item)
+
+    versioned_storage_keys = {
+        item.id for item in summaries
+        if item.version and item.id != _strip_version_suffix(item.id, item.version)
+    }
+    family_counts: Dict[str, int] = defaultdict(int)
+    for item in summaries:
+        if item.id in versioned_storage_keys and item.version:
+            family_counts[_strip_version_suffix(item.id, item.version)] += 1
+
+    for item in summaries:
+        if not item.version:
+            continue
+        same_name_siblings = len(by_name[item.name]) > 1
+        family_root = _strip_version_suffix(item.id, item.version) if item.id in versioned_storage_keys else None
+        family_siblings = family_root is not None and family_counts[family_root] > 1
+        if not (same_name_siblings or family_siblings):
+            continue
+        if item.version in item.name:
+            continue
+        item.name = f"{item.name} (v{item.version})"
+
+
+def _strip_version_suffix(storage_key: str, version: str) -> str:
+    """Reverse :func:`derive_storage_key` to recover the bare ``service_id``.
+
+    ``derive_storage_key("onesig_api", "2.5.3 D20260321")`` returns
+    ``onesig_api_v2_5_3_D20260321``; this helper rebuilds the
+    ``_v<sanitised>`` tail using the same sanitiser and chops it off
+    so callers can group sibling installs by family. Falls back to
+    *storage_key* when the suffix isn't present (e.g. legacy
+    unversioned entries).
+    """
+    import re
+
+    sanitised = re.sub(r"[^A-Za-z0-9]+", "_", str(version)).strip("_")
+    if not sanitised:
+        return storage_key
+    suffix = f"_v{sanitised}"
+    if storage_key.endswith(suffix):
+        return storage_key[: -len(suffix)]
+    return storage_key
 
 
 async def list_api_services() -> List[APIServiceSummary]:
     try:
         from flocks.tool.registry import ToolRegistry
+        from flocks.config.api_versioning import shadowed_legacy_ids
 
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
 
         configured_services = set(ConfigWriter.list_api_services_raw().keys())
         discovered_services = ToolRegistry.get_api_service_ids()
         raw_statuses = await _read_api_service_status_cache()
 
         service_ids = configured_services | discovered_services
+        # Hide each legacy ``api_services[<service_id>]`` block once its
+        # versioned ``<service_id>_v<version>`` counterpart exists, so
+        # the user does not see duplicate entries after migration.
+        service_ids -= shadowed_legacy_ids(service_ids)
         summaries = [
             _build_api_service_summary(provider_id, raw_statuses)
             for provider_id in service_ids
         ]
+        _disambiguate_summary_names(summaries)
         summaries.sort(key=lambda item: (
             0 if item.enabled else 1,
             0 if item.status == "connected" else 1,
@@ -1317,11 +1369,16 @@ async def list_api_services() -> List[APIServiceSummary]:
 
 async def update_api_service(provider_id: str, request: APIServiceUpdateRequest) -> APIServiceSummary:
     try:
+        from flocks.tool.registry import ToolRegistry
+
+        await ToolRegistry.init_async()
+
         existing = ConfigWriter.get_api_service_raw(provider_id) or {}
         existing["enabled"] = request.enabled
         if request.verify_ssl is not None:
             existing["verify_ssl"] = request.verify_ssl
         ConfigWriter.set_api_service(provider_id, existing)
+        _clear_api_service_summary_metadata_cache(provider_id)
 
         matched_count = _set_api_service_tools_enabled(provider_id, request.enabled)
 
@@ -1354,8 +1411,77 @@ async def update_api_service(provider_id: str, request: APIServiceUpdateRequest)
         raise HTTPException(status_code=500, detail=str(e))
 
 
+def _find_user_installed_tool_plugin_for(storage_key: str) -> Optional[tuple[str, str]]:
+    """Return ``(plugin_type, plugin_id)`` backing *storage_key*, if any.
+
+    Walks the discovered ``ApiServiceDescriptor`` set, finds the
+    ``_provider.yaml`` matching *storage_key*, and resolves it to the
+    enclosing user-installed plugin directory id. ``plugin_type`` is
+    ``"device"`` when the descriptor lives under ``<tools>/device/`` or
+    when ``_provider.yaml`` declares ``integration_type: device`` —
+    otherwise ``"tool"``. Returns ``None`` if no descriptor matches OR
+    the descriptor lives outside ``~/.flocks/plugins/`` (project-level
+    / built-in installs are kept intact — only user-level installs
+    cascade).
+    """
+    import yaml
+
+    from flocks.config.api_versioning import discover_api_service_descriptors
+    from flocks.hub import local as hub_local
+
+    user_root = (Path.home() / ".flocks" / "plugins" / "tools").resolve()
+    for descriptor in discover_api_service_descriptors(refresh=True):
+        if descriptor.storage_key != storage_key:
+            continue
+        plugin_dir = descriptor.provider_yaml.parent.resolve()
+        try:
+            plugin_dir.relative_to(user_root)
+        except ValueError:
+            return None  # Not under the user-level install root.
+        plugin_id = plugin_dir.name
+
+        plugin_type = "tool"
+        if plugin_dir.parent.name == "device":
+            plugin_type = "device"
+        else:
+            try:
+                provider_yaml = yaml.safe_load(descriptor.provider_yaml.read_text(encoding="utf-8"))
+                if (
+                    isinstance(provider_yaml, dict)
+                    and str(provider_yaml.get("integration_type") or "").strip().lower() == "device"
+                ):
+                    plugin_type = "device"
+            except Exception:
+                pass
+
+        # Confirm the catalog tracks this as an installed plugin so
+        # we never try to "uninstall" a stray on-disk dir.
+        record = hub_local.get_record(plugin_type, plugin_id)
+        if record is not None:
+            return (plugin_type, plugin_id)
+        # Fall back to the opposite type when the record was saved
+        # before ``device`` became a first-class Hub type.
+        legacy_type = "tool" if plugin_type == "device" else "device"
+        legacy_record = hub_local.get_record(legacy_type, plugin_id)
+        if legacy_record is not None:
+            return (legacy_type, plugin_id)
+        if hub_local.infer_local_install(plugin_type, plugin_id) is not None:
+            return (plugin_type, plugin_id)
+    return None
+
+
 async def delete_api_service(provider_id: str) -> Dict[str, Any]:
-    """Delete an API service configuration and its stored credential."""
+    """Delete an API service configuration and its stored credential.
+
+    When the service is backed by a user-installed plugin (i.e. lives
+    under ``~/.flocks/plugins/tools/``), the plugin itself is also
+    uninstalled so the FlocksHub catalog flips back to ``available`` —
+    otherwise the catalog would still show the plugin as ``installed``
+    despite the user explicitly deleting "the API". Project-level /
+    built-in plugins are left untouched (they're guarded by
+    :func:`_is_api_service_builtin` above).
+    """
+    from flocks.hub.installer import uninstall_plugin
     from flocks.security import get_secret_manager
 
     try:
@@ -1375,7 +1501,14 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
                 if candidate not in secret_ids
             )
 
+        # Resolve backing plugin BEFORE we mutate config — once
+        # ``remove_api_service`` runs, ``discover_api_service_descriptors``
+        # still works (it scans ``_provider.yaml`` on disk, not config),
+        # but doing this first keeps the order easy to reason about.
+        backing_plugin = _find_user_installed_tool_plugin_for(provider_id)
+
         removed_config = ConfigWriter.remove_api_service(provider_id)
+        _clear_api_service_summary_metadata_cache(provider_id)
 
         secrets = get_secret_manager()
         deleted_secret = False
@@ -1389,7 +1522,26 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
 
         matched_count = _set_api_service_tools_enabled(provider_id, False)
 
-        if not removed_config and not deleted_secret:
+        uninstalled_plugin = False
+        if backing_plugin is not None:
+            backing_plugin_type, backing_plugin_id = backing_plugin
+            try:
+                # ``uninstall_plugin`` itself calls
+                # ``_cleanup_orphan_api_services`` for the plugin's
+                # storage_keys, but ``provider_id`` is already gone from
+                # config at this point so that pass is a no-op for it.
+                uninstalled_plugin = await uninstall_plugin(backing_plugin_type, backing_plugin_id)
+            except Exception as exc:  # pragma: no cover - defensive
+                log.warning("api_service.delete.plugin_uninstall_failed", {
+                    "provider_id": provider_id,
+                    "plugin_type": backing_plugin_type,
+                    "plugin_id": backing_plugin_id,
+                    "error": str(exc),
+                })
+        else:
+            backing_plugin_id = None
+
+        if not removed_config and not deleted_secret and not uninstalled_plugin:
             raise HTTPException(status_code=404, detail="API service not found")
 
         log.info("api_service.deleted", {
@@ -1397,6 +1549,7 @@ async def delete_api_service(provider_id: str) -> Dict[str, Any]:
             "removed_config": removed_config,
             "deleted_secret": deleted_secret,
             "matched_tools": matched_count,
+            "uninstalled_plugin": backing_plugin_id if uninstalled_plugin else None,
         })
         return {"success": True}
     except HTTPException:
@@ -1469,91 +1622,6 @@ async def get_api_service_metadata(provider_id: str):
             description=f"API service: {provider_id}"
         )
 
-
-def _load_provider_yaml_metadata(provider_id: str) -> Optional[Dict[str, Any]]:
-    """Load metadata from a _provider.yaml file for YAML-based API tools."""
-    try:
-        from flocks.plugin.loader import DEFAULT_PLUGIN_ROOT
-        import yaml
-
-        api_roots = [
-            Path.cwd() / ".flocks" / "plugins" / "tools" / "api",
-            DEFAULT_PLUGIN_ROOT / "tools" / "api",
-        ]
-        api_dir: Optional[Path] = None
-        for api_root in api_roots:
-            direct_dir = api_root / provider_id
-            if direct_dir.is_dir():
-                api_dir = direct_dir
-                break
-
-            if not api_root.is_dir():
-                continue
-
-            for candidate in api_root.iterdir():
-                if not candidate.is_dir():
-                    continue
-                provider_file = candidate / "_provider.yaml"
-                if not provider_file.is_file():
-                    continue
-                try:
-                    candidate_provider = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
-                except Exception as e:
-                    log.debug("provider.yaml_metadata.provider_read_failed", {
-                        "provider_id": provider_id, "dir": str(candidate), "error": str(e),
-                    })
-                    continue
-
-                if (
-                    isinstance(candidate_provider, dict)
-                    and candidate_provider.get("service_id") == provider_id
-                ):
-                    api_dir = candidate
-                    break
-
-            if api_dir is not None:
-                break
-        if api_dir is None:
-            return None
-
-        provider_file = api_dir / "_provider.yaml"
-        if not provider_file.is_file():
-            return None
-
-        prov = yaml.safe_load(provider_file.read_text(encoding="utf-8"))
-        if not isinstance(prov, dict):
-            return None
-
-        tool_apis = []
-        for item in sorted(api_dir.iterdir()):
-            if item.suffix in (".yaml", ".yml") and not item.name.startswith("_"):
-                try:
-                    tool_data = yaml.safe_load(item.read_text(encoding="utf-8"))
-                    if isinstance(tool_data, dict) and tool_data.get("name"):
-                        tool_apis.append({
-                            "name": tool_data["name"],
-                            "description": tool_data.get("description", ""),
-                        })
-                except Exception as e:
-                    log.debug("provider.yaml_metadata.tool_read_failed", {
-                        "provider_id": provider_id, "file": item.name, "error": str(e),
-                    })
-
-        return {
-            "name": prov.get("name", provider_id),
-            "service_id": prov.get("service_id", provider_id),
-            "description": prov.get("description"),
-            "description_cn": prov.get("description_cn"),
-            "auth": prov.get("auth"),
-            "credential_fields": prov.get("credential_fields"),
-            "defaults": prov.get("defaults", {}),
-            "apis": tool_apis or None,
-        }
-    except Exception as e:
-        log.debug("provider.yaml_metadata.load_failed", {"provider_id": provider_id, "error": str(e)})
-        return None
-
-
 # =============================================================================
 # Credentials Management (Similar to MCP)
 # =============================================================================
@@ -1590,13 +1658,53 @@ class ProviderCredentialResponse(BaseModel):
     has_credential: bool
 
 
+def _load_llm_provider_credentials(
+    provider_id: str,
+    *,
+    reveal_api_key: bool = False,
+) -> ProviderCredentialResponse:
+    from flocks.security import get_secret_manager
+
+    secrets = get_secret_manager()
+
+    secret_id = f"{provider_id}_llm_key"
+    api_key = secrets.get(secret_id)
+    if not api_key:
+        secret_id = f"{provider_id}_api_key"
+        api_key = secrets.get(secret_id)
+    if not api_key:
+        api_key = _get_inline_provider_api_key(provider_id)
+
+    base_url = None
+    raw_provider = ConfigWriter.get_provider_raw(provider_id)
+    if raw_provider:
+        options = raw_provider.get("options", {})
+        base_url = options.get("baseURL") or options.get("base_url")
+    if not base_url:
+        base_url = secrets.get(f"{provider_id}_base_url")
+
+    is_placeholder = _is_placeholder_api_key(api_key)
+    ui_api_key = None if is_placeholder else api_key
+
+    return ProviderCredentialResponse(
+        secret_id=secret_id if api_key else None,
+        api_key=ui_api_key if reveal_api_key else None,
+        api_key_masked=SecretManager.mask(ui_api_key) if ui_api_key else None,
+        base_url=base_url,
+        has_credential=bool(api_key),
+    )
+
+
 @router.get(
     "/{provider_id}/credentials",
     response_model=ProviderCredentialResponse,
     summary="Get provider credentials (masked)",
     description="Get masked credential information for a registered LLM provider."
 )
-async def get_provider_credentials(provider_id: str):
+async def get_provider_credentials(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     """Get credential info for an LLM provider (_llm_key convention).
 
     - api_key: from .secret.json  (_llm_key first, legacy _api_key fallback)
@@ -1604,51 +1712,53 @@ async def get_provider_credentials(provider_id: str):
 
     For API services use GET /{provider_id}/service-credentials instead.
     """
-    from flocks.security import get_secret_manager
-
     try:
-        secrets = get_secret_manager()
-
-        # LLM provider convention: _llm_key first, fall back to legacy _api_key
-        secret_id = f"{provider_id}_llm_key"
-        api_key = secrets.get(secret_id)
-        if not api_key:
-            secret_id = f"{provider_id}_api_key"
-            api_key = secrets.get(secret_id)
-        if not api_key:
-            api_key = _get_inline_provider_api_key(provider_id)
-
-        # base_url from flocks.json raw (not resolved)
-        base_url = None
-        raw_provider = ConfigWriter.get_provider_raw(provider_id)
-        if raw_provider:
-            options = raw_provider.get("options", {})
-            base_url = options.get("baseURL") or options.get("base_url")
-        # Fallback: check legacy .secret.json entry (migration may not have run yet)
-        if not base_url:
-            base_url = secrets.get(f"{provider_id}_base_url")
-
-        # When the stored value is the no-auth sentinel, hide it from the
-        # response so the UI doesn't pre-fill the password input with the
-        # literal string "not-needed". We still report ``has_credential=True``
-        # because a credential record DOES exist; the user just chose to leave
-        # the key blank for an internal/no-auth gateway.
-        is_placeholder = _is_placeholder_api_key(api_key)
-        ui_api_key = None if is_placeholder else api_key
-
-        return ProviderCredentialResponse(
-            secret_id=secret_id if api_key else None,
-            api_key=ui_api_key,
-            api_key_masked=(
-                SecretManager.mask(api_key)
-                if api_key and not is_placeholder
-                else None
-            ),
-            base_url=base_url,
-            has_credential=bool(api_key),
-        )
+        return _load_llm_provider_credentials(provider_id)
     except Exception as e:
         log.error("provider.credentials.get.error", {"provider_id": provider_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.post(
+    "/{provider_id}/credentials/reveal",
+    response_model=ProviderCredentialResponse,
+    summary="Reveal provider credentials",
+    description="Reveal credential information for a registered LLM provider to an administrator.",
+)
+async def reveal_provider_credentials(
+    provider_id: str,
+    request: Request,
+    response: Response,
+    admin: AuthUser = Depends(require_admin),
+):
+    response.headers["Cache-Control"] = "no-store"
+    response.headers["Pragma"] = "no-cache"
+
+    try:
+        credentials = _load_llm_provider_credentials(provider_id, reveal_api_key=True)
+        try:
+            await emit_audit_event(
+                "provider.credentials_reveal",
+                {
+                    "action": "credentials_reveal",
+                    "actor_id": admin.id,
+                    "actor_name": admin.username,
+                    "user_id": admin.id,
+                    "username": admin.username,
+                    "provider_id": provider_id,
+                    "secret_id": credentials.secret_id,
+                    "ip": get_request_ip(request),
+                    "user_agent": get_request_user_agent(request),
+                },
+            )
+        except Exception as audit_error:
+            log.warn(
+                "provider.credentials.reveal.audit_failed",
+                {"provider_id": provider_id, "error": str(audit_error)},
+            )
+        return credentials
+    except Exception as e:
+        log.error("provider.credentials.reveal.error", {"provider_id": provider_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -1658,7 +1768,11 @@ async def get_provider_credentials(provider_id: str):
     summary="Set provider credentials",
     description="Set authentication credentials for a provider or API service."
 )
-async def set_provider_credentials(provider_id: str, request: ProviderCredentialRequest):
+async def set_provider_credentials(
+    provider_id: str,
+    request: ProviderCredentialRequest,
+    _admin: object = Depends(require_admin),
+):
     """Set credentials for a provider.
 
     - api_key → .secret.json
@@ -1672,37 +1786,66 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
     try:
         # OpenAI-compatible endpoints (e.g. internal LLM gateways without auth)
         # and user-defined custom-* providers may legitimately have no API key.
-        # For other providers (OpenAI, Anthropic, etc.) the key is still required.
+        # For an already configured provider, an omitted/blank key means "keep
+        # the existing secret" so callers can safely update only the base URL
+        # or model selection without receiving the original key back first.
         api_key_optional = (
             provider_id == "openai-compatible" or provider_id.startswith("custom-")
         )
-        effective_api_key = (request.api_key or "").strip()
-        if not effective_api_key:
-            if not api_key_optional:
-                raise HTTPException(status_code=400, detail="API key required")
-            # Persist a sentinel value so downstream OpenAI SDK clients (which
-            # require a non-empty key argument) keep working transparently.
-            # The GET endpoint masks this back to ``None`` for the UI.
-            effective_api_key = _NO_API_KEY_PLACEHOLDER
-
         secrets = get_secret_manager()
+        secret_id = request.secret_id or f"{provider_id}_llm_key"
+        effective_api_key = (request.api_key or "").strip()
+        preserve_existing_secret = False
+
+        if not effective_api_key:
+            existing_secret_ids = [secret_id]
+            legacy_secret_id = f"{provider_id}_api_key"
+            if request.secret_id is None and legacy_secret_id not in existing_secret_ids:
+                existing_secret_ids.append(legacy_secret_id)
+
+            for candidate in existing_secret_ids:
+                existing_value = secrets.get(candidate)
+                if isinstance(existing_value, str) and existing_value.strip():
+                    secret_id = candidate
+                    effective_api_key = existing_value.strip()
+                    preserve_existing_secret = True
+                    break
+
+            if not effective_api_key:
+                inline_api_key = _get_inline_provider_api_key(provider_id)
+                if inline_api_key:
+                    effective_api_key = inline_api_key
+                    preserve_existing_secret = True
+
+            if not effective_api_key:
+                if not api_key_optional:
+                    raise HTTPException(status_code=400, detail="API key required")
+                # Persist a sentinel value so downstream OpenAI SDK clients
+                # (which require a non-empty key argument) keep working.
+                effective_api_key = _NO_API_KEY_PLACEHOLDER
 
         # 1. Save API key to .secret.json using _llm_key convention for LLM providers
-        secret_id = request.secret_id or f"{provider_id}_llm_key"
-        secrets.set(secret_id, effective_api_key)
-        if _is_placeholder_api_key(effective_api_key):
-            masked = _NO_API_KEY_LOG_MARKER
-        elif len(effective_api_key) > 8:
-            masked = f"{effective_api_key[:4]}***{effective_api_key[-4:]}"
+        if preserve_existing_secret:
+            log.info("provider.credentials.preserved", {
+                "provider_id": provider_id,
+                "secret_id": secret_id,
+                "base_url": request.base_url,
+            })
         else:
-            masked = "***"
-        log.info("provider.credentials.saving", {
-            "provider_id": provider_id,
-            "secret_id": secret_id,
-            "api_key_masked": masked,
-            "api_key_optional": api_key_optional,
-            "base_url": request.base_url,
-        })
+            secrets.set(secret_id, effective_api_key)
+            if _is_placeholder_api_key(effective_api_key):
+                masked = _NO_API_KEY_LOG_MARKER
+            elif len(effective_api_key) > 8:
+                masked = f"{effective_api_key[:4]}***{effective_api_key[-4:]}"
+            else:
+                masked = "***"
+            log.info("provider.credentials.saving", {
+                "provider_id": provider_id,
+                "secret_id": secret_id,
+                "api_key_masked": masked,
+                "api_key_optional": api_key_optional,
+                "base_url": request.base_url,
+            })
 
         # 2. Ensure provider entry exists in flocks.json and update base_url / name
         raw_provider = ConfigWriter.get_provider_raw(provider_id)
@@ -1712,10 +1855,13 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
                 ConfigWriter.update_provider_field(
                     provider_id, "options.baseURL", request.base_url
                 )
-                # Ensure apiKey reference is set
-                ConfigWriter.update_provider_field(
-                    provider_id, "options.apiKey", f"{{secret:{provider_id}_llm_key}}"
-                )
+                if not preserve_existing_secret:
+                    # A newly supplied key uses the canonical secret reference.
+                    # When preserving a stored or inline key, leave its existing
+                    # config reference untouched.
+                    ConfigWriter.update_provider_field(
+                        provider_id, "options.apiKey", f"{{secret:{secret_id}}}"
+                    )
             if request.provider_name:
                 ConfigWriter.update_provider_field(
                     provider_id, "name", request.provider_name
@@ -1768,7 +1914,7 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
             ConfigWriter.add_provider(provider_id, config_dict)
 
         # 3. Configure the provider runtime so is_configured() reflects the change
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         if provider:
             # Preserve the existing base_url from flocks.json when not explicitly provided,
@@ -1818,7 +1964,10 @@ async def set_provider_credentials(provider_id: str, request: ProviderCredential
     summary="Delete provider credentials",
     description="Delete stored credentials for a provider or API service."
 )
-async def delete_provider_credentials(provider_id: str):
+async def delete_provider_credentials(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     """Delete a provider: remove from flocks.json and .secret.json."""
     from flocks.security import get_secret_manager
 
@@ -1841,7 +1990,7 @@ async def delete_provider_credentials(provider_id: str):
             raise HTTPException(status_code=404, detail="No credentials found for this provider")
 
         # 4. Clear provider runtime config
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
         if provider:
             provider._config = None
@@ -1853,7 +2002,7 @@ async def delete_provider_credentials(provider_id: str):
             Provider._providers.pop(provider_id, None)
 
         log.info("provider.credentials.deleted", {"provider_id": provider_id})
-        return {"success": True, "cleared_defaults": affected_defaults}
+        return {"success": True, "cleared_defaults": bool(affected_defaults)}
 
 
     except HTTPException:
@@ -1873,7 +2022,10 @@ async def delete_provider_credentials(provider_id: str):
     summary="Get API service credentials (masked)",
     description="Get masked credential information for an API service (tool integrations)."
 )
-async def get_service_credentials(provider_id: str):
+async def get_service_credentials(
+    provider_id: str,
+    _admin: object = Depends(require_admin),
+):
     """Get credential info for an API service (_api_key convention).
 
     Reads the secret_id from flocks.json api_services.{id}.secret first,
@@ -1930,15 +2082,30 @@ async def get_service_credentials(provider_id: str):
                     field_values["api_key"] = split_api_key
                     field_values["secret"] = split_secret
 
+        sensitive_field_names = {
+            field.key
+            for field in schema
+            if field.sensitive or field.storage == "secret"
+        }
+        sensitive_field_names.update(secret_ids)
+        safe_field_values = {
+            field_name: (
+                SecretManager.mask(value)
+                if value and field_name in sensitive_field_names
+                else value
+            )
+            for field_name, value in field_values.items()
+        }
+
         return ProviderCredentialResponse(
             secret_id=secret_ids.get("api_key"),
-            api_key=field_values.get("api_key"),
+            api_key=None,
             api_key_masked=SecretManager.mask(field_values["api_key"]) if field_values.get("api_key") else None,
-            secret=field_values.get("secret"),
+            secret=None,
             secret_masked=SecretManager.mask(field_values["secret"]) if field_values.get("secret") else None,
             base_url=field_values.get("base_url"),
             username=field_values.get("username"),
-            fields=field_values or None,
+            fields=safe_field_values or None,
             secret_ids=secret_ids or None,
             has_credential=bool(any(value for value in field_values.values())),
         )
@@ -1953,7 +2120,11 @@ async def get_service_credentials(provider_id: str):
     summary="Set API service credentials",
     description="Set authentication credentials for an API service."
 )
-async def set_service_credentials(provider_id: str, request: ProviderCredentialRequest):
+async def set_service_credentials(
+    provider_id: str,
+    request: ProviderCredentialRequest,
+    _admin: object = Depends(require_admin),
+):
     """Set credentials for an API service (_api_key convention).
 
     Saves to .secret.json AND writes the secret reference into flocks.json
@@ -2070,6 +2241,7 @@ async def set_service_credentials(provider_id: str, request: ProviderCredentialR
                     if field.key == "base_url":
                         existing.pop("baseUrl", None)
         ConfigWriter.set_api_service(provider_id, existing)
+        _clear_api_service_summary_metadata_cache(provider_id)
 
         log.info(
             "service.credentials.set",
@@ -2106,7 +2278,11 @@ class TestCredentialRequest(BaseModel):
     summary="Test provider credentials",
     description="Test if the stored credentials are valid by making a real chat API call."
 )
-async def test_provider_credentials(provider_id: str, body: Optional[TestCredentialRequest] = None):
+async def test_provider_credentials(
+    provider_id: str,
+    body: Optional[TestCredentialRequest] = None,
+    _admin: object = Depends(require_admin),
+):
     """Test credentials for a provider or API service by making a real API call"""
     from flocks.security import get_secret_manager
 
@@ -2148,12 +2324,12 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             await _save_api_service_status_if_configured(provider_id, response)
             return response
 
-        Provider._ensure_initialized()
+        await _ensure_provider_initialized()
         # Re-run dynamic provider loading in case this provider was created after
         # the server started (e.g. user just added azure-openai via the UI).
         # _load_dynamic_providers skips already-registered providers, so it is safe
         # to call multiple times.
-        Provider._load_dynamic_providers()
+        await _load_dynamic_providers()
         # Apply config to ensure _config_models (user-defined models) are loaded
         config = await Config.get()
         await Provider.apply_config(config, provider_id=provider_id)
@@ -2199,9 +2375,15 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             requested_model_id = body.model_id if body else None
             test_model_id = requested_model_id or models[0].id
 
-            # Validate model belongs to this provider
+            # Validate model belongs to this provider. Azure OpenAI is the
+            # exception: users may test a deployment name before saving it.
             valid_ids = {m.id for m in models}
-            if test_model_id not in valid_ids:
+            is_unsaved_azure_deployment = (
+                requested_model_id
+                and provider_id in {"azure-openai", "azure"}
+                and test_model_id not in valid_ids
+            )
+            if test_model_id not in valid_ids and not is_unsaved_azure_deployment:
                 response = {
                     "success": False,
                     "message": f"模型 '{test_model_id}' 不属于该 Provider",
@@ -2256,11 +2438,47 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
             # Try to test connectivity by calling a simple tool
             from flocks.tool.registry import ToolRegistry, ToolCategory, ToolInfo
             from flocks.server.routes.tool import _get_tool_source
-            
-            ToolRegistry.init()
+
+            await ToolRegistry.init_async()
 
             _set_api_service_tools_enabled(provider_id, True)
-            
+
+            # If the plugin ships a `_test.yaml` with a `connectivity` block,
+            # honour the declared (tool, params) probe. Tool failures (e.g.
+            # wrong apikey) are surfaced as-is — that's the answer the test
+            # is looking for. Exceptions (broken manifest, missing tool, …)
+            # log a warning and fall through to the heuristic below so a
+            # malformed `_test.yaml` cannot take down connectivity testing.
+            from flocks.tool.probe_loader import get_connectivity_spec
+            spec = get_connectivity_spec(provider_id)
+            if spec is not None:
+                log.info("test_credentials.using_declared_probe", {
+                    "service": provider_id, "tool": spec.tool, "params": spec.params,
+                })
+                try:
+                    probe = await ToolRegistry.execute(tool_name=spec.tool, **spec.params)
+                    latency = int((time.time() - start) * 1000)
+                    response = {
+                        "success": probe.success,
+                        "message": (
+                            f"✅ 连通性测试成功（声明式探针：{spec.tool}）"
+                            if probe.success
+                            else f"❌ 连通性测试失败（声明式探针：{spec.tool}）：{probe.error or 'Unknown'}"
+                        ),
+                        "latency_ms": latency,
+                        "tool_tested": spec.tool,
+                        "params_used": spec.params,
+                        "probe_source": "manifest",
+                    }
+                    await _save_api_service_status_if_configured(provider_id, response)
+                    return response
+                except Exception as exc:
+                    log.warning("test_credentials.declared_probe_exception", {
+                        "service": provider_id, "tool": spec.tool, "error": str(exc),
+                    })
+                    # fall through to heuristic
+
+
             # Find tools from this service using the shared source detection
             all_tools = ToolRegistry.list_tools()
             service_tools = []
@@ -2275,7 +2493,7 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                 if not tool_info.enabled:
                     continue
                 source, source_name = _get_tool_source(tool_info)
-                if source == "api" and source_name == provider_id:
+                if source in ("api", "device") and source_name == provider_id:
                     service_tools.append(tool_info)
             
             log.info("test_credentials.service_tools", {
@@ -2326,14 +2544,47 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                     name_lower.endswith(f"_{kw}") for kw in login_probe_keywords
                 )
 
+            def _is_action_dispatch_login_probe(t: ToolInfo) -> bool:
+                """Action-dispatch login tool (e.g. ``onesig_login``,
+                ``onesec_login``, ``onesig_v2_5_older_login``).
+
+                These tools require an ``action`` enum parameter, so they don't
+                qualify as parameter-free probes; but their handler ships a
+                special ``action="test"`` branch that runs a single read-only
+                call (``get_account`` / ``common_threat_type_list`` / ...) —
+                which is the *cheapest* way to verify credentials without
+                triggering any business write or repeated logins. We pick
+                them as the connectivity probe of choice for such services.
+                """
+                if t.requires_confirmation:
+                    return False
+                name_lower = t.name.lower()
+                if not (name_lower == "login" or name_lower.endswith("_login")):
+                    return False
+                for param in t.parameters:
+                    if param.name == "action" and param.enum:
+                        return True
+                return False
+
             def _tool_sort_key(t: ToolInfo) -> tuple[int, int, str]:
                 required_count = sum(1 for p in t.parameters if p.required)
                 name_lower = t.name.lower()
                 # Highest priority: dedicated login/health probes. These are the
                 # safest connectivity test because they have no required params
                 # and only exercise the auth/sign-in flow.
-                if _is_login_probe(t):
+                #
+                # We treat action-dispatch login tools (``<service>_login``
+                # with required ``action`` enum) as equally safe: the handler
+                # special-cases ``action="test"`` to a single read-only call,
+                # so we'll force that value below and avoid enumerating other
+                # actions (which would each trigger a fresh login attempt).
+                if _is_login_probe(t) or _is_action_dispatch_login_probe(t):
                     priority = -1
+                # OneSEC grouped tools all look equally generic to the default
+                # heuristic, but the threat probe maps to a safer read-only
+                # version query than the legacy DNS probe.
+                elif provider_id == "onesec_api" and name_lower == "onesec_threat":
+                    priority = 0
                 # Prefer query/scan style tools first, and push upload/file tools last.
                 elif "ip" in name_lower:
                     priority = 0
@@ -2464,102 +2715,121 @@ async def test_provider_credentials(provider_id: str, body: Optional[TestCredent
                     param_sets = next_sets or param_sets
                 return param_sets or [{}]
 
-            def _short_repr(value: object, limit: int = 80) -> str:
-                """Compact repr for params, capped to *limit* chars to keep
-                the failure summary message readable (and the cached status
-                payload small)."""
-                text = repr(value)
-                if len(text) <= limit:
-                    return text
-                return text[: limit - 3] + "..."
-
+            # ----------------------------------------------------------------
+            # Connectivity test policy: probe **at most one tool, with a single
+            # parameter set**.
+            #
+            # Rationale: services that authenticate via session cookies
+            # (OneSIG / OneSec / Qingteng / ...) lock the account after a
+            # small number of consecutive failed logins. Iterating through
+            # multiple tools and enum-driven action variants on a wrong-cred
+            # test would multiply login attempts (often N tools × M actions
+            # = double-digit login attempts in a single click), tripping the
+            # server-side lockout. A single probe is enough to surface the
+            # auth failure to the user without burning their account.
+            #
+            # Tradeoff: if the chosen probe happens to fail for non-auth
+            # reasons (e.g. the synthesized param value is rejected by a
+            # specialized endpoint), the user sees a false negative and
+            # has to re-test after fixing the config — much better than
+            # discovering their service account was locked. The
+            # ``_tool_sort_key`` ranking above is what makes this safe:
+            # login probes (parameter-free or action-dispatch) get top
+            # priority, so for credential-style services we land on the
+            # cheapest possible call.
+            # ----------------------------------------------------------------
             attempts: list[dict[str, object]] = []
-            last_response: Optional[dict[str, object]] = None
-            for test_tool in service_tools[:5]:
-                for test_params in _build_param_sets(test_tool):
-                    try:
-                        log.info("testing.api.connectivity", {
-                            "service": provider_id,
-                            "tool": test_tool.name,
-                            "params": test_params,
-                        })
+            test_tool = service_tools[0]
 
-                        result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
-                        latency = int((time.time() - start) * 1000)
+            if _is_action_dispatch_login_probe(test_tool):
+                # Handlers like onesig.handler.py / onesec.handler.py ship a
+                # ``_dispatch_group(group, action="test", ...)`` branch that
+                # routes to ``_CONNECTIVITY_TEST_ACTIONS[group]`` — a single
+                # read-only API (e.g. ``get_account``). Bypass the enum
+                # exploration so we don't accidentally invoke ``login``,
+                # ``logout``, ``change_password``, ``get_pubkey``, etc.,
+                # each of which would trigger its own login round-trip.
+                test_params: dict[str, object] = {"action": "test"}
+            else:
+                # Fallback path for services without action-dispatch login
+                # tools. Only the *first* synthesized param set is tried
+                # to keep total login attempts at one.
+                param_sets = _build_param_sets(test_tool)
+                test_params = param_sets[0] if param_sets else {}
 
-                        if result.success:
-                            response = {
-                                "success": True,
-                                "message": f"✅ API 连通性测试成功！使用工具 '{test_tool.name}' 进行测试。",
-                                "latency_ms": latency,
-                                "tool_tested": test_tool.name,
-                                "attempts": attempts,
-                            }
-                            await _save_api_service_status(provider_id, response)
-                            return response
+            try:
+                log.info("testing.api.connectivity", {
+                    "service": provider_id,
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "single_attempt": True,
+                })
 
-                        error_detail = result.error or "Unknown error"
-                        log.warning("testing.api.connectivity.failed", {
-                            "service": provider_id,
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": error_detail,
-                        })
-                        attempts.append({
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": error_detail,
-                        })
-                        last_response = {
-                            "success": False,
-                            "message": f"❌ API 调用失败: {error_detail}",
-                            "error": error_detail,
-                            "latency_ms": latency,
-                            "tool_tested": test_tool.name,
-                        }
-                    except Exception as tool_error:
-                        latency = int((time.time() - start) * 1000)
-                        log.warning("testing.api.connectivity.failed", {
-                            "service": provider_id,
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": str(tool_error),
-                            "exception": True,
-                        })
-                        attempts.append({
-                            "tool": test_tool.name,
-                            "params": test_params,
-                            "error": str(tool_error),
-                        })
-                        last_response = {
-                            "success": False,
-                            "message": f"❌ API 连通性测试失败: {str(tool_error)}",
-                            "error": str(tool_error),
-                            "latency_ms": latency,
-                            "tool_tested": test_tool.name,
-                        }
+                result = await ToolRegistry.execute(tool_name=test_tool.name, **test_params)
+                latency = int((time.time() - start) * 1000)
 
-            response = last_response or {
-                "success": False,
-                "message": "❌ API 连通性测试失败: 未生成可执行的测试参数",
-                "error": "No executable connectivity test candidate",
-                "latency_ms": int((time.time() - start) * 1000),
-            }
-            # Attach all attempts so the WebUI/log can show why every probe
-            # failed, instead of only the message of the very last attempt.
-            response["attempts"] = attempts
-            if attempts:
-                # Keep message single-line so any UI (toast/popover) renders
-                # consistently regardless of whitespace handling. Per-attempt
-                # params are truncated to avoid blowing up the cached message.
-                detail = "; ".join(
-                    f"{a['tool']}({_short_repr(a.get('params') or {})})→{a['error']}"
-                    for a in attempts
-                )
-                response["message"] = (
-                    f"❌ API 连通性测试失败（共尝试 {len(attempts)} 次）。"
-                    f"最后一次错误: {response.get('error', 'unknown')}｜尝试明细: {detail}"
-                )
+                if result.success:
+                    response = {
+                        "success": True,
+                        "message": f"✅ API 连通性测试成功！使用工具 '{test_tool.name}' 进行测试。",
+                        "latency_ms": latency,
+                        "tool_tested": test_tool.name,
+                        "attempts": [],
+                    }
+                    await _save_api_service_status(provider_id, response)
+                    return response
+
+                error_detail = result.error or "Unknown error"
+                log.warning("testing.api.connectivity.failed", {
+                    "service": provider_id,
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": error_detail,
+                })
+                attempts.append({
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": error_detail,
+                })
+                response = {
+                    "success": False,
+                    "message": (
+                        f"❌ API 连通性测试失败: {error_detail}（已使用工具 "
+                        f"'{test_tool.name}' 探测一次；为避免连续失败导致账号锁定，"
+                        "本次不再尝试其它工具）"
+                    ),
+                    "error": error_detail,
+                    "latency_ms": latency,
+                    "tool_tested": test_tool.name,
+                    "attempts": attempts,
+                }
+            except Exception as tool_error:
+                latency = int((time.time() - start) * 1000)
+                log.warning("testing.api.connectivity.failed", {
+                    "service": provider_id,
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": str(tool_error),
+                    "exception": True,
+                })
+                attempts.append({
+                    "tool": test_tool.name,
+                    "params": test_params,
+                    "error": str(tool_error),
+                })
+                response = {
+                    "success": False,
+                    "message": (
+                        f"❌ API 连通性测试失败: {str(tool_error)}（已使用工具 "
+                        f"'{test_tool.name}' 探测一次；为避免连续失败导致账号锁定，"
+                        "本次不再尝试其它工具）"
+                    ),
+                    "error": str(tool_error),
+                    "latency_ms": latency,
+                    "tool_tested": test_tool.name,
+                    "attempts": attempts,
+                }
+
             await _save_api_service_status(provider_id, response)
             return response
     except Exception as e:
@@ -2629,7 +2899,9 @@ async def get_api_services_status():
     summary="Refresh API service connectivity status",
     description="Manually trigger a refresh of all API service connectivity statuses."
 )
-async def refresh_api_services_status():
+async def refresh_api_services_status(
+    _admin: object = Depends(require_admin),
+):
     """Refresh all API service connectivity statuses and cache them."""
     try:
         await Storage.init()
@@ -2640,7 +2912,7 @@ async def refresh_api_services_status():
 
         # Also discover services from registered tools (covers YAML API tools)
         from flocks.tool.registry import ToolRegistry
-        ToolRegistry.init()
+        await ToolRegistry.init_async()
         service_ids: set = set(api_services.keys()) | ToolRegistry.get_api_service_ids()
 
         refreshed_at = int(time.time())

@@ -7,7 +7,7 @@
  * - Rex 对话模式（自然语言描述任务 → 填充表单）
  */
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useMemo } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Calendar, Clock, Sparkles } from 'lucide-react';
 import { taskAPI, TaskScheduler, TaskPriority, TaskCreateParams, ExecutionMode } from '@/api/task';
@@ -15,12 +15,15 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet, { useEntitySheet } from '@/components/common/EntitySheet';
+import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
+import { useRexComposerControls } from '@/components/common/useRexComposerControls';
 import PillGroup from '@/components/common/PillGroup';
 import { useTaskExecutionsByScheduler } from '@/hooks/useTasks';
 import { describeCron, CRON_PRESETS, formatDuration, formatTime } from './helpers';
 import { agentAPI, Agent } from '@/api/agent';
-import { workflowAPI, Workflow } from '@/api/workflow';
+import { workflowAPI, WorkflowSummary } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { StatusBadge } from './components';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -33,6 +36,7 @@ interface TaskFormData {
   executionMode: ExecutionMode;
   agentName: string;
   workflowID: string;
+  workflowContext: string;
   userPrompt: string;
   cron: string;
   runAt: string;
@@ -69,6 +73,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
         executionMode: task.executionMode,
         agentName: task.agentName ?? 'rex',
         workflowID: task.workflowID ?? '',
+        workflowContext: stringifyJsonObject(task.context),
         userPrompt: task.source?.userPrompt ?? '',
         cron: preset ? preset.value : (task.trigger?.cron ?? ''),
         runAt: (() => {
@@ -90,6 +95,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
       executionMode: 'agent',
       agentName: 'rex',
       workflowID: '',
+      workflowContext: '{}',
       userPrompt: '',
       cron: '',
       runAt: '',
@@ -100,11 +106,33 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
 
   const [loading, setLoading] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
+  const guideGroups = useMemo(() => {
+    const scope = isEdit ? 'taskSheet.edit' : 'taskSheet.create';
+    const name = formData.title || task?.title || t('taskSheet.entityType');
+
+    return buildGuidedCreateGroups([
+      {
+        title: t(`${scope}.guideSectionTitle`),
+        actions: t(`${scope}.guideActions`, {
+          returnObjects: true,
+          name,
+        }),
+      },
+      {
+        title: t(`${scope}.caseSectionTitle`),
+        actions: t(`${scope}.caseActions`, {
+          returnObjects: true,
+          name,
+        }),
+      },
+    ]);
+  }, [formData.title, isEdit, task?.title, t]);
+  const rexComposerControls = useRexComposerControls();
 
   useEffect(() => {
     agentAPI.list().then((res) => setAgents(res.data.filter((a) => !a.hidden))).catch(() => {});
-    workflowAPI.list({ status: 'active' }).then((res) => setWorkflows(res.data)).catch(() => {});
+    workflowAPI.listSummaries({ status: 'active' }).then((res) => setWorkflows(res.data)).catch(() => {});
   }, []);
 
   const isImmediate = formData.scheduleKind === 'immediate';
@@ -123,6 +151,14 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
     if (!canSubmit) return;
     setLoading(true);
     try {
+      let workflowContext: Record<string, any> | undefined;
+      if (formData.executionMode === 'workflow') {
+        try {
+          workflowContext = parseJsonObject(formData.workflowContext);
+        } catch {
+          throw new Error(t('form.workflowParamsInvalid'));
+        }
+      }
       if (isEdit) {
         if (isRunOnce) {
           await taskAPI.updateScheduler(task!.id, {
@@ -134,6 +170,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
             executionMode: formData.executionMode,
             agentName: formData.executionMode === 'agent' ? formData.agentName : undefined,
             workflowID: formData.executionMode === 'workflow' ? formData.workflowID : undefined,
+            context: workflowContext,
             userPrompt: formData.userPrompt || undefined,
           });
         } else {
@@ -147,6 +184,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
             executionMode: formData.executionMode,
             agentName: formData.executionMode === 'agent' ? formData.agentName : undefined,
             workflowID: formData.executionMode === 'workflow' ? formData.workflowID : undefined,
+            context: workflowContext,
             userPrompt: formData.userPrompt || undefined,
           });
         }
@@ -159,6 +197,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
           executionMode: formData.executionMode,
           agentName: formData.executionMode === 'agent' ? formData.agentName : undefined,
           workflowID: formData.executionMode === 'workflow' ? formData.workflowID : undefined,
+          context: workflowContext,
           userPrompt: formData.userPrompt || undefined,
         };
         if (isOnce) {
@@ -184,10 +223,10 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
 
   const handleExtractFromRex = async (sessionId: string) => {
     const fields = isEdit && isRunOnce
-      ? `{"title": "...", "description": "...", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "..."}`
+      ? `{"title": "...", "description": "...", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "workflowID": "...", "context": {"key": "value"}, "userPrompt": "..."}`
       : isEdit
-      ? `{"title": "...", "description": "...", "priority": "urgent|high|normal|low", "cron": "...", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "..."}`
-      : `{"title": "...", "description": "...", "scheduleKind": "immediate|once|recurring", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "userPrompt": "...", "runAt": "（指定时间执行一次时填写）", "cron": "（循环执行时填写）"}`;
+      ? `{"title": "...", "description": "...", "priority": "urgent|high|normal|low", "cron": "...", "timezone": "...", "cronDescription": "...", "executionMode": "agent|workflow", "agentName": "...", "workflowID": "...", "context": {"key": "value"}, "userPrompt": "..."}`
+      : `{"title": "...", "description": "...", "scheduleKind": "immediate|once|recurring", "priority": "urgent|high|normal|low", "executionMode": "agent|workflow", "agentName": "...", "workflowID": "...", "context": {"key": "value"}, "userPrompt": "...", "runAt": "（指定时间执行一次时填写）", "cron": "（循环执行时填写）", "timezone": "（循环执行时填写）", "cronDescription": "（循环执行时填写）"}`;
 
     const extractPrompt = `请将以上讨论的任务配置整理为 JSON，只输出 JSON 对象：
 \`\`\`json
@@ -227,9 +266,15 @@ ${fields}
               priority: config.priority || prev.priority,
               executionMode: config.executionMode || prev.executionMode,
               agentName: config.agentName || prev.agentName,
+              workflowID: config.workflowID || prev.workflowID,
+              workflowContext: config.context
+                ? stringifyJsonObject(config.context)
+                : prev.workflowContext,
               userPrompt: config.userPrompt ?? prev.userPrompt,
-              runAt: config.runAt ?? prev.runAt,
-              cron: config.cron || prev.cron,
+              runAt: pickStringValue(config, 'runAt', 'run_at') ?? prev.runAt,
+              cron: pickStringValue(config, 'cron') || prev.cron,
+              timezone: pickStringValue(config, 'timezone', 'timeZone', 'time_zone') ?? prev.timezone,
+              cronDescription: pickStringValue(config, 'cronDescription', 'cron_description') ?? prev.cronDescription,
             }));
             return;
           }
@@ -251,11 +296,14 @@ ${fields}
       icon={icon}
       rexSystemContext={buildRexContext(formData, isEdit)}
       rexWelcomeMessage={buildRexWelcome(isEdit, task?.title)}
+      rexGuideGroups={guideGroups}
+      rexGuidePanelTitle={t(isEdit ? 'taskSheet.edit.guidePanelTitle' : 'taskSheet.create.guidePanelTitle')}
+      rexGuidePanelDesc={t(isEdit ? 'taskSheet.edit.guidePanelDesc' : 'taskSheet.create.guidePanelDesc', { name: task?.title ?? formData.title })}
+      rexGuideEmptyTitle={t(isEdit ? 'taskSheet.edit.emptyStateTitle' : 'taskSheet.create.emptyStateTitle')}
+      rexGuideIcon={<Calendar className="h-5 w-5" />}
+      {...rexComposerControls}
       submitDisabled={!canSubmit || loading}
       submitLoading={loading}
-      width={640}
-      minWidth={480}
-      maxWidth={960}
       onClose={onClose}
       onSubmit={handleSubmit}
       onExtractFromRex={handleExtractFromRex}
@@ -284,7 +332,7 @@ interface TaskFormContentProps {
   isRunOnce: boolean;
   effectiveCron: string;
   agents: Agent[];
-  workflows: Workflow[];
+  workflows: WorkflowSummary[];
 }
 
 function TaskFormContent({
@@ -526,23 +574,38 @@ function TaskFormContent({
             </select>
           </div>
         ) : (
-          <div className="flex items-center gap-3">
-            <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Workflow</span>
-            <select
-              value={formData.workflowID}
-              onChange={(e) => update({ workflowID: e.target.value })}
-              className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-purple-500"
-            >
-              <option value="">{t('form.selectWorkflow')}</option>
-              {workflows.length === 0 && formData.workflowID && (
-                <option value={formData.workflowID}>{formData.workflowID}</option>
-              )}
-              {workflows.map((wf) => (
-                <option key={wf.id} value={wf.id}>
-                  {wf.name}{wf.description ? ` — ${wf.description.slice(0, 30)}${wf.description.length > 30 ? '…' : ''}` : ''}
-                </option>
-              ))}
-            </select>
+          <div className="space-y-3">
+            <div className="flex items-center gap-3">
+              <span className="w-14 shrink-0 text-sm font-medium text-gray-700">Workflow</span>
+              <select
+                value={formData.workflowID}
+                onChange={(e) => update({ workflowID: e.target.value })}
+                className="flex-1 px-3 py-1.5 border border-gray-300 rounded-lg outline-none text-sm focus:ring-2 focus:ring-purple-500"
+              >
+                <option value="">{t('form.selectWorkflow')}</option>
+                {workflows.length === 0 && formData.workflowID && (
+                  <option value={formData.workflowID}>{formData.workflowID}</option>
+                )}
+                {workflows.map((wf) => (
+                  <option key={wf.id} value={wf.id}>
+                    {getWorkflowDisplayName(wf, i18n.language)}{wf.description ? ` — ${wf.description.slice(0, 30)}${wf.description.length > 30 ? '…' : ''}` : ''}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label className="block text-sm font-medium text-gray-700 mb-1">
+                {t('form.workflowParamsLabel')}
+                <span className="text-gray-400 font-normal text-xs ml-1">{t('form.workflowParamsHint')}</span>
+              </label>
+              <textarea
+                value={formData.workflowContext}
+                onChange={(e) => update({ workflowContext: e.target.value })}
+                className="w-full min-h-[120px] px-3 py-2 border border-gray-300 rounded-lg focus:ring-2 focus:ring-purple-500 outline-none resize-y text-sm font-mono"
+                spellCheck={false}
+                placeholder={t('form.workflowParamsPlaceholder')}
+              />
+            </div>
           </div>
         )}
       </div>
@@ -639,6 +702,7 @@ function buildRexContext(formData: TaskFormData, isEdit: boolean): string {
     `- 调度方式：${scheduleLabel}`,
     `- 优先级：${formData.priority}`,
     `- 执行模式：${formData.executionMode === 'agent' ? `Agent（${formData.agentName || 'rex'}）` : `Workflow（${formData.workflowID || '未指定'}）`}`,
+    formData.executionMode === 'workflow' ? `- Workflow 参数：${formData.workflowContext || '{}'}` : '',
     `- 任务补充信息：${formData.userPrompt || '（未填写）'}`,
     formData.scheduleKind === 'once' ? `- 执行时间：${formData.runAt || '（未配置）'}` : '',
     formData.scheduleKind === 'recurring' ? `- 执行频率：${formData.cron ? describeCron(formData.cron) : '（未配置）'}` : '',
@@ -649,6 +713,7 @@ function buildRexContext(formData: TaskFormData, isEdit: boolean): string {
     `- **调度方式**：immediate（立即执行一次）、once（指定时间执行一次）或 recurring（定时循环执行）`,
     `- **优先级**：urgent/high/normal/low`,
     `- **执行模式**：agent（使用指定 Agent）或 workflow（运行工作流）`,
+    `- **context**：仅 workflow 模式使用，传给 workflow 的 JSON 对象参数`,
     formData.scheduleKind === 'once' ? `- **runAt**：一次执行的具体时间` : '',
     formData.scheduleKind === 'recurring' ? `- **Cron**：标准5段 cron 表达式，例如 "0 9 * * 1-5" 表示工作日早9点` : '',
     ``,
@@ -696,4 +761,31 @@ function parseJsonFromText(text: string): Record<string, any> | null {
     } catch {}
   }
   return null;
+}
+
+function parseJsonObject(text: string): Record<string, any> {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {};
+  }
+  const parsed = JSON.parse(trimmed);
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('workflow context must be a JSON object');
+  }
+  return parsed as Record<string, any>;
+}
+
+function pickStringValue(data: Record<string, any>, ...keys: string[]): string | undefined {
+  for (const key of keys) {
+    const value = data[key];
+    if (typeof value === 'string') return value;
+  }
+  return undefined;
+}
+
+function stringifyJsonObject(value: Record<string, any> | undefined): string {
+  if (!value || Object.keys(value).length === 0) {
+    return '{}';
+  }
+  return JSON.stringify(value, null, 2);
 }

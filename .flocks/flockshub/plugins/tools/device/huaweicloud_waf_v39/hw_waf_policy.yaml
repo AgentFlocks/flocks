@@ -1,0 +1,207 @@
+name: hw_waf_policy
+description: >
+  Huawei Cloud WAF protection policy management tool. Use the `action`
+  parameter to query, create, update, or delete protection policies, and
+  manage policy rules (CC rules, custom rules, blacklist/whitelist, etc.).
+description_cn: >
+  华为云 WAF 防护策略管理工具。通过 `action` 参数调用防护策略的查询、创建、
+  更新和删除接口，以及 CC 规则、精准防护规则、黑白名单、地理位置控制等规则管理接口。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: huaweicloud_waf_api
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: |
+        防护策略管理动作名，可选值：
+        - policy_list
+          用途: 查询防护策略列表
+          必填: 无
+          常用: `page`、`pagesize`、`name`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - policy_show
+          用途: 根据 ID 查询防护策略详情
+          必填: `policy_id`
+          常用: `policy_id`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - policy_create
+          用途: 创建防护策略
+          必填: `name`
+          常用: `name`、`level`、`full_detection`
+          风险提示: 写操作；会新增防护策略
+          是否任务型: 否
+        - policy_update
+          用途: 更新防护策略
+          必填: `policy_id`
+          常用: `policy_id`、`name`、`level`、`full_detection`、`options`
+          风险提示: 写操作；会修改防护策略参数
+          是否任务型: 否
+        - policy_delete
+          用途: 删除防护策略
+          必填: `policy_id`
+          常用: `policy_id`
+          风险提示: 高风险写操作；删除后绑定该策略的域名需重新绑定
+          是否任务型: 否
+        - policy_update_hosts
+          用途: 更新防护策略绑定的域名列表
+          必填: `policy_id`、`hosts`
+          常用: `policy_id`、`hosts`
+          风险提示: 写操作；会变更策略与域名的绑定关系
+          是否任务型: 否
+        - cc_rule_list
+          用途: 查询 CC 防护规则列表
+          必填: `policy_id`
+          常用: `policy_id`、`page`、`pagesize`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - cc_rule_create
+          用途: 创建 CC 防护规则
+          必填: `policy_id`、`url`、`limit_num`、`limit_period`、`lock_time`、`tag_type`、`rule_action`
+          常用: `policy_id`、`url`、`limit_num`、`limit_period`、`lock_time`、`tag_type`、`rule_action`
+          风险提示: 写操作；会新增 CC 规则
+          是否任务型: 否
+        - cc_rule_delete
+          用途: 删除 CC 防护规则
+          必填: `policy_id`、`rule_id`
+          常用: `policy_id`、`rule_id`
+          风险提示: 写操作；会删除 CC 规则
+          是否任务型: 否
+        - custom_rule_list
+          用途: 查询精准防护规则列表
+          必填: `policy_id`
+          常用: `policy_id`、`page`、`pagesize`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - custom_rule_create
+          用途: 创建精准防护规则
+          必填: `policy_id`、`name`、`conditions`、`rule_action`
+          常用: `policy_id`、`name`、`conditions`、`rule_action`、`priority`
+          风险提示: 写操作；会新增精准防护规则
+          是否任务型: 否
+        - custom_rule_delete
+          用途: 删除精准防护规则
+          必填: `policy_id`、`rule_id`
+          常用: `policy_id`、`rule_id`
+          风险提示: 写操作；会删除精准防护规则
+          是否任务型: 否
+        - whiteblackip_rule_list
+          用途: 查询黑白名单规则列表
+          必填: `policy_id`
+          常用: `policy_id`、`page`、`pagesize`
+          风险提示: 只读查询接口
+          是否任务型: 否
+        - whiteblackip_rule_create
+          用途: 创建黑白名单规则（IP/IP 段 允许/拦截）
+          必填: `policy_id`、`addr`、`white`
+          常用: `policy_id`、`addr`、`white`、`description`
+          风险提示: 写操作；会新增 IP 黑白名单规则，影响访问控制
+          是否任务型: 否
+        - whiteblackip_rule_delete
+          用途: 删除黑白名单规则
+          必填: `policy_id`、`rule_id`
+          常用: `policy_id`、`rule_id`
+          风险提示: 写操作；会删除 IP 黑白名单规则
+          是否任务型: 否
+        - geoip_rule_list
+          用途: 查询地理位置访问控制规则列表
+          必填: `policy_id`
+          常用: `policy_id`、`page`、`pagesize`
+          风险提示: 只读查询接口
+          是否任务型: 否
+      enum:
+        - policy_list
+        - policy_show
+        - policy_create
+        - policy_update
+        - policy_delete
+        - policy_update_hosts
+        - cc_rule_list
+        - cc_rule_create
+        - cc_rule_delete
+        - custom_rule_list
+        - custom_rule_create
+        - custom_rule_delete
+        - whiteblackip_rule_list
+        - whiteblackip_rule_create
+        - whiteblackip_rule_delete
+        - geoip_rule_list
+    policy_id:
+      type: string
+      description: 防护策略 ID
+    rule_id:
+      type: string
+      description: 规则 ID
+    name:
+      type: string
+      description: 策略名称（查询时为模糊匹配关键词，创建时为精确名称）
+    level:
+      type: integer
+      description: 防护等级，`1` 宽松、`2` 中等（默认）、`3` 严格
+    full_detection:
+      type: boolean
+      description: 是否开启全检测模式
+    options:
+      type: object
+      description: 防护开关选项对象（如 webattack、cc、custom 等开关）
+    hosts:
+      type: array
+      items:
+        type: object
+      description: 域名列表，每项含 `id`（域名 ID）字段
+    url:
+      type: string
+      description: CC 规则匹配的 URL 路径
+    limit_num:
+      type: integer
+      description: CC 规则限制请求数
+    limit_period:
+      type: integer
+      description: CC 规则统计时间窗（秒）
+    lock_time:
+      type: integer
+      description: CC 规则封禁时长（秒）
+    tag_type:
+      type: string
+      description: CC 规则标签类型，如 `ip`、`cookie`、`header` 等
+    rule_action:
+      type: object
+      description: 规则匹配后的动作，含 `category`（`block`/`pass`/`log`）等字段
+    conditions:
+      type: array
+      items:
+        type: object
+      description: 精准防护规则条件列表
+    priority:
+      type: integer
+      description: 精准防护规则优先级（数字越小优先级越高）
+    addr:
+      type: string
+      description: 黑白名单 IP 地址或 CIDR 段
+    white:
+      type: integer
+      description: 白名单标识，`0` 黑名单（拦截）、`1` 白名单（放行）
+    description:
+      type: string
+      description: 规则备注描述
+    page:
+      type: integer
+      description: 页码，从 1 开始
+      default: 1
+    pagesize:
+      type: integer
+      description: 每页数量
+      default: 10
+    enterprise_project_id:
+      type: string
+      description: 企业项目 ID（可选）
+  required:
+    - action
+handler:
+  type: script
+  script_file: hw_waf.handler.py
+  function: policy

@@ -8,13 +8,13 @@ Writes files to the local filesystem with:
 """
 
 import os
-from typing import Optional
 from difflib import unified_diff
+from typing import Optional
 
 from flocks.tool.registry import (
     ToolRegistry, ToolCategory, ToolParameter, ParameterType, ToolResult, ToolContext
 )
-from flocks.project.instance import Instance
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.utils.log import Log
 
 
@@ -107,52 +107,90 @@ def trim_diff(diff: str) -> str:
     
     return "\n".join(trimmed_lines)
 
-
-def _safe_relpath(path: str, start: Optional[str]) -> str:
-    """Return a relative path when possible, otherwise keep the absolute path."""
-    if not start:
-        return path
-    try:
-        return os.path.relpath(path, start)
-    except ValueError:
-        return path
-
-
-async def _resolve_sandbox_file_path(
-    ctx: ToolContext,
-    filepath: str,
-) -> tuple[Optional[str], Optional[str], Optional[dict]]:
+def _looks_like_filename_only_intent(raw_path: str, resolved_path: str, base_dir: str) -> bool:
     """
-    Resolve file path under sandbox workspace when sandbox is enabled.
+    Best-effort detect "user gave only a filename (no directory)" intent.
 
-    Returns:
-        (resolved_path, error_message, sandbox_dict)
+    Cases considered filename-only:
+    - Relative path without any directory separator (e.g. ``hello.txt``)
+    - Absolute path that points to the source root + basename
+      (common when model auto-expands a bare filename to cwd/source dir)
     """
-    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
-    if not isinstance(sandbox, dict):
-        return filepath, None, None
-
-    workspace_root = sandbox.get("workspace_dir")
-    if not workspace_root:
-        return filepath, None, sandbox
-
-    if not os.path.isabs(filepath):
-        filepath = os.path.join(workspace_root, filepath)
-
+    normalized = (raw_path or "").replace("\\", "/")
+    if not raw_path:
+        return False
+    if not os.path.isabs(raw_path):
+        return "/" not in normalized
     try:
-        from flocks.sandbox.paths import assert_sandbox_path
-
-        resolved = await assert_sandbox_path(
-            file_path=filepath,
-            cwd=workspace_root,
-            root=workspace_root,
-        )
-        return resolved.resolved, None, sandbox
+        return os.path.realpath(os.path.dirname(resolved_path)) == os.path.realpath(base_dir)
     except Exception:
-        return None, (
-            f"Path escapes sandbox workspace: {filepath}. "
-            "Use paths inside sandbox workspace only."
-        ), sandbox
+        return False
+
+
+async def _resolve_owner_username(ctx: ToolContext) -> Optional[str]:
+    """Resolve owner username from auth context, then session ownership."""
+    try:
+        from flocks.auth.context import get_current_auth_user
+        auth_user = get_current_auth_user()
+        if auth_user and getattr(auth_user, "username", None):
+            return str(auth_user.username)
+    except Exception:
+        pass
+
+    session_id = getattr(ctx, "session_id", None)
+    if not session_id or session_id == "default":
+        return None
+    try:
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id(session_id)
+        if session and getattr(session, "owner_username", None):
+            return str(session.owner_username)
+    except Exception:
+        pass
+    return None
+
+
+async def _maybe_redirect_to_default_outputs(
+    ctx: ToolContext,
+    *,
+    original_path: str,
+    resolved_path: str,
+    base_dir: str,
+) -> str:
+    """
+    For filename-only writes, force stable default output location.
+
+    This prevents nondeterministic writes to source root when user did not
+    specify a directory and model expanded filename against cwd.
+    """
+    if not _looks_like_filename_only_intent(original_path, resolved_path, base_dir):
+        return resolved_path
+    if os.path.exists(resolved_path):
+        # Existing file writes should remain explicit and deterministic.
+        return resolved_path
+
+    filename = os.path.basename(original_path) or os.path.basename(resolved_path)
+    if not filename:
+        return resolved_path
+
+    try:
+        from flocks.workspace.manager import WorkspaceManager
+
+        owner_username = await _resolve_owner_username(ctx)
+        outputs_dir = WorkspaceManager.get_instance().get_default_outputs_dir(
+            username=owner_username
+        )
+        redirected = str((outputs_dir / filename).resolve())
+        if redirected != resolved_path:
+            log.info(
+                "write.default_output_redirect",
+                {"from": resolved_path, "to": redirected, "session_id": ctx.session_id},
+            )
+        return redirected
+    except Exception as exc:
+        log.debug("write.default_output_redirect.failed", {"error": str(exc)})
+        return resolved_path
 
 
 @ToolRegistry.register_function(
@@ -170,7 +208,7 @@ async def _resolve_sandbox_file_path(
             name="filePath",
             type=ParameterType.STRING,
             description=(
-                "The absolute path to the file to write (must be absolute, not relative).\n"
+                "The path to the file to write. It may be absolute, use `~`, or be relative to the current project directory.\n"
                 "\n"
                 "IMPORTANT — choose the correct directory from <env>:\n"
                 "- Project source file (source code, tests, configs that belong to the project)"
@@ -209,19 +247,31 @@ async def write_tool(
         else:
             content = str(content)
 
-    # Resolve path
-    filepath = filePath
-    if not os.path.isabs(filepath):
-        base_dir = Instance.get_directory() or os.getcwd()
-        filepath = os.path.join(base_dir, filepath)
-
-    filepath, sandbox_error, sandbox = await _resolve_sandbox_file_path(ctx, filepath)
-    if sandbox_error:
+    try:
+        resolution = await resolve_tool_path(ctx, filePath)
+        if resolution.sandbox_root is None:
+            redirected_path = await _maybe_redirect_to_default_outputs(
+                ctx,
+                original_path=filePath,
+                resolved_path=resolution.resolved_path,
+                base_dir=resolution.base_dir,
+            )
+            if redirected_path != resolution.resolved_path:
+                resolution = await resolve_tool_path(
+                    ctx,
+                    redirected_path,
+                    base_dir=resolution.base_dir,
+                    worktree=resolution.worktree,
+                )
+    except ValueError as exc:
         return ToolResult(
             success=False,
-            error=sandbox_error,
+            error=str(exc),
             title=filePath,
         )
+    filepath = resolution.resolved_path
+
+    sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
         return ToolResult(
             success=False,
@@ -233,8 +283,7 @@ async def write_tool(
         )
     
     # Get relative title for display
-    worktree = Instance.get_worktree() or os.getcwd()
-    title = _safe_relpath(filepath, worktree)
+    title = resolution.display_path
     
     # Check if file exists and get old content
     exists = os.path.exists(filepath)
@@ -257,7 +306,7 @@ async def write_tool(
     # Request permission
     await ctx.ask(
         permission="edit",
-        patterns=[_safe_relpath(filepath, worktree)],
+        patterns=[resolution.permission_pattern],
         always=["*"],
         metadata={
             "filepath": filepath,

@@ -83,15 +83,27 @@ async def test_apply_auth_for_request_non_browser_accepts_valid_token(monkeypatc
 
 
 @pytest.mark.asyncio
-async def test_apply_auth_for_request_non_browser_loopback_allows_without_token(monkeypatch):
+async def test_apply_auth_for_request_non_browser_loopback_rejects_without_token_by_default(monkeypatch):
     monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}))
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
     request = _make_request(headers={"user-agent": "curl/8.0"})
-    _, token, user = await auth_module.apply_auth_for_request(request)
-    try:
-        assert user is not None
-        assert user.username == "local-service"
-    finally:
-        auth_module.clear_auth_context(token)
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+    assert exc_info.value.status_code == 401
+    assert "Bearer API Token" in str(exc_info.value.detail)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_ignores_pytest_current_test_for_loopback(monkeypatch):
+    monkeypatch.setattr(auth_module, "get_secret_manager", lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}))
+    monkeypatch.setenv("PYTEST_CURRENT_TEST", "tests/example.py::test_name (call)")
+    request = _make_request(headers={"user-agent": "curl/8.0"})
+
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+
+    assert exc_info.value.status_code == 401
+    assert "Bearer API Token" in str(exc_info.value.detail)
 
 
 @pytest.mark.asyncio
@@ -152,6 +164,123 @@ async def test_apply_auth_for_request_requires_password_reset_before_access(monk
     assert "必须先修改密码" in str(exc_info.value.detail)
 
 
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_treats_referer_only_remote_request_as_browser(monkeypatch):
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeLocalUser(must_reset_password=False)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+    request = _make_request(
+        headers={
+            "user-agent": "Mozilla/5.0",
+            "referer": "http://10.0.0.9:5173/login",
+            "cookie": f"{auth_module.SESSION_COOKIE_NAME}=session-123",
+        },
+        client_host="10.0.0.2",
+        path="/api/auth/me",
+    )
+    _, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert user is not None
+        assert user.username == "test-user"
+    finally:
+        auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_session_cookie_takes_precedence_over_loopback_service(monkeypatch):
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeLocalUser(must_reset_password=False)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+    request = _make_request(
+        headers={
+            "user-agent": "curl/8.0",
+            "cookie": f"{auth_module.SESSION_COOKIE_NAME}=session-123",
+        },
+        path="/api/auth/me",
+    )
+    _, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert user is not None
+        assert user.username == "test-user"
+    finally:
+        auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_sse_request_with_cookie_uses_browser_session(monkeypatch):
+    async def _has_users():
+        return True
+
+    async def _get_user_by_session_id(_session_id: str):
+        return _FakeLocalUser(must_reset_password=False)
+
+    monkeypatch.setattr(auth_module.AuthService, "has_users", _has_users)
+    monkeypatch.setattr(auth_module.AuthService, "get_user_by_session_id", _get_user_by_session_id)
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+
+    request = _make_request(
+        headers={
+            "user-agent": "Mozilla/5.0",
+            "accept": "text/event-stream",
+            "cookie": f"{auth_module.SESSION_COOKIE_NAME}=session-123",
+        },
+        client_host="10.0.0.2",
+        path="/api/event",
+    )
+    _, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert user is not None
+        assert user.username == "test-user"
+    finally:
+        auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_non_browser_forwarded_loopback_requires_token(monkeypatch):
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+    request = _make_request(
+        headers={
+            "user-agent": "curl/8.0",
+            "x-forwarded-for": "203.0.113.10",
+        },
+        client_host="127.0.0.1",
+    )
+    with pytest.raises(HTTPException) as exc_info:
+        await auth_module.apply_auth_for_request(request)
+    assert exc_info.value.status_code == 401
+    assert "Bearer API Token" in str(exc_info.value.detail)
+
+
 class TestAuthMiddlewareExempt:
     """Cover ``auth_middleware_exempt`` — both fixed paths and regex patterns."""
 
@@ -166,6 +295,9 @@ class TestAuthMiddlewareExempt:
     def test_protected_path_is_not_exempt(self):
         assert auth_module.auth_middleware_exempt("/api/session") is False
         assert auth_module.auth_middleware_exempt("/api/admin/users") is False
+        assert auth_module.auth_middleware_exempt("/docs") is False
+        assert auth_module.auth_middleware_exempt("/redoc") is False
+        assert auth_module.auth_middleware_exempt("/openapi.json") is False
 
     def test_channel_webhook_is_exempt_via_regex(self):
         # /api/channel/{channel_id}/webhook is the public callback entry for
@@ -175,6 +307,10 @@ class TestAuthMiddlewareExempt:
         assert auth_module.auth_middleware_exempt("/channel/dingtalk/webhook") is True
         assert auth_module.auth_middleware_exempt("/api/channel/wecom/webhook") is True
         assert auth_module.auth_middleware_exempt("/api/channel/feishu/webhook/") is True
+
+    def test_workflow_webhook_is_exempt_via_regex(self):
+        assert auth_module.auth_middleware_exempt("/webhook/workflows/wf-1/hook-default") is True
+        assert auth_module.auth_middleware_exempt("/webhook/workflows/wf-1/hook-default/") is True
 
     def test_other_channel_subpaths_are_still_protected(self):
         # Only ``/webhook`` is public; ``/bind``, ``/restart``, ``/status``
@@ -186,6 +322,7 @@ class TestAuthMiddlewareExempt:
         # Defense-in-depth: a malicious caller must not hide a protected path
         # behind a fake ``webhook`` segment.
         assert auth_module.auth_middleware_exempt("/api/channel/dingtalk/webhook/extra") is False
+        assert auth_module.auth_middleware_exempt("/webhook/workflows/wf-1/hook-default/extra") is False
 
 
 @pytest.mark.asyncio
@@ -210,6 +347,26 @@ async def test_apply_auth_for_request_channel_webhook_passes_without_credentials
     try:
         assert blocked is None
         # Public paths intentionally do not synthesize an auth user.
+        assert user is None
+    finally:
+        auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_workflow_webhook_passes_without_credentials(monkeypatch):
+    monkeypatch.setattr(
+        auth_module,
+        "get_secret_manager",
+        lambda: _FakeSecrets({auth_module.API_TOKEN_SECRET_ID: "abc123"}),
+    )
+    request = _make_request(
+        headers={"user-agent": "Alertmanager-Webhook"},
+        client_host="203.0.113.20",
+        path="/webhook/workflows/wf-1/hook-default",
+    )
+    blocked, token, user = await auth_module.apply_auth_for_request(request)
+    try:
+        assert blocked is None
         assert user is None
     finally:
         auth_module.clear_auth_context(token)

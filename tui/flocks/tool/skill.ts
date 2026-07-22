@@ -9,7 +9,7 @@ const parameters = z.object({
   name: z.string().describe("The skill identifier from available_skills (e.g., 'code-review' or 'category/helper')"),
 })
 
-export const SkillTool = Tool.define("skill", async (ctx) => {
+export const SkillTool = Tool.define("skill_load", async (ctx) => {
   const skills = await Skill.all()
 
   // Filter skills by agent permissions if agent provided

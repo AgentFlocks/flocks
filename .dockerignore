@@ -55,7 +55,6 @@ prompt.txt
 *.sqlite3
 vectordb/
 data/
-.flocks/data/
 .flocks/logs/
 .flocks/*.db
 .flocks/*.sqlite*

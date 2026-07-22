@@ -5,13 +5,14 @@ import {
   Download, ExternalLink, Star, TestTube, Play, Info, CheckCircle, XCircle, AlertTriangle, Power,
 } from 'lucide-react';
 import { mcpAPI } from '@/api/mcp';
-import { toolAPI } from '@/api/tool';
+import { listAllToolPages, toolAPI } from '@/api/tool';
 import type { Tool } from '@/api/tool';
 import type { MCPCatalogCategory, MCPCatalogEntry, MCPServer } from '@/types';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { getCatalogDescription, getMetadataDescription } from '@/utils/mcpCatalog';
 import { MCPServerDetailPanel } from './ServiceDetailPanel';
+import { SERVICE_TAB_GRID_COLS } from './gridLayout';
 
 const DETAIL_DRAWER_WIDTH = 560;
 const TOOL_PANEL_WIDTH = 720;
@@ -24,7 +25,6 @@ const LANG_COLORS: Record<string, string> = {
   c: 'bg-gray-100 text-gray-700',
 };
 const INSTALL_BUTTON_CLASS = 'flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors';
-const INSTALL_CONFIRM_BUTTON_CLASS = 'px-4 py-2 text-sm text-white bg-green-600 rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors';
 
 function formatDuration(connectedAt: number, t: (key: string, options?: Record<string, unknown>) => string): string {
   const now = Date.now() / 1000;
@@ -70,8 +70,10 @@ export default function MCPTabContent({
   const [selectedToolFromMCP, setSelectedToolFromMCP] = useState<Tool | null>(null);
   const [selectedCategory, setSelectedCategory] = useState<string>('all');
   const [installing, setInstalling] = useState<string | null>(null);
-  const [credModalEntry, setCredModalEntry] = useState<MCPCatalogEntry | null>(null);
-  const [credValues, setCredValues] = useState<Record<string, string>>({});
+  const [setupEntry, setSetupEntry] = useState<MCPCatalogEntry | null>(null);
+  const [setupCredentials, setSetupCredentials] = useState<Record<string, string>>({});
+  const [setupEnvOverrides, setSetupEnvOverrides] = useState<Record<string, string>>({});
+  const [serverToolCache, setServerToolCache] = useState<Record<string, Tool[]>>({});
 
   const fetchServers = useCallback(async () => {
     try {
@@ -164,10 +166,47 @@ export default function MCPTabContent({
     return map;
   }, [tools]);
 
+  useEffect(() => {
+    setServerToolCache({});
+  }, [tools]);
+
+  useEffect(() => {
+    if (!selectedServer || serverToolCache[selectedServer]) return;
+    let cancelled = false;
+    void listAllToolPages({
+      source: 'mcp',
+      sourceName: selectedServer,
+      sortBy: 'name',
+      sortDir: 'asc',
+    }).then((serverTools) => {
+      if (!cancelled) {
+        setServerToolCache((current) => ({ ...current, [selectedServer]: serverTools }));
+      }
+    }).catch(() => {
+      // Keep the current page slice visible; reopening retries the complete server list.
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedServer, serverToolCache]);
+
   const setSelectedCard = useCallback((name: string | null) => {
     setSelectedServer(name);
     setSelectedServerData(name ? (servers.find((server) => server.name === name) ?? null) : null);
   }, [servers]);
+
+  const selectMcpTool = useCallback((tool: Tool) => {
+    setSelectedToolFromMCP(tool);
+    toolAPI.get(tool.name)
+      .then((response) => {
+        setSelectedToolFromMCP((current) => (
+          current?.name === tool.name ? response.data : current
+        ));
+      })
+      .catch(() => {
+        // Keep the summary row visible; reopening retries the detail request.
+      });
+  }, []);
 
   const selectedServerObj = useMemo(() => {
     if (!selectedServer) return undefined;
@@ -227,66 +266,43 @@ export default function MCPTabContent({
     return counts;
   }, [catalogEntries]);
 
-  const openCredModal = (entry: MCPCatalogEntry) => {
-    const initial: Record<string, string> = {};
-    for (const [key, spec] of Object.entries(entry.env_vars)) {
-      if (spec.secret) initial[key] = '';
-    }
-    setCredValues(initial);
-    setCredModalEntry(entry);
-  };
+  const requiresSetupBeforeInstall = useCallback((entry: MCPCatalogEntry) => (
+    Object.values(entry.env_vars || {}).some((spec) => spec.secret || spec.required)
+  ), []);
 
-  const handleCredSubmit = async () => {
-    if (!credModalEntry) return;
-    const hasEmpty = Object.entries(credValues).some(([, value]) => !value.trim());
-    if (hasEmpty) {
-      alert(t('alert.fillAllRequired'));
-      return;
-    }
-    const entryId = credModalEntry.id;
-    const entryName = credModalEntry.name;
-    let shouldConnect = false;
-    let installRes: Awaited<ReturnType<typeof mcpAPI.catalogInstall>> | null = null;
-    try {
-      setInstalling(entryId);
-      installRes = await mcpAPI.catalogInstall(entryId, { credentials: credValues });
-      shouldConnect = installRes.data?.config?.enabled !== false;
-      onConfiguredChange(entryId);
-      setCredModalEntry(null);
-    } catch (err: any) {
-      alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
-      setInstalling(null);
-      return;
-    }
-    try {
-      if (shouldConnect) {
-        await mcpAPI.connect(entryId);
+  const openSetupModal = useCallback((entry: MCPCatalogEntry) => {
+    const nextCredentials: Record<string, string> = {};
+    const nextEnvOverrides: Record<string, string> = {};
+    for (const [key, spec] of Object.entries(entry.env_vars || {})) {
+      if (spec.secret) {
+        nextCredentials[key] = '';
+      } else {
+        nextEnvOverrides[key] = spec.default || '';
       }
-      await fetchServers();
-      await onRefreshTools();
-      if (!shouldConnect) {
-        alert(t('alert.mcpConfiguredDisabled', { name: entryName }));
-      }
-    } catch (err: any) {
-      alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
-    } finally {
-      setInstalling(null);
     }
-  };
+    setSetupCredentials(nextCredentials);
+    setSetupEnvOverrides(nextEnvOverrides);
+    setSetupEntry(entry);
+  }, []);
 
-  const handleInstallNoAuth = async (entry: MCPCatalogEntry, e?: React.MouseEvent) => {
-    e?.stopPropagation();
+  const installCatalogEntry = useCallback(async (
+    entry: MCPCatalogEntry,
+    options?: {
+      credentials?: Record<string, string>;
+      env_overrides?: Record<string, string>;
+    },
+  ) => {
     let shouldConnect = false;
     let installRes: Awaited<ReturnType<typeof mcpAPI.catalogInstall>> | null = null;
     try {
       setInstalling(entry.id);
-      installRes = await mcpAPI.catalogInstall(entry.id);
+      installRes = await mcpAPI.catalogInstall(entry.id, options);
       shouldConnect = installRes.data?.config?.enabled !== false;
       onConfiguredChange(entry.id);
     } catch (err: any) {
       alert(t('alert.configFailed', { error: err.response?.data?.detail || err.message }));
       setInstalling(null);
-      return;
+      return false;
     }
     try {
       if (shouldConnect) {
@@ -294,6 +310,7 @@ export default function MCPTabContent({
       }
       await fetchServers();
       await onRefreshTools();
+      setSelectedCard(entry.id);
       if (!shouldConnect) {
         alert(t('alert.mcpConfiguredDisabled', { name: entry.name }));
       }
@@ -301,6 +318,40 @@ export default function MCPTabContent({
       alert(t('alert.connectFailed', { error: err.response?.data?.detail || err.message }));
     } finally {
       setInstalling(null);
+    }
+    return true;
+  }, [fetchServers, onConfiguredChange, onRefreshTools, setSelectedCard, t]);
+
+  const handleInstallNoAuth = async (entry: MCPCatalogEntry, e?: React.MouseEvent) => {
+    e?.stopPropagation();
+    return installCatalogEntry(entry);
+  };
+
+  const handleSetupSubmit = async () => {
+    if (!setupEntry) return;
+
+    const missingRequired = Object.entries(setupEntry.env_vars || {}).some(([key, spec]) => {
+      const value = spec.secret ? setupCredentials[key] : setupEnvOverrides[key];
+      return spec.required && !String(value || '').trim();
+    });
+    if (missingRequired) {
+      alert(t('alert.fillAllRequired'));
+      return;
+    }
+
+    const credentials = Object.fromEntries(
+      Object.entries(setupCredentials).filter(([, value]) => String(value || '').trim()),
+    );
+    const envOverrides = Object.fromEntries(
+      Object.entries(setupEnvOverrides).filter(([, value]) => String(value || '').trim()),
+    );
+
+    const success = await installCatalogEntry(setupEntry, {
+      credentials: Object.keys(credentials).length ? credentials : undefined,
+      env_overrides: Object.keys(envOverrides).length ? envOverrides : undefined,
+    });
+    if (success) {
+      setSetupEntry(null);
     }
   };
 
@@ -390,125 +441,136 @@ export default function MCPTabContent({
 
   return (
     <div className="space-y-4">
-      <div className="flex items-center justify-between gap-3">
-        <div className="flex items-center gap-1.5 flex-wrap flex-1 min-w-0">
-          <button
-            onClick={() => setSelectedCategory('all')}
-            className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-          >
-            {t('catalog.all')}
-          </button>
-          {Object.entries(catalogCategories).map(([id, cat]) =>
-            catalogCategoryCounts[id] ? (
-              <button
-                key={id}
-                onClick={() => setSelectedCategory(id)}
-                className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
-              >
-                {cat.label} ({catalogCategoryCounts[id]})
-              </button>
-            ) : null
-          )}
-        </div>
+      <div className="flex items-center gap-1.5 flex-wrap">
         <button
-          onClick={fetchServers}
-          className="inline-flex items-center px-3 py-2 text-sm text-gray-700 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 flex-shrink-0"
+          onClick={() => setSelectedCategory('all')}
+          className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === 'all' ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
         >
-          <RefreshCw className="w-4 h-4 mr-1.5" />
-          {t('mcp.refreshStatus')}
+          {t('catalog.all')}
         </button>
+        {Object.entries(catalogCategories).map(([id, cat]) =>
+          catalogCategoryCounts[id] ? (
+            <button
+              key={id}
+              onClick={() => setSelectedCategory(id)}
+              className={`px-2.5 py-1 rounded-full text-xs font-medium transition-colors ${selectedCategory === id ? 'bg-slate-100 text-slate-700' : 'bg-gray-100 text-gray-600 hover:bg-gray-200'}`}
+            >
+              {cat.label} ({catalogCategoryCounts[id]})
+            </button>
+          ) : null
+        )}
       </div>
 
       {serversLoading && catalogLoading ? (
-        <div className="flex justify-center py-12"><LoadingSpinner /></div>
+        <div className="flex min-h-[360px] items-center justify-center rounded-lg border border-gray-200 bg-white">
+          <LoadingSpinner delayMs={180} />
+        </div>
       ) : unifiedCards.length === 0 ? (
         <EmptyState icon={<Server className="w-16 h-16" />} title={t('mcp.noServers')} description={t('mcp.noServersDesc')} />
       ) : (
-        <div className="grid gap-4 grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
+        <div className="bg-white border border-gray-200 rounded-lg overflow-hidden divide-y divide-gray-100">
           {unifiedCards.map(({ id, entry, server, configured }) => {
             const displayName = entry?.name || server.name;
             const metadataDescription = getMetadataDescription(server.metadata, i18n.language);
-            const cardDescription = getCatalogDescription(entry, i18n.language)
+            const rowDescription = getCatalogDescription(entry, i18n.language)
               || metadataDescription
-              || `${displayName} MCP server for secure tool integration and operational workflows.`;
+              || `${displayName} MCP server`;
             const serverTools = toolsByServer[id] || [];
             const isSelected = selectedServer === id;
             const isActive = server.status === 'connected';
             const isError = server.status === 'error';
             const isDisabled = server.status === 'disabled';
-            const borderColor = isActive ? '#10B981' : isError ? '#EF4444' : '#9CA3AF';
             const isActionable = isActive || configured;
-            const hasCatalogMeta = !!entry;
+            const statusLabel = isActive
+              ? t('statusBadge.active')
+              : isError
+              ? t('statusBadge.error')
+              : isDisabled
+              ? t('statusBadge.disabled')
+              : t('statusBadge.inactive');
+            const statusClass = isActive
+              ? 'bg-green-100 text-green-700'
+              : isError
+              ? 'bg-red-100 text-red-700'
+              : 'bg-gray-100 text-gray-500';
 
             return (
               <div
                 key={id}
-                onClick={() => {
-                  if (!isActionable) return;
-                  setSelectedCard(isSelected ? null : id);
-                }}
-                className={`relative bg-white rounded-xl border overflow-hidden h-[180px] flex flex-col transition-all duration-150 ${isActionable ? 'cursor-pointer' : 'cursor-default'} ${isSelected ? 'border-red-400 shadow-md ring-2 ring-red-200' : 'border-gray-200 shadow-sm hover:shadow-md hover:border-gray-300'}`}
-                style={{ borderLeftWidth: 4, borderLeftColor: borderColor }}
+                className={`grid items-center gap-3 px-4 py-3 transition-colors ${isSelected ? 'bg-red-50' : 'hover:bg-gray-50'}`}
+                style={{ gridTemplateColumns: SERVICE_TAB_GRID_COLS }}
               >
-                <div className="flex-1 px-4 pt-4 pb-2 min-h-0 flex flex-col gap-1.5">
-                  <div className="flex items-start gap-1.5 flex-wrap">
-                    <span className="text-sm font-semibold text-gray-900 truncate max-w-[120px]">{displayName}</span>
-                    <span className={`px-1.5 py-0.5 text-xs font-medium rounded-full shrink-0 ${isActive ? 'bg-green-100 text-green-700' : isError ? 'bg-red-100 text-red-700' : isDisabled ? 'bg-gray-100 text-gray-500' : 'bg-gray-100 text-gray-600'}`}>
-                      {isActive ? t('statusBadge.active') : isError ? t('statusBadge.error') : isDisabled ? t('statusBadge.disabled') : t('statusBadge.inactive')}
-                    </span>
-                    <span className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full shrink-0">MCP</span>
+                {/* Icon */}
+                <div className={`w-8 h-8 flex items-center justify-center rounded-lg ${isActive ? 'bg-green-50' : isError ? 'bg-red-50' : 'bg-gray-50'}`}>
+                  <Server className={`w-4 h-4 ${isActive ? 'text-green-600' : isError ? 'text-red-500' : 'text-gray-400'}`} />
+                </div>
+
+                {/* Name + description.
+                    Whole block is the click target — mirrors the Hub catalog
+                    pattern (``Hub/index.tsx`` HubTable row) so the description
+                    line is just as clickable as the name itself. */}
+                <button
+                  type="button"
+                  onClick={() => setSelectedCard(isSelected ? null : id)}
+                  className="min-w-0 text-left group/name focus:outline-none"
+                >
+                  <div className="flex items-center gap-1.5">
+                    <span className="text-sm font-semibold text-gray-900 truncate transition-colors group-hover/name:text-slate-700 group-focus-visible/name:underline">{displayName}</span>
                     {entry && PRIORITY_IDS.has(entry.id) && (
-                      <span className="px-1.5 py-0.5 bg-slate-100 text-slate-700 text-xs font-medium rounded-full shrink-0">{t('mcp.recommended')}</span>
+                      <span className="px-1.5 py-0.5 bg-amber-50 text-amber-700 text-[10px] font-medium rounded border border-amber-200 shrink-0">{t('mcp.recommended')}</span>
                     )}
                   </div>
-                  <p className="text-xs text-gray-500 leading-relaxed min-h-[40px] line-clamp-2">
-                    {cardDescription}
-                  </p>
-                  <div className="flex items-center gap-1 text-xs text-gray-500 mt-auto">
-                    <Wrench className="w-3 h-3 shrink-0" />
-                    <span>{serverTools.length} {t('mcp.tools')}</span>
-                    <span className="mx-1">·</span>
-                    <FileText className="w-3 h-3 shrink-0" />
-                    <span>{server.resources?.length || 0} {t('mcp.resources')}</span>
-                  </div>
+                  <p className="text-xs text-gray-500 truncate mt-0.5">{rowDescription}</p>
+                </button>
+
+                {/* Type column */}
+                <div className="text-center">
+                  <span className="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-medium rounded">MCP</span>
+                </div>
+
+                {/* Status column */}
+                <div className="text-center">
+                  <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded ${statusClass}`}>
+                    {statusLabel}
+                  </span>
+                </div>
+
+                {/* Stats column */}
+                <div className="flex items-center justify-end gap-3 text-xs text-gray-400">
+                  <span className="flex items-center gap-1"><Wrench className="w-3 h-3" />{server.tools_count ?? serverTools.length}</span>
                   {server.connected_at ? (
-                    <div className="flex items-center gap-1">
-                      <Clock className="w-3 h-3 shrink-0" />
-                      <span>{t('mcp.connectedFor', { duration: formatDuration(server.connected_at, t) })}</span>
-                    </div>
-                  ) : hasCatalogMeta ? (
-                    <div className="flex items-center gap-2 text-xs text-gray-500">
-                      <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${LANG_COLORS[entry.language] || 'bg-gray-100 text-gray-600'}`}>{entry.language}</span>
-                      <span className="flex items-center gap-0.5"><Star className="w-3 h-3" />{entry.stars}</span>
-                    </div>
+                    <span className="flex items-center gap-1"><Clock className="w-3 h-3" />{formatDuration(server.connected_at, t)}</span>
+                  ) : entry ? (
+                    <span className="flex items-center gap-1"><Star className="w-3 h-3" />{entry.stars}</span>
                   ) : null}
                 </div>
-                <div className="border-t border-gray-100 px-4 py-2 flex items-center gap-2" onClick={(e) => e.stopPropagation()}>
+
+                {/* Actions column */}
+                <div className="flex items-center justify-end gap-1.5">
                   {isActive ? (
                     <>
                       <button
                         onClick={() => setSelectedCard(isSelected ? null : id)}
-                        className={`flex-1 flex items-center justify-center gap-1 py-1 px-2 border rounded-lg text-xs font-medium transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-300 text-gray-700 hover:bg-gray-50'}`}
+                        className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-lg border text-xs font-medium transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-200 text-gray-600 hover:bg-gray-100'}`}
                       >
-                        <Settings className="w-3 h-3" /> {t('mcp.manage')}
+                        <Settings className="w-3 h-3" />{t('mcp.manage')}
                       </button>
-                      <button onClick={(e) => handleDisconnect(id, e)} className="flex items-center justify-center w-7 h-7 border border-red-200 text-red-500 rounded-lg hover:bg-red-50 transition-colors" title={t('mcp.disconnectTitle')}>
+                      <button onClick={(e) => handleDisconnect(id, e)} className="p-1.5 rounded-lg border border-red-200 text-red-400 hover:bg-red-50 transition-colors" title={t('mcp.disconnectTitle')}>
                         <PowerOff className="w-3.5 h-3.5" />
                       </button>
                     </>
                   ) : isDisabled ? (
                     <>
                       <button
-                        onClick={(e) => { handleToggleEnabled(id, true, e); }}
+                        onClick={(e) => handleToggleEnabled(id, true, e)}
                         disabled={installing === id}
-                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />
-                        {installing === id ? t('mcp.configuring') : t('detail.enableServer')}
+                        <Power className="w-3 h-3" />{installing === id ? t('mcp.configuring') : t('detail.enableServer')}
                       </button>
                       <button
                         onClick={() => setSelectedCard(isSelected ? null : id)}
-                        className={`flex items-center justify-center w-7 h-7 border rounded-lg transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+                        className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
                         <Settings className="w-3.5 h-3.5" />
@@ -519,14 +581,13 @@ export default function MCPTabContent({
                       <button
                         onClick={(e) => { e.stopPropagation(); handleConnect(id, e); }}
                         disabled={installing === id}
-                        className="flex-1 flex items-center justify-center gap-1 py-1 px-2 bg-green-600 text-white rounded-lg text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Power className="w-3 h-3" />
-                        {installing === id ? t('mcp.configuring') : t('mcp.reconnect')}
+                        <Power className="w-3 h-3" />{installing === id ? t('mcp.configuring') : t('mcp.reconnect')}
                       </button>
                       <button
                         onClick={() => setSelectedCard(isSelected ? null : id)}
-                        className={`flex items-center justify-center w-7 h-7 border rounded-lg transition-colors ${isSelected ? 'border-red-300 text-red-700 bg-red-50' : 'border-gray-300 text-gray-500 hover:bg-gray-50'}`}
+                        className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                         title={t('mcp.manage')}
                       >
                         <Settings className="w-3.5 h-3.5" />
@@ -537,29 +598,32 @@ export default function MCPTabContent({
                       <button
                         onClick={(e) => {
                           e.stopPropagation();
-                          if (entry?.requires_auth && !configured) {
-                            openCredModal(entry);
-                          } else if (entry) {
-                            handleInstallNoAuth(entry, e);
+                          if (entry) {
+                            if (requiresSetupBeforeInstall(entry)) {
+                              openSetupModal(entry);
+                            } else {
+                              handleInstallNoAuth(entry, e);
+                            }
                           }
                         }}
                         disabled={!entry || installing === id}
-                        className={INSTALL_BUTTON_CLASS}
+                        className="inline-flex items-center gap-1 px-2.5 py-1 rounded-lg bg-green-600 text-white text-xs font-medium hover:bg-green-700 disabled:opacity-50 transition-colors"
                       >
-                        <Download className="w-3 h-3" />
-                        {installing === id ? t('mcp.configuring') : t('button.install')}
+                        <Download className="w-3 h-3" />{installing === id ? t('mcp.configuring') : t('button.install')}
                       </button>
                       {entry?.github ? (
                         <a
                           href={`https://github.com/${entry.github}`}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="flex items-center justify-center w-7 h-7 border border-gray-300 text-gray-500 rounded-lg hover:bg-gray-50 transition-colors"
+                          className="p-1.5 rounded-lg border border-gray-200 text-gray-400 hover:bg-gray-100 transition-colors"
                           title="GitHub"
                         >
                           <ExternalLink className="w-3.5 h-3.5" />
                         </a>
-                      ) : null}
+                      ) : (
+                        <span className="w-7 h-7" aria-hidden="true" />
+                      )}
                     </>
                   )}
                 </div>
@@ -569,40 +633,58 @@ export default function MCPTabContent({
         </div>
       )}
 
-      {credModalEntry && (
+      {setupEntry && (
         <>
-          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setCredModalEntry(null)} />
+          <div className="fixed inset-0 bg-black/40 z-40" onClick={() => setSetupEntry(null)} />
           <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-            <div className="bg-white rounded-2xl shadow-2xl w-full max-w-md" onClick={(e) => e.stopPropagation()}>
-              <div className="px-6 py-4 border-b border-gray-200">
-                <h3 className="text-lg font-semibold text-gray-900">{credModalEntry.name}</h3>
-                <p className="text-sm text-gray-500 mt-1">{t('credentials.configNote')}</p>
+            <div
+              className="w-full max-w-lg rounded-2xl bg-white shadow-2xl"
+              onClick={(e) => e.stopPropagation()}
+            >
+              <div className="border-b border-gray-200 px-6 py-4">
+                <h3 className="text-lg font-semibold text-gray-900">{setupEntry.name}</h3>
+                <p className="mt-1 text-sm text-gray-500">{t('credentials.configNote')}</p>
               </div>
-              <div className="px-6 py-4 space-y-4">
-                {Object.entries(credModalEntry.env_vars).filter(([, spec]) => spec.secret).map(([key, spec]) => (
-                  <div key={key}>
-                    <label className="block text-sm font-medium text-gray-700 mb-1">{key}</label>
-                    <p className="text-xs text-gray-500 mb-1.5">{spec.description}</p>
-                    <input
-                      type="password"
-                      value={credValues[key] || ''}
-                      onChange={(e) => setCredValues((prev) => ({ ...prev, [key]: e.target.value }))}
-                      placeholder={t('credentials.enterField', { field: key })}
-                      className="w-full px-3 py-2 text-sm border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-red-500 focus:border-transparent"
-                    />
-                  </div>
-                ))}
+              <div className="max-h-[70vh] space-y-4 overflow-y-auto px-6 py-4">
+                {Object.entries(setupEntry.env_vars || {}).map(([key, spec]) => {
+                  const value = spec.secret ? setupCredentials[key] || '' : setupEnvOverrides[key] || '';
+                  return (
+                    <div key={key}>
+                      <label className="mb-1 block text-sm font-medium text-gray-700">
+                        {key}{spec.required ? <span className="text-red-500"> *</span> : null}
+                      </label>
+                      <p className="mb-1.5 text-xs text-gray-500">{spec.description || key}</p>
+                      <input
+                        type={spec.secret ? 'password' : 'text'}
+                        value={value}
+                        onChange={(e) => {
+                          const nextValue = e.target.value;
+                          if (spec.secret) {
+                            setSetupCredentials((prev) => ({ ...prev, [key]: nextValue }));
+                          } else {
+                            setSetupEnvOverrides((prev) => ({ ...prev, [key]: nextValue }));
+                          }
+                        }}
+                        placeholder={spec.default || t('credentials.enterField', { field: key })}
+                        className="w-full rounded-lg border border-gray-300 px-3 py-2 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-red-500"
+                      />
+                    </div>
+                  );
+                })}
               </div>
-              <div className="px-6 py-4 border-t border-gray-200 flex gap-3 justify-end">
-                <button onClick={() => setCredModalEntry(null)} className="px-4 py-2 text-sm text-gray-700 border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors">
+              <div className="flex justify-end gap-3 border-t border-gray-200 px-6 py-4">
+                <button
+                  onClick={() => setSetupEntry(null)}
+                  className="rounded-lg border border-gray-300 px-4 py-2 text-sm text-gray-700 transition-colors hover:bg-gray-50"
+                >
                   {t('button.cancel')}
                 </button>
                 <button
-                  onClick={handleCredSubmit}
-                  disabled={installing === credModalEntry.id}
-                  className={INSTALL_CONFIRM_BUTTON_CLASS}
+                  onClick={handleSetupSubmit}
+                  disabled={installing === setupEntry.id}
+                  className="rounded-lg bg-green-600 px-4 py-2 text-sm text-white transition-colors hover:bg-green-700 disabled:opacity-50"
                 >
-                  {installing === credModalEntry.id ? t('mcp.configuring') : t('button.confirmConfig')}
+                  {installing === setupEntry.id ? t('mcp.configuring') : t('button.confirmConfig')}
                 </button>
               </div>
             </div>
@@ -654,13 +736,13 @@ export default function MCPTabContent({
                 )}
                 <MCPServerDetailPanel
                   server={drawerServer}
-                  serverTools={toolsByServer[selectedServer] || []}
+                  serverTools={serverToolCache[selectedServer] ?? toolsByServer[selectedServer] ?? []}
                   onConnect={() => handleConnect(selectedServer)}
                   onDisconnect={() => handleDisconnect(selectedServer)}
                   onRefresh={async () => { await mcpAPI.refresh(selectedServer); await fetchServers(); await onRefreshTools(); }}
                   onStatusChange={async () => { await fetchServers(); await onRefreshTools(); }}
                   onRemove={() => handleRemove(selectedServer)}
-                  onSelectTool={setSelectedToolFromMCP}
+                  onSelectTool={selectMcpTool}
                 />
               </div>
             </div>
@@ -700,7 +782,7 @@ function MCPToolDetailPanel({ tool, onClose }: { tool: Tool; onClose: () => void
             <Wrench className="w-4 h-4 text-gray-600" />
           </div>
           <div className="flex-1 min-w-0">
-            <h2 className="text-base font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
+            <h2 className="text-lg font-semibold text-gray-900 font-mono truncate">{tool.name}</h2>
             {tool.source_name && <p className="text-xs text-gray-500 mt-0.5">{tool.source_name}</p>}
           </div>
           <button onClick={onClose} className="flex-shrink-0 p-1 rounded hover:bg-gray-100 transition-colors">

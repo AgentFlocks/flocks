@@ -1,28 +1,10 @@
 name: rex-junior
-description: "Focused task executor. Same discipline, no delegation."
+name_cn: Rex 执行智能体
+description: "Focused task executor. A general-purpose agent for simple tasks."
 mode: subagent
 hidden: false
 tags: [system]
 color: "#20B2AA"
-delegatable: false
+delegatable: true
 # Explicit tool allowlist for the focused executor.
-tools:
-  - read
-  - list
-  - glob
-  - grep
-  - edit
-  - write
-  - bash
-  - skill
-  - delegate_task
-  - task
-  - todoread
-  - todowrite
-  - run_workflow
-  - run_workflow_node
-  - background_output
-  - background_cancel
-  - session_list
-  - channel_message
-
+tools: []

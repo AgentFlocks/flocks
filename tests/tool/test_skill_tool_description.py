@@ -1,21 +1,17 @@
-"""Tests for flocks.tool.system.skill.
+"""Tests for flocks.tool.skill.skill_load.
 
-Two complementary aspects of the skill tool's progressive-disclosure design
-are exercised here:
+Two complementary aspects of the skill_load tool's load-on-demand design are
+exercised here:
 
-1. ``build_description`` — the meta-description that ships in every system
-   prompt. Each skill's description is capped at
-   ``MAX_SKILL_DESCRIPTION_PREVIEW_CHARS`` using head + tail truncation, so
-   both the opening (scope/triggers) and the closing (hard constraints, "must
-   load this skill before X") survive. The model is explicitly told to call
-   ``skill(name=...)`` to load the full SKILL.md before acting.
+1. ``build_description`` — the tool schema must stay short and stable. It
+   should tell the model to discover the right skill first, then call
+   ``skill_load(name=...)`` to load the full SKILL.md before acting.
 
-2. ``skill_tool`` (load on demand) — when the model actually calls the tool,
-   the FULL SKILL.md must come back unredacted. This is the load-on-demand
-   counterpart of the truncated preview, mirroring hermes-agent's
-   ``skill_view``. Without the explicit opt-out the registry would silently
-   crop SKILL.md at 10 KB / 200 lines (head-only), dropping the workflow
-   steps and references that authors put at the file's tail.
+2. ``skill_tool`` — when the model actually calls the tool, the FULL SKILL.md
+   must come back unredacted. This mirrors hermes-agent's ``skill_view``.
+   Without the explicit opt-out the registry would silently crop SKILL.md at
+   100 KB / 1000 lines (head-only), dropping the workflow steps and references
+   that authors put at the file's tail.
 """
 
 from __future__ import annotations
@@ -29,12 +25,14 @@ import pytest
 
 from flocks.skill.skill import Skill, SkillInfo
 from flocks.tool.registry import ToolContext, ToolRegistry
-from flocks.tool.system.skill import (
+from flocks.tool.skill.skill_load import (
     MAX_SKILL_DESCRIPTION_PREVIEW_CHARS,
     _truncate_skill_description,
     build_description,
     skill_tool_impl,
 )
+from flocks.tool.truncation import MAX_BYTES as REGISTRY_MAX_BYTES
+from flocks.tool.truncation import MAX_LINES as REGISTRY_MAX_LINES
 
 
 def _skill(name: str, description: str) -> SkillInfo:
@@ -84,7 +82,7 @@ class TestTruncateSkillDescription:
         out = _truncate_skill_description(desc, "onesec-use")
         # The truncation marker must point the model at the right tool call,
         # otherwise progressive disclosure breaks.
-        assert 'skill(name="onesec-use")' in out
+        assert 'skill_load(name="onesec-use")' in out
         assert "truncated" in out
 
     def test_chinese_threat_intel_skill_keeps_trailing_constraint(self):
@@ -106,48 +104,40 @@ class TestTruncateSkillDescription:
 
 
 class TestBuildDescription:
-    def test_empty_skills_returns_no_skills_message(self):
+    def test_empty_skills_returns_short_load_on_demand_description(self):
         out = build_description([])
-        assert "No skills are currently available" in out
+        assert "Load the full SKILL.md for one specific skill" in out
         assert "<available_skills>" not in out
 
-    def test_each_skill_emits_xml_block(self):
+    def test_description_does_not_inline_skill_inventory(self):
         out = build_description(
             [
                 _skill("alpha", "First skill description."),
                 _skill("beta", "Second skill description."),
             ]
         )
-        assert "<available_skills>" in out
-        assert "</available_skills>" in out
-        assert "<name>alpha</name>" in out
-        assert "<name>beta</name>" in out
-        assert "<description>First skill description.</description>" in out
-        assert "<description>Second skill description.</description>" in out
+        assert "<available_skills>" not in out
+        assert "alpha" not in out
+        assert "beta" not in out
+        assert "First skill description." not in out
+        assert "Second skill description." not in out
 
     def test_includes_progressive_disclosure_instruction(self):
         out = build_description([_skill("alpha", "demo")])
-        # Must direct the model at the load-on-demand tool call pattern,
-        # otherwise the model will try to act on the (possibly truncated)
-        # preview without first reading the full SKILL.md.
-        assert "skill(name=" in out
-        assert "preview" in out.lower() or "truncated" in out.lower()
+        # Must still direct the model at the load-on-demand call pattern.
+        assert "skill_load(name=" in out
+        assert "load the full skill.md" in out.lower()
         assert "MUST" in out or "must" in out.lower()
 
-    def test_long_description_is_truncated_in_output(self):
+    def test_long_description_is_not_embedded_in_output(self):
         long_desc = "a" * 2000
         out = build_description([_skill("big", long_desc)])
-        # The full 2000-char string should never appear verbatim because it
-        # exceeds the per-skill preview cap.
         assert long_desc not in out
-        assert 'skill(name="big")' in out
 
-    def test_short_descriptions_are_emitted_verbatim(self):
+    def test_short_descriptions_are_not_embedded_verbatim(self):
         desc = "Short, single-sentence description that fits."
         out = build_description([_skill("tiny", desc)])
-        # No truncation marker should appear for descriptions under the cap.
-        assert desc in out
-        assert "truncated" not in out.split("<available_skills>")[1]
+        assert desc not in out
 
     def test_api_surface_returns_string(self):
         out = build_description([_skill("alpha", "desc")])
@@ -163,7 +153,7 @@ class TestBuildDescription:
 @pytest.fixture
 def fake_skill_dir():
     """Create a temp directory with a SKILL.md that exceeds default truncation
-    limits (>10 KB AND >200 lines) so we can prove the registry's auto-truncate
+    limits so we can prove the registry's auto-truncate
     pass leaves it alone.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -171,14 +161,15 @@ def fake_skill_dir():
         skill_dir.mkdir()
 
         body_lines = [
-            f"## Step {i}: do something important and clearly identifiable" for i in range(1, 401)
+            f"## Step {i}: do something important and clearly identifiable"
+            for i in range(1, REGISTRY_MAX_LINES + 201)
         ]
         # Tail sentinel proves we kept the END of the file (where authors
         # typically put the operational steps and references).
         body_lines.append("# TAIL_SENTINEL: this line MUST survive end-to-end")
         body = "\n".join(body_lines)
-        # Pad with extra bytes so total comfortably exceeds the 10 KB cap.
-        padding = "x" * (15 * 1024)
+        # Pad with extra bytes so total comfortably exceeds the byte cap.
+        padding = "x" * (REGISTRY_MAX_BYTES + 1024)
 
         (skill_dir / "SKILL.md").write_text(
             f"""---
@@ -206,8 +197,8 @@ class TestSkillLoadNoTruncation:
         original = skill_md.read_text(encoding="utf-8")
         # Sanity-check the fixture: it MUST exceed the registry defaults,
         # otherwise the test isn't actually exercising the bypass.
-        assert len(original.encode("utf-8")) > 10 * 1024
-        assert original.count("\n") > 200
+        assert len(original.encode("utf-8")) > REGISTRY_MAX_BYTES
+        assert original.count("\n") > REGISTRY_MAX_LINES
 
         skill_info = SkillInfo(
             name="huge-skill",
@@ -245,7 +236,7 @@ class TestSkillLoadNoTruncation:
 
     @pytest.mark.asyncio
     async def test_registry_execute_does_not_truncate_skill_output(self, fake_skill_dir):
-        """End-to-end: when the `skill` tool is executed via ToolRegistry
+        """End-to-end: when the `skill_load` tool is executed via ToolRegistry
         (which is what the real session loop does), the auto-truncate path
         must NOT fire and the tail must survive."""
         skill_info = SkillInfo(
@@ -254,8 +245,8 @@ class TestSkillLoadNoTruncation:
             location=str(fake_skill_dir / "SKILL.md"),
         )
 
-        skill_tool = ToolRegistry.get("skill")
-        assert skill_tool is not None, "skill tool must be registered"
+        skill_tool = ToolRegistry.get("skill_load")
+        assert skill_tool is not None, "skill_load tool must be registered"
 
         with patch.object(Skill, "all", AsyncMock(return_value=[skill_info])), \
              patch.object(Skill, "get", AsyncMock(return_value=skill_info)):

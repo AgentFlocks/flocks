@@ -1,14 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  Loader2, ChevronDown, ChevronRight, Globe, StopCircle,
-  Check, Clock, CheckCircle, XCircle, AlertCircle, Wifi, FlaskConical,
+  Loader2, ChevronDown, ChevronRight, StopCircle,
+  Clock, CheckCircle, XCircle, AlertCircle, FlaskConical,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
   workflowAPI,
   Workflow,
   WorkflowExecution,
-  WorkflowService,
   WorkflowJSON,
 } from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
@@ -20,6 +19,35 @@ interface RunTabProps {
   latestExecution: WorkflowExecution | null;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
+  sections?: RunTabSection[];
+  embedded?: boolean;
+  embeddedTabs?: boolean;
+  hideSectionHeaders?: boolean;
+}
+
+export type RunTabSection = 'test' | 'history';
+
+function getExecutionDisplayStatus(execution?: WorkflowExecution | null): string {
+  if (!execution) return 'unknown';
+  if (execution.status === 'running' && execution.currentPhase) {
+    return execution.currentPhase;
+  }
+  return execution.status;
+}
+
+function getExecutionDisplayMessage(
+  execution: WorkflowExecution | null | undefined,
+  t: (key: string) => string,
+): string {
+  if (!execution?.errorMessage) return '';
+  const displayStatus = getExecutionDisplayStatus(execution);
+  if (
+    displayStatus === 'cancelling'
+    && execution.errorMessage === 'Cancellation requested'
+  ) {
+    return t('detail.run.cancelRequested');
+  }
+  return execution.errorMessage;
 }
 
 function SectionHeader({
@@ -27,18 +55,24 @@ function SectionHeader({
   expanded,
   onToggle,
   badge,
+  embedded = false,
 }: {
   title: string;
   expanded: boolean;
   onToggle: () => void;
   badge?: React.ReactNode;
+  embedded?: boolean;
 }) {
   return (
     <button
       onClick={onToggle}
-      className="w-full flex items-center justify-between px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100 transition-colors text-left"
+      className={`w-full flex items-center justify-between transition-colors text-left ${
+        embedded
+          ? 'px-3 py-2.5 bg-white border-b border-gray-100 hover:bg-gray-50'
+          : 'px-4 py-3 bg-gray-50 border-b border-gray-100 hover:bg-gray-100'
+      }`}
     >
-      <span className="text-xs font-semibold text-gray-700 flex items-center gap-2">
+      <span className={`${embedded ? 'text-sm text-gray-900' : 'text-xs text-gray-700'} font-semibold flex items-center gap-2`}>
         {title}
         {badge}
       </span>
@@ -174,11 +208,15 @@ function TestSection({
   execution,
   onExecutionChange,
   onExecutionSettled,
+  embedded = false,
+  hideSectionHeader = false,
 }: {
   workflow: Workflow;
   execution: WorkflowExecution | null;
   onExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
+  embedded?: boolean;
+  hideSectionHeader?: boolean;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -247,7 +285,7 @@ function TestSection({
 
     const pollExecution = async () => {
       try {
-        const response = await workflowAPI.getExecution(workflow.id, execution.id);
+        const response = await workflowAPI.getExecution(workflow.id, execution.id, { stepLimit: 0 });
         if (cancelled) return;
         onExecutionChange?.(response.data);
         if (response.data.status === 'running') {
@@ -275,6 +313,10 @@ function TestSection({
       }
     };
   }, [execution, onExecutionChange, onExecutionSettled, t, workflow.id]);
+
+  const displayStatus = getExecutionDisplayStatus(execution);
+  const isCancelling = displayStatus === 'cancelling';
+  const displayMessage = getExecutionDisplayMessage(execution, t);
 
   const scheduleSampleSave = useCallback((raw: string, parsed: Record<string, any>) => {
     if (saveTimerRef.current) {
@@ -358,6 +400,12 @@ function TestSection({
     try {
       setStopping(true);
       await workflowAPI.cancelExecution(workflow.id, execution.id);
+      onExecutionChange?.({
+        ...execution,
+        currentPhase: 'cancelling',
+        errorMessage: execution.errorMessage || 'Cancellation requested',
+      });
+      setStopping(false);
     } catch (error) {
       setStopping(false);
       onExecutionChange?.(execution ? {
@@ -368,12 +416,20 @@ function TestSection({
   };
 
   const showSampleSaveHint = sampleSaveState === 'saving' || sampleSaveState === 'saved';
+  const bodyExpanded = hideSectionHeader || expanded;
 
   return (
-    <div className="border-b border-gray-100">
-      <SectionHeader title={t('detail.run.testSection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
-      {expanded && (
-        <div className="p-4 space-y-3">
+    <div className={embedded ? 'bg-white' : 'border-b border-gray-100'}>
+      {!hideSectionHeader && (
+        <SectionHeader
+          title={t('detail.run.testSection')}
+          expanded={expanded}
+          onToggle={() => setExpanded(v => !v)}
+          embedded={embedded}
+        />
+      )}
+      {bodyExpanded && (
+        <div className={`${embedded ? 'p-3' : 'p-4'} space-y-3`}>
           <div>
             <div className="flex items-center justify-between gap-2 mb-1">
               <label className="block text-xs text-gray-500">{t('detail.run.inputParams')}</label>
@@ -398,21 +454,21 @@ function TestSection({
           </div>
           <button
             onClick={running ? handleStop : handleRun}
-            disabled={stopping}
+            disabled={stopping || isCancelling}
             className="w-full flex items-center justify-center gap-2 py-2 bg-red-600 text-white text-xs font-medium rounded-lg hover:bg-red-700 disabled:opacity-60 disabled:cursor-not-allowed transition-colors"
           >
-            {stopping
+            {stopping || isCancelling
               ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
               : running
                 ? <StopCircle className="w-3.5 h-3.5" />
                 : <FlaskConical className="w-3.5 h-3.5" />}
-            {stopping ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
+            {stopping || isCancelling ? t('detail.run.stopping') : running ? t('detail.run.stopRun') : t('detail.run.testRun')}
           </button>
 
           {execution && (
             <div className="border border-gray-200 rounded-lg overflow-hidden">
               <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-200">
-                <WorkflowStatusBadge status={execution.status} />
+                <WorkflowStatusBadge status={displayStatus} />
                 {execution.duration != null && (
                   <span className="text-xs text-gray-400 flex items-center gap-1">
                     <Clock className="w-3 h-3" />
@@ -421,9 +477,11 @@ function TestSection({
                 )}
               </div>
 
-              {execution.errorMessage && (
-                <div className="px-3 py-2 bg-red-50 border-b border-red-100">
-                  <p className="text-xs text-red-600">{execution.errorMessage}</p>
+              {displayMessage && (
+                <div className={`px-3 py-2 border-b ${
+                  isCancelling ? 'bg-amber-50 border-amber-100' : 'bg-red-50 border-red-100'
+                }`}>
+                  <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
                 </div>
               )}
 
@@ -478,252 +536,6 @@ function TestSection({
               )}
             </div>
           )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// 区块2：发布为 API
-// ─────────────────────────────────────────────
-function PublishSection({ workflowId }: { workflowId: string }) {
-  const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(true);
-  const [service, setService] = useState<WorkflowService | null>(null);
-  const [loadingService, setLoadingService] = useState(true);
-  const [publishing, setPublishing] = useState(false);
-  const [stopping, setStopping] = useState(false);
-  const [error, setError] = useState('');
-  const [apiKeyVisible, setApiKeyVisible] = useState(false);
-
-  const fetchService = useCallback(async () => {
-    try {
-      const res = await workflowAPI.getService(workflowId);
-      setService(res.data);
-    } catch {
-      setService(null);
-    } finally {
-      setLoadingService(false);
-    }
-  }, [workflowId]);
-
-  useEffect(() => {
-    fetchService();
-  }, [fetchService]);
-
-  const handlePublish = async () => {
-    setError('');
-    setPublishing(true);
-    try {
-      const res = await workflowAPI.publish(workflowId);
-      setService(res.data);
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.publishFailed')));
-    } finally {
-      setPublishing(false);
-    }
-  };
-
-  const handleUnpublish = async () => {
-    setError('');
-    setStopping(true);
-    try {
-      await workflowAPI.unpublish(workflowId);
-      await fetchService();
-    } catch (err: unknown) {
-      setError(extractErrorMessage(err, t('detail.run.stopFailed')));
-    } finally {
-      setStopping(false);
-    }
-  };
-
-  const maskedKey = (key?: string) => {
-    if (!key) return '***';
-    return apiKeyVisible ? key : `${key.slice(0, 4)}${'*'.repeat(Math.max(0, key.length - 8))}${key.slice(-4)}`;
-  };
-
-  const badge = service && (
-    <WorkflowStatusBadge status={service.status} />
-  );
-
-  return (
-    <div className="border-b border-gray-100">
-      <SectionHeader title={t('detail.run.publishSection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} badge={badge} />
-      {expanded && (
-        <div className="p-4 space-y-3">
-          {loadingService ? (
-            <div className="flex items-center justify-center py-4">
-              <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
-            </div>
-          ) : service && service.status !== 'stopped' ? (
-            <div className="space-y-3">
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">Invoke URL</label>
-                <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5">
-                  <span className="text-xs font-mono text-gray-700 flex-1 truncate">{service.invokeUrl ?? ''}</span>
-                  <CopyButton text={service.invokeUrl ?? ''} />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">API Key</label>
-                <div className="flex items-center gap-1 bg-gray-50 border border-gray-200 rounded-lg px-2 py-1.5">
-                  <span className="text-xs font-mono text-gray-700 flex-1 truncate">
-                    {maskedKey(service.apiKey)}
-                  </span>
-                  <button
-                    onClick={() => setApiKeyVisible(v => !v)}
-                    className="text-xs text-red-500 hover:text-red-700 flex-shrink-0 px-1"
-                  >
-                    {apiKeyVisible ? t('detail.run.apiKeyHide') : t('detail.run.apiKeyShow')}
-                  </button>
-                  <CopyButton text={service.apiKey ?? ''} />
-                </div>
-              </div>
-              <div>
-                <label className="block text-xs text-gray-500 mb-1">{t('detail.run.curlExample')}</label>
-                <div className="bg-gray-900 rounded-lg px-3 py-2 relative">
-                  <pre className="text-xs text-gray-300 font-mono whitespace-pre-wrap">{`curl -X POST ${service.invokeUrl ?? ''} \\
-  -H "Content-Type: application/json" \\
-  -H "X-API-Key: ${service.apiKey ?? ''}" \\
-  -d '{"inputs": {}}'`}</pre>
-                  <div className="absolute top-2 right-2">
-                    <CopyButton text={`curl -X POST ${service.invokeUrl ?? ''} \\\n  -H "Content-Type: application/json" \\\n  -H "X-API-Key: ${service.apiKey ?? ''}" \\\n  -d '{"inputs": {}}'`} />
-                  </div>
-                </div>
-              </div>
-              <button
-                onClick={handleUnpublish}
-                disabled={stopping}
-                className="w-full flex items-center justify-center gap-2 py-2 border border-red-200 text-red-600 text-xs font-medium rounded-lg hover:bg-red-50 disabled:opacity-60 transition-colors"
-              >
-                {stopping ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5" />}
-                {stopping ? t('detail.run.stopping') : t('detail.run.stopService')}
-              </button>
-            </div>
-          ) : (
-            <div className="space-y-3">
-              <p className="text-xs text-gray-500 leading-relaxed">
-                {t('detail.run.publishDesc')}
-              </p>
-              <button
-                onClick={handlePublish}
-                disabled={publishing}
-                className="w-full flex items-center justify-center gap-2 py-2 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-60 transition-colors"
-              >
-                {publishing ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Globe className="w-3.5 h-3.5" />}
-                {publishing ? t('detail.run.publishing') : t('detail.run.publishAsApi')}
-              </button>
-              {publishing && (
-                <p className="text-xs text-gray-400 text-center">{t('detail.run.dockerStarting')}</p>
-              )}
-            </div>
-          )}
-          {error && (
-            <div className="flex items-start gap-1.5 text-xs text-red-600 bg-red-50 rounded-lg px-3 py-2">
-              <AlertCircle className="w-3.5 h-3.5 flex-shrink-0 mt-0.5" />
-              {error}
-            </div>
-          )}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─────────────────────────────────────────────
-// 区块3：Kafka 配置
-// ─────────────────────────────────────────────
-function KafkaSection({ workflowId }: { workflowId: string }) {
-  const { t } = useTranslation('workflow');
-  const [expanded, setExpanded] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [inputBroker, setInputBroker] = useState('');
-  const [inputTopic, setInputTopic] = useState('');
-  const [inputGroupId, setInputGroupId] = useState('');
-  const [outputBroker, setOutputBroker] = useState('');
-  const [outputTopic, setOutputTopic] = useState('');
-
-  useEffect(() => {
-    workflowAPI.getKafkaConfig(workflowId).then(res => {
-      if (res.data) {
-        setInputBroker(res.data.inputBroker || '');
-        setInputTopic(res.data.inputTopic || '');
-        setInputGroupId(res.data.inputGroupId || '');
-        setOutputBroker(res.data.outputBroker || '');
-        setOutputTopic(res.data.outputTopic || '');
-      }
-    }).catch(() => {});
-  }, [workflowId]);
-
-  const handleSave = async () => {
-    setSaving(true);
-    setSaved(false);
-    try {
-      await workflowAPI.saveKafkaConfig(workflowId, {
-        inputBroker, inputTopic, inputGroupId, outputBroker, outputTopic,
-      });
-      setSaved(true);
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      // ignore - stub endpoint may return 501
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const inputField = (label: string, value: string, onChange: (v: string) => void, placeholder: string) => (
-    <div>
-      <label className="block text-xs text-gray-500 mb-1">{label}</label>
-      <input
-        type="text"
-        value={value}
-        onChange={e => onChange(e.target.value)}
-        placeholder={placeholder}
-        className="w-full text-xs border border-gray-200 rounded-lg px-3 py-1.5 focus:outline-none focus:ring-1 focus:ring-red-500"
-      />
-    </div>
-  );
-
-  return (
-    <div className="border-b border-gray-100">
-      <SectionHeader
-        title={t('detail.run.kafkaSection')}
-        expanded={expanded}
-        onToggle={() => setExpanded(v => !v)}
-        badge={<span className="text-xs text-gray-400 font-normal">{t('detail.run.kafkaExperimental')}</span>}
-      />
-      {expanded && (
-        <div className="p-4 space-y-4">
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
-              <Wifi className="w-3.5 h-3.5" /> {t('detail.run.inputConfig')}
-            </p>
-            {inputField('Broker', inputBroker, setInputBroker, 'localhost:9092')}
-            {inputField('Topic', inputTopic, setInputTopic, 'workflow-input')}
-            {inputField('Consumer Group', inputGroupId, setInputGroupId, 'flocks-consumer')}
-          </div>
-          <div className="space-y-2">
-            <p className="text-xs font-medium text-gray-600 flex items-center gap-1">
-              <Wifi className="w-3.5 h-3.5 rotate-180" /> {t('detail.run.outputConfig')}
-            </p>
-            {inputField('Broker', outputBroker, setOutputBroker, 'localhost:9092')}
-            {inputField('Topic', outputTopic, setOutputTopic, 'workflow-output')}
-          </div>
-          <button
-            onClick={handleSave}
-            disabled={saving}
-            className="w-full flex items-center justify-center gap-2 py-2 border border-gray-200 text-gray-600 text-xs font-medium rounded-lg hover:bg-gray-50 disabled:opacity-60 transition-colors"
-          >
-            {saving ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin" />
-            ) : saved ? (
-              <Check className="w-3.5 h-3.5 text-green-500" />
-            ) : null}
-            {saving ? t('detail.run.savingConfig') : saved ? t('detail.run.savedConfig') : t('detail.run.saveConfig')}
-          </button>
-          <p className="text-xs text-gray-400 text-center">{t('detail.run.kafkaHint')}</p>
         </div>
       )}
     </div>
@@ -845,24 +657,27 @@ function StepDetail({ step, index, hasInputs, hasOutputs }: {
 function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
   const { t } = useTranslation('workflow');
   const [logExpanded, setLogExpanded] = useState(false);
+  const displayStatus = getExecutionDisplayStatus(ex);
   const isRunning = ex.status === 'running';
+  const isCancelling = displayStatus === 'cancelling';
   const hasOutput = ex.outputResults && Object.keys(ex.outputResults).length > 0;
   const hasLog = ex.executionLog && ex.executionLog.length > 0;
+  const displayMessage = getExecutionDisplayMessage(ex, t);
 
   return (
     <div className="border-t border-gray-200 bg-gray-50">
       {isRunning && (
         <div className="px-4 py-2 flex items-center gap-2 border-b border-gray-200">
-          <Loader2 className="w-3 h-3 animate-spin text-red-500" />
-          <span className="text-xs text-red-600">
-            {t('detail.run.running')}
+          <Loader2 className={`w-3 h-3 animate-spin ${isCancelling ? 'text-amber-500' : 'text-red-500'}`} />
+          <span className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>
+            {isCancelling ? t('detail.run.stopping') : t('detail.run.running')}
             {hasLog && ` (${ex.executionLog.length} ${t('detail.run.stepsCompleted')})`}
           </span>
         </div>
       )}
-      {ex.errorMessage && (
+      {displayMessage && (
         <div className="px-4 py-2 border-b border-gray-200">
-          <p className="text-xs text-red-600">{ex.errorMessage}</p>
+          <p className={`text-xs ${isCancelling ? 'text-amber-700' : 'text-red-600'}`}>{displayMessage}</p>
         </div>
       )}
       {hasOutput && (
@@ -910,10 +725,14 @@ function HistorySection({
   workflowId,
   latestExecutionId,
   onLatestExecutionChange,
+  embedded = false,
+  hideSectionHeader = false,
 }: {
   workflowId: string;
   latestExecutionId?: string;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
+  embedded?: boolean;
+  hideSectionHeader?: boolean;
 }) {
   const { t } = useTranslation('workflow');
   const [expanded, setExpanded] = useState(true);
@@ -940,7 +759,14 @@ function HistorySection({
       setSelectedExec(prev => {
         if (!prev) return null;
         const updated = res.data.find((e: WorkflowExecution) => e.id === prev.id);
-        return updated ?? prev;
+        if (!updated) return prev;
+        return {
+          ...updated,
+          executionLog: prev.executionLog?.length ? prev.executionLog : updated.executionLog,
+          stepLogOffset: prev.stepLogOffset ?? updated.stepLogOffset,
+          stepLogLimit: prev.stepLogLimit ?? updated.stepLogLimit,
+          stepLogTotal: prev.stepLogTotal ?? updated.stepLogTotal,
+        };
       });
     } catch {
       setHistory([]);
@@ -964,16 +790,39 @@ function HistorySection({
   };
 
   const statusIcon = (status: string) => {
+    if (status === 'cancelling') return <Loader2 className="w-3.5 h-3.5 text-amber-500 animate-spin" />;
     if (status === 'success' || status === 'SUCCEEDED') return <CheckCircle className="w-3.5 h-3.5 text-green-500" />;
     if (status === 'running') return <Loader2 className="w-3.5 h-3.5 text-red-500 animate-spin" />;
     if (status === 'error' || status === 'FAILED') return <XCircle className="w-3.5 h-3.5 text-red-500" />;
     return <AlertCircle className="w-3.5 h-3.5 text-orange-500" />;
   };
+  const bodyExpanded = hideSectionHeader || expanded;
+
+  const toggleExecutionDetail = async (exec: WorkflowExecution) => {
+    if (selectedExec?.id === exec.id) {
+      setSelectedExec(null);
+      return;
+    }
+    setSelectedExec(exec);
+    try {
+      const res = await workflowAPI.getExecution(workflowId, exec.id);
+      setSelectedExec(res.data);
+    } catch {
+      setSelectedExec(exec);
+    }
+  };
 
   return (
-    <div>
-      <SectionHeader title={t('detail.run.historySection')} expanded={expanded} onToggle={() => setExpanded(v => !v)} />
-      {expanded && (
+    <div className={embedded ? 'bg-white' : undefined}>
+      {!hideSectionHeader && (
+        <SectionHeader
+          title={t('detail.run.historySection')}
+          expanded={expanded}
+          onToggle={() => setExpanded(v => !v)}
+          embedded={embedded}
+        />
+      )}
+      {bodyExpanded && (
         <div>
           {loading ? (
             <div className="flex items-center justify-center py-6">
@@ -986,31 +835,32 @@ function HistorySection({
             </div>
           ) : (
             <div>
-              <div className="divide-y divide-gray-100">
+              <div>
                 {history.map((exec) => (
-                  <button
-                    key={exec.id}
-                    onClick={() => setSelectedExec(selectedExec?.id === exec.id ? null : exec)}
-                    className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
-                  >
-                    {statusIcon(exec.status)}
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
-                    </div>
-                    {exec.duration != null && (
-                      <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
+                  <div key={exec.id} className="border-b border-gray-100 last:border-b-0">
+                    <button
+                      onClick={() => void toggleExecutionDetail(exec)}
+                      className="w-full flex items-center gap-2 px-4 py-2.5 hover:bg-gray-50 transition-colors text-left"
+                    >
+                      {statusIcon(getExecutionDisplayStatus(exec))}
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs text-gray-700 truncate">{formatTime(exec.startedAt)}</p>
+                      </div>
+                      {exec.duration != null && (
+                        <span className="text-xs text-gray-400 flex-shrink-0">{exec.duration.toFixed(1)}s</span>
+                      )}
+                      {selectedExec?.id === exec.id ? (
+                        <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                      ) : (
+                        <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
+                      )}
+                    </button>
+                    {selectedExec?.id === exec.id && (
+                      <HistoryExecDetail exec={selectedExec} />
                     )}
-                    {selectedExec?.id === exec.id ? (
-                      <ChevronDown className="w-3 h-3 text-gray-400 flex-shrink-0" />
-                    ) : (
-                      <ChevronRight className="w-3 h-3 text-gray-400 flex-shrink-0" />
-                    )}
-                  </button>
+                  </div>
                 ))}
               </div>
-              {selectedExec && (
-                <HistoryExecDetail exec={selectedExec} />
-              )}
             </div>
           )}
         </div>
@@ -1027,22 +877,97 @@ export default function RunTab({
   latestExecution,
   onLatestExecutionChange,
   onExecutionSettled,
+  sections = ['test', 'history'],
+  embedded = false,
+  embeddedTabs = false,
+  hideSectionHeaders = false,
 }: RunTabProps) {
+  const { t } = useTranslation('workflow');
+  const [activeEmbeddedSection, setActiveEmbeddedSection] = useState<RunTabSection>('test');
+  const showTest = sections.includes('test');
+  const showHistory = sections.includes('history');
+  const activeSection =
+    activeEmbeddedSection === 'test' && showTest
+      ? 'test'
+      : activeEmbeddedSection === 'history' && showHistory
+        ? 'history'
+        : showTest
+          ? 'test'
+          : 'history';
+  const embeddedTabItems = [
+    showTest ? { id: 'test' as const, label: t('detail.run.testSection') } : null,
+    showHistory ? { id: 'history' as const, label: t('detail.run.historySection') } : null,
+  ].filter((item): item is { id: RunTabSection; label: string } => Boolean(item));
+
+  if (embeddedTabs) {
+    return (
+      <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto space-y-3'}>
+        <div className="flex rounded-md bg-gray-100 p-1">
+          {embeddedTabItems.map((item) => (
+            <button
+              key={item.id}
+              type="button"
+              onClick={() => setActiveEmbeddedSection(item.id)}
+              className={`flex-1 rounded px-2 py-1.5 text-xs font-medium transition-colors ${
+                activeSection === item.id
+                  ? 'bg-white text-red-600 shadow-sm'
+                  : 'text-gray-500 hover:text-gray-800'
+              }`}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+        <div className="overflow-hidden rounded-md border border-gray-200 bg-white">
+          {showTest && (
+            <div className={activeSection === 'test' ? 'block' : 'hidden'}>
+              <TestSection
+                workflow={workflow}
+                execution={latestExecution}
+                onExecutionChange={onLatestExecutionChange}
+                onExecutionSettled={onExecutionSettled}
+                embedded={embedded}
+                hideSectionHeader={hideSectionHeaders}
+              />
+            </div>
+          )}
+          {showHistory && (
+            <div className={activeSection === 'history' ? 'block' : 'hidden'}>
+              <HistorySection
+                workflowId={workflow.id}
+                latestExecutionId={latestExecution?.id}
+                onLatestExecutionChange={onLatestExecutionChange}
+                embedded={embedded}
+                hideSectionHeader={hideSectionHeaders}
+              />
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  }
+
   return (
-    <div className="flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100">
-      <TestSection
-        workflow={workflow}
-        execution={latestExecution}
-        onExecutionChange={onLatestExecutionChange}
-        onExecutionSettled={onExecutionSettled}
-      />
-      <PublishSection workflowId={workflow.id} />
-      <KafkaSection workflowId={workflow.id} />
-      <HistorySection
-        workflowId={workflow.id}
-        latestExecutionId={latestExecution?.id}
-        onLatestExecutionChange={onLatestExecutionChange}
-      />
+    <div className={embedded ? 'space-y-3' : 'flex-1 min-h-0 overflow-y-auto divide-y divide-gray-100'}>
+      {showTest && (
+        <TestSection
+          workflow={workflow}
+          execution={latestExecution}
+          onExecutionChange={onLatestExecutionChange}
+          onExecutionSettled={onExecutionSettled}
+          embedded={embedded}
+          hideSectionHeader={hideSectionHeaders}
+        />
+      )}
+      {showHistory && (
+        <HistorySection
+          workflowId={workflow.id}
+          latestExecutionId={latestExecution?.id}
+          onLatestExecutionChange={onLatestExecutionChange}
+          embedded={embedded}
+          hideSectionHeader={hideSectionHeaders}
+        />
+      )}
     </div>
   );
 }

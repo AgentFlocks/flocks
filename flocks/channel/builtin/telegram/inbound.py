@@ -216,8 +216,14 @@ async def build_inbound_message(
     # Check for media first so we always surface the media type to the AI,
     # even when the message also carries a text caption.
     media_desc = extract_media_description(message)
+    media_url: Optional[str] = None
     if media_desc:
         text = media_desc
+        # Surface the Telegram file_id as an opaque URI so the dispatcher
+        # can route it to the per-channel downloader (Telegram getFile).
+        file_id, media_kind = _extract_primary_file_id(message)
+        if file_id:
+            media_url = f"telegram://{media_kind}/{file_id}"
     else:
         text = extract_text(message)
         if not text:
@@ -268,9 +274,40 @@ async def build_inbound_message(
         chat_id=chat_id,
         chat_type=chat_type,
         text=text.strip(),
+        media_url=media_url,
         reply_to_id=reply_to_id,
         thread_id=thread_id,
         mentioned=mentioned,
         mention_text=mention_text,
         raw=message,
     )
+
+
+def _extract_primary_file_id(
+    message: dict[str, Any],
+) -> tuple[Optional[str], str]:
+    """Return the first Telegram ``file_id`` in *message* + the media kind.
+
+    Media kinds follow the Telegram Bot API parameter names so the
+    outbound ``send_*`` methods can use them directly: ``photo``,
+    ``document``, ``video``, ``audio``, ``voice``, ``animation``.
+    Photos are special — Telegram exposes them as a list of size variants;
+    we pick the largest one.
+    """
+    photos = message.get("photo")
+    if isinstance(photos, list) and photos:
+        largest = max(
+            (p for p in photos if isinstance(p, dict)),
+            key=lambda p: coerce_int(p.get("file_size")) or 0,
+            default=None,
+        )
+        if largest is not None:
+            return coerce_str(largest.get("file_id")), "photo"
+
+    for kind in ("document", "video", "audio", "voice", "animation"):
+        block = message.get(kind)
+        if isinstance(block, dict):
+            file_id = coerce_str(block.get("file_id"))
+            if file_id:
+                return file_id, kind
+    return None, "document"

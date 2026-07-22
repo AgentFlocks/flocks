@@ -15,13 +15,15 @@
   "metrics": {
     "messageRate": "消息速率",
     "toolCallRate": "工具调用",
-    "errorRate": "错误率",
+    "errorRate": "系统错误",
+    "toolParseFailureRate": "工具解析失败",
     "avgResponse": "平均响应",
     "activeRequests": "活跃请求"
   },
   "llmPerformance": "LLM 响应时间",
   "toolPerformance": "工具执行时间",
   "noData": "暂无数据",
+  "unavailable": "暂无数据",
   "calls": "次调用",
   "errors": "错误",
   "performanceTrend": "性能趋势",

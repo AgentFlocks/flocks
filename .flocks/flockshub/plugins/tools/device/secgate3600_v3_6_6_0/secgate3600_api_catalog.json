@@ -1,0 +1,2006 @@
+{
+  "schema_version": 1,
+  "source": "SecGate3600 RESTful API guide V1.1",
+  "entries": [
+    {
+      "module": "HA",
+      "function": "get_obj_lkdt_ref_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "aaa",
+      "function": "get_authsrv_config_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "aaa",
+      "function": "get_authsrv_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "aaa",
+      "function": "get_authsrv_member_group",
+      "kind": "readonly"
+    },
+    {
+      "module": "aaa",
+      "function": "get_authsrv_member_role",
+      "kind": "readonly"
+    },
+    {
+      "module": "aaa",
+      "function": "get_authsrv_member_user",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "add_batch_blacklist_cfg",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "add_blacklist_ip",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "add_blacklist_ip_web",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "add_blacklist_mac_web",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "clear_batch_domain_blacklist_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "clear_batch_domain_blacklist_hitnum_all",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "clear_batch_ip_blacklist_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "clear_batch_ip_blacklist_hitnum_all",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "clear_blacklist_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "clear_blacklist_hitnum_one",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "del_batch_blacklist_all_cfg",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "del_batch_blacklist_cfg",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "del_blacklist_by_id",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "export_batch_blacklist_cfg",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "get_batch_domain_blacklist_commit_status",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "get_blacklist_config",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "import_batch_blacklist_cfg",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "set_batch_blacklist_match_model",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "set_batch_domain_blacklist_commit",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "set_blacklist_match_model",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "show_batch_blacklist_cfg",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "show_batch_blacklist_match_model",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_blacklist",
+      "function": "show_blacklist_match_model",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_whitelist",
+      "function": "add_whitelist_ip",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_whitelist",
+      "function": "clear_whitelist_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_whitelist",
+      "function": "clear_whitelist_hitnum_one",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_whitelist",
+      "function": "del_whitelist_by_id",
+      "kind": "mutation"
+    },
+    {
+      "module": "addr_whitelist",
+      "function": "get_whitelist_config",
+      "kind": "readonly"
+    },
+    {
+      "module": "addr_whitelist",
+      "function": "get_whitelist_config_by_id",
+      "kind": "readonly"
+    },
+    {
+      "module": "admin_host",
+      "function": "add_admin_host_addr",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_host",
+      "function": "add_admin_mac",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_host",
+      "function": "del_admin_host_addr",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_host",
+      "function": "del_admin_mac",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_host",
+      "function": "get_admin_host",
+      "kind": "readonly"
+    },
+    {
+      "module": "admin_host",
+      "function": "get_admin_mac",
+      "kind": "readonly"
+    },
+    {
+      "module": "admin_host",
+      "function": "get_admin_port",
+      "kind": "readonly"
+    },
+    {
+      "module": "admin_host",
+      "function": "set_admin_port",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_user",
+      "function": "add_admin_user",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_user",
+      "function": "del_admin_user",
+      "kind": "mutation"
+    },
+    {
+      "module": "admin_user",
+      "function": "get_admin_user",
+      "kind": "readonly"
+    },
+    {
+      "module": "admin_user",
+      "function": "get_admin_user_detail",
+      "kind": "readonly"
+    },
+    {
+      "module": "admin_user",
+      "function": "set_admin_user",
+      "kind": "mutation"
+    },
+    {
+      "module": "alg",
+      "function": "get_alg_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "alg",
+      "function": "set_alg_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "all",
+      "function": "get_ha_compare_cfg",
+      "kind": "readonly"
+    },
+    {
+      "module": "app",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "area",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "asset",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "auto_upgrade",
+      "function": "set_auto_upgrade_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "auto_upgrade",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "set_av_add_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "set_av_custom_add",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "set_av_custom_del",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "set_av_del_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "set_av_edit_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "av",
+      "function": "show_av_md5_custom",
+      "kind": "readonly"
+    },
+    {
+      "module": "av",
+      "function": "show_av_profile",
+      "kind": "readonly"
+    },
+    {
+      "module": "cloud_basic",
+      "function": "del_cloud_basic_intelligence_info",
+      "kind": "mutation"
+    },
+    {
+      "module": "cloud_basic",
+      "function": "show_cld_cloud_basic_abnormal_host_statistics",
+      "kind": "readonly"
+    },
+    {
+      "module": "cloud_basic",
+      "function": "show_cld_cloud_basic_intelligence_statistics",
+      "kind": "readonly"
+    },
+    {
+      "module": "cloud_basic",
+      "function": "show_cloud_basic_intelligence_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "cloud_notice",
+      "function": "get_cloud_notice_msg_num",
+      "kind": "readonly"
+    },
+    {
+      "module": "ctrl_agent",
+      "function": "get_controller_cfg",
+      "kind": "readonly"
+    },
+    {
+      "module": "ctrl_agent",
+      "function": "get_controller_online",
+      "kind": "readonly"
+    },
+    {
+      "module": "ctrl_agent",
+      "function": "set_controller_cfg",
+      "kind": "mutation"
+    },
+    {
+      "module": "ctrl_agent",
+      "function": "set_controller_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "dashboard",
+      "function": "get_interface_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "dashboard",
+      "function": "get_system_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "dashboard",
+      "function": "get_system_resource",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "add_decrypt_bypass_sni_domain",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "add_decrypt_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "add_ssl_decrypt_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "add_ssl_ins_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "clear_decrypt_bypass_sni_domain_hitnum_all",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "clear_decrypt_bypass_sni_domain_hitnum_one",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "del_decrypt_bypass_sni_domain",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "del_decrypt_cert_signer",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "del_decrypt_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "del_ssl_decrypt_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "del_ssl_ins_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "get_decrypt_cert_issue_addr_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "get_decrypt_certlearn_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "get_ssl_decrypt_profile",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "get_ssl_ins_cert",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "get_ssl_ins_profile",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_decrypt_bypass_sni_domain",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_decrypt_cert_issue",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_decrypt_cert_trustCA_default",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_decrypt_mirror_dport_offset",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_decrypt_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_decrypt_policy_pri",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_ssl_decrypt_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "set_ssl_ins_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "decrypt",
+      "function": "show_decrypt_bypass_sni",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "show_decrypt_cert_issue",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "show_decrypt_cert_signer",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "show_decrypt_cert_trustCA",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "show_decrypt_mirror_config",
+      "kind": "readonly"
+    },
+    {
+      "module": "decrypt",
+      "function": "show_decrypt_policy",
+      "kind": "readonly"
+    },
+    {
+      "module": "dns",
+      "function": "add_dns_domain_blacklist",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "add_dns_domain_whitelist",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "add_ioc_honeypot_domain",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "clear_dns_domain_hit_num",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "del_dns_domain",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "del_ioc_honeypot_domain_one",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "get_dns_domain_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "dns",
+      "function": "set_dns_domain_blacklist",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "set_dns_domain_whitelist",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "set_ioc_honeypot",
+      "kind": "mutation"
+    },
+    {
+      "module": "dns",
+      "function": "show_ioc_honeypot_domain",
+      "kind": "readonly"
+    },
+    {
+      "module": "exploit",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "filetype",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "add_honeypot_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "del_honeypot_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "del_honeypot_policy_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "get_honeypot_policy",
+      "kind": "readonly"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "get_honeypot_policy_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "get_honeypot_policy_name",
+      "kind": "readonly"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "set_honeypot_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "honeypot_policy",
+      "function": "set_move_honeypot_policy_pri",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "add_bridge",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "add_inf_phy",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "add_vlan_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "del_bridge",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "del_inf_phy",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "del_vlan_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_bridge_conf_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_channel_inf_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_interface_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_interface_select_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_vlan_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_vlan_conf_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "get_vlan_ref_modle",
+      "kind": "readonly"
+    },
+    {
+      "module": "inter_face",
+      "function": "set_bridge_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "set_if_config_web",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "set_vlan_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "inter_face",
+      "function": "show_all_interface_web",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "add_ips_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "add_ips_profile_scene",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "del_ips_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "del_ips_profile_scene",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "get_app_ctl",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_app_proto_scene",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_defence_scene_class",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_defence_type_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_profile_detail",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_profile_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_profile_info_scene",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "get_scene_class_rules",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips",
+      "function": "set_app_ctl_proto",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "set_ips_profile",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips",
+      "function": "set_ips_profile_scene",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips_sig",
+      "function": "add_ips_sig",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips_sig",
+      "function": "del_ips_sig",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips_sig",
+      "function": "get_ips_sig",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips_sig",
+      "function": "get_ips_sig_all",
+      "kind": "readonly"
+    },
+    {
+      "module": "ips_sig",
+      "function": "set_ips_sig",
+      "kind": "mutation"
+    },
+    {
+      "module": "ips_sig",
+      "function": "set_ips_sig_commit",
+      "kind": "mutation"
+    },
+    {
+      "module": "ipv6",
+      "function": "get_nat64_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "ipv6",
+      "function": "set_add_nat64_prefix",
+      "kind": "mutation"
+    },
+    {
+      "module": "ipv6",
+      "function": "set_del_nat64_prefix",
+      "kind": "mutation"
+    },
+    {
+      "module": "isp",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "log",
+      "function": "get_log_send_template_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "log",
+      "function": "get_log_syslog_config",
+      "kind": "readonly"
+    },
+    {
+      "module": "log",
+      "function": "set_log_syslog_config",
+      "kind": "mutation"
+    },
+    {
+      "module": "multicast_snooping",
+      "function": "set_vlan_igmp_snooping",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "add_dnat_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "add_snat_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "clear_dnat_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "clear_snat_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "del_dnat_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "del_snat_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "get_dnat_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_dnat_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_dnat_list_by_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_snat_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_snat_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_snat_list_by_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_snat_trans_ip_state",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "get_snat_trans_ip_state_by_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "nat",
+      "function": "set_dnat_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "set_dnat_move",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "set_dnat_status",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "set_snat_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "set_snat_move",
+      "kind": "mutation"
+    },
+    {
+      "module": "nat",
+      "function": "set_snat_status",
+      "kind": "mutation"
+    },
+    {
+      "module": "notice",
+      "function": "get_notice_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "notice",
+      "function": "get_notice_num_day",
+      "kind": "readonly"
+    },
+    {
+      "module": "ntp",
+      "function": "set_ntp_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_address",
+      "function": "add_obj_addr_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_address",
+      "function": "add_obj_addr_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_address",
+      "function": "del_obj_addr_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_address",
+      "function": "del_obj_addr_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_address",
+      "function": "get_obj_addr_group",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_address",
+      "function": "get_obj_addr_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_address",
+      "function": "set_obj_addr_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_address",
+      "function": "set_obj_addr_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_app",
+      "function": "get_search_app_list_for_rule",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_area",
+      "function": "add_obj_area_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_area",
+      "function": "del_obj_area_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_area",
+      "function": "export_area_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_area",
+      "function": "get_area_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_area",
+      "function": "import_area_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_area",
+      "function": "set_obj_area_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_honeypot",
+      "function": "add_obj_honeypot",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_honeypot",
+      "function": "del_obj_honeypot",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_honeypot",
+      "function": "get_obj_honeypot",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_honeypot",
+      "function": "set_obj_honeypot",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "add_obj_lkdt",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "del_obj_lkdt",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "get_obj_lkdt",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "get_obj_lkdt_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "get_obj_lkdt_ref_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "get_obj_lkdt_textvalue_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_lkdt",
+      "function": "set_obj_lkdt",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_sche",
+      "function": "add_schedule_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_sche",
+      "function": "del_schedule_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_sche",
+      "function": "get_obj_sche_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_sche",
+      "function": "set_obj_schedule",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_server",
+      "function": "add_server_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_server",
+      "function": "del_server",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_server",
+      "function": "get_server_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_server",
+      "function": "get_server_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_server",
+      "function": "get_server_search",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_server",
+      "function": "set_server_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_service",
+      "function": "add_service_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_service",
+      "function": "add_service_grp",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_service",
+      "function": "del_service_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_service",
+      "function": "del_service_grp",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_service",
+      "function": "get_service_custom",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_service",
+      "function": "get_service_grp",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_service",
+      "function": "get_service_predef",
+      "kind": "readonly"
+    },
+    {
+      "module": "obj_service",
+      "function": "set_service_custom",
+      "kind": "mutation"
+    },
+    {
+      "module": "obj_service",
+      "function": "set_service_grp",
+      "kind": "mutation"
+    },
+    {
+      "module": "pki",
+      "function": "get_pki_gwcert",
+      "kind": "readonly"
+    },
+    {
+      "module": "pnf",
+      "function": "add_pnf_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "pnf",
+      "function": "add_pnf_object",
+      "kind": "mutation"
+    },
+    {
+      "module": "pnf",
+      "function": "del_pnf_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "pnf",
+      "function": "del_pnf_object",
+      "kind": "mutation"
+    },
+    {
+      "module": "pnf",
+      "function": "get_pnf_group_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "pnf",
+      "function": "get_pnf_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "pnf",
+      "function": "get_service_chain_monitor",
+      "kind": "readonly"
+    },
+    {
+      "module": "pnf",
+      "function": "get_sfc_name_list_bypass",
+      "kind": "readonly"
+    },
+    {
+      "module": "pnf",
+      "function": "set_pnf_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "pnf",
+      "function": "set_pnf_group_bypass",
+      "kind": "mutation"
+    },
+    {
+      "module": "pnf",
+      "function": "set_pnf_object",
+      "kind": "mutation"
+    },
+    {
+      "module": "profile_group",
+      "function": "add_profile_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "profile_group",
+      "function": "del_profile_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "profile_group",
+      "function": "get_profile_group",
+      "kind": "readonly"
+    },
+    {
+      "module": "profile_group",
+      "function": "set_profile_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "add_qos_class_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "add_qos_line_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "add_qos_policy_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "add_qos_root_class_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "del_qos_class_tree_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "del_qos_line_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "del_qos_policy_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "get_qos_class_quota_use",
+      "kind": "readonly"
+    },
+    {
+      "module": "qos",
+      "function": "get_qos_policy_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "qos",
+      "function": "set_qos_class",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "set_qos_line_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "set_qos_line_interface",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "set_qos_policy_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "qos",
+      "function": "show_web_qos_class_one",
+      "kind": "readonly"
+    },
+    {
+      "module": "qos",
+      "function": "show_web_qos_class_tree",
+      "kind": "readonly"
+    },
+    {
+      "module": "qos",
+      "function": "show_web_qos_line_tree",
+      "kind": "readonly"
+    },
+    {
+      "module": "route_policy",
+      "function": "add_route_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "route_policy",
+      "function": "del_route_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "route_policy",
+      "function": "del_route_policy_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "route_policy",
+      "function": "get_route_policy_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "route_policy",
+      "function": "set_route_policy_move",
+      "kind": "mutation"
+    },
+    {
+      "module": "route_static",
+      "function": "add_route_static",
+      "kind": "mutation"
+    },
+    {
+      "module": "route_static",
+      "function": "del_route_static",
+      "kind": "mutation"
+    },
+    {
+      "module": "route_static",
+      "function": "get_route_all_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "route_static",
+      "function": "get_route_single_static",
+      "kind": "readonly"
+    },
+    {
+      "module": "route_static",
+      "function": "set_route_static",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "add_sec_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "add_sec_policy_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "add_sec_policy_learn_task",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "del_sec_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "del_sec_policy_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "del_sec_policy_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "del_sec_policy_learn_task",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_learn_policy_name",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_adjacent_merged_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_export",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_group",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_group_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_group_name",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_hitinfo_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_include",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_name",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_part_include",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_part_useless",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_region_merged_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_task",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_sec_policy_useless",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "get_system_hostname",
+      "kind": "readonly"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_move_sec_policy_group_member_pri",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_move_sec_policy_pri",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_group",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_group_state",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_import",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_learn_task",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_learn_task_state",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_state",
+      "kind": "mutation"
+    },
+    {
+      "module": "sec_policy",
+      "function": "set_sec_policy_task_generate_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc",
+      "function": "add_sfc",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc",
+      "function": "del_sfc",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc",
+      "function": "set_sfc",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc",
+      "function": "set_sfc_bypass",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc",
+      "function": "show_sfc",
+      "kind": "readonly"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "add_sfc_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "del_sfc_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "del_sfc_policy_hitnum",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "get_sfc_policy",
+      "kind": "readonly"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "get_sfc_policy_filter",
+      "kind": "readonly"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "get_sfc_policy_name",
+      "kind": "readonly"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "set_move_sfc_policy_pri",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "set_sfc_policy",
+      "kind": "mutation"
+    },
+    {
+      "module": "sfc_policy",
+      "function": "set_sfc_policy_state",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "del_ha_group_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_compare_cfg",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_global_config",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_group_id_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_group_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_track_bfd_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_track_if_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_track_ip_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "get_ha_track_pnf_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_global_config",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_group_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_group_demotion_force",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_group_trackbfd",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_group_trackif",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_group_trackip",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_group_trackpnf",
+      "kind": "mutation"
+    },
+    {
+      "module": "sgrp",
+      "function": "set_ha_sync_cfg_force",
+      "kind": "mutation"
+    },
+    {
+      "module": "smac",
+      "function": "get_smac_conf",
+      "kind": "readonly"
+    },
+    {
+      "module": "smac",
+      "function": "set_smac_conf",
+      "kind": "mutation"
+    },
+    {
+      "module": "snmpagent",
+      "function": "get_snmp_agent",
+      "kind": "readonly"
+    },
+    {
+      "module": "snmpagent",
+      "function": "set_snmp_agent",
+      "kind": "mutation"
+    },
+    {
+      "module": "snmpv3usr",
+      "function": "add_snmpv3usr",
+      "kind": "mutation"
+    },
+    {
+      "module": "snmpv3usr",
+      "function": "del_snmpv3usr",
+      "kind": "mutation"
+    },
+    {
+      "module": "snmpv3usr",
+      "function": "get_snmpv3usr",
+      "kind": "readonly"
+    },
+    {
+      "module": "snmpv3usr",
+      "function": "set_snmpv3usr",
+      "kind": "mutation"
+    },
+    {
+      "module": "statistics",
+      "function": "get_connection_monitor",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_cpu_usage",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_disk_usage",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_focus_focus",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_memory_usage",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_network_monitor",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_threat_monitor",
+      "kind": "readonly"
+    },
+    {
+      "module": "statistics",
+      "function": "get_threat_threats",
+      "kind": "readonly"
+    },
+    {
+      "module": "sysconfig",
+      "function": "export_sysconfig_ftp",
+      "kind": "mutation"
+    },
+    {
+      "module": "sysconfig",
+      "function": "import_sysconfig_ftp",
+      "kind": "mutation"
+    },
+    {
+      "module": "sysconfig",
+      "function": "set_save_sysconfig",
+      "kind": "mutation"
+    },
+    {
+      "module": "syslog",
+      "function": "add_syslog_server_config",
+      "kind": "mutation"
+    },
+    {
+      "module": "syslog",
+      "function": "del_syslog_server_config",
+      "kind": "mutation"
+    },
+    {
+      "module": "syslog",
+      "function": "get_syslog_server_config_all",
+      "kind": "readonly"
+    },
+    {
+      "module": "syslog",
+      "function": "get_syslog_server_config_one",
+      "kind": "readonly"
+    },
+    {
+      "module": "syslog",
+      "function": "get_syslog_server_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "syslog",
+      "function": "set_syslog_server_config",
+      "kind": "mutation"
+    },
+    {
+      "module": "system",
+      "function": "get_sec_policy",
+      "kind": "readonly"
+    },
+    {
+      "module": "system",
+      "function": "get_system_hostname",
+      "kind": "readonly"
+    },
+    {
+      "module": "system",
+      "function": "set_system_time",
+      "kind": "mutation"
+    },
+    {
+      "module": "system_advanced",
+      "function": "get_sys_advanced_status",
+      "kind": "readonly"
+    },
+    {
+      "module": "system_advanced",
+      "function": "set_sys_advanced_status",
+      "kind": "mutation"
+    },
+    {
+      "module": "threat_disposal",
+      "function": "add_threat_disposal",
+      "kind": "mutation"
+    },
+    {
+      "module": "threat_disposal",
+      "function": "del_threat_disposal",
+      "kind": "mutation"
+    },
+    {
+      "module": "threat_disposal",
+      "function": "get_threat_disposal",
+      "kind": "readonly"
+    },
+    {
+      "module": "threat_disposal",
+      "function": "get_threat_disposal_statitics",
+      "kind": "readonly"
+    },
+    {
+      "module": "threat_disposal",
+      "function": "set_threat_disposal",
+      "kind": "mutation"
+    },
+    {
+      "module": "trap",
+      "function": "add_trap_server",
+      "kind": "mutation"
+    },
+    {
+      "module": "trap",
+      "function": "del_trap_server",
+      "kind": "mutation"
+    },
+    {
+      "module": "trap",
+      "function": "get_trap_server",
+      "kind": "readonly"
+    },
+    {
+      "module": "trap",
+      "function": "set_trap_server",
+      "kind": "mutation"
+    },
+    {
+      "module": "upgrade",
+      "function": "get_notice_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "url",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "vsys",
+      "function": "get_vsys_info",
+      "kind": "readonly"
+    },
+    {
+      "module": "vsys",
+      "function": "get_vsys_info_specify",
+      "kind": "readonly"
+    },
+    {
+      "module": "vsys",
+      "function": "set_reset_vsys",
+      "kind": "mutation"
+    },
+    {
+      "module": "vsys",
+      "function": "set_vsys",
+      "kind": "mutation"
+    },
+    {
+      "module": "waf",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "weakpwd",
+      "function": "set_auto_upgrade_immediately",
+      "kind": "mutation"
+    },
+    {
+      "module": "zone",
+      "function": "add_zone",
+      "kind": "mutation"
+    },
+    {
+      "module": "zone",
+      "function": "del_zone",
+      "kind": "mutation"
+    },
+    {
+      "module": "zone",
+      "function": "get_zone_list",
+      "kind": "readonly"
+    },
+    {
+      "module": "zone",
+      "function": "set_zone",
+      "kind": "mutation"
+    }
+  ]
+}

@@ -3,10 +3,12 @@ Workflow management routes
 
 Provides API endpoints for workflow CRUD, execution, history, and AI generation.
 """
+
 from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import json
 import os
 import shutil
@@ -15,16 +17,18 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
-from fastapi import APIRouter, HTTPException, status, Query
+from fastapi import APIRouter, Body, HTTPException, Request, status, Query
 from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
-from flocks.workflow.runner import run_workflow, RunWorkflowResult
+from flocks.workflow.service_port import resolve_service_port
+from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.center import (
     WorkflowCenterError,
     WorkflowNotFoundError,
     WorkflowNotPublishedError,
+    WorkflowPortUnavailableError,
     get_workflow_health,
     invoke_published_workflow,
     list_registry_entries,
@@ -34,8 +38,6 @@ from flocks.workflow.center import (
     stop_workflow_service,
 )
 from flocks.session.recorder import Recorder
-from flocks.session.message import Message, MessageRole
-from flocks.session.session import Session
 from flocks.workflow.workflow_lint import lint_workflow
 from flocks.workflow.compiler import compile_workflow
 from flocks.workflow.fs_store import (
@@ -44,8 +46,48 @@ from flocks.workflow.fs_store import (
     read_workflow_from_fs as shared_read_workflow_from_fs,
     workflow_scan_dirs as _all_scan_dirs,
 )
+from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
+from flocks.ingest.syslog.constants import WORKFLOW_SYSLOG_CONFIG_PREFIX
+from flocks.workflow.execution_store import (
+    compact_history_for_storage,
+    compact_execution_summary,
+    compact_outputs_for_storage,
+    compact_step_for_storage,
+    create_execution_record,
+    derive_loop_progress,
+    load_execution_steps,
+    normalize_execution_status as _normalize_execution_status,
+    record_execution_step,
+    record_execution_result as _record_execution_result,
+    resolve_execution_outcome as _resolve_execution_outcome,
+    workflow_execution_key as _workflow_execution_key,
+    workflow_execution_step_prefix as _workflow_execution_step_prefix,
+)
 from flocks.workflow.io import load_workflow, dump_workflow
+from flocks.workflow.store import WorkflowStore
+from flocks.workflow.tool_context import build_workflow_tool_context
 from flocks.workflow.tools import get_tool_registry
+from flocks.workflow.visibility import is_hidden_workflow_data
+from flocks.workflow.triggers import (
+    TriggerDefinition,
+    TriggerEvent,
+    build_trigger_event,
+    preview_trigger_mapping,
+    set_workflow_json_triggers,
+    workflow_json_declares_triggers,
+    workflow_trigger_definitions_from_json,
+)
+from flocks.workflow.triggers.models import TriggerType
+from flocks.workflow.triggers.dispatcher import evaluate_trigger_filter
+from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
+from flocks.workflow.triggers.compat import (
+    kafka_trigger_to_legacy_config,
+    legacy_kafka_trigger_from_config,
+    legacy_schedule_trigger_from_config,
+    legacy_syslog_trigger_from_config,
+    schedule_trigger_to_legacy_config,
+    syslog_trigger_to_legacy_config,
+)
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
@@ -54,12 +96,53 @@ from flocks.utils.log import Log
 
 
 router = APIRouter()
+webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
+
+_PROGRESS_FLUSH_EVERY_STEPS = 5
+_WORKFLOW_LIST_ENRICH_CONCURRENCY = 8
+_WORKFLOW_API_HEALTH_INTERVAL_S = 5.0
+_WORKFLOW_API_HEALTH_PROBE_CONCURRENCY = 4
+
+_workflow_api_health_cache: Dict[str, bool] = {}
+_workflow_api_health_monitor_task: Optional[asyncio.Task[None]] = None
+
+_LEGACY_SINGLETON_TRIGGER_TYPES = frozenset({"schedule", "kafka", "syslog"})
+_WEBHOOK_TRIGGER_TYPES = frozenset({"webhook", "custom_webhook"})
+_WEBHOOK_AUTH_TYPES = frozenset({"api_key", "hmac"})
+_WORKFLOW_INTEGRATION_CONFIG_VERSION = 1
+_WORKFLOW_INTEGRATION_CONFIG_KIND = "workflow.integration-config"
+_WORKFLOW_INTEGRATION_CONFIG_PREFIX = "workflow_integration_config/"
+_WORKFLOW_CENTER_REGISTRY_PREFIX = "workflow_registry/"
+_WORKFLOW_CENTER_RELEASE_PREFIX = "workflow_release/"
+_WORKFLOW_CENTER_RUNTIME_PREFIX = "workflow_runtime/"
+_WORKFLOW_CENTER_LOCAL_PID_PREFIX = "workflow_local_pid/"
+_WORKFLOW_POLLER_CONFIG_PREFIX = "workflow_poller_config/"
+_WORKFLOW_CONFIG_TRIGGER_TYPES = frozenset(
+    {
+        "manual",
+        "schedule",
+        "webhook",
+        "syslog",
+        "kafka",
+        "internal_event",
+        "custom_webhook",
+        "custom_adapter",
+        "plugin",
+        "api",
+        "publish",
+        "api_service",
+        "service",
+    }
+)
+_WORKFLOW_CONFIG_SECRET_KEYS = frozenset({"apikey", "password", "token", "secret"})
+_WORKFLOW_CONFIG_SECRET_REF_KEYS = frozenset({"secretref", "secretreference"})
 
 
 @dataclass
 class ActiveWorkflowExecution:
     """Tracks an in-flight workflow execution that can be cancelled."""
+
     workflow_id: str
     task: asyncio.Task[Any]
     cancel_event: threading.Event
@@ -72,36 +155,84 @@ _active_workflow_executions: Dict[str, ActiveWorkflowExecution] = {}
 # Request/Response Models
 # =============================================================================
 
+
 class WorkflowCreateRequest(BaseModel):
     """Request to create a workflow"""
+
     model_config = ConfigDict(populate_by_name=True)
-    
+
     name: str = Field(..., description="Workflow name")
+    name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field("default", description="Workflow category")
     workflow_json: Dict[str, Any] = Field(..., alias="workflowJson", description="Workflow JSON definition")
     created_by: Optional[str] = Field(None, alias="createdBy", description="Creator")
+    source: Optional[Literal["project", "global"]] = Field(
+        "global",
+        description="Storage location: 'project' or 'global'; defaults to global user storage",
+    )
 
 
 class WorkflowUpdateRequest(BaseModel):
     """Request to update a workflow"""
+
     model_config = ConfigDict(populate_by_name=True)
-    
+
     name: Optional[str] = Field(None, description="Workflow name")
+    name_i18n: Optional[Dict[str, str]] = Field(None, alias="nameI18n", description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Workflow description")
     category: Optional[str] = Field(None, description="Workflow category")
     workflow_json: Optional[Dict[str, Any]] = Field(None, alias="workflowJson", description="Workflow JSON")
+    markdown_content: Optional[str] = Field(
+        None,
+        alias="markdownContent",
+        description="Human-editable workflow.md content",
+    )
+    edit_markdown_content: Optional[str] = Field(
+        None,
+        alias="editMarkdownContent",
+        description="Legacy alias for markdownContent",
+    )
     status: Optional[Literal["draft", "active", "archived"]] = Field(None, description="Status")
+
+
+WorkflowCapabilityState = Literal["unconfigured", "starting", "running", "stopped", "error"]
+
+
+class WorkflowCapabilityStatusResponse(BaseModel):
+    configured: bool
+    state: WorkflowCapabilityState
+
+
+class WorkflowTriggerStatusItemResponse(BaseModel):
+    id: str
+    type: TriggerType
+    name: Optional[str] = None
+    state: WorkflowCapabilityState
+    rawState: Optional[str] = None
+
+
+class WorkflowTriggerCapabilityStatusResponse(WorkflowCapabilityStatusResponse):
+    count: int = 0
+    items: List[WorkflowTriggerStatusItemResponse] = Field(default_factory=list)
+
+
+class WorkflowIntegrationStatusResponse(BaseModel):
+    api: WorkflowCapabilityStatusResponse
+    trigger: WorkflowTriggerCapabilityStatusResponse
 
 
 class WorkflowResponse(BaseModel):
     """Workflow response"""
+
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
-    
+
     id: str = Field(..., description="Workflow ID")
     name: str = Field(..., description="Workflow name")
+    nameI18n: Optional[Dict[str, str]] = Field(None, description="Localized workflow display names")
     description: Optional[str] = Field(None, description="Description")
     markdownContent: Optional[str] = Field(None, description="Workflow markdown documentation content")
+    editMarkdownContent: Optional[str] = Field(None, description="Human-editable workflow markdown document content")
     category: str = Field("default", description="Category")
     workflowJson: Dict[str, Any] = Field(..., description="Workflow JSON")
     status: str = Field("draft", description="Status")
@@ -110,12 +241,34 @@ class WorkflowResponse(BaseModel):
     createdAt: int = Field(..., description="Created timestamp (ms)")
     updatedAt: int = Field(..., description="Updated timestamp (ms)")
     stats: Dict[str, Any] = Field(default_factory=dict, description="Statistics")
+    integrationStatus: Optional[WorkflowIntegrationStatusResponse] = Field(
+        None,
+        description="API publishing and trigger runtime summary",
+    )
+
+
+class WorkflowSummaryResponse(BaseModel):
+    """Lightweight workflow data used by card lists."""
+
+    id: str
+    name: str
+    nameI18n: Optional[Dict[str, str]] = None
+    description: Optional[str] = None
+    category: str = "default"
+    status: str = "draft"
+    source: Optional[str] = None
+    createdAt: int
+    updatedAt: int
+    nodeCount: int = 0
+    stats: Dict[str, Any] = Field(default_factory=dict)
+    integrationStatus: WorkflowIntegrationStatusResponse
 
 
 class WorkflowRunRequest(BaseModel):
     """Request to run a workflow"""
+
     model_config = ConfigDict(populate_by_name=True)
-    
+
     inputs: Optional[Dict[str, Any]] = Field(default_factory=dict, description="Input parameters")
     timeout_s: Optional[float] = Field(None, alias="timeoutS", description="Timeout in seconds")
     trace: bool = Field(False, description="Enable tracing")
@@ -126,8 +279,9 @@ class WorkflowRunRequest(BaseModel):
 
 class WorkflowExecutionResponse(BaseModel):
     """Workflow execution response"""
+
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
-    
+
     id: str = Field(..., description="Execution ID")
     workflowId: str = Field(..., description="Workflow ID")
     inputParams: Dict[str, Any] = Field(default_factory=dict, description="Input parameters")
@@ -138,12 +292,31 @@ class WorkflowExecutionResponse(BaseModel):
     duration: Optional[float] = Field(None, description="Duration (seconds)")
     executionLog: List[Dict[str, Any]] = Field(default_factory=list, description="Execution log")
     errorMessage: Optional[str] = Field(None, description="Error message")
+    triggerId: Optional[str] = Field(None, description="Trigger ID")
+    triggerType: Optional[str] = Field(None, description="Trigger type")
+    deliveryId: Optional[str] = Field(None, description="Trigger delivery ID")
+    attempt: Optional[int] = Field(None, description="Trigger attempt")
+    triggerSource: Optional[str] = Field(None, description="Trigger source")
+    currentNodeId: Optional[str] = Field(None, description="Current running node ID")
+    currentNodeType: Optional[str] = Field(None, description="Current running node type")
+    currentPhase: Optional[str] = Field(None, description="Current execution phase")
+    currentStepIndex: Optional[int] = Field(None, description="Current step index")
+    stepCount: Optional[int] = Field(None, description="Persisted execution step count")
+    stepLogOffset: Optional[int] = Field(None, description="Returned step log offset")
+    stepLogLimit: Optional[int] = Field(None, description="Returned step log limit")
+    stepLogTotal: Optional[int] = Field(None, description="Total persisted step logs")
+    loopProgress: Optional[Dict[str, Any]] = Field(None, description="Best-effort loop progress metadata")
 
 
 class WorkflowCenterPublishRequest(BaseModel):
-    """Request to publish a workflow as a Docker service."""
+    """Request to publish a workflow as an API service."""
 
     image: Optional[str] = Field(None, description="Docker image used to run service")
+    driver: Optional[Literal["local", "docker"]] = Field(
+        None,
+        description="Service driver. Defaults to FLOCKS_WORKFLOW_SERVICE_DRIVER or local.",
+    )
+    port: Optional[int] = Field(None, ge=1, le=65535, description="Stable host listening port")
 
 
 class WorkflowCenterInvokeRequest(BaseModel):
@@ -157,8 +330,9 @@ class WorkflowCenterInvokeRequest(BaseModel):
 
 class WorkflowStatsResponse(BaseModel):
     """Workflow statistics response"""
+
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
-    
+
     workflowId: Optional[str] = Field(None, description="Workflow ID (null for aggregate)")
     callCount: int = Field(0, description="Total calls")
     successCount: int = Field(0, description="Successful calls")
@@ -184,12 +358,37 @@ def _global_workflow_dir(workflow_id: str) -> Path:
     return Path.home() / ".flocks" / "plugins" / "workflows" / workflow_id
 
 
+def _existing_workflow_dir(workflow_id: str) -> Optional[Path]:
+    """Return the highest-priority existing directory for a workflow."""
+    result: Optional[Path] = None
+    for root, _source in _all_scan_dirs():
+        wf_dir = root / workflow_id
+        if (wf_dir / "workflow.json").is_file():
+            result = wf_dir
+    return result
+
+
+def _workflow_config_dir(workflow_id: str, workflow_data: Optional[Dict[str, Any]] = None) -> Path:
+    """Return the directory where workflow-local config.json should be written."""
+    existing = _existing_workflow_dir(workflow_id)
+    if existing is not None:
+        return existing
+    if workflow_data and workflow_data.get("source") == "global":
+        return _global_workflow_dir(workflow_id)
+    return _workflow_dir(workflow_id)
+
+
+def _workflow_integration_config_key(workflow_id: str) -> str:
+    """Storage key for the publish/integration template used by the UI."""
+    return f"{_WORKFLOW_INTEGRATION_CONFIG_PREFIX}{workflow_id}"
+
+
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Read workflow data from the filesystem.
 
-    Search order (lowest → highest priority), same roots as
-    resolve_global_workflow_roots / resolve_project_workflow_roots; per-id dir
-    is ``<root>/<id>/`` with ``workflow.json`` inside.
+    Search order (lowest → highest priority) visits project-bundled roots before
+    global user roots; per-id dir is ``<root>/<id>/`` with ``workflow.json``
+    inside.
     """
     return shared_read_workflow_from_fs(workflow_id)
 
@@ -202,76 +401,14 @@ async def _build_workflow_tool_context(
     message_id: Optional[str] = None,
     agent: Optional[str] = None,
 ) -> ToolContext:
-    """Build a real ToolContext for workflow execution.
-
-    Prefer the caller-provided session/message. When absent, create a temporary
-    parent session and synthetic user message so workflow-internal tools such as
-    `task` can resolve a valid parent session.
-    """
-    effective_session_id = str(session_id or "").strip()
-    effective_message_id = str(message_id or "").strip()
-    effective_agent = str(agent or "").strip()
-
-    workspace_dir = os.getcwd()
-    project_id = "default"
-    try:
-        from flocks.project.instance import Instance
-
-        workspace_dir = str(getattr(Instance, "directory", None) or workspace_dir)
-        project = getattr(Instance, "project", None)
-        if project is not None and getattr(project, "id", None):
-            project_id = str(project.id)
-    except Exception:
-        workspace_dir = str(_find_workspace_root())
-
-    parent_session = None
-    if effective_session_id:
-        parent_session = await Session.get_by_id(effective_session_id)
-        if not parent_session:
-            raise HTTPException(status_code=400, detail=f"Parent session not found: {effective_session_id}")
-        workspace_dir = str(getattr(parent_session, "directory", None) or workspace_dir)
-        if getattr(parent_session, "project_id", None):
-            project_id = str(parent_session.project_id)
-        if not effective_agent:
-            effective_agent = str(getattr(parent_session, "agent", None) or "rex")
-    else:
-        parent_session = await Session.create(
-            project_id=project_id,
-            directory=workspace_dir,
-            title=f"Workflow {action_name}: {workflow_id}",
-            agent=effective_agent or "rex",
-            category="task",
-            metadata={
-                "workflowTempParent": True,
-                "hideFromSessionManager": True,
-                "workflowId": workflow_id,
-                "workflowAction": action_name,
-            },
-        )
-        effective_session_id = parent_session.id
-        workspace_dir = str(getattr(parent_session, "directory", None) or workspace_dir)
-        if not effective_agent:
-            effective_agent = str(getattr(parent_session, "agent", None) or "rex")
-
-    if not effective_message_id:
-        message = await Message.create(
-            session_id=effective_session_id,
-            role=MessageRole.USER,
-            content=f"[Workflow {action_name}] {workflow_id}",
-            agent=effective_agent or "rex",
-            synthetic=True,
-        )
-        effective_message_id = message.id
-
-    return ToolContext(
-        session_id=effective_session_id,
-        message_id=effective_message_id,
-        agent=effective_agent or "rex",
+    """Build a real ToolContext for workflow execution."""
+    return await build_workflow_tool_context(
+        workflow_id=workflow_id,
+        action_name=action_name,
+        session_id=session_id,
+        message_id=message_id,
+        agent=agent,
         event_publish_callback=publish_event,
-        extra={
-            "workspace_dir": workspace_dir,
-            "main_session_key": effective_session_id,
-        },
     )
 
 
@@ -280,6 +417,7 @@ def _write_workflow_to_fs(
     workflow_json: Dict[str, Any],
     meta: Dict[str, Any],
     markdown_content: Optional[str] = None,
+    edit_markdown_content: Optional[str] = None,
     *,
     global_store: bool = False,
 ) -> None:
@@ -294,13 +432,63 @@ def _write_workflow_to_fs(
     with open(wf_dir / "workflow.json", "w", encoding="utf-8") as f:
         json.dump(workflow_json, f, ensure_ascii=False, indent=2)
 
-    meta_to_save = {k: v for k, v in meta.items() if k not in ("workflowJson", "markdownContent", "stats", "source")}
+    meta_to_save = {
+        k: v
+        for k, v in meta.items()
+        if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
+    }
     with open(wf_dir / "meta.json", "w", encoding="utf-8") as f:
         json.dump(meta_to_save, f, ensure_ascii=False, indent=2)
+
+    if markdown_content is None and edit_markdown_content is not None:
+        markdown_content = edit_markdown_content
 
     if markdown_content is not None:
         with open(wf_dir / "workflow.md", "w", encoding="utf-8") as f:
             f.write(markdown_content)
+
+    legacy_edit_file = wf_dir / "workflow.edit.md"
+    if legacy_edit_file.exists():
+        legacy_edit_file.unlink()
+
+
+def _apply_new_workflow_runtime_defaults(workflow_json: Dict[str, Any]) -> Dict[str, Any]:
+    """Return workflow JSON with runtime defaults for newly created workflows."""
+    normalized = dict(workflow_json)
+    metadata = normalized.get("metadata")
+    if not isinstance(metadata, dict):
+        metadata = {}
+    else:
+        metadata = dict(metadata)
+    runtime = metadata.get("runtime")
+    if not isinstance(runtime, dict):
+        runtime = {}
+    else:
+        runtime = dict(runtime)
+
+    runtime.setdefault("strict_edge_mapping", True)
+    runtime.setdefault("dataflow_mode", "vertex_cache")
+    metadata["runtime"] = runtime
+    normalized["metadata"] = metadata
+    return normalized
+
+
+def _strict_edge_mapping_lint_errors(workflow: Workflow) -> List[Dict[str, Any]]:
+    """Return strict edge-mapping lint errors that would fail execution."""
+    return [
+        item
+        for item in lint_workflow(workflow)
+        if item.get("severity") == "error" and item.get("kind") == "implicit_full_payload_edge"
+    ]
+
+
+def _schema_lint_errors(workflow: Workflow) -> List[Dict[str, Any]]:
+    """Return lightweight schema lint errors that would fail execution."""
+    return [
+        item
+        for item in lint_workflow(workflow)
+        if item.get("severity") == "error" and str(item.get("kind", "")).startswith("schema_")
+    ]
 
 
 def _delete_workflow_from_fs(workflow_id: str) -> bool:
@@ -318,6 +506,71 @@ def _delete_workflow_from_fs(workflow_id: str) -> bool:
     return deleted
 
 
+async def _remove_storage_key_if_exists(key: str) -> None:
+    try:
+        await Storage.remove(key)
+    except Storage.NotFoundError:
+        pass
+    except Exception as exc:
+        log.warning("workflow.delete.storage_key_remove_failed", {"key": key, "error": str(exc)})
+
+
+async def _remove_storage_prefix(prefix: str) -> None:
+    try:
+        keys = await Storage.list(prefix)
+    except Exception as exc:
+        log.warning("workflow.delete.storage_prefix_list_failed", {"prefix": prefix, "error": str(exc)})
+        return
+
+    for key in keys:
+        try:
+            await Storage.remove(key)
+        except Storage.NotFoundError:
+            pass
+        except Exception as exc:
+            log.warning("workflow.delete.storage_key_remove_failed", {"key": key, "error": str(exc)})
+
+
+async def _stop_workflow_runtime_resources(workflow_id: str) -> None:
+    for exec_id, active in list(_active_workflow_executions.items()):
+        if active.workflow_id == workflow_id:
+            active.cancel_event.set()
+
+    try:
+        await stop_workflow_service(workflow_id)
+    except Exception as exc:
+        log.debug("workflow.delete.stop_service_ignored", {"id": workflow_id, "error": str(exc)})
+
+    try:
+        await default_trigger_runtime.restart_workflow(workflow_id, {"triggers": []})
+    except Exception as exc:
+        log.debug("workflow.delete.stop_triggers_ignored", {"id": workflow_id, "error": str(exc)})
+
+
+async def _cleanup_workflow_storage(workflow_id: str) -> None:
+    try:
+        await WorkflowStore.delete_stats(workflow_id)
+        await WorkflowStore.delete_config(workflow_id)
+        await WorkflowStore.delete_executions_for_workflow(workflow_id)
+        await WorkflowStore.kv_remove(_api_service_key(workflow_id))
+        await WorkflowStore.kv_remove(f"{_WORKFLOW_CENTER_REGISTRY_PREFIX}{workflow_id}")
+        await WorkflowStore.kv_remove(f"{_WORKFLOW_CENTER_RUNTIME_PREFIX}{workflow_id}")
+        await WorkflowStore.kv_remove(f"{_WORKFLOW_CENTER_LOCAL_PID_PREFIX}{workflow_id}")
+        await WorkflowStore.kv_clear(f"{_WORKFLOW_CENTER_RELEASE_PREFIX}{workflow_id}/")
+    except Exception as exc:
+        log.warning(
+            "workflow.delete.workflow_store_cleanup_failed",
+            {
+                "workflow_id": workflow_id,
+                "error": str(exc),
+            },
+        )
+
+    service_dir = Config.get_data_path() / "workflow-services" / "workflows" / workflow_id
+    if service_dir.is_dir():
+        shutil.rmtree(service_dir, ignore_errors=True)
+
+
 def _scan_workflow_base_dir(base_dir: Path, source: str) -> Dict[str, Dict[str, Any]]:
     """Scan a single workflow base directory and return {id: data} dict."""
     results: Dict[str, Dict[str, Any]] = {}
@@ -327,7 +580,7 @@ def _scan_workflow_base_dir(base_dir: Path, source: str) -> Dict[str, Dict[str, 
         if not entry.is_dir():
             continue
         data = _read_workflow_dir(entry, entry.name, source)
-        if data is not None:
+        if data is not None and not is_hidden_workflow_data(data):
             results[entry.name] = data
     return results
 
@@ -335,9 +588,8 @@ def _scan_workflow_base_dir(base_dir: Path, source: str) -> Dict[str, Dict[str, 
 def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     """Scan global and project workflow directories and return merged list.
 
-    Scan order matches *_all_scan_dirs()* (lowest -> highest priority): each
-    root from *resolve_global_workflow_roots* then each from
-    *resolve_project_workflow_roots(workspace)*; under each root, immediate
+    Scan order matches *_all_scan_dirs()* (lowest -> highest priority): project
+    bundle roots first, then global user roots; under each root, immediate
     subdirectories with *workflow.json* are workflows.
 
     Later entries override earlier ones when the workflow directory name (*id*)
@@ -347,6 +599,17 @@ def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     for scan_path, source in _all_scan_dirs():
         by_id.update(_scan_workflow_base_dir(scan_path, source))
     return list(by_id.values())
+
+
+async def sync_workflows_from_filesystem() -> int:
+    """Best-effort startup sync for filesystem-backed workflows.
+
+    The filesystem is the source of truth for workflow definitions. Startup only
+    needs to migrate any legacy Storage-only records to disk and report how many
+    workflows are currently discoverable from the configured workflow roots.
+    """
+    await _migrate_storage_to_filesystem()
+    return len(_list_workflows_from_fs())
 
 
 async def _migrate_storage_to_filesystem() -> None:
@@ -414,67 +677,437 @@ async def _migrate_storage_to_filesystem() -> None:
 # Storage Helpers (Stats & Execution only)
 # =============================================================================
 
+
 def _workflow_stats_key(workflow_id: str) -> str:
     return f"workflow/{workflow_id}/stats"
 
 
-def _workflow_execution_key(exec_id: str) -> str:
-    return f"workflow_execution/{exec_id}"
+def _syslog_config_key(workflow_id: str) -> str:
+    return f"{WORKFLOW_SYSLOG_CONFIG_PREFIX}{workflow_id}"
 
 
-def _normalize_execution_status(status: str) -> str:
-    """Map runner status values to API status values."""
-    normalized = (status or "").strip().upper()
-    if normalized == "SUCCEEDED":
-        return "success"
-    if normalized == "FAILED":
-        return "error"
-    if normalized == "TIMED_OUT":
-        return "timeout"
-    if normalized == "CANCELLED":
-        return "cancelled"
-    return (status or "error").strip().lower() or "error"
+async def _read_legacy_trigger_defs(workflow_id: str) -> List[TriggerDefinition]:
+    triggers: List[TriggerDefinition] = []
+    for kind, converter in (
+        ("workflow_kafka_config", legacy_kafka_trigger_from_config),
+        ("workflow_poller_config", legacy_schedule_trigger_from_config),
+        ("workflow_syslog_config", legacy_syslog_trigger_from_config),
+    ):
+        try:
+            config = await WorkflowStore.get_config(workflow_id, kind=kind)
+        except Exception:
+            config = None
+        trigger = converter(config)
+        if trigger is not None:
+            triggers.append(trigger)
+    return triggers
 
 
-def _extract_business_failure_message(outputs: Dict[str, Any]) -> Optional[str]:
-    """Return a user-facing failure reason from workflow outputs."""
-    for key in ("reason", "error_message", "errorMessage", "message"):
-        value = outputs.get(key)
-        if isinstance(value, str) and value.strip():
-            return value.strip()
-    return None
+async def _get_workflow_trigger_defs(
+    workflow_id: str,
+    workflow_data: Optional[Dict[str, Any]] = None,
+) -> List[TriggerDefinition]:
+    data = workflow_data or _read_workflow_from_fs(workflow_id)
+    if not data:
+        return []
+    workflow_json = data.get("workflowJson") or {}
+    triggers = workflow_trigger_definitions_from_json(workflow_json)
+    # Once the workflow JSON explicitly declares a trigger list, it becomes the
+    # single source of truth, even when the list is empty.
+    if workflow_json_declares_triggers(workflow_json):
+        return triggers
+    return await _read_legacy_trigger_defs(workflow_id)
 
 
-def _resolve_execution_outcome(result: RunWorkflowResult) -> tuple[str, Optional[str]]:
-    """Resolve API execution status from runner status and workflow outputs."""
-    status_value = _normalize_execution_status(result.status)
-    error_message = result.error
+def _trigger_to_api_dict(trigger: TriggerDefinition) -> Dict[str, Any]:
+    return trigger.model_dump(mode="json", by_alias=True, exclude_none=True)
 
-    if status_value != "success" or not isinstance(result.outputs, dict):
-        return status_value, error_message
 
-    if result.outputs.get("workflow_success") is False:
-        return (
-            "error",
-            error_message
-            or _extract_business_failure_message(result.outputs)
-            or "Workflow reported business failure.",
+def _drop_none_values(payload: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _normalized_config_key(key: Any) -> str:
+    return str(key).replace("_", "").replace("-", "").lower()
+
+
+def _sanitize_workflow_config_secrets(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_sanitize_workflow_config_secrets(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+
+    sanitized: Dict[str, Any] = {}
+    for key, nested in value.items():
+        normalized_key = _normalized_config_key(key)
+        is_secret_key = (
+            normalized_key in _WORKFLOW_CONFIG_SECRET_KEYS
+            or normalized_key.endswith(("apikey", "password", "token", "secret"))
+        ) and normalized_key not in _WORKFLOW_CONFIG_SECRET_REF_KEYS
+        if is_secret_key:
+            if nested not in (None, ""):
+                configured_key = "apiKeyConfigured" if normalized_key == "apikey" else f"{key}Configured"
+                sanitized[configured_key] = True
+            continue
+        sanitized[str(key)] = _sanitize_workflow_config_secrets(nested)
+    return sanitized
+
+
+def _normalize_workflow_integration_config_template(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    config: Dict[str, Any],
+) -> Dict[str, Any]:
+    if not isinstance(config, dict):
+        raise HTTPException(status_code=422, detail="config must be a JSON object")
+
+    payload = _sanitize_workflow_config_secrets(config)
+    payload.pop("runtime", None)
+
+    kind = payload.get("kind", _WORKFLOW_INTEGRATION_CONFIG_KIND)
+    if kind != _WORKFLOW_INTEGRATION_CONFIG_KIND:
+        raise HTTPException(
+            status_code=422,
+            detail=f"config.kind must be {_WORKFLOW_INTEGRATION_CONFIG_KIND}",
         )
+    payload["kind"] = _WORKFLOW_INTEGRATION_CONFIG_KIND
 
-    return status_value, error_message
+    version = payload.get("version", _WORKFLOW_INTEGRATION_CONFIG_VERSION)
+    if not isinstance(version, int):
+        raise HTTPException(status_code=422, detail="config.version must be an integer")
+    payload["version"] = version
+
+    workflow = payload.get("workflow") or {}
+    if not isinstance(workflow, dict):
+        raise HTTPException(status_code=422, detail="config.workflow must be an object")
+    if workflow.get("id") not in (None, workflow_id):
+        raise HTTPException(status_code=409, detail="config.workflow.id does not match the route workflow id")
+    workflow["id"] = workflow_id
+    workflow.setdefault("name", workflow_data.get("name") or workflow_id)
+    if workflow_data.get("category") is not None:
+        workflow.setdefault("category", workflow_data.get("category"))
+    if workflow_data.get("source") is not None:
+        workflow.setdefault("source", workflow_data.get("source"))
+    payload["workflow"] = workflow
+
+    publish = payload.get("publish", {})
+    if publish is None:
+        publish = {}
+    if not isinstance(publish, dict):
+        raise HTTPException(status_code=422, detail="config.publish must be an object")
+    payload["publish"] = publish
+
+    if "triggers" not in payload and isinstance(payload.get("integrations"), list):
+        payload["triggers"] = payload["integrations"]
+    triggers = payload.get("triggers", [])
+    if triggers is None:
+        triggers = []
+    if not isinstance(triggers, list):
+        raise HTTPException(status_code=422, detail="config.triggers must be an array")
+    for index, trigger in enumerate(triggers):
+        if not isinstance(trigger, dict):
+            raise HTTPException(status_code=422, detail=f"config.triggers[{index}] must be an object")
+        trigger_type = str(trigger.get("type") or "").strip()
+        if not trigger_type:
+            raise HTTPException(status_code=422, detail=f"config.triggers[{index}].type is required")
+        normalized_type = trigger_type.lower().replace("-", "_")
+        if normalized_type not in _WORKFLOW_CONFIG_TRIGGER_TYPES:
+            raise HTTPException(
+                status_code=422,
+                detail=f"Unsupported config trigger type: {trigger_type}",
+            )
+        trigger["type"] = normalized_type
+    payload["triggers"] = triggers
+    payload["updatedAt"] = int(time.time() * 1000)
+    return payload
 
 
-async def _record_execution_result(workflow_id: str, exec_id: str, exec_data: Dict[str, Any]) -> None:
-    """Persist the final execution record and audit trail."""
-    await Storage.write(_workflow_execution_key(exec_id), exec_data)
+def _auth_for_config(auth: Optional[Any]) -> Optional[Dict[str, Any]]:
+    if auth is None:
+        return None
+    if hasattr(auth, "model_dump"):
+        auth_payload = auth.model_dump(mode="json", by_alias=True, exclude_none=True)
+    elif isinstance(auth, dict):
+        auth_payload = dict(auth)
+    else:
+        return None
+
+    if "apiKey" in auth_payload:
+        auth_payload.pop("apiKey", None)
+        auth_payload["apiKeyConfigured"] = True
+    return auth_payload
+
+
+def _trigger_for_config(workflow_id: str, trigger: TriggerDefinition) -> Dict[str, Any]:
+    payload = _trigger_to_api_dict(trigger)
+    if trigger.auth is not None:
+        payload["auth"] = _auth_for_config(trigger.auth)
+
+    if trigger.type in ("webhook", "custom_webhook"):
+        payload["invoke"] = {
+            "method": str((trigger.source or {}).get("method") or "POST").upper(),
+            "path": f"/webhook/workflows/{workflow_id}/{trigger.id}",
+        }
+    return payload
+
+
+def _publish_for_config(service: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+    service = service if isinstance(service, dict) else None
+    status_value = str(service.get("status") or "stopped") if service else "stopped"
+    return _drop_none_values(
+        {
+            "type": "api_service",
+            "enabled": bool(service) and status_value not in {"stopped", "unpublished"},
+            "status": status_value,
+            "driver": service.get("driver") if service else None,
+            "port": resolve_service_port(service) if service else None,
+            "serviceUrl": service.get("serviceUrl") if service else None,
+            "invokeUrl": service.get("invokeUrl") if service else None,
+            "containerName": service.get("containerName") if service else None,
+            "publishedAt": service.get("publishedAt") if service else None,
+            "stoppedAt": service.get("stoppedAt") if service else None,
+            "apiKeyConfigured": bool(service and service.get("apiKey")),
+        }
+    )
+
+
+async def _build_workflow_integration_config(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    *,
+    triggers: Optional[List[TriggerDefinition]] = None,
+    service: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    trigger_defs = triggers
+    if trigger_defs is None:
+        trigger_defs = await _get_workflow_trigger_defs(workflow_id, workflow_data)
+    if service is None:
+        service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+    now_ms = int(time.time() * 1000)
+    return {
+        "version": _WORKFLOW_INTEGRATION_CONFIG_VERSION,
+        "kind": "workflow.integration-config",
+        "workflow": _drop_none_values(
+            {
+                "id": workflow_id,
+                "name": workflow_data.get("name") or workflow_id,
+                "category": workflow_data.get("category"),
+                "source": workflow_data.get("source"),
+            }
+        ),
+        "updatedAt": now_ms,
+        "publish": _publish_for_config(service),
+        "triggers": [_trigger_for_config(workflow_id, trigger) for trigger in trigger_defs],
+    }
+
+
+async def _build_workflow_integration_runtime(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+) -> Dict[str, Any]:
+    triggers = await _get_workflow_trigger_defs(workflow_id, workflow_data)
+    service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+    statuses: Dict[str, Dict[str, Any]] = {}
     try:
-        await Recorder.record_workflow_execution(
-            exec_id=exec_id,
-            workflow_id=workflow_id,
-            run_result=exec_data,
+        statuses = {
+            item.get("triggerId"): item
+            for item in await default_trigger_runtime.get_workflow_trigger_statuses(
+                workflow_id,
+                set_workflow_json_triggers(workflow_data.get("workflowJson") or {}, triggers),
+            )
+            if item.get("triggerId")
+        }
+    except Exception as exc:
+        log.warning(
+            "workflow.config.runtime_status_failed",
+            {
+                "id": workflow_id,
+                "error": str(exc),
+            },
         )
-    except Exception:
-        pass
+
+    return {
+        "publish": _publish_for_config(service),
+        "triggers": [
+            {
+                "trigger": _trigger_to_api_dict(trigger),
+                "status": statuses.get(trigger.id),
+            }
+            for trigger in triggers
+        ],
+    }
+
+
+async def _write_workflow_integration_config(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    *,
+    triggers: Optional[List[TriggerDefinition]] = None,
+    service: Optional[Dict[str, Any]] = None,
+) -> tuple[Path, Dict[str, Any]]:
+    config_dir = _workflow_config_dir(workflow_id, workflow_data)
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = await _build_workflow_integration_config(
+        workflow_id,
+        workflow_data,
+        triggers=triggers,
+        service=service,
+    )
+    config_path = config_dir / "config.json"
+    config_path.write_text(
+        json.dumps(config, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
+    return config_path, config
+
+
+async def _read_stored_workflow_integration_config(workflow_id: str) -> Optional[Dict[str, Any]]:
+    stored = await WorkflowStore.get_config(workflow_id)
+    return stored if isinstance(stored, dict) else None
+
+
+async def _read_file_workflow_integration_config(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    config_path: Path,
+) -> Optional[Dict[str, Any]]:
+    if not config_path.is_file():
+        return None
+    raw_config = json.loads(config_path.read_text(encoding="utf-8"))
+    if not isinstance(raw_config, dict):
+        raise HTTPException(status_code=422, detail="workflow config file must contain a JSON object")
+    return _normalize_workflow_integration_config_template(workflow_id, workflow_data, raw_config)
+
+
+async def _load_workflow_integration_config_template(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    config_path: Path,
+) -> tuple[Optional[Dict[str, Any]], str]:
+    """Load publish template from Storage first, then migrate legacy config.json."""
+    stored = await _read_stored_workflow_integration_config(workflow_id)
+    if stored is not None:
+        return stored, "storage"
+
+    file_config = await _read_file_workflow_integration_config(workflow_id, workflow_data, config_path)
+    if file_config is not None:
+        await WorkflowStore.put_config(workflow_id, file_config)
+        log.info(
+            "workflow.config.migrated_from_file",
+            {
+                "id": workflow_id,
+                "path": str(config_path),
+                "storage_key": _workflow_integration_config_key(workflow_id),
+            },
+        )
+        return file_config, "file_migrated"
+
+    return None, "missing"
+
+
+def _replace_or_append_trigger(
+    triggers: List[TriggerDefinition],
+    trigger: TriggerDefinition,
+) -> List[TriggerDefinition]:
+    updated = [existing for existing in triggers if existing.id != trigger.id]
+    updated.append(trigger)
+    return updated
+
+
+def _disable_legacy_trigger_of_type(
+    workflow_id: str,
+    trigger_type: str,
+) -> tuple[Optional[str], Optional[Dict[str, Any]]]:
+    now_ms = int(time.time() * 1000)
+    if trigger_type == "kafka":
+        return (
+            _kafka_config_key(workflow_id),
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+    if trigger_type == "schedule":
+        return (
+            f"workflow_poller_config/{workflow_id}",
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+    if trigger_type == "syslog":
+        return (
+            _syslog_config_key(workflow_id),
+            {"workflowId": workflow_id, "enabled": False, "updatedAt": now_ms},
+        )
+    return None, None
+
+
+async def _sync_trigger_legacy_state(workflow_id: str, trigger: TriggerDefinition) -> Optional[Dict[str, Any]]:
+    if trigger.type == "kafka":
+        config = kafka_trigger_to_legacy_config(workflow_id, trigger)
+        await WorkflowStore.put_config(workflow_id, config, kind="workflow_kafka_config")
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        return await _kafka_default_manager.restart_workflow(workflow_id)
+    if trigger.type == "schedule":
+        config = schedule_trigger_to_legacy_config(workflow_id, trigger)
+        await WorkflowStore.put_config(workflow_id, config, kind="workflow_poller_config")
+        from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+        return await _poller_default_manager.restart_workflow(workflow_id)
+    if trigger.type == "syslog":
+        config = syslog_trigger_to_legacy_config(workflow_id, trigger)
+        await WorkflowStore.put_config(workflow_id, config, kind="workflow_syslog_config")
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        return await _syslog_default_manager.restart_workflow(workflow_id)
+    return await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
+
+
+async def _remove_legacy_trigger_state(workflow_id: str, trigger: TriggerDefinition) -> None:
+    """Remove legacy trigger configs so deleted unified triggers do not reappear."""
+    if trigger.type == "kafka":
+        try:
+            from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+            await _kafka_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        await WorkflowStore.delete_config(workflow_id, kind="workflow_kafka_config")
+        return
+    if trigger.type == "schedule":
+        try:
+            from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+            await _poller_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        await WorkflowStore.delete_config(workflow_id, kind="workflow_poller_config")
+        return
+    if trigger.type == "syslog":
+        try:
+            from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+            await _syslog_default_manager.stop_workflow(workflow_id)
+        except Exception:
+            pass
+        await WorkflowStore.delete_config(workflow_id, kind="workflow_syslog_config")
+
+
+async def _persist_workflow_triggers(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+    triggers: List[TriggerDefinition],
+) -> Dict[str, Any]:
+    workflow_json = workflow_data.get("workflowJson") or {}
+    updated_json = set_workflow_json_triggers(workflow_json, triggers)
+    data = dict(workflow_data)
+    data["workflowJson"] = updated_json
+    data["updatedAt"] = int(time.time() * 1000)
+    is_global = data.get("source") == "global"
+    _write_workflow_to_fs(
+        workflow_id,
+        updated_json,
+        data,
+        data.get("markdownContent"),
+        global_store=is_global,
+    )
+    return data
 
 
 async def _run_workflow_execution_task(
@@ -487,25 +1120,134 @@ async def _run_workflow_execution_task(
     tool_context: Optional[ToolContext] = None,
 ) -> None:
     """Execute a workflow in the background and keep the execution record updated."""
-    exec_key = _workflow_execution_key(exec_id)
     start_time = time.time()
-    step_history: list[dict[str, Any]] = []
+    step_count = 0
     loop = asyncio.get_running_loop()
-    def _on_step_complete(step_result) -> None:
-        step_dict = step_result.model_dump(mode="json")
-        step_history.append(step_dict)
+    pending_step_index: Optional[int] = None
+    pending_step: Optional[Dict[str, Any]] = None
+    execution_summary: Dict[str, Any] = {
+        "id": exec_id,
+        "workflowId": workflow_id,
+        "inputParams": compact_outputs_for_storage(req.inputs or {}),
+        "status": "running",
+        "startedAt": int(start_time * 1000),
+        "executionLog": [],
+        "currentPhase": "queued",
+        "currentStepIndex": 0,
+        "stepCount": 0,
+    }
+
+    def _write_progress(update_fields: Dict[str, Any]) -> None:
         try:
-            current = asyncio.run_coroutine_threadsafe(Storage.read(exec_key), loop).result(timeout=5)
-            update = {
-                **current,
-                "executionLog": list(step_history),
-            }
-            asyncio.run_coroutine_threadsafe(Storage.write(exec_key, update), loop).result(timeout=5)
+            execution_summary.update(update_fields)
+            asyncio.run_coroutine_threadsafe(
+                WorkflowStore.upsert_execution(compact_execution_summary(execution_summary)), loop
+            ).result(timeout=5)
         except Exception as exc:
-            log.warning("workflow.step_progress.write_failed", {
-                "exec_id": exec_id,
-                "error": str(exc),
-            })
+            log.warning(
+                "workflow.step_progress.write_failed",
+                {
+                    "exec_id": exec_id,
+                    "error": str(exc),
+                },
+            )
+
+    def _on_step_start(_run_id, step_index, node, _inputs):
+        nonlocal pending_step_index, pending_step
+        node_id = getattr(node, "id", None)
+        node_type = getattr(node, "type", None)
+        loop_progress = derive_loop_progress(
+            node_id=node_id,
+            global_step_index=step_index,
+            inputs=_inputs,
+            outputs=None,
+        )
+        pending_step_index = step_index
+        pending_step = compact_step_for_storage(
+            {
+                "node_id": node_id,
+                "node_type": node_type,
+                "inputs": _inputs if isinstance(_inputs, dict) else {},
+                "outputs": {},
+                "error": "Run cancelled before node completed",
+            }
+        )
+        _write_progress(
+            {
+                "currentNodeId": node_id,
+                "currentNodeType": node_type,
+                "currentPhase": "running",
+                "currentStepIndex": step_index,
+                "loopProgress": loop_progress,
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
+        return step_index
+
+    def _on_step_complete(step_result) -> None:
+        nonlocal step_count, pending_step_index, pending_step
+        step_dict = compact_step_for_storage(step_result.model_dump(mode="json"))
+        step_count += 1
+        pending_step_index = None
+        pending_step = None
+        loop_progress = derive_loop_progress(
+            node_id=step_dict.get("node_id"),
+            global_step_index=step_count,
+            inputs=step_dict.get("inputs"),
+            outputs=step_dict.get("outputs"),
+        )
+        execution_summary.update(
+            {
+                "stepCount": step_count,
+                "currentNodeId": step_dict.get("node_id"),
+                "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+                "currentPhase": "running",
+                "currentStepIndex": step_count,
+                "loopProgress": loop_progress,
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
+        try:
+            asyncio.run_coroutine_threadsafe(
+                record_execution_step(exec_id, step_count, step_dict),
+                loop,
+            ).result(timeout=5)
+        except Exception as exc:
+            log.warning(
+                "workflow.execution_step.write_failed",
+                {
+                    "exec_id": exec_id,
+                    "step_index": step_count,
+                    "error": str(exc),
+                },
+            )
+        if step_count % _PROGRESS_FLUSH_EVERY_STEPS == 0:
+            _write_progress(
+                {
+                    "stepCount": step_count,
+                    "currentNodeId": step_dict.get("node_id"),
+                    "currentNodeType": step_dict.get("node_type") or step_dict.get("type"),
+                    "currentPhase": "running",
+                    "currentStepIndex": step_count,
+                    "loopProgress": loop_progress,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
+
+    async def _flush_pending_step() -> None:
+        if pending_step_index is None or pending_step is None:
+            return
+        try:
+            await record_execution_step(exec_id, pending_step_index, pending_step)
+        except Exception as exc:
+            log.warning(
+                "workflow.pending_step.write_failed",
+                {
+                    "exec_id": exec_id,
+                    "step_index": pending_step_index,
+                    "error": str(exc),
+                },
+            )
 
     try:
         result: RunWorkflowResult = await asyncio.to_thread(
@@ -514,53 +1256,77 @@ async def _run_workflow_execution_task(
             inputs=req.inputs or {},
             timeout_s=req.timeout_s,
             trace=req.trace,
+            on_step_start=_on_step_start,
             on_step_complete=_on_step_complete,
             cancel=cancel_event.is_set,
             tool_context=tool_context,
         )
 
         duration = time.time() - start_time
-        current_data = await Storage.read(exec_key)
+        current_data = dict(execution_summary)
         status_value, error_message = _resolve_execution_outcome(result)
-        current_data.update({
-            "outputResults": result.outputs,
-            "status": status_value,
-            "finishedAt": int(time.time() * 1000),
-            "duration": duration,
-            "executionLog": result.history or list(step_history),
-            "errorMessage": error_message,
-        })
-
-        if status_value == "success":
-            await _update_workflow_stats(workflow_id, True, duration)
-        elif status_value in {"error", "timeout"}:
-            await _update_workflow_stats(workflow_id, False, duration)
+        if cancel_event.is_set() and status_value == "success":
+            status_value = "cancelled"
+            error_message = error_message or f"Run cancelled: run_id={result.run_id or exec_id}"
+        # ``record_execution_result`` backfills this compacted history into
+        # append-only step rows, then stores only the summary row.
+        final_history = compact_history_for_storage(result.history)
+        if status_value == "cancelled" and not final_history:
+            await _flush_pending_step()
+        final_steps = result.steps
+        if pending_step_index is not None:
+            final_steps = max(final_steps, pending_step_index)
+        current_data.update(
+            {
+                "outputResults": compact_outputs_for_storage(result.outputs),
+                "status": status_value,
+                "finishedAt": int(time.time() * 1000),
+                "duration": duration,
+                "executionLog": final_history,
+                "stepCount": final_steps,
+                "errorMessage": error_message,
+                "currentNodeId": result.last_node_id,
+                "currentNodeType": current_data.get("currentNodeType"),
+                "currentPhase": status_value,
+                "currentStepIndex": final_steps,
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
 
         await _record_execution_result(workflow_id, exec_id, current_data)
-        log.info("workflow.executed", {
-            "id": workflow_id,
-            "exec_id": exec_id,
-            "status": status_value,
-            "duration": duration,
-        })
+        log.info(
+            "workflow.executed",
+            {
+                "id": workflow_id,
+                "exec_id": exec_id,
+                "status": status_value,
+                "duration": duration,
+            },
+        )
     except Exception as exc:
         duration = time.time() - start_time
-        current_data = await Storage.read(exec_key)
-        current_data.update({
-            "status": "cancelled" if cancel_event.is_set() else "error",
-            "finishedAt": int(time.time() * 1000),
-            "duration": duration,
-            "errorMessage": str(exc),
-            "executionLog": list(step_history),
-        })
-        if current_data["status"] == "error":
-            await _update_workflow_stats(workflow_id, False, duration)
+        current_data = dict(execution_summary)
+        current_data.update(
+            {
+                "status": "cancelled" if cancel_event.is_set() else "error",
+                "finishedAt": int(time.time() * 1000),
+                "duration": duration,
+                "errorMessage": str(exc),
+                "executionLog": [],
+                "stepCount": step_count,
+                "currentPhase": "cancelled" if cancel_event.is_set() else "error",
+                "updatedAt": int(time.time() * 1000),
+            }
+        )
         await _record_execution_result(workflow_id, exec_id, current_data)
-        log.error("workflow.execute.error", {
-            "id": workflow_id,
-            "exec_id": exec_id,
-            "error": str(exc),
-        })
+        log.error(
+            "workflow.execute.error",
+            {
+                "id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(exc),
+            },
+        )
     finally:
         _active_workflow_executions.pop(exec_id, None)
 
@@ -587,7 +1353,7 @@ def _compute_avg_runtime(stats: Dict[str, Any]) -> Dict[str, Any]:
 async def _get_workflow_stats(workflow_id: str) -> Dict[str, Any]:
     """Get workflow statistics"""
     try:
-        data = await Storage.read(_workflow_stats_key(workflow_id))
+        data = await WorkflowStore.get_stats(workflow_id)
         if data is None:
             return dict(_DEFAULT_STATS)
         return _compute_avg_runtime(data)
@@ -595,27 +1361,34 @@ async def _get_workflow_stats(workflow_id: str) -> Dict[str, Any]:
         return dict(_DEFAULT_STATS)
 
 
-async def _update_workflow_stats(workflow_id: str, success: bool, duration: float) -> None:
-    """Update workflow statistics"""
-    stats = await _get_workflow_stats(workflow_id)
-    stats["callCount"] += 1
-    if success:
-        stats["successCount"] += 1
-    else:
-        stats["errorCount"] += 1
-    stats["totalRuntime"] += duration
-    await Storage.write(_workflow_stats_key(workflow_id), stats)
-
-
 # =============================================================================
 # API Endpoints - Workflow CRUD
 # =============================================================================
+
+
+def _filter_workflow_list_data(
+    all_data: List[Dict[str, Any]],
+    *,
+    category: Optional[str],
+    status: Optional[str],
+    exclude_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    return [
+        data
+        for data in all_data
+        if not category or data.get("category") == category
+        if not status or data.get("status") == status
+        if not exclude_id or data.get("id") != exclude_id
+    ]
+
 
 @router.get("/workflow", response_model=List[WorkflowResponse])
 async def list_workflows(
     category: Optional[str] = Query(None, description="Filter by category"),
     status: Optional[str] = Query(None, description="Filter by status"),
-    exclude_id: Optional[str] = Query(None, alias="excludeId", description="Exclude workflow by ID (e.g. exclude self when selecting sub-workflows)"),
+    exclude_id: Optional[str] = Query(
+        None, alias="excludeId", description="Exclude workflow by ID (e.g. exclude self when selecting sub-workflows)"
+    ),
 ):
     """
     Get workflow list
@@ -626,34 +1399,95 @@ async def list_workflows(
     try:
         await _migrate_storage_to_filesystem()
 
-        all_data = _list_workflows_from_fs()
-        workflows = []
+        filtered_data = _filter_workflow_list_data(
+            _list_workflows_from_fs(),
+            category=category,
+            status=status,
+            exclude_id=exclude_id,
+        )
 
-        for data in all_data:
+        semaphore = asyncio.Semaphore(_WORKFLOW_LIST_ENRICH_CONCURRENCY)
+
+        async def enrich_workflow(data: Dict[str, Any]) -> Optional[WorkflowResponse]:
             try:
-                if category and data.get("category") != category:
-                    continue
-                if status and data.get("status") != status:
-                    continue
-                if exclude_id and data.get("id") == exclude_id:
-                    continue
-
-                workflow_id = data["id"]
-                stats = await _get_workflow_stats(workflow_id)
-                data["stats"] = stats
-
-                workflows.append(WorkflowResponse(**data))
+                async with semaphore:
+                    workflow_id = data["id"]
+                    stats = await _get_workflow_stats(workflow_id)
+                enriched_data = {
+                    **data,
+                    "stats": stats,
+                }
+                return WorkflowResponse(**enriched_data)
             except Exception as e:
                 log.warning("workflow.list.skip", {"id": data.get("id"), "error": str(e)})
-                continue
+                return None
+
+        enriched = await asyncio.gather(*(enrich_workflow(data) for data in filtered_data))
+        workflows = [workflow for workflow in enriched if workflow is not None]
 
         workflows.sort(key=lambda w: w.updatedAt, reverse=True)
 
-        log.info("workflow.list", {"count": len(workflows), "category": category, "status": status, "exclude_id": exclude_id})
+        log.info(
+            "workflow.list", {"count": len(workflows), "category": category, "status": status, "exclude_id": exclude_id}
+        )
         return workflows
     except Exception as e:
         log.error("workflow.list.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to list workflows: {str(e)}")
+
+
+@router.get("/workflow-summaries", response_model=List[WorkflowSummaryResponse])
+async def list_workflow_summaries(
+    category: Optional[str] = Query(None, description="Filter by category"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    exclude_id: Optional[str] = Query(None, alias="excludeId", description="Exclude workflow by ID"),
+):
+    """Return lightweight workflow card data with cached integration states."""
+    try:
+        await _migrate_storage_to_filesystem()
+        filtered_data = _filter_workflow_list_data(
+            _list_workflows_from_fs(),
+            category=category,
+            status=status,
+            exclude_id=exclude_id,
+        )
+        semaphore = asyncio.Semaphore(_WORKFLOW_LIST_ENRICH_CONCURRENCY)
+
+        async def build_summary(data: Dict[str, Any]) -> Optional[WorkflowSummaryResponse]:
+            try:
+                async with semaphore:
+                    workflow_id = data["id"]
+                    stats, integration_status = await asyncio.gather(
+                        _get_workflow_stats(workflow_id),
+                        _get_workflow_integration_status(workflow_id, data),
+                    )
+                workflow_json = data.get("workflowJson") or {}
+                nodes = workflow_json.get("nodes") if isinstance(workflow_json, dict) else []
+                return WorkflowSummaryResponse(
+                    id=workflow_id,
+                    name=data.get("name") or workflow_id,
+                    nameI18n=data.get("nameI18n"),
+                    description=data.get("description"),
+                    category=data.get("category") or "default",
+                    status=data.get("status") or "draft",
+                    source=data.get("source"),
+                    createdAt=int(data.get("createdAt") or 0),
+                    updatedAt=int(data.get("updatedAt") or 0),
+                    nodeCount=len(nodes) if isinstance(nodes, list) else 0,
+                    stats=stats,
+                    integrationStatus=integration_status,
+                )
+            except Exception as exc:
+                log.warning("workflow.summary.skip", {"id": data.get("id"), "error": str(exc)})
+                return None
+
+        enriched = await asyncio.gather(*(build_summary(data) for data in filtered_data))
+        summaries = [summary for summary in enriched if summary is not None]
+        summaries.sort(key=lambda item: item.updatedAt, reverse=True)
+        return summaries
+    except Exception as exc:
+        log.error("workflow.summary.error", {"error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Failed to list workflow summaries: {str(exc)}")
 
 
 @router.post("/workflow", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
@@ -665,17 +1499,38 @@ async def create_workflow(req: WorkflowCreateRequest):
     of truth. Stats are initialised in Storage on first access.
     """
     try:
+        workflow_json = _apply_new_workflow_runtime_defaults(req.workflow_json)
         try:
-            Workflow.from_dict(req.workflow_json)
+            workflow_model = Workflow.from_dict(workflow_json)
         except Exception as e:
             raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
+        strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
+        if strict_mapping_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workflow strict edge mapping failed: "
+                    f"{strict_mapping_errors[:5]}"
+                ),
+            )
+        schema_errors = _schema_lint_errors(workflow_model)
+        if schema_errors:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Workflow schema lint failed: "
+                    f"{schema_errors[:5]}"
+                ),
+            )
 
         workflow_id = str(uuid.uuid4())
         now_ms = int(time.time() * 1000)
 
+        source = req.source or "global"
         meta = {
             "id": workflow_id,
             "name": req.name,
+            "nameI18n": req.name_i18n,
             "description": req.description,
             "category": req.category or "default",
             "status": "draft",
@@ -684,10 +1539,17 @@ async def create_workflow(req: WorkflowCreateRequest):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, req.workflow_json, meta)
+        _write_workflow_to_fs(workflow_id, workflow_json, meta, global_store=(source == "global"))
 
         stats = await _get_workflow_stats(workflow_id)
-        data = {**meta, "workflowJson": req.workflow_json, "markdownContent": None, "stats": stats}
+        data = {
+            **meta,
+            "workflowJson": workflow_json,
+            "markdownContent": None,
+            "editMarkdownContent": None,
+            "stats": stats,
+            "source": source,
+        }
 
         log.info("workflow.created", {"id": workflow_id, "name": req.name})
         await publish_event("workflow.created", {"id": workflow_id, "name": req.name})
@@ -742,6 +1604,8 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
 
         if req.name is not None:
             data["name"] = req.name
+        if req.name_i18n is not None:
+            data["nameI18n"] = req.name_i18n
         if req.description is not None:
             data["description"] = req.description
         if req.category is not None:
@@ -750,18 +1614,49 @@ async def update_workflow(workflow_id: str, req: WorkflowUpdateRequest):
             data["status"] = req.status
         if req.workflow_json is not None:
             try:
-                Workflow.from_dict(req.workflow_json)
+                workflow_model = Workflow.from_dict(req.workflow_json)
+                strict_mapping_errors = _strict_edge_mapping_lint_errors(workflow_model)
+                if strict_mapping_errors:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Workflow strict edge mapping failed: "
+                            f"{strict_mapping_errors[:5]}"
+                        ),
+                    )
+                schema_errors = _schema_lint_errors(workflow_model)
+                if schema_errors:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=(
+                            "Workflow schema lint failed: "
+                            f"{schema_errors[:5]}"
+                        ),
+                    )
                 workflow_json = req.workflow_json
             except Exception as e:
+                if isinstance(e, HTTPException):
+                    raise
                 raise HTTPException(status_code=400, detail=f"Invalid workflow JSON: {str(e)}")
-
+        if req.markdown_content is not None:
+            markdown_content = req.markdown_content
+        elif req.edit_markdown_content is not None:
+            markdown_content = req.edit_markdown_content
         data["updatedAt"] = int(time.time() * 1000)
 
         is_global = data.get("source") == "global"
-        _write_workflow_to_fs(workflow_id, workflow_json, data, markdown_content, global_store=is_global)
+        _write_workflow_to_fs(
+            workflow_id,
+            workflow_json,
+            data,
+            markdown_content,
+            global_store=is_global,
+        )
 
         stats = await _get_workflow_stats(workflow_id)
         data["workflowJson"] = workflow_json
+        data["markdownContent"] = markdown_content
+        data["editMarkdownContent"] = markdown_content
         data["stats"] = stats
 
         log.info("workflow.updated", {"id": workflow_id})
@@ -787,26 +1682,20 @@ async def delete_workflow(workflow_id: str):
         if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
+        # Stop runtime resources before removing the filesystem source of truth.
+        await _stop_workflow_runtime_resources(workflow_id)
+
         # Remove from filesystem (source of truth)
         _delete_workflow_from_fs(workflow_id)
 
-        # Clean up runtime data from Storage
-        try:
-            await Storage.remove(_workflow_stats_key(workflow_id))
-        except Storage.NotFoundError:
-            pass
+        from flocks.hub import local as hub_local
 
         try:
-            exec_keys = await Storage.list("workflow_execution/")
-            for key in exec_keys:
-                try:
-                    exec_data = await Storage.read(key)
-                    if exec_data.get("workflowId") == workflow_id:
-                        await Storage.remove(key)
-                except Exception:
-                    pass
-        except Exception:
-            pass
+            hub_local.remove_installed_record("workflow", workflow_id)
+        except Exception as exc:
+            log.warning("workflow.delete.hub_record_remove_failed", {"id": workflow_id, "error": str(exc)})
+
+        await _cleanup_workflow_storage(workflow_id)
 
         log.info("workflow.deleted", {"id": workflow_id})
         await publish_event("workflow.deleted", {"id": workflow_id})
@@ -822,11 +1711,12 @@ async def delete_workflow(workflow_id: str):
 # API Endpoints - Workflow Operations
 # =============================================================================
 
+
 @router.post("/workflow/{workflow_id}/run", response_model=WorkflowExecutionResponse)
 async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
     """
     Execute workflow
-    
+
     Runs the workflow with provided inputs and returns execution results.
     """
     try:
@@ -843,22 +1733,12 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             agent=req.agent,
         )
 
-        # Create execution record
-        exec_id = str(uuid.uuid4())
-        start_ms = int(time.time() * 1000)
-        
-        exec_data = {
-            "id": exec_id,
-            "workflowId": workflow_id,
-            "inputParams": req.inputs or {},
-            "status": "running",
-            "startedAt": start_ms,
-            "executionLog": [],
-        }
-        
-        # Save initial execution record
-        await Storage.write(_workflow_execution_key(exec_id), exec_data)
-        
+        exec_data = await create_execution_record(
+            workflow_id,
+            input_params=req.inputs or {},
+        )
+        exec_id = str(exec_data["id"])
+
         cancel_event = threading.Event()
         task = asyncio.create_task(
             _run_workflow_execution_task(
@@ -868,7 +1748,8 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
                 exec_id=exec_id,
                 cancel_event=cancel_event,
                 tool_context=tool_context,
-            )
+            ),
+            name=f"workflow-run-{exec_id}",
         )
         _active_workflow_executions[exec_id] = ActiveWorkflowExecution(
             workflow_id=workflow_id,
@@ -876,10 +1757,22 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             cancel_event=cancel_event,
         )
 
-        log.info("workflow.execution.started", {
-            "id": workflow_id,
-            "exec_id": exec_id,
-        })
+        # Guarantee cleanup of the registry entry even when the task is
+        # cancelled or fails before reaching its own ``finally`` block (e.g.
+        # if the event loop is shutting down).  This prevents the ``Active*``
+        # map from growing forever when tasks are abandoned.
+        def _cleanup_active(_t: asyncio.Task, _eid: str = exec_id) -> None:
+            _active_workflow_executions.pop(_eid, None)
+
+        task.add_done_callback(_cleanup_active)
+
+        log.info(
+            "workflow.execution.started",
+            {
+                "id": workflow_id,
+                "exec_id": exec_id,
+            },
+        )
         return WorkflowExecutionResponse(**exec_data)
     except HTTPException:
         raise
@@ -892,7 +1785,9 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
 async def cancel_workflow_execution(workflow_id: str, exec_id: str):
     """Request cooperative cancellation of a running workflow execution."""
     try:
-        exec_data = await Storage.read(_workflow_execution_key(exec_id))
+        exec_data = await WorkflowStore.get_execution(exec_id)
+        if not exec_data:
+            raise HTTPException(status_code=404, detail=f"Execution not found: {exec_id}")
         if exec_data.get("workflowId") != workflow_id:
             raise HTTPException(status_code=404, detail="Execution not found for this workflow")
 
@@ -908,25 +1803,36 @@ async def cancel_workflow_execution(workflow_id: str, exec_id: str):
             raise HTTPException(status_code=404, detail="Execution not found for this workflow")
 
         active.cancel_event.set()
-        log.info("workflow.execution.cancel_requested", {
-            "id": workflow_id,
-            "exec_id": exec_id,
-        })
+        exec_data.update(
+            {
+                "currentPhase": "cancelling",
+                "errorMessage": exec_data.get("errorMessage") or "Cancellation requested",
+            }
+        )
+        await WorkflowStore.upsert_execution(exec_data)
+        log.info(
+            "workflow.execution.cancel_requested",
+            {
+                "id": workflow_id,
+                "exec_id": exec_id,
+            },
+        )
         return {
             "status": "accepted",
             "message": f"Cancellation requested for execution {exec_id}",
             "executionId": exec_id,
         }
-    except Storage.NotFoundError:
-        raise HTTPException(status_code=404, detail=f"Execution not found: {exec_id}")
     except HTTPException:
         raise
     except Exception as e:
-        log.error("workflow.execution.cancel.error", {
-            "id": workflow_id,
-            "exec_id": exec_id,
-            "error": str(e),
-        })
+        log.error(
+            "workflow.execution.cancel.error",
+            {
+                "id": workflow_id,
+                "exec_id": exec_id,
+                "error": str(e),
+            },
+        )
         raise HTTPException(status_code=500, detail=f"Failed to cancel execution: {str(e)}")
 
 
@@ -934,7 +1840,7 @@ async def cancel_workflow_execution(workflow_id: str, exec_id: str):
 async def validate_workflow(workflow_id: str):
     """
     Validate workflow
-    
+
     Lints the workflow and returns validation errors/warnings.
     """
     try:
@@ -967,11 +1873,10 @@ async def validate_workflow(workflow_id: str):
         raise HTTPException(status_code=500, detail=f"Failed to validate workflow: {str(e)}")
 
 
-
-
 # =============================================================================
 # API Endpoints - Workflow Center (Skill -> Register -> Publish Service)
 # =============================================================================
+
 
 @router.post("/workflow-center/scan-workflows")
 async def workflow_center_scan_workflows():
@@ -1002,10 +1907,15 @@ async def workflow_center_list():
 
 
 @router.post("/workflow-center/{workflow_id}/publish")
-async def workflow_center_publish(workflow_id: str, req: WorkflowCenterPublishRequest):
-    """Publish workflow as dockerized service."""
+async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenterPublishRequest] = None):
+    """Publish workflow as an API service."""
     try:
-        result = await publish_workflow(workflow_id, image=req.image)
+        result = await publish_workflow(
+            workflow_id,
+            image=req.image if req else None,
+            driver=req.driver if req else None,
+            port=req.port if req else None,
+        )
         return result
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
@@ -1033,21 +1943,67 @@ async def workflow_center_stop(workflow_id: str):
 
 @router.post("/workflow-center/{workflow_id}/invoke")
 async def workflow_center_invoke(workflow_id: str, req: WorkflowCenterInvokeRequest):
-    """Proxy invoke request to active published workflow service."""
+    """Proxy invoke request to active published workflow service.
+
+    Also records execution stats (callCount / successCount / errorCount) so
+    that the UI invocation counter is updated for every published-service call,
+    not just agent-driven /run calls.
+    """
+    started = time.time()
+    exec_data = await create_execution_record(
+        workflow_id,
+        input_params=req.inputs or {},
+    )
+    exec_id = str(exec_data["id"])
     try:
-        return await invoke_published_workflow(
+        result = await invoke_published_workflow(
             workflow_id,
             inputs=req.inputs,
             timeout_s=req.timeout_s,
             request_id=req.request_id,
         )
-    except WorkflowNotFoundError as e:
-        raise HTTPException(status_code=404, detail=str(e))
-    except WorkflowNotPublishedError as e:
+        duration = time.time() - started
+        raw_status = result.get("status", "SUCCEEDED") if isinstance(result, dict) else "SUCCEEDED"
+        status_value = _normalize_execution_status(raw_status)
+        success = status_value == "success"
+        # workflow_center_invoke proxies to an external published service; no
+        # step callbacks run locally so executionLog stays as the empty list
+        # set by create_execution_record.  We still run compact_history here
+        # as a forward-compatible guard in case a future code path populates it.
+        exec_data.update(
+            {
+                "outputResults": compact_outputs_for_storage(
+                    result.get("outputs", {}) if isinstance(result, dict) else {}
+                ),
+                "executionLog": compact_history_for_storage(exec_data.get("executionLog")),
+                "status": status_value,
+                "finishedAt": int(time.time() * 1000),
+                "duration": duration,
+                "currentPhase": status_value,
+            }
+        )
+        await _record_execution_result(workflow_id, exec_id, exec_data)
+        return result
+    except (WorkflowNotFoundError, WorkflowNotPublishedError) as e:
+        duration = time.time() - started
+        exec_data.update(
+            {"status": "error", "finishedAt": int(time.time() * 1000), "duration": duration, "errorMessage": str(e)}
+        )
+        await _record_execution_result(workflow_id, exec_id, exec_data)
         raise HTTPException(status_code=404, detail=str(e))
     except WorkflowCenterError as e:
+        duration = time.time() - started
+        exec_data.update(
+            {"status": "error", "finishedAt": int(time.time() * 1000), "duration": duration, "errorMessage": str(e)}
+        )
+        await _record_execution_result(workflow_id, exec_id, exec_data)
         raise HTTPException(status_code=400, detail=str(e))
     except Exception as e:
+        duration = time.time() - started
+        exec_data.update(
+            {"status": "error", "finishedAt": int(time.time() * 1000), "duration": duration, "errorMessage": str(e)}
+        )
+        await _record_execution_result(workflow_id, exec_id, exec_data)
         log.error("workflow.center.invoke.error", {"workflow_id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to invoke workflow service: {str(e)}")
 
@@ -1085,36 +2041,38 @@ async def workflow_center_releases(workflow_id: str):
 # API Endpoints - Workflow History
 # =============================================================================
 
+
 @router.get("/workflow/{workflow_id}/history", response_model=List[WorkflowExecutionResponse])
 async def get_workflow_history(
     workflow_id: str,
     limit: int = Query(50, ge=1, le=100, description="Max results"),
+    trigger_id: Optional[str] = Query(None, alias="triggerId"),
+    trigger_type: Optional[str] = Query(None, alias="triggerType"),
 ):
     """
     Get workflow execution history
-    
+
     Returns list of recent executions for this workflow.
     """
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
-        all_exec_keys = await Storage.list("workflow_execution/")
+        # Keep the list endpoint on summary rows only.  Do not materialize
+        # append-only step logs here; details load them separately.
+        rows = await WorkflowStore.list_executions(
+            workflow_id,
+            limit=limit,
+            trigger_id=trigger_id,
+            trigger_type=trigger_type,
+        )
         executions = []
-        
-        for key in all_exec_keys:
-            try:
-                exec_data = await Storage.read(key)
-                if exec_data.get("workflowId") == workflow_id:
-                    executions.append(WorkflowExecutionResponse(**exec_data))
-            except Exception as e:
-                log.warning("workflow.history.skip", {"key": key, "error": str(e)})
-                continue
-        
-        # Sort by start time (newest first) and limit
-        executions.sort(key=lambda e: e.startedAt, reverse=True)
-        executions = executions[:limit]
-        
+        for exec_data in rows:
+            item = dict(exec_data)
+            item["executionLog"] = []
+            executions.append(WorkflowExecutionResponse(**item))
+
         log.info("workflow.history", {"id": workflow_id, "count": len(executions)})
         return executions
     except HTTPException:
@@ -1125,22 +2083,47 @@ async def get_workflow_history(
 
 
 @router.get("/workflow/{workflow_id}/history/{exec_id}", response_model=WorkflowExecutionResponse)
-async def get_execution_details(workflow_id: str, exec_id: str):
+async def get_execution_details(
+    workflow_id: str,
+    exec_id: str,
+    step_offset: int = Query(0, ge=0, alias="stepOffset"),
+    step_limit: int = Query(500, ge=0, le=1000, alias="stepLimit"),
+):
     """
     Get execution details
-    
+
     Returns detailed information about a specific workflow execution.
     """
     try:
-        exec_data = await Storage.read(_workflow_execution_key(exec_id))
-        
+        exec_data = await WorkflowStore.get_execution(exec_id)
+        if not exec_data:
+            raise HTTPException(status_code=404, detail=f"Execution not found: {exec_id}")
+
         # Verify workflow ID matches
         if exec_data.get("workflowId") != workflow_id:
             raise HTTPException(status_code=404, detail="Execution not found for this workflow")
-        
+
+        if step_limit == 0:
+            inline_log = exec_data.get("executionLog")
+            inline_count = len(inline_log) if isinstance(inline_log, list) else 0
+            steps, total_steps = [], exec_data.get("stepCount") or inline_count
+        else:
+            steps, total_steps = await load_execution_steps(
+                exec_id,
+                offset=step_offset,
+                limit=step_limit,
+            )
+            if total_steps == 0:
+                legacy_steps = compact_history_for_storage(exec_data.get("executionLog"))
+                total_steps = len(legacy_steps)
+                steps = legacy_steps[step_offset : step_offset + step_limit]
+        exec_data = dict(exec_data)
+        exec_data["executionLog"] = steps
+        exec_data["stepLogOffset"] = step_offset
+        exec_data["stepLogLimit"] = step_limit
+        exec_data["stepLogTotal"] = total_steps
+        exec_data["stepCount"] = exec_data.get("stepCount") or total_steps
         return WorkflowExecutionResponse(**exec_data)
-    except Storage.NotFoundError:
-        raise HTTPException(status_code=404, detail=f"Execution not found: {exec_id}")
     except HTTPException:
         raise
     except Exception as e:
@@ -1152,11 +2135,12 @@ async def get_execution_details(workflow_id: str, exec_id: str):
 # API Endpoints - Workflow Statistics
 # =============================================================================
 
+
 @router.get("/workflow/stats", response_model=WorkflowStatsResponse)
 async def get_aggregate_stats():
     """
     Get aggregate workflow statistics
-    
+
     Returns statistics across all workflows.
     """
     try:
@@ -1200,7 +2184,7 @@ async def get_aggregate_stats():
 async def get_workflow_stats_endpoint(workflow_id: str):
     """
     Get workflow statistics
-    
+
     Returns statistics for a specific workflow.
     """
     try:
@@ -1208,12 +2192,12 @@ async def get_workflow_stats_endpoint(workflow_id: str):
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         stats = await _get_workflow_stats(workflow_id)
-        
+
         # Calculate average runtime
         avg_runtime = 0.0
         if stats["callCount"] > 0:
             avg_runtime = stats["totalRuntime"] / stats["callCount"]
-        
+
         result = {
             "workflowId": workflow_id,
             "callCount": stats["callCount"],
@@ -1224,7 +2208,7 @@ async def get_workflow_stats_endpoint(workflow_id: str):
             "thumbsUp": stats["thumbsUp"],
             "thumbsDown": stats["thumbsDown"],
         }
-        
+
         return WorkflowStatsResponse(**result)
     except HTTPException:
         raise
@@ -1236,6 +2220,7 @@ async def get_workflow_stats_endpoint(workflow_id: str):
 # =============================================================================
 # API Endpoints - Import/Export
 # =============================================================================
+
 
 @router.post("/workflow/import", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
 async def import_workflow(workflow_json: Dict[str, Any]):
@@ -1268,10 +2253,17 @@ async def import_workflow(workflow_json: Dict[str, Any]):
             "updatedAt": now_ms,
         }
 
-        _write_workflow_to_fs(workflow_id, workflow_json, meta)
+        _write_workflow_to_fs(workflow_id, workflow_json, meta, global_store=True)
 
         stats = await _get_workflow_stats(workflow_id)
-        data = {**meta, "workflowJson": workflow_json, "markdownContent": None, "stats": stats}
+        data = {
+            **meta,
+            "workflowJson": workflow_json,
+            "markdownContent": None,
+            "editMarkdownContent": None,
+            "stats": stats,
+            "source": "global",
+        }
 
         log.info("workflow.imported", {"id": workflow_id, "name": name})
         await publish_event("workflow.created", {"id": workflow_id, "name": name})
@@ -1287,7 +2279,7 @@ async def import_workflow(workflow_json: Dict[str, Any]):
 async def export_workflow(workflow_id: str):
     """
     Export workflow
-    
+
     Exports workflow as JSON for download/sharing.
     """
     try:
@@ -1302,7 +2294,7 @@ async def export_workflow(workflow_id: str):
         workflow_json["metadata"]["exportedFrom"] = "flocks"
         workflow_json["metadata"]["exportedAt"] = int(time.time() * 1000)
         workflow_json["name"] = data["name"]
-        
+
         log.info("workflow.exported", {"id": workflow_id})
         return workflow_json
     except HTTPException:
@@ -1317,16 +2309,352 @@ async def export_workflow(workflow_id: str):
 # =============================================================================
 
 _API_SERVICE_PREFIX = "workflow_api_service/"
-_KAFKA_CONFIG_PREFIX = "workflow_kafka_config/"
+_KAFKA_CONFIG_PREFIX = WORKFLOW_KAFKA_CONFIG_PREFIX
 _REGISTRY_PREFIX_MAIN = "workflow_registry/"
+_RUNTIME_PREFIX_MAIN = "workflow_runtime/"
 
 
 def _api_service_key(workflow_id: str) -> str:
     return f"{_API_SERVICE_PREFIX}{workflow_id}"
 
 
+def _runtime_key_main(workflow_id: str) -> str:
+    return f"{_RUNTIME_PREFIX_MAIN}{workflow_id}"
+
+
+def _workflow_id_from_api_service_key(key: Any) -> str:
+    return str(key).removeprefix(_API_SERVICE_PREFIX)
+
+
 def _kafka_config_key(workflow_id: str) -> str:
     return f"{_KAFKA_CONFIG_PREFIX}{workflow_id}"
+
+
+async def _prepare_workflow_api_registry(workflow_id: str) -> tuple[Dict[str, Any], int]:
+    """Write the current workflow snapshot to the workflow center registry."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise WorkflowNotFoundError(f"Workflow not found: {workflow_id}")
+
+    workflow_json = data["workflowJson"]
+    service_dir = Config.get_data_path() / "workflow-services" / "workflows" / workflow_id
+    service_dir.mkdir(parents=True, exist_ok=True)
+    workflow_path = service_dir / "workflow.json"
+    workflow_path.write_text(json.dumps(workflow_json), encoding="utf-8")
+
+    fp = hashlib.sha256(workflow_path.read_bytes()).hexdigest()
+    now_ms = int(time.time() * 1000)
+
+    existing_registry = await WorkflowStore.kv_get(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}") or {}
+    registry_entry = {
+        "workflowId": workflow_id,
+        "name": data["name"],
+        "sourceType": "main_storage",
+        "workflowPath": str(workflow_path),
+        "fingerprint": fp,
+        "publishStatus": existing_registry.get("publishStatus", "unpublished"),
+        "registeredAt": existing_registry.get("registeredAt", now_ms),
+        "updatedAt": now_ms,
+        "activeReleaseId": existing_registry.get("activeReleaseId"),
+        "serviceKey": existing_registry.get("serviceKey"),
+        "serviceUrl": existing_registry.get("serviceUrl"),
+        "servicePort": existing_registry.get("servicePort"),
+    }
+    await WorkflowStore.kv_put(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
+    return data, now_ms
+
+
+def _workflow_api_autostart_enabled() -> bool:
+    raw = os.getenv("FLOCKS_WORKFLOW_API_AUTOSTART", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _service_driver_from_record(service: Dict[str, Any]) -> Optional[Literal["local", "docker"]]:
+    driver = str(service.get("driver") or "").strip().lower()
+    if driver in {"local", "docker"}:
+        return driver  # type: ignore[return-value]
+    return None
+
+
+def _is_manually_stopped_service(service: Dict[str, Any]) -> bool:
+    return str(service.get("status") or "").strip().lower() == "stopped" and bool(service.get("stoppedAt"))
+
+
+async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(entry, dict):
+        return None
+
+    service = dict(entry)
+    workflow_id = str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
+    service["workflowId"] = workflow_id
+    runtime = await WorkflowStore.kv_get(_runtime_key_main(workflow_id))
+
+    if isinstance(runtime, dict) and runtime:
+        service_url = runtime.get("serviceUrl") or service.get("serviceUrl") or ""
+        service["serviceUrl"] = service_url
+        service["invokeUrl"] = f"{service_url}/invoke" if service_url else service.get("invokeUrl", "")
+        service["status"] = (
+            "running" if runtime.get("status") in {"active", "running"} else service.get("status", "running")
+        )
+        service["driver"] = runtime.get("driver") or service.get("driver")
+        service["containerName"] = runtime.get("containerName") or service.get("containerName", "")
+        service["image"] = runtime.get("image") or service.get("image")
+        service["port"] = resolve_service_port(runtime) or resolve_service_port(service)
+        return service
+
+    status = str(service.get("status") or "").strip().lower()
+    if status in {"running", "publishing"}:
+        service["status"] = "stopped"
+        service["health"] = {
+            **(service.get("health") if isinstance(service.get("health"), dict) else {}),
+            "ok": False,
+            "stale": True,
+            "reason": "missing_runtime",
+        }
+    return service
+
+
+def _summarize_capability_state(raw_state: Any) -> WorkflowCapabilityState:
+    state = str(raw_state or "").strip().lower()
+    if state in {"running", "listening", "ready", "active"}:
+        return "running"
+    if state in {"failed", "error"}:
+        return "error"
+    if state in {"stopped", "unpublished", "paused", "disabled"}:
+        return "stopped"
+    return "starting"
+
+
+async def refresh_workflow_api_health_cache() -> Dict[str, int]:
+    """Refresh API health outside list requests with process-wide bounded concurrency."""
+    keys = await WorkflowStore.kv_list_keys(_API_SERVICE_PREFIX)
+    services = await asyncio.gather(*(WorkflowStore.kv_get(key) for key in keys))
+    active_workflow_ids = [
+        str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
+        for key, service in zip(keys, services)
+        if isinstance(service, dict)
+        and service
+        and _summarize_capability_state(service.get("status")) == "running"
+    ]
+    semaphore = asyncio.Semaphore(_WORKFLOW_API_HEALTH_PROBE_CONCURRENCY)
+
+    async def probe(workflow_id: str) -> tuple[str, bool]:
+        async with semaphore:
+            try:
+                health = await get_workflow_health(workflow_id)
+                return workflow_id, bool(health.get("ok"))
+            except Exception as exc:
+                log.warning("workflow.api_health_monitor.probe_failed", {"id": workflow_id, "error": str(exc)})
+                return workflow_id, False
+
+    results = await asyncio.gather(*(probe(workflow_id) for workflow_id in active_workflow_ids))
+    _workflow_api_health_cache.clear()
+    _workflow_api_health_cache.update(results)
+    return {
+        "checked": len(results),
+        "healthy": sum(1 for _, healthy in results if healthy),
+    }
+
+
+async def run_workflow_api_health_monitor() -> None:
+    """Continuously maintain the health snapshot consumed by workflow cards."""
+    while True:
+        try:
+            await refresh_workflow_api_health_cache()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("workflow.api_health_monitor.refresh_failed", {"error": str(exc)})
+        await asyncio.sleep(_WORKFLOW_API_HEALTH_INTERVAL_S)
+
+
+def start_workflow_api_health_monitor() -> asyncio.Task[None]:
+    global _workflow_api_health_monitor_task
+    if _workflow_api_health_monitor_task is None or _workflow_api_health_monitor_task.done():
+        _workflow_api_health_monitor_task = asyncio.create_task(
+            run_workflow_api_health_monitor(),
+            name="workflow-api-health-monitor",
+        )
+    return _workflow_api_health_monitor_task
+
+
+async def _get_workflow_integration_status(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+) -> WorkflowIntegrationStatusResponse:
+    api_summary = WorkflowCapabilityStatusResponse(configured=False, state="unconfigured")
+    try:
+        service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+        if isinstance(service, dict) and service:
+            normalized_service = await _normalize_listed_api_service(
+                _api_service_key(workflow_id),
+                service,
+            )
+            state = _summarize_capability_state((normalized_service or service).get("status"))
+            if state == "running":
+                cached_health = _workflow_api_health_cache.get(workflow_id)
+                if cached_health is None:
+                    persisted_health = service.get("health")
+                    if isinstance(persisted_health, dict) and isinstance(persisted_health.get("ok"), bool):
+                        cached_health = persisted_health["ok"]
+                if cached_health is False:
+                    state = "error"
+                elif cached_health is None:
+                    state = "starting"
+            api_summary = WorkflowCapabilityStatusResponse(configured=True, state=state)
+    except Exception as exc:
+        log.warning("workflow.list.api_status_failed", {"id": workflow_id, "error": str(exc)})
+        api_summary = WorkflowCapabilityStatusResponse(configured=False, state="error")
+
+    try:
+        triggers = await _get_workflow_trigger_defs(workflow_id, workflow_data)
+        if not triggers:
+            trigger_summary = WorkflowTriggerCapabilityStatusResponse(
+                configured=False,
+                state="unconfigured",
+            )
+        else:
+            statuses = await default_trigger_runtime.get_workflow_trigger_statuses(
+                workflow_id,
+                set_workflow_json_triggers(workflow_data.get("workflowJson") or {}, triggers),
+            )
+            statuses_by_id = {
+                item.get("triggerId"): item
+                for item in statuses
+                if isinstance(item, dict) and item.get("triggerId")
+            }
+            trigger_items: List[WorkflowTriggerStatusItemResponse] = []
+            for trigger in triggers:
+                runtime_status = statuses_by_id.get(trigger.id)
+                raw_state = runtime_status.get("state") if runtime_status else None
+                trigger_items.append(
+                    WorkflowTriggerStatusItemResponse(
+                        id=trigger.id,
+                        type=trigger.type,
+                        name=trigger.name,
+                        state=_summarize_capability_state(raw_state) if raw_state else "error",
+                        rawState=raw_state,
+                    )
+                )
+            summarized_states = [item.state for item in trigger_items]
+            if "error" in summarized_states:
+                state = "error"
+            elif "stopped" in summarized_states:
+                state = "stopped"
+            elif summarized_states and all(item == "running" for item in summarized_states):
+                state = "running"
+            else:
+                state = "starting"
+            trigger_summary = WorkflowTriggerCapabilityStatusResponse(
+                configured=True,
+                state=state,
+                count=len(triggers),
+                items=trigger_items,
+            )
+    except Exception as exc:
+        log.warning("workflow.list.trigger_status_failed", {"id": workflow_id, "error": str(exc)})
+        trigger_summary = WorkflowTriggerCapabilityStatusResponse(configured=True, state="error")
+
+    return WorkflowIntegrationStatusResponse(api=api_summary, trigger=trigger_summary)
+
+
+async def _record_api_publish_failure(
+    workflow_id: str,
+    existing_service: Dict[str, Any],
+    error: Exception,
+) -> None:
+    """Mark a failed restart only when no prior runtime survived the attempt."""
+    if not existing_service:
+        return
+    try:
+        runtime = await WorkflowStore.kv_get(_runtime_key_main(workflow_id))
+        if isinstance(runtime, dict) and runtime:
+            return
+        failed_service = {
+            **existing_service,
+            "status": "error",
+            "lastStartError": str(error),
+            "lastStartAttemptAt": int(time.time() * 1000),
+            "health": {"ok": False, "reason": "publish_failed"},
+        }
+        await WorkflowStore.kv_put(_api_service_key(workflow_id), failed_service)
+    except Exception as persist_error:
+        log.warning(
+            "workflow.api.publish_failure_persist_failed",
+            {"id": workflow_id, "error": str(persist_error)},
+        )
+
+
+async def reconcile_published_workflow_api_services() -> Dict[str, int]:
+    """Restart persisted workflow API services after the main server restarts."""
+    stats = {"checked": 0, "healthy": 0, "restarted": 0, "failed": 0, "skipped": 0}
+    if not _workflow_api_autostart_enabled():
+        return stats
+
+    keys = await WorkflowStore.kv_list_keys(_API_SERVICE_PREFIX)
+    for key in keys:
+        service = await WorkflowStore.kv_get(key)
+        if not isinstance(service, dict):
+            continue
+
+        workflow_id = str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
+        if _is_manually_stopped_service(service):
+            stats["skipped"] += 1
+            continue
+
+        stats["checked"] += 1
+        try:
+            health = await get_workflow_health(workflow_id)
+        except Exception as exc:
+            health = {"ok": False, "error": str(exc)}
+
+        if health.get("ok"):
+            service["status"] = "running"
+            service["health"] = health
+            await WorkflowStore.kv_put(_api_service_key(workflow_id), service)
+            stats["healthy"] += 1
+            continue
+
+        now_ms = int(time.time() * 1000)
+        service["lastStartAttemptAt"] = now_ms
+        try:
+            data, _ = await _prepare_workflow_api_registry(workflow_id)
+            active_record = await publish_workflow(
+                workflow_id,
+                image=service.get("image") or None,
+                driver=_service_driver_from_record(service),
+                api_key=service.get("apiKey") or None,
+                port=resolve_service_port(service),
+            )
+
+            service_url = active_record.get("serviceUrl", "")
+            service.update(
+                {
+                    "workflowId": workflow_id,
+                    "workflowName": service.get("workflowName") or data["name"],
+                    "serviceUrl": service_url,
+                    "invokeUrl": f"{service_url}/invoke",
+                    "apiKey": service.get("apiKey") or active_record.get("apiKey"),
+                    "status": "running",
+                    "containerName": active_record.get("containerName", ""),
+                    "driver": active_record.get("driver") or service.get("driver"),
+                    "image": active_record.get("image") or service.get("image"),
+                    "port": resolve_service_port(active_record) or resolve_service_port(service),
+                    "restartedAt": int(time.time() * 1000),
+                }
+            )
+            service.pop("lastStartError", None)
+            service["health"] = {"ok": True, "restarted": True}
+            await WorkflowStore.kv_put(_api_service_key(workflow_id), service)
+            stats["restarted"] += 1
+        except Exception as exc:
+            service["status"] = "error"
+            service["health"] = health
+            service["lastStartError"] = str(exc)
+            await WorkflowStore.kv_put(_api_service_key(workflow_id), service)
+            log.warning("workflow.api.autostart_failed", {"id": workflow_id, "error": str(exc)})
+            stats["failed"] += 1
+    return stats
 
 
 class WorkflowServiceResponse(BaseModel):
@@ -1338,63 +2666,128 @@ class WorkflowServiceResponse(BaseModel):
     status: str
     publishedAt: int
     containerName: Optional[str] = None
+    driver: Optional[Literal["local", "docker"]] = None
+    image: Optional[str] = None
+    port: Optional[int] = None
 
 
 class KafkaConfigRequest(BaseModel):
+    """Per-workflow Kafka consumer configuration."""
+
+    enabled: bool = False
     inputBroker: Optional[str] = None
     inputTopic: Optional[str] = None
     inputGroupId: Optional[str] = None
-    outputBroker: Optional[str] = None
-    outputTopic: Optional[str] = None
+    inputKey: str = "kafka_message"
+    autoOffsetReset: str = "latest"
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+
+
+def _strip_execution_only_comments(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_strip_execution_only_comments(item) for item in value]
+    if not isinstance(value, dict):
+        return value
+    return {
+        key: _strip_execution_only_comments(nested)
+        for key, nested in value.items()
+        if not str(key).startswith("_comment")
+    }
+
+
+class TriggerEventPayloadRequest(BaseModel):
+    """Sample event payload for trigger preview/testing."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    body: Any = None
+    headers: Dict[str, Any] = Field(default_factory=dict)
+    query: Dict[str, Any] = Field(default_factory=dict)
+    path_params: Dict[str, Any] = Field(default_factory=dict, alias="pathParams")
+
+
+class TriggerPreviewResponse(BaseModel):
+    """Preview result for trigger mapping and filtering."""
+
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    triggerId: str
+    triggerType: str
+    matched: bool
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+    filterError: Optional[str] = None
+
+
+class TriggerSaveResponse(BaseModel):
+    """Persisted trigger definition with runtime status."""
+
+    model_config = ConfigDict(populate_by_name=True, by_alias=True)
+
+    trigger: Dict[str, Any]
+    status: Optional[Dict[str, Any]] = None
+
+
+class WorkflowPollerConfigRequest(BaseModel):
+    """Per-workflow background poller configuration."""
+
+    enabled: bool = False
+    intervalSeconds: int = Field(30, ge=1)
+    cronExpression: Optional[str] = None
+    timeoutSeconds: int = Field(7200, ge=1)
+    noOverlap: bool = True
+    inputs: Dict[str, Any] = Field(default_factory=dict)
+
+
+class SyslogConfigRequest(BaseModel):
+    """Per-workflow syslog listener configuration (experimental)."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    enabled: bool = False
+    protocol: str = "udp"
+    host: str = "0.0.0.0"
+    port: int = Field(5140, ge=1, le=65535, description="Listener port (1-65535)")
+    msg_format: str = Field("auto", alias="format")
+    input_key: str = Field("syslog_message", alias="inputKey")
 
 
 @router.post("/workflow/{workflow_id}/publish")
-async def publish_workflow_as_api(workflow_id: str):
+async def publish_workflow_as_api(
+    workflow_id: str,
+    req: Optional[WorkflowCenterPublishRequest] = None,
+):
     """
-    Publish workflow as Docker API service.
+    Publish workflow as an API service.
 
     Writes the workflow JSON to disk, registers it with the workflow center,
-    starts a Docker container, and returns the service URL and generated API key.
+    starts the selected runtime, and returns the service URL and generated API key.
     """
+    existing_service: Dict[str, Any] = {}
     try:
-        data = _read_workflow_from_fs(workflow_id)
-        if not data:
-            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+        data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
-        workflow_json = data["workflowJson"]
-
-        # Write workflow JSON to a stable path that center.py can read
-        service_dir = Config.get_data_path() / "workflow-services" / "workflows" / workflow_id
-        service_dir.mkdir(parents=True, exist_ok=True)
-        workflow_path = service_dir / "workflow.json"
-        workflow_path.write_text(json.dumps(workflow_json), encoding="utf-8")
-
-        fp = hashlib.sha256(workflow_path.read_bytes()).hexdigest()
-        now_ms = int(time.time() * 1000)
-
-        existing_registry = await Storage.read(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}") or {}
-        registry_entry = {
-            "workflowId": workflow_id,
-            "name": data["name"],
-            "sourceType": "main_storage",
-            "workflowPath": str(workflow_path),
-            "fingerprint": fp,
-            "publishStatus": "unpublished",
-            "registeredAt": existing_registry.get("registeredAt", now_ms),
-            "updatedAt": now_ms,
-        }
-        await Storage.write(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
-
-        # Use center.py to publish the Docker container
-        active_record = await publish_workflow(workflow_id)
-
-        # Preserve existing API key across re-publishes so callers don't break
-        existing_service = await Storage.read(_api_service_key(workflow_id)) or {}
+        # Preserve existing API key across re-publishes so callers don't break.
+        # The runtime must receive the same key before it starts so /invoke can
+        # enforce the key returned to callers.
+        existing_service = await WorkflowStore.kv_get(_api_service_key(workflow_id)) or {}
         api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
+        requested_port = req.port if req and req.port is not None else resolve_service_port(existing_service)
+
+        # Use center.py to publish the selected runtime.
+        active_record = await publish_workflow(
+            workflow_id,
+            image=req.image if req else None,
+            driver=req.driver if req else None,
+            api_key=api_key,
+            port=requested_port,
+        )
 
         service_url = active_record.get("serviceUrl", "")
         invoke_url = f"{service_url}/invoke"
         container_name = active_record.get("containerName", "")
+        driver = active_record.get("driver") or (req.driver if req else None)
+        image = active_record.get("image") or (req.image if req else None)
+        host_port = resolve_service_port(active_record) or requested_port
 
         service_info = {
             "workflowId": workflow_id,
@@ -1405,16 +2798,25 @@ async def publish_workflow_as_api(workflow_id: str):
             "status": "running",
             "publishedAt": now_ms,
             "containerName": container_name,
+            "driver": driver,
+            "image": image,
+            "port": host_port,
         }
-        await Storage.write(_api_service_key(workflow_id), service_info)
+        await WorkflowStore.kv_put(_api_service_key(workflow_id), service_info)
 
         log.info("workflow.api.published", {"id": workflow_id, "url": service_url})
         return service_info
+    except WorkflowNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except WorkflowPortUnavailableError as e:
+        await _record_api_publish_failure(workflow_id, existing_service, e)
+        raise HTTPException(status_code=409, detail=str(e))
     except HTTPException:
         raise
     except WorkflowCenterError as e:
+        await _record_api_publish_failure(workflow_id, existing_service, e)
         log.error("workflow.publish.center_error", {"id": workflow_id, "error": str(e)})
-        raise HTTPException(status_code=500, detail=f"发布失败（Docker）: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"发布失败: {str(e)}")
     except Exception as e:
         log.error("workflow.publish.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to publish workflow: {str(e)}")
@@ -1426,7 +2828,7 @@ async def unpublish_workflow_api(workflow_id: str):
     Stop a published workflow API service.
     """
     try:
-        existing = await Storage.read(_api_service_key(workflow_id))
+        existing = await WorkflowStore.kv_get(_api_service_key(workflow_id))
         if not existing:
             raise HTTPException(status_code=404, detail="No published service found for this workflow")
 
@@ -1437,7 +2839,7 @@ async def unpublish_workflow_api(workflow_id: str):
 
         existing["status"] = "stopped"
         existing["stoppedAt"] = int(time.time() * 1000)
-        await Storage.write(_api_service_key(workflow_id), existing)
+        await WorkflowStore.kv_put(_api_service_key(workflow_id), existing)
 
         log.info("workflow.api.unpublished", {"id": workflow_id})
         return {"ok": True}
@@ -1455,11 +2857,161 @@ async def get_workflow_service(workflow_id: str):
     Returns null if not published.
     """
     try:
-        service = await Storage.read(_api_service_key(workflow_id))
-        return service  # None / null if not found
+        service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+        return await _normalize_listed_api_service(_api_service_key(workflow_id), service)
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
+
+
+@router.delete("/workflow/{workflow_id}/service")
+async def delete_workflow_service(workflow_id: str):
+    """Delete the stored API service configuration for a workflow."""
+    try:
+        existing = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+        if not existing:
+            raise HTTPException(status_code=404, detail="No published service found for this workflow")
+
+        try:
+            await stop_workflow_service(workflow_id)
+        except (WorkflowNotFoundError, WorkflowNotPublishedError):
+            pass
+
+        try:
+            await WorkflowStore.kv_remove(_api_service_key(workflow_id))
+        except Exception:
+            pass
+        else:
+            registry_key = f"{_REGISTRY_PREFIX_MAIN}{workflow_id}"
+            registry = await WorkflowStore.kv_get(registry_key)
+            if isinstance(registry, dict) and "servicePort" in registry:
+                registry.pop("servicePort", None)
+                await WorkflowStore.kv_put(registry_key, registry)
+
+        log.info("workflow.api.service_deleted", {"id": workflow_id})
+        return {"ok": True, "workflowId": workflow_id}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.service.delete.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to delete workflow service: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/config")
+async def get_workflow_config(workflow_id: str):
+    """Read workflow publish template from Storage, migrating config.json if needed."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+    config_path = _workflow_config_dir(workflow_id, data) / "config.json"
+    runtime = await _build_workflow_integration_runtime(workflow_id, data)
+    try:
+        config, source = await _load_workflow_integration_config_template(workflow_id, data, config_path)
+        if config is not None:
+            return {
+                "exists": True,
+                "path": str(config_path),
+                "storageKey": _workflow_integration_config_key(workflow_id),
+                "source": source,
+                "config": config,
+                "runtime": runtime,
+            }
+
+        config = await _build_workflow_integration_config(workflow_id, data)
+        return {
+            "exists": False,
+            "path": str(config_path),
+            "storageKey": _workflow_integration_config_key(workflow_id),
+            "source": "generated",
+            "config": config,
+            "runtime": runtime,
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("workflow.config.get.error", {"id": workflow_id, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Failed to read workflow config: {str(exc)}")
+
+
+@router.put("/workflow/{workflow_id}/config")
+async def update_workflow_config(
+    workflow_id: str,
+    config: Dict[str, Any] = Body(...),
+):
+    """Update the publish template in Storage without mutating runtime state."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+    try:
+        normalized_config = _normalize_workflow_integration_config_template(workflow_id, data, config)
+        config_path = _workflow_config_dir(workflow_id, data) / "config.json"
+        await WorkflowStore.put_config(workflow_id, normalized_config)
+        log.info(
+            "workflow.config.updated",
+            {
+                "id": workflow_id,
+                "storage_key": _workflow_integration_config_key(workflow_id),
+            },
+        )
+        return {
+            "ok": True,
+            "exists": True,
+            "path": str(config_path),
+            "storageKey": _workflow_integration_config_key(workflow_id),
+            "source": "storage",
+            "config": normalized_config,
+            "runtime": await _build_workflow_integration_runtime(workflow_id, data),
+        }
+    except HTTPException:
+        raise
+    except Exception as exc:
+        log.error("workflow.config.update.error", {"id": workflow_id, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Failed to update workflow config: {str(exc)}")
+
+
+@router.post("/workflow/{workflow_id}/config/sync")
+async def sync_workflow_config(workflow_id: str):
+    """Ensure a publish template exists in Storage, migrating config.json if present."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    try:
+        config_path = _workflow_config_dir(workflow_id, data) / "config.json"
+        config, source = await _load_workflow_integration_config_template(workflow_id, data, config_path)
+        if config is not None:
+            return {
+                "ok": True,
+                "path": str(config_path),
+                "exists": True,
+                "storageKey": _workflow_integration_config_key(workflow_id),
+                "source": source,
+                "config": config,
+                "runtime": await _build_workflow_integration_runtime(workflow_id, data),
+            }
+
+        config = await _build_workflow_integration_config(workflow_id, data)
+        await WorkflowStore.put_config(workflow_id, config)
+        log.info(
+            "workflow.config.synced",
+            {
+                "id": workflow_id,
+                "storage_key": _workflow_integration_config_key(workflow_id),
+            },
+        )
+        return {
+            "ok": True,
+            "path": str(config_path),
+            "exists": True,
+            "storageKey": _workflow_integration_config_key(workflow_id),
+            "source": "storage",
+            "config": config,
+            "runtime": await _build_workflow_integration_runtime(workflow_id, data),
+        }
+    except Exception as exc:
+        log.error("workflow.config.sync.error", {"id": workflow_id, "error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Failed to sync workflow config: {str(exc)}")
 
 
 @router.get("/workflow-services")
@@ -1468,12 +3020,13 @@ async def list_workflow_services():
     List all published workflow API services.
     """
     try:
-        keys = await Storage.list_keys(_API_SERVICE_PREFIX)
+        keys = await WorkflowStore.kv_list_keys(_API_SERVICE_PREFIX)
         services = []
         for key in keys:
-            entry = await Storage.read(key)
-            if entry:
-                services.append(entry)
+            entry = await WorkflowStore.kv_get(key)
+            service = await _normalize_listed_api_service(key, entry)
+            if service:
+                services.append(service)
         services.sort(key=lambda s: s.get("publishedAt", 0), reverse=True)
         return services
     except Exception as e:
@@ -1481,27 +3034,392 @@ async def list_workflow_services():
         raise HTTPException(status_code=500, detail=f"Failed to list services: {str(e)}")
 
 
+def _find_trigger_or_404(triggers: List[TriggerDefinition], trigger_id: str) -> TriggerDefinition:
+    trigger = next((item for item in triggers if item.id == trigger_id), None)
+    if trigger is None:
+        raise HTTPException(status_code=404, detail=f"Trigger not found: {trigger_id}")
+    return trigger
+
+
+def _validate_trigger_type_constraints(triggers: List[TriggerDefinition]) -> None:
+    singleton_ids_by_type: Dict[str, List[str]] = {}
+    for trigger in triggers:
+        if trigger.type not in _LEGACY_SINGLETON_TRIGGER_TYPES:
+            continue
+        singleton_ids_by_type.setdefault(trigger.type, []).append(trigger.id or "")
+
+    duplicates = {
+        trigger_type: trigger_ids for trigger_type, trigger_ids in singleton_ids_by_type.items() if len(trigger_ids) > 1
+    }
+    if not duplicates:
+        return
+
+    first_type = sorted(duplicates)[0]
+    trigger_ids = [trigger_id for trigger_id in duplicates[first_type] if trigger_id]
+    detail = (
+        f"Only one {first_type} trigger is supported per workflow; "
+        f"found: {', '.join(trigger_ids) or 'multiple triggers'}"
+    )
+    raise HTTPException(status_code=409, detail=detail)
+
+
+def _webhook_auth_type(trigger: TriggerDefinition) -> str:
+    auth = trigger.auth
+    return str(getattr(auth, "type", "") or "").strip().lower()
+
+
+def _validate_webhook_trigger_auth(trigger: TriggerDefinition) -> None:
+    if trigger.type not in _WEBHOOK_TRIGGER_TYPES:
+        return
+
+    auth = trigger.auth
+    auth_type = _webhook_auth_type(trigger)
+    if auth is None or auth_type in {"", "none"}:
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook triggers must configure authentication with auth.type 'api_key' or 'hmac'.",
+        )
+    if auth_type not in _WEBHOOK_AUTH_TYPES:
+        raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
+    if auth_type == "api_key" and not (auth.apiKey or auth.secretRef):
+        raise HTTPException(
+            status_code=400,
+            detail="Webhook api_key auth requires either apiKey or secretRef.",
+        )
+    if auth_type == "hmac" and not auth.secretRef:
+        raise HTTPException(status_code=400, detail="Webhook hmac auth requires secretRef.")
+
+
+def _validate_trigger_definitions(triggers: List[TriggerDefinition]) -> None:
+    _validate_trigger_type_constraints(triggers)
+    for trigger in triggers:
+        _validate_webhook_trigger_auth(trigger)
+
+
+@router.get("/workflow/{workflow_id}/triggers")
+async def list_workflow_triggers(workflow_id: str):
+    """List unified triggers for a workflow with runtime status."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    statuses = {
+        item.get("triggerId"): item
+        for item in await default_trigger_runtime.get_workflow_trigger_statuses(
+            workflow_id,
+            set_workflow_json_triggers(data.get("workflowJson") or {}, triggers),
+        )
+    }
+    return [
+        {
+            "trigger": _trigger_to_api_dict(trigger),
+            "status": statuses.get(trigger.id),
+        }
+        for trigger in triggers
+    ]
+
+
+@router.post("/workflow/{workflow_id}/triggers", response_model=TriggerSaveResponse)
+async def create_workflow_trigger(workflow_id: str, trigger: TriggerDefinition):
+    """Create or replace a unified trigger definition."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    existing = await _get_workflow_trigger_defs(workflow_id, data)
+    updated = _replace_or_append_trigger(existing, trigger)
+    _validate_trigger_definitions(updated)
+    persisted = await _persist_workflow_triggers(workflow_id, data, updated)
+    await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    status = await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
+    return TriggerSaveResponse(trigger=_trigger_to_api_dict(trigger), status=status)
+
+
+@router.put("/workflow/{workflow_id}/triggers/{trigger_id}", response_model=TriggerSaveResponse)
+async def update_workflow_trigger(workflow_id: str, trigger_id: str, trigger: TriggerDefinition):
+    """Update a unified trigger definition."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    existing = await _get_workflow_trigger_defs(workflow_id, data)
+    _find_trigger_or_404(existing, trigger_id)
+    updated_trigger = trigger.model_copy(update={"id": trigger_id})
+    updated = _replace_or_append_trigger(existing, updated_trigger)
+    _validate_trigger_definitions(updated)
+    persisted = await _persist_workflow_triggers(workflow_id, data, updated)
+    await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    status = await default_trigger_runtime.get_trigger_status(workflow_id, updated_trigger)
+    return TriggerSaveResponse(trigger=_trigger_to_api_dict(updated_trigger), status=status)
+
+
+@router.delete("/workflow/{workflow_id}/triggers/{trigger_id}")
+async def delete_workflow_trigger(workflow_id: str, trigger_id: str):
+    """Delete a unified trigger definition."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    existing = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(existing, trigger_id)
+    remaining = [item for item in existing if item.id != trigger_id]
+    persisted = await _persist_workflow_triggers(workflow_id, data, remaining)
+    await _remove_legacy_trigger_state(workflow_id, trigger)
+    await default_trigger_runtime.restart_workflow(workflow_id, persisted.get("workflowJson") or {})
+    return {"ok": True, "triggerId": trigger_id}
+
+
+@router.get("/workflow/{workflow_id}/triggers/{trigger_id}/status")
+async def get_workflow_trigger_status(workflow_id: str, trigger_id: str):
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    return await default_trigger_runtime.get_trigger_status(workflow_id, trigger)
+
+
+@router.post("/workflow/{workflow_id}/triggers/{trigger_id}/preview-mapping", response_model=TriggerPreviewResponse)
+async def preview_workflow_trigger_mapping(
+    workflow_id: str,
+    trigger_id: str,
+    payload: TriggerEventPayloadRequest,
+):
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    event = build_trigger_event(
+        workflow_id=workflow_id,
+        trigger=trigger,
+        body=payload.body,
+        headers=payload.headers,
+        query=payload.query,
+        path_params=payload.path_params,
+    )
+    matched, filter_error = evaluate_trigger_filter(trigger, event)
+    return TriggerPreviewResponse(
+        triggerId=trigger.id or trigger_id,
+        triggerType=trigger.type,
+        matched=matched,
+        inputs=preview_trigger_mapping(trigger, event),
+        filterError=filter_error,
+    )
+
+
+@router.post("/workflow/{workflow_id}/triggers/{trigger_id}/test")
+async def test_workflow_trigger(
+    workflow_id: str,
+    trigger_id: str,
+    payload: TriggerEventPayloadRequest,
+):
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    workflow_json = data.get("workflowJson") or {}
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    event = build_trigger_event(
+        workflow_id=workflow_id,
+        trigger=trigger,
+        body=payload.body,
+        headers=payload.headers,
+        query=payload.query,
+        path_params=payload.path_params,
+    )
+    result = await default_trigger_runtime.dispatch_event(
+        workflow_id=workflow_id,
+        workflow_json=workflow_json,
+        trigger=trigger,
+        event=event,
+    )
+    return {
+        "ok": True,
+        "trigger": _trigger_to_api_dict(trigger),
+        **result,
+    }
+
+
+@router.get("/workflow-trigger-plugins")
+async def list_workflow_trigger_plugins():
+    return default_trigger_runtime.list_plugin_specs()
+
+
+def _resolve_trigger_secret(secret_ref: Optional[str]) -> Optional[str]:
+    if not secret_ref:
+        return None
+    try:
+        from flocks.security import get_secret_manager
+
+        return get_secret_manager().get(secret_ref)
+    except Exception:
+        return None
+
+
+def _normalize_hmac_signature(signature: Optional[str]) -> Optional[str]:
+    if not signature:
+        return None
+    value = signature.strip()
+    if value.lower().startswith("sha256="):
+        return value.split("=", 1)[1].strip()
+    return value
+
+
+def _authorize_webhook_trigger(
+    trigger: TriggerDefinition,
+    headers: Dict[str, str],
+    query: Dict[str, str],
+    *,
+    raw_body: bytes,
+) -> None:
+    auth = trigger.auth
+    auth_type = _webhook_auth_type(trigger)
+    if auth is None or auth_type in {"none", ""}:
+        raise HTTPException(
+            status_code=401,
+            detail="Webhook trigger must configure authentication with auth.type 'api_key' or 'hmac'.",
+        )
+    if auth_type == "api_key":
+        expected = auth.apiKey or _resolve_trigger_secret(auth.secretRef)
+        if not expected:
+            raise HTTPException(status_code=401, detail="Webhook trigger API key is not configured")
+        header_name = (auth.headerName or "x-api-key").lower()
+        actual = headers.get(header_name) or query.get(auth.queryParam or "api_key")
+        if actual != expected:
+            raise HTTPException(status_code=401, detail="Invalid webhook API key")
+        return
+    if auth_type == "hmac":
+        expected = _resolve_trigger_secret(auth.secretRef)
+        if not expected:
+            raise HTTPException(status_code=401, detail="Webhook trigger secret is not configured")
+        signature = _normalize_hmac_signature(headers.get((auth.headerName or "x-flocks-signature").lower()))
+        expected_signature = hmac.new(
+            expected.encode("utf-8"),
+            raw_body,
+            hashlib.sha256,
+        ).hexdigest()
+        if not signature or not hmac.compare_digest(signature, expected_signature):
+            raise HTTPException(status_code=401, detail="Invalid webhook signature")
+        return
+    raise HTTPException(status_code=400, detail=f"Unsupported webhook auth type: {auth.type}")
+
+
+@webhook_router.post("/webhook/workflows/{workflow_id}/{trigger_id}")
+async def invoke_workflow_webhook_trigger(
+    workflow_id: str,
+    trigger_id: str,
+    request: Request,
+):
+    """Invoke a webhook/custom_webhook trigger and dispatch the workflow."""
+    data = _read_workflow_from_fs(workflow_id)
+    if not data:
+        raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+    workflow_json = data.get("workflowJson") or {}
+    triggers = await _get_workflow_trigger_defs(workflow_id, data)
+    trigger = _find_trigger_or_404(triggers, trigger_id)
+    if trigger.type not in {"webhook", "custom_webhook"}:
+        raise HTTPException(status_code=400, detail=f"Trigger is not a webhook trigger: {trigger_id}")
+    if not trigger.enabled:
+        raise HTTPException(status_code=403, detail=f"Trigger is disabled: {trigger_id}")
+
+    headers = {key.lower(): value for key, value in request.headers.items()}
+    query = {key: value for key, value in request.query_params.items()}
+    raw_body = await request.body()
+    _authorize_webhook_trigger(trigger, headers, query, raw_body=raw_body)
+
+    try:
+        body = json.loads(raw_body.decode("utf-8"))
+    except Exception:
+        body = raw_body.decode("utf-8", errors="replace")
+
+    event = build_trigger_event(
+        workflow_id=workflow_id,
+        trigger=trigger,
+        body=body,
+        headers=headers,
+        query=query,
+        path_params={"workflow_id": workflow_id, "trigger_id": trigger_id},
+        raw=body,
+        source=(trigger.source or {}).get("path") or str(request.url.path),
+    )
+    result = await default_trigger_runtime.dispatch_event(
+        workflow_id=workflow_id,
+        workflow_json=workflow_json,
+        trigger=trigger,
+        event=event,
+    )
+    return {
+        "ok": True,
+        "matched": result.get("matched", True),
+        "executed": result.get("executed", False),
+        "inputs": result.get("inputs", {}),
+        "deliveryId": event.source.deliveryId,
+    }
+
+
 @router.post("/workflow/{workflow_id}/kafka-config")
 async def save_kafka_config(workflow_id: str, req: KafkaConfigRequest):
     """
-    Save Kafka input/output configuration for a workflow.
-    (Kafka integration is experimental; this stores config for future use.)
+    Save Kafka input configuration for a workflow.
+
+    When ``enabled`` is true this also (re)starts the Kafka consumer and blocks
+    until it has either connected to the broker or failed.  Connection failures
+    are surfaced as ``409 Conflict`` so the UI can show an actionable error
+    instead of falsely claiming the consumer is running.
     """
     try:
-        if not _read_workflow_from_fs(workflow_id):
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
             raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
 
         config = {
             "workflowId": workflow_id,
+            "enabled": req.enabled,
             "inputBroker": req.inputBroker,
             "inputTopic": req.inputTopic,
             "inputGroupId": req.inputGroupId,
-            "outputBroker": req.outputBroker,
-            "outputTopic": req.outputTopic,
+            "inputKey": req.inputKey,
+            "autoOffsetReset": req.autoOffsetReset,
+            "inputs": _strip_execution_only_comments(req.inputs),
             "updatedAt": int(time.time() * 1000),
         }
-        await Storage.write(_kafka_config_key(workflow_id), config)
-        return {"ok": True}
+        await WorkflowStore.put_config(workflow_id, config, kind="workflow_kafka_config")
+        unified_trigger = TriggerDefinition.model_validate(
+            {
+                "id": "kafka-default",
+                "type": "kafka",
+                "enabled": req.enabled,
+                "source": {
+                    "inputBroker": req.inputBroker or "",
+                    "inputTopic": req.inputTopic or "",
+                    "inputGroupId": req.inputGroupId or "",
+                    "autoOffsetReset": req.autoOffsetReset,
+                },
+                "mapping": {
+                    req.inputKey or "kafka_message": "$.body",
+                },
+                "inputs": _strip_execution_only_comments(req.inputs),
+                "updatedAt": config["updatedAt"],
+            }
+        )
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
+        _validate_trigger_type_constraints(updated_triggers)
+        await _persist_workflow_triggers(
+            workflow_id,
+            data,
+            updated_triggers,
+        )
+
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        status = await _kafka_default_manager.restart_workflow(workflow_id)
+        state = (status or {}).get("state")
+        if req.enabled and state == "failed":
+            err = (status or {}).get("error") or "consumer_connect_failed"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Kafka consumer failed to start: {err}",
+            )
+        return {"ok": True, "consumer": status}
     except HTTPException:
         raise
     except Exception as e:
@@ -1515,19 +3433,275 @@ async def get_kafka_config(workflow_id: str):
     Get saved Kafka configuration for a workflow.
     """
     try:
-        config = await Storage.read(_kafka_config_key(workflow_id))
+        config = await WorkflowStore.get_config(workflow_id, kind="workflow_kafka_config")
+        if config is None:
+            data = _read_workflow_from_fs(workflow_id)
+            if data:
+                triggers = await _get_workflow_trigger_defs(workflow_id, data)
+                trigger = next((item for item in triggers if item.type == "kafka"), None)
+                if trigger is not None:
+                    config = kafka_trigger_to_legacy_config(workflow_id, trigger)
         return config  # None / null if not configured
     except Exception as e:
         log.error("workflow.kafka_config.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get Kafka config: {str(e)}")
 
 
+@router.get("/workflow/{workflow_id}/kafka-status")
+async def get_kafka_status(workflow_id: str):
+    """Return the *runtime* status of the Kafka consumer for a workflow.
+
+    Reflects the actual connection state (connecting/running/failed/stopped) and
+    queue depth so the UI can show whether a saved-but-not-yet-connected
+    consumer is actually running.  The persisted config only captures *intent*.
+    """
+    try:
+        from flocks.ingest.kafka.manager import default_manager as _kafka_default_manager
+
+        return _kafka_default_manager.get_consumer_status(workflow_id)
+    except Exception as e:
+        log.error("workflow.kafka_status.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get Kafka status: {str(e)}")
+
+
+@router.post("/workflow/{workflow_id}/poller-config")
+async def save_workflow_poller_config(workflow_id: str, req: WorkflowPollerConfigRequest):
+    """Save background poller configuration for a workflow."""
+    try:
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+        cron_expression = (req.cronExpression or "").strip()
+        trigger_source: Dict[str, Any]
+        if cron_expression:
+            trigger_source = {
+                "mode": "cron",
+                "intervalSeconds": req.intervalSeconds,
+                "cron": cron_expression,
+            }
+        else:
+            trigger_source = {
+                "mode": "interval",
+                "intervalSeconds": req.intervalSeconds,
+            }
+
+        config = {
+            "workflowId": workflow_id,
+            "enabled": req.enabled,
+            "intervalSeconds": req.intervalSeconds,
+            "cronExpression": cron_expression or None,
+            "timeoutSeconds": req.timeoutSeconds,
+            "noOverlap": req.noOverlap,
+            "inputs": req.inputs,
+            "updatedAt": int(time.time() * 1000),
+        }
+        await WorkflowStore.put_config(workflow_id, config, kind="workflow_poller_config")
+        unified_trigger = TriggerDefinition.model_validate(
+            {
+                "id": "schedule-default",
+                "type": "schedule",
+                "enabled": req.enabled,
+                "source": trigger_source,
+                "runtime": {
+                    "timeoutSeconds": req.timeoutSeconds,
+                    "noOverlap": req.noOverlap,
+                },
+                "inputs": req.inputs,
+                "updatedAt": config["updatedAt"],
+            }
+        )
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
+        _validate_trigger_type_constraints(updated_triggers)
+        await _persist_workflow_triggers(
+            workflow_id,
+            data,
+            updated_triggers,
+        )
+
+        from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+        poller_status = await _poller_default_manager.restart_workflow(workflow_id)
+        if req.enabled and (poller_status or {}).get("state") == "failed":
+            err = (poller_status or {}).get("error") or "poller_start_failed"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Workflow poller failed to start: {err}",
+            )
+        return {"ok": True, "status": poller_status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.poller_config.save.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to save poller config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/poller-config")
+async def get_workflow_poller_config(workflow_id: str):
+    """Get saved poller configuration for a workflow."""
+    try:
+        config = await WorkflowStore.get_config(workflow_id, kind="workflow_poller_config")
+        if config is None:
+            data = _read_workflow_from_fs(workflow_id)
+            if data:
+                triggers = await _get_workflow_trigger_defs(workflow_id, data)
+                trigger = next((item for item in triggers if item.type == "schedule"), None)
+                if trigger is not None:
+                    config = schedule_trigger_to_legacy_config(workflow_id, trigger)
+        return config
+    except Exception as e:
+        log.error("workflow.poller_config.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get poller config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/poller-status")
+async def get_workflow_poller_status(workflow_id: str):
+    """Return the runtime status of a workflow poller."""
+    try:
+        from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+        return _poller_default_manager.get_status(workflow_id)
+    except Exception as e:
+        log.error("workflow.poller_status.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get poller status: {str(e)}")
+
+
+@router.post("/workflow/{workflow_id}/poller-run-once")
+async def run_workflow_poller_once(workflow_id: str):
+    """Trigger one immediate poller execution for a workflow."""
+    try:
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+        from flocks.workflow.poller_manager import default_manager as _poller_default_manager
+
+        poller_status = await _poller_default_manager.run_once(workflow_id)
+        return {"ok": True, "status": poller_status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.poller_run_once.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to run workflow poller once: {str(e)}")
+
+
+@router.post("/workflow/{workflow_id}/syslog-config")
+async def save_syslog_config(workflow_id: str, req: SyslogConfigRequest):
+    """
+    Save syslog listener configuration for a workflow.
+
+    When ``enabled`` is true, this also (re)starts the UDP/TCP listener and
+    blocks until the underlying socket has either bound successfully or the
+    bind has failed (e.g. ``EADDRINUSE``, invalid host).  Bind failures are
+    surfaced as ``409 Conflict`` so the UI can show an actionable error
+    instead of falsely claiming "Listening".
+    """
+    try:
+        data = _read_workflow_from_fs(workflow_id)
+        if not data:
+            raise HTTPException(status_code=404, detail=f"Workflow not found: {workflow_id}")
+
+        config = {
+            "workflowId": workflow_id,
+            "enabled": req.enabled,
+            "protocol": req.protocol,
+            "host": req.host,
+            "port": req.port,
+            "format": req.msg_format,
+            "inputKey": req.input_key,
+            "updatedAt": int(time.time() * 1000),
+        }
+        await WorkflowStore.put_config(workflow_id, config, kind="workflow_syslog_config")
+        unified_trigger = TriggerDefinition.model_validate(
+            {
+                "id": "syslog-default",
+                "type": "syslog",
+                "enabled": req.enabled,
+                "source": {
+                    "protocol": req.protocol,
+                    "host": req.host,
+                    "port": req.port,
+                    "format": req.msg_format,
+                },
+                "mapping": {
+                    req.input_key or "syslog_message": "$.body",
+                },
+                "updatedAt": config["updatedAt"],
+            }
+        )
+        triggers = await _get_workflow_trigger_defs(workflow_id, data)
+        updated_triggers = _replace_or_append_trigger(triggers, unified_trigger)
+        _validate_trigger_type_constraints(updated_triggers)
+        await _persist_workflow_triggers(
+            workflow_id,
+            data,
+            updated_triggers,
+        )
+
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        status = await _syslog_default_manager.restart_workflow(workflow_id)
+        state = (status or {}).get("state")
+        if req.enabled and state == "failed":
+            err = (status or {}).get("error") or "listener_bind_failed"
+            raise HTTPException(
+                status_code=409,
+                detail=f"Syslog listener failed to bind: {err}",
+            )
+        return {"ok": True, "listener": status}
+    except HTTPException:
+        raise
+    except Exception as e:
+        log.error("workflow.syslog_config.save.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to save syslog config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/syslog-config")
+async def get_syslog_config(workflow_id: str):
+    """Get saved syslog configuration for a workflow."""
+    try:
+        config = await WorkflowStore.get_config(workflow_id, kind="workflow_syslog_config")
+        if config is None:
+            data = _read_workflow_from_fs(workflow_id)
+            if data:
+                triggers = await _get_workflow_trigger_defs(workflow_id, data)
+                trigger = next((item for item in triggers if item.type == "syslog"), None)
+                if trigger is not None:
+                    config = syslog_trigger_to_legacy_config(workflow_id, trigger)
+        return config
+    except Exception as e:
+        log.error("workflow.syslog_config.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get syslog config: {str(e)}")
+
+
+@router.get("/workflow/{workflow_id}/syslog-status")
+async def get_syslog_status(workflow_id: str):
+    """Return the *runtime* status of the syslog listener for a workflow.
+
+    This reflects the actual bind state (binding/listening/failed/stopped) and
+    queue depth, so the UI can show whether a saved-but-not-yet-bound listener
+    is actually running.  The persisted config (``/syslog-config``) only
+    captures *intent*, which is why the UI must consult this endpoint to
+    truthfully render "Listening".
+    """
+    try:
+        from flocks.ingest.syslog.manager import default_manager as _syslog_default_manager
+
+        return _syslog_default_manager.get_listener_status(workflow_id)
+    except Exception as e:
+        log.error("workflow.syslog_status.get.error", {"id": workflow_id, "error": str(e)})
+        raise HTTPException(status_code=500, detail=f"Failed to get syslog status: {str(e)}")
+
+
 # =============================================================================
 # API Endpoints - Run Single Node
 # =============================================================================
 
+
 class RunNodeRequest(BaseModel):
     """Request to execute a single workflow node."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     node_id: str = Field(..., description="Node ID to execute")
@@ -1539,6 +3713,7 @@ class RunNodeRequest(BaseModel):
 
 class RunNodeResponse(BaseModel):
     """Response from executing a single workflow node."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     node_id: str
@@ -1585,12 +3760,15 @@ async def run_single_node(workflow_id: str, req: RunNodeRequest):
 
             step_result = await asyncio.to_thread(engine.run_node, req.node_id, req.inputs)
 
-            log.info("workflow.run_node", {
-                "workflow_id": workflow_id,
-                "node_id": req.node_id,
-                "success": step_result.error is None,
-                "duration_ms": step_result.duration_ms,
-            })
+            log.info(
+                "workflow.run_node",
+                {
+                    "workflow_id": workflow_id,
+                    "node_id": req.node_id,
+                    "success": step_result.error is None,
+                    "duration_ms": step_result.duration_ms,
+                },
+            )
 
             return RunNodeResponse(
                 node_id=step_result.node_id,
@@ -1622,8 +3800,10 @@ async def run_single_node(workflow_id: str, req: RunNodeRequest):
 # API Endpoints - Sample Inputs
 # =============================================================================
 
+
 class SampleInputsRequest(BaseModel):
     """Request to save sample inputs for a workflow."""
+
     model_config = ConfigDict(populate_by_name=True)
 
     sampleInputs: Dict[str, Any] = Field(default_factory=dict, description="Sample input data")
@@ -1671,11 +3851,21 @@ async def save_sample_inputs(workflow_id: str, req: SampleInputsRequest):
             workflow_json["metadata"] = {}
         workflow_json["metadata"]["sampleInputs"] = req.sampleInputs
 
-        meta = {k: v for k, v in data.items() if k not in ("workflowJson", "markdownContent", "stats", "source")}
+        meta = {
+            k: v
+            for k, v in data.items()
+            if k not in ("workflowJson", "markdownContent", "editMarkdownContent", "stats", "source")
+        }
         meta["updatedAt"] = int(time.time() * 1000)
         markdown_content = data.get("markdownContent")
         is_global = data.get("source") == "global"
-        _write_workflow_to_fs(workflow_id, workflow_json, meta, markdown_content, global_store=is_global)
+        _write_workflow_to_fs(
+            workflow_id,
+            workflow_json,
+            meta,
+            markdown_content,
+            global_store=is_global,
+        )
 
         log.info("workflow.sample_inputs.saved", {"id": workflow_id})
         return {"ok": True}

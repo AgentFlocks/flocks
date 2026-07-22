@@ -16,6 +16,26 @@ _policy_log = Log.create(service="session.compaction_policy")
 
 
 # ============================================================================
+# v2 anomaly detection thresholds (B1) — see docs/design/context-compaction-v2.md
+# ============================================================================
+
+# When ``max_output_tokens`` claims more than this fraction of the context
+# window, treat the provider metadata as suspicious (e.g. GLM-5.1 reports
+# ``max_output_tokens=168000`` against ``context_window=198000``, which
+# would leave only 30K of usable input — the model can in fact accept far
+# more) and cap the value to a sane default.  The threshold sits below
+# the legacy ``>=`` comparison so anomalies are caught without disturbing
+# normal models like Claude / GPT-4 whose output ratios stay well under 0.5.
+MAX_OUTPUT_RATIO_THRESHOLD = 0.7
+
+# After the anomaly is detected we cap ``max_output_tokens`` to this share
+# of the context window.  Picked to mirror typical generation budgets
+# (~25%) so the resulting ``usable_context`` covers the entire prompt
+# half of the window.
+SAFE_OUTPUT_RATIO = 0.25
+
+
+# ============================================================================
 # Context Tier
 # ============================================================================
 
@@ -31,13 +51,17 @@ class ContextTier(str, Enum):
 # Policy ratio tables
 # ============================================================================
 
+# Note: ``overflow_ratio`` used to live here for tier-aware overflow
+# thresholds.  We now compute ``overflow_threshold`` directly from the
+# raw context window (``int(context_window * 0.85)``, mirroring
+# hermes-agent's gateway), so the per-tier overrides only carry the
+# fields that still drive computation.
 _DEFAULT_RATIOS: Dict[str, float] = {
     "prune_protect_ratio": 0.25,
     "prune_minimum_ratio": 0.15,
     "flush_trigger_ratio": 0.03,
     "flush_reserve_ratio": 0.015,
     "summary_ratio": 0.04,
-    "overflow_ratio": 0.85,
     "overflow_buffer_ratio": 0.05,
 }
 
@@ -48,7 +72,6 @@ _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
         "flush_trigger_ratio": 0.05,
         "flush_reserve_ratio": 0.025,
         "summary_ratio": 0.06,
-        "overflow_ratio": 0.80,
         "overflow_buffer_ratio": 0.08,
     },
     ContextTier.MEDIUM: {},
@@ -56,7 +79,6 @@ _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
         "flush_trigger_ratio": 0.02,
         "flush_reserve_ratio": 0.01,
         "summary_ratio": 0.05,
-        "overflow_ratio": 0.87,
         "overflow_buffer_ratio": 0.04,
     },
     ContextTier.XLARGE: {
@@ -65,7 +87,6 @@ _TIER_OVERRIDES: Dict[ContextTier, Dict[str, float]] = {
         "flush_trigger_ratio": 0.015,
         "flush_reserve_ratio": 0.008,
         "summary_ratio": 0.05,
-        "overflow_ratio": 0.90,
         "overflow_buffer_ratio": 0.03,
     },
 }
@@ -86,9 +107,6 @@ _BOUNDS: Dict[str, tuple[int, int]] = {
     "overflow_buffer":    (2_000,   32_000),
 }
 
-# Minimum overflow threshold for models with sufficient context window.
-_MIN_OVERFLOW_THRESHOLD = 100_000
-
 
 # ============================================================================
 # CompactionPolicy
@@ -100,8 +118,9 @@ class CompactionPolicy:
     Immutable set of compaction thresholds derived from a model's context
     window and output token limit.
 
-    All values are integers (token counts) except ``overflow_ratio`` which is
-    kept as a float so callers can apply it to varying token counts.
+    All values are integer token counts.  Tier-aware ratios live in the
+    ``_DEFAULT_RATIOS`` / ``_TIER_OVERRIDES`` tables and are resolved to
+    absolute token counts during ``from_model``.
     """
 
     context_window: int
@@ -149,13 +168,32 @@ class CompactionPolicy:
         """Build a policy from model parameters."""
         overrides = overrides or {}
 
-        if max_output_tokens >= context_window:
-            _policy_log.warn("compaction_policy.capping_output_tokens", {
-                "context_window": context_window,
-                "max_output_tokens_original": max_output_tokens,
-                "max_output_tokens_capped": context_window // 4,
-            })
-            max_output_tokens = context_window // 4
+        # B1: anomaly-aware ``max_output_tokens`` capping
+        #
+        # Many providers ship ``max_output_tokens`` metadata that's wildly
+        # disproportionate to the actual window (e.g. GLM-5.1 reports
+        # ``max_output_tokens=168000`` against ``context_window=198000`` —
+        # that would leave only 30K usable input).  We always cap any
+        # value claiming more than ``MAX_OUTPUT_RATIO_THRESHOLD`` of the
+        # window down to ``SAFE_OUTPUT_RATIO`` to keep ``usable_context``
+        # sane.  The cap is purely for *estimation*; the real generation
+        # budget passed to the provider is unaffected.
+        if context_window > 0:
+            anomaly_floor = int(context_window * MAX_OUTPUT_RATIO_THRESHOLD)
+            if max_output_tokens >= anomaly_floor:
+                capped = int(context_window * SAFE_OUTPUT_RATIO)
+                _policy_log.warn("compaction_policy.capping_output_tokens", {
+                    "context_window": context_window,
+                    "max_output_tokens_original": max_output_tokens,
+                    "max_output_tokens_capped": capped,
+                    "reason": (
+                        "metadata_anomaly_exceeds_window"
+                        if max_output_tokens >= context_window
+                        else "metadata_anomaly_output_too_large"
+                    ),
+                    "threshold_ratio": MAX_OUTPUT_RATIO_THRESHOLD,
+                })
+                max_output_tokens = capped
 
         if max_input_tokens and max_input_tokens > 0:
             usable = max_input_tokens
@@ -186,13 +224,31 @@ class CompactionPolicy:
         clamped: Dict[str, int] = {}
         for key, value in raw.items():
             lo, hi = _BOUNDS[key]
-            effective_lo = min(lo, int(value)) if value > 0 else lo
-            clamped[key] = int(max(effective_lo, min(hi, value)))
+            clamped[key] = int(max(lo, min(hi, int(value))))
 
-        overflow_ratio = ratios["overflow_ratio"]
-        overflow_threshold = int(usable * overflow_ratio)
-        if usable >= _MIN_OVERFLOW_THRESHOLD:
-            overflow_threshold = max(_MIN_OVERFLOW_THRESHOLD, overflow_threshold)
+        # Fixed 85 % of the full context window — matches hermes-agent gateway
+        # behaviour and is simpler than a tier-adjusted ``usable × ratio``.
+        # Users can override the ratio via the ``overflow_ratio`` Memory
+        # config field (forwarded as an override here); the default keeps
+        # the hermes-style fixed threshold.
+        overflow_ratio_override = overrides.get("overflow_ratio")
+        if overflow_ratio_override is not None:
+            try:
+                ratio_val = float(overflow_ratio_override)
+                if 0 < ratio_val < 1:
+                    overflow_threshold = int(context_window * ratio_val)
+                else:
+                    _policy_log.warn("compaction_policy.overflow_ratio_out_of_range", {
+                        "value": ratio_val, "fallback": 0.85,
+                    })
+                    overflow_threshold = int(context_window * 0.85)
+            except (TypeError, ValueError):
+                _policy_log.warn("compaction_policy.overflow_ratio_parse_error", {
+                    "raw": overflow_ratio_override, "fallback": 0.85,
+                })
+                overflow_threshold = int(context_window * 0.85)
+        else:
+            overflow_threshold = int(context_window * 0.85)
         overflow_buffer = clamped["overflow_buffer"]
         preemptive_threshold = max(0, overflow_threshold - overflow_buffer)
 
@@ -228,7 +284,7 @@ class CompactionPolicy:
             preserve_last=preserve_last,
         )
 
-        _policy_log.info("compaction_policy.created", {
+        _policy_log.debug("compaction_policy.created", {
             "context_window": context_window,
             "max_output_tokens": max_output_tokens,
             "usable_context": usable,
@@ -263,7 +319,12 @@ class CompactionPolicy:
 
     @classmethod
     def default(cls) -> CompactionPolicy:
-        """Return a policy with the legacy hardcoded values."""
+        """Return a policy with sensible medium-tier defaults.
+
+        Equivalent to ``CompactionPolicy.from_model(128_000, 4096)`` but
+        constructed without going through the factory so unit tests can
+        hold a stable baseline policy.
+        """
         return cls(
             context_window=128000,
             max_output_tokens=4096,
@@ -274,9 +335,9 @@ class CompactionPolicy:
             flush_trigger=4_000,
             flush_reserve=2_000,
             summary_max_tokens=4_000,
-            overflow_threshold=int(123904 * 0.85),
+            overflow_threshold=int(128000 * 0.85),
             overflow_buffer=8_192,
-            preemptive_threshold=max(0, int(123904 * 0.85) - 8_192),
+            preemptive_threshold=max(0, int(128000 * 0.85) - 8_192),
             preserve_last=4,
         )
 

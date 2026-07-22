@@ -7,11 +7,14 @@ ThreadPoolExecutor rather than serially.
 
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any, Dict
+from unittest.mock import patch
 
 import pytest
 
+from flocks.tool.registry import ParameterType, ToolCategory, ToolParameter, ToolRegistry, ToolResult
 from flocks.workflow.engine import ExecutionResult, StepResult, WorkflowEngine
 from flocks.workflow.models import Workflow
 from flocks.workflow.repl_runtime import PythonExecRuntime
@@ -80,6 +83,7 @@ class TestParallelExecution:
     def test_parallel_faster_than_serial(self):
         """Parallel execution of 3 siblings (each sleeping 0.15s) should
         finish significantly faster than serial (3 * 0.15 = 0.45s)."""
+        ToolRegistry.init()
         wf = _build_fan_out_workflow(sibling_count=3, sleep_seconds=0.15)
         engine = WorkflowEngine(
             wf,
@@ -87,7 +91,7 @@ class TestParallelExecution:
             max_parallel_workers=4,
         )
         t0 = time.perf_counter()
-        result = engine.run()
+        result = engine.run(retain_history=True)
         elapsed = time.perf_counter() - t0
 
         assert result.steps >= 5  # start + 3 workers + end
@@ -96,6 +100,7 @@ class TestParallelExecution:
 
     def test_serial_fallback_when_workers_1(self):
         """With max_parallel_workers=1, siblings execute serially."""
+        ToolRegistry.init()
         wf = _build_fan_out_workflow(sibling_count=3, sleep_seconds=0.10)
         engine = WorkflowEngine(
             wf,
@@ -103,7 +108,7 @@ class TestParallelExecution:
             max_parallel_workers=1,
         )
         t0 = time.perf_counter()
-        result = engine.run()
+        result = engine.run(retain_history=True)
         elapsed = time.perf_counter() - t0
 
         assert result.steps >= 5
@@ -118,7 +123,7 @@ class TestParallelExecution:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         worker_steps = [s for s in result.history if s.node_id.startswith("worker_")]
         assert len(worker_steps) == 4
@@ -134,7 +139,7 @@ class TestParallelExecution:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         end_steps = [s for s in result.history if s.node_id == "end"]
         assert len(end_steps) == 1
@@ -160,7 +165,7 @@ class TestParallelExecution:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         assert result.steps == 3
         last = result.history[-1]
@@ -196,7 +201,7 @@ class TestParallelErrorHandling:
         )
         from flocks.workflow.errors import NodeExecutionError
         with pytest.raises(NodeExecutionError, match="boom"):
-            engine.run()
+            engine.run(retain_history=True)
 
     def test_parallel_one_node_fails_continue(self):
         """When stop_on_error=False, other siblings still complete."""
@@ -221,7 +226,7 @@ class TestParallelErrorHandling:
             max_parallel_workers=4,
             stop_on_error=False,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         ok_steps = [s for s in result.history if s.error is None and s.node_id.startswith("ok_")]
         assert len(ok_steps) == 2
@@ -260,6 +265,103 @@ class TestParallelHooks:
         assert len(ended) == len(started)
 
 
+class TestParallelToolExecution:
+    """Workflow tool execution should use the shared async runtime."""
+
+    def test_parallel_python_nodes_use_shared_tool_loop(self):
+        tool_name = "workflow_parallel_shared_loop_tool"
+        previous_tool = ToolRegistry._tools.get(tool_name)
+        previous_default = ToolRegistry._enabled_defaults.get(tool_name)
+
+        @ToolRegistry.register_function(
+            name=tool_name,
+            description="Test async workflow tool",
+            category=ToolCategory.SYSTEM,
+            parameters=[
+                ToolParameter(
+                    name="value",
+                    type=ParameterType.STRING,
+                    description="Value to echo back",
+                    required=True,
+                )
+            ],
+        )
+        async def _workflow_parallel_shared_loop_tool(ctx, value: str) -> ToolResult:
+            await asyncio.sleep(0.02)
+            return ToolResult(success=True, output=f"ok:{value}")
+
+        try:
+            calls: list[str] = []
+
+            def _spy_run_sync(coro):
+                calls.append(type(coro).__name__)
+                from flocks.workflow._async_runtime import run_sync
+
+                return run_sync(coro)
+
+            wf = Workflow.from_dict({
+                "name": "parallel_tool_test",
+                "start": "start",
+                "nodes": [
+                    {"id": "start", "type": "python", "code": "outputs['x'] = 'seed'"},
+                    {
+                        "id": "worker_0",
+                        "type": "python",
+                        "code": (
+                            "result = tool.run_safe('workflow_parallel_shared_loop_tool', value=inputs['x'])\n"
+                            "assert result['success'] is True\n"
+                            "outputs['result'] = result['text']"
+                        ),
+                    },
+                    {
+                        "id": "worker_1",
+                        "type": "python",
+                        "code": (
+                            "result = tool.run_safe('workflow_parallel_shared_loop_tool', value=inputs['x'])\n"
+                            "assert result['success'] is True\n"
+                            "outputs['result'] = result['text']"
+                        ),
+                    },
+                    {
+                        "id": "worker_2",
+                        "type": "python",
+                        "code": (
+                            "result = tool.run_safe('workflow_parallel_shared_loop_tool', value=inputs['x'])\n"
+                            "assert result['success'] is True\n"
+                            "outputs['result'] = result['text']"
+                        ),
+                    },
+                ],
+                "edges": [
+                    {"from": "start", "to": "worker_0"},
+                    {"from": "start", "to": "worker_1"},
+                    {"from": "start", "to": "worker_2"},
+                ],
+            })
+
+            with patch("flocks.workflow.tools_adapter._run_sync_on_shared_loop", side_effect=_spy_run_sync):
+                result = WorkflowEngine(
+                    wf,
+                    runtime=PythonExecRuntime(),
+                    max_parallel_workers=4,
+                ).run(retain_history=True)
+
+            worker_steps = [step for step in result.history if step.node_id.startswith("worker_")]
+            assert len(worker_steps) == 3
+            assert all(step.error is None for step in worker_steps)
+            assert {step.outputs.get("result") for step in worker_steps} == {"ok:seed"}
+            assert len(calls) == 3
+        finally:
+            if previous_tool is not None:
+                ToolRegistry._tools[tool_name] = previous_tool
+            else:
+                ToolRegistry._tools.pop(tool_name, None)
+            if previous_default is not None:
+                ToolRegistry._enabled_defaults[tool_name] = previous_default
+            else:
+                ToolRegistry._enabled_defaults.pop(tool_name, None)
+
+
 class TestParallelDedup:
     """Dedup still works correctly with batch draining."""
 
@@ -281,8 +383,9 @@ class TestParallelDedup:
             wf,
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
+            history_mode="full",
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
         b_steps = [s for s in result.history if s.node_id == "b"]
         assert len(b_steps) == 1
 
@@ -317,7 +420,7 @@ class TestParallelTimeout:
             stop_on_error=False,
         )
         t0 = time.perf_counter()
-        result = engine.run()
+        result = engine.run(retain_history=True)
         elapsed = time.perf_counter() - t0
 
         # Should complete near the timeout, not wait for the 5s sleep.
@@ -358,7 +461,7 @@ class TestParallelTimeout:
             stop_on_error=True,
         )
         # Should NOT raise even though stop_on_error=True, because timeout is non-fatal.
-        result = engine.run()
+        result = engine.run(retain_history=True)
         errors = [s for s in result.history if s.error is not None]
         assert len(errors) == 1
         assert "超时" in errors[0].error
@@ -393,7 +496,7 @@ class TestParallelBranch:
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
         )
-        result = engine.run()
+        result = engine.run(retain_history=True)
 
         executed_ids = [s.node_id for s in result.history]
         assert "a" in executed_ids

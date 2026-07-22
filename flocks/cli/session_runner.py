@@ -12,6 +12,7 @@ Core logic is in session/runner.py
 import asyncio
 import json
 import os
+from functools import cache
 from pathlib import Path
 from typing import Optional, Dict, Any
 
@@ -54,21 +55,18 @@ def _get_cli_callbacks() -> Optional['RunnerCallbacks']:
 
 # Tool display styles
 TOOL_STYLES: Dict[str, tuple] = {
-    "todowrite": ("Todo", "yellow bold"),
-    "todoread": ("Todo", "yellow bold"),
+    "todo": ("Todo", "yellow bold"),
     "bash": ("Bash", "red bold"),
     "edit": ("Edit", "green bold"),
     "write": ("Write", "green bold"),
     "glob": ("Glob", "cyan bold"),
     "grep": ("Grep", "cyan bold"),
-    "list": ("List", "cyan bold"),
     "read": ("Read", "magenta bold"),
     "websearch": ("Search", "dim bold"),
     "delegate_task": ("Delegate", "bright_magenta bold"),
-    "call_omo_agent": ("Delegate", "bright_magenta bold"),
 }
 
-DELEGATE_TOOLS = {"delegate_task", "call_omo_agent"}
+DELEGATE_TOOLS = {"delegate_task"}
 
 
 class CLISessionRunner:
@@ -256,9 +254,18 @@ class CLISessionRunner:
         continue_session: bool = False,
     ) -> SessionInfo:
         """Get or create session."""
+        resolve_worktree = cache(Project.worktree_for_directory)
+        current_worktree = resolve_worktree(str(self.directory))
+
+        def belongs_to_current_worktree(session: SessionInfo) -> bool:
+            return bool(
+                session.directory
+                and resolve_worktree(session.directory) == current_worktree
+            )
+
         if session_id:
             session = await Session.get(project_id, session_id)
-            if session:
+            if session and belongs_to_current_worktree(session):
                 return session
             self.console.print(f"[yellow]Session {session_id} not found, creating new[/yellow]")
         
@@ -266,7 +273,7 @@ class CLISessionRunner:
             sessions = await Session.list(project_id)
             if sessions:
                 for s in sessions:
-                    if not s.parent_id:
+                    if not s.parent_id and belongs_to_current_worktree(s):
                         return s
         
         return await Session.create(
@@ -341,6 +348,7 @@ class CLISessionRunner:
             from flocks.input.dispatcher import dispatch_user_input
             from flocks.input.events import UserInputEvent
             from flocks.input.output import CliOutputSink
+            from flocks.session.message import Message
 
             event = UserInputEvent(
                 source_type="cli",
@@ -351,6 +359,12 @@ class CLISessionRunner:
                 model={"providerID": provider_id, "modelID": model_id},
                 display_text=stripped,
             )
+
+            async def _clear_history() -> None:
+                await Message.clear(self._session.id)
+                await self._clear_screen()
+                self.console.print("[dim]Conversation history cleared.[/dim]")
+
             handled = await dispatch_user_input(
                 event,
                 CliOutputSink(
@@ -367,6 +381,7 @@ class CLISessionRunner:
                         dispatch_commands=False,
                     ),
                     clear_screen=self._clear_screen,
+                    clear_history=_clear_history,
                 ),
             )
             if handled.handled:
@@ -700,7 +715,7 @@ class CLISessionRunner:
                 self.console.print(f"  [red]✗[/red] Failed")
     
     def _render_delegate_result(self, result: ToolResult) -> None:
-        """Render delegate_task / call_omo_agent result with a compact panel."""
+        """Render delegate_task result with a compact panel."""
         import re
         if result.success:
             output_text = str(result.output or "")
@@ -776,7 +791,7 @@ class CLISessionRunner:
   /skills          List skills (same as /skills list)
   /skills list     List skills
   /skills refresh  Refresh skills
-  /clear           Clear screen
+  /clear           Clear session history
   /exit            Exit session
   /quit            Exit session
   /q               Exit session

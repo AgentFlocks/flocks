@@ -53,7 +53,7 @@ const entityTranslations: Record<string, string> = {
   'entity.defaultCreate': '创建',
   'entity.defaultSave': '保存',
   'entity.tabDetails': '详情',
-  'entity.tabAIEdit': 'AI 编辑',
+  'entity.tabAIEdit': '工作台',
   'entity.tabTest': '测试',
   'entity.cancelButton': '取消',
   'entity.testButton': '测试',
@@ -115,17 +115,23 @@ describe('SkillSheet', () => {
 
     it('should default to Rex tab in create mode', () => {
       render(<SkillSheet {...defaultProps} />);
-      expect(screen.getByText('AI 编辑')).toBeInTheDocument();
+      expect(screen.getByText('工作台')).toBeInTheDocument();
     });
   });
 
   describe('Edit mode', () => {
+    // Use `source: 'user'` so the sheet renders in editable mode.  Skills
+    // with `source: 'project'` (i.e. checked into the project's
+    // `.flocks/plugins/skills/...` directory) are intentionally read-only in
+    // the UI to prevent users from accidentally rewriting repo-tracked files;
+    // those scenarios are exercised by the read-only branch in
+    // "should show name field in edit mode" below.
     const skill = {
       name: 'test-skill',
       description: 'A test skill',
       content: '# Test skill content',
       location: '/path/to/skill',
-      source: 'project',
+      source: 'user',
     };
 
     it('should show "编辑 技能：test-skill" title', () => {

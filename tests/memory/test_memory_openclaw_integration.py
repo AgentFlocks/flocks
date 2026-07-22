@@ -186,7 +186,12 @@ class TestMemoryBootstrap:
         assert "Memory System" in instructions
         assert "MEMORY.md" in instructions
         assert "daily/" in instructions
+        assert "YYYY-MM-DD" in instructions
+        assert "daily/2026-02-09.md" in instructions
+        assert "daily/2026-02-08.md" in instructions
         assert "memory_search" in instructions
+        assert "{memory_root}" not in instructions
+        assert "On-disk memory root" in instructions
     
     @pytest.mark.asyncio
     async def test_bootstrap(self):

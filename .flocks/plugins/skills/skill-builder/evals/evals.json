@@ -1,0 +1,23 @@
+{
+  "skill_name": "skill-builder",
+  "evals": [
+    {
+      "id": 1,
+      "prompt": "帮我创建一个 `release-note-builder` skill，放到当前项目的 `.flocks/plugins/skills/` 下。这个 skill 要能把一组 git commit 和变更说明整理成发布说明，默认只写 `SKILL.md`，但如果有必要可以补 `evals/evals.json`。描述里要明确什么时候触发，不要只写“帮助创建发布说明”。",
+      "expected_output": "创建一个项目级 skill 目录，包含有效的 `SKILL.md`，frontmatter 完整，description 同时说明能力和触发时机，并根据需要决定是否增加 evals。",
+      "files": []
+    },
+    {
+      "id": 2,
+      "prompt": "把现有的 `browser-use` skill 改得更适合内部系统测试，但不要改 skill 名字。需要保留当前 repo 的写作风格，尽量把长说明下沉到 `references/`，并补 2 个真实一点的测试提示。",
+      "expected_output": "对已有 skill 做最小必要修改，保留原名，必要时新增 `references/` 与 `evals/evals.json`，并在结果里说明为什么这样拆分。",
+      "files": []
+    },
+    {
+      "id": 3,
+      "prompt": "我想做一个通用 skill，指导 agent 在处理 CSV 到 Markdown summary 的任务时优先用 Python 标准库，不要默认加依赖。你先判断这到底该做成 skill 还是 tool；如果适合做 skill，再把目录结构和验证方式一起建好。",
+      "expected_output": "先正确判断 skill/tool 边界；如果选择 skill，则输出一个最小可用 skill 目录，并在 `SKILL.md` 中写清楚依赖策略、验证步骤和适用场景。",
+      "files": []
+    }
+  ]
+}

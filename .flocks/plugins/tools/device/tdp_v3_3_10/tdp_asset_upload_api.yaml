@@ -1,0 +1,66 @@
+name: tdp_asset_upload_api
+description: >
+  查询 TDP 上传接口相关数据。`summary` 返回上传接口统计，`host_list` 返回域名列表，
+  `interface_list` 返回上传接口明细。优先使用顶层语义化参数；`fuzzy`、`condition` 和 `page`
+  仅用于高级兼容或复杂筛选。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        上传接口子接口动作。`summary` 会自动补齐根级 `time_from`、
+        `time_to` 和 `search_for_upload=true`；`host_list` 会自动补齐根级时间范围；
+        `interface_list` 会自动补齐 `condition.search_for_upload=true`
+        以及默认分页排序。
+      enum: [summary, host_list, interface_list]
+      default: summary
+    time_from:
+      type: integer
+      description: 开始时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_from`。可以使用python datetime动态计算。
+    time_to:
+      type: integer
+      description: 结束时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_to`。可以使用python datetime动态计算。
+    search_for_upload:
+      type: boolean
+      description: 是否只搜索上传接口；`summary` 默认会补 `true`，`interface_list` 也会自动写入 `condition.search_for_upload=true`。
+    host:
+      type: string
+      description: 域名筛选，适用于 `interface_list`，用于限定某个站点或域名下的上传接口。
+    fuzzy:
+      type: object
+      description: 模糊查询对象；`host_list` 使用根级 `fuzzy`，`interface_list` 会写入 `condition.fuzzy`。通常为 `{keyword, fieldlist}` 结构。
+    keyword:
+      type: string
+      description: >
+        关键词搜索。`host_list` 会自动生成按主机字段过滤；`interface_list` 会自动生成
+        `condition.fuzzy.fieldlist=["url_pattern","title"]`。
+    cur_page:
+      type: integer
+      description: 页码，主要适用于 `interface_list`。
+    page_size:
+      type: integer
+      description: 每页条数，主要适用于 `interface_list`。
+    sort_by:
+      type: string
+      description: 排序字段，主要适用于 `interface_list`，默认 `last_upload_time`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，主要适用于 `interface_list`，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: upload_api

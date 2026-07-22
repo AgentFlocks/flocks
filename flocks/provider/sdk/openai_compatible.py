@@ -22,10 +22,18 @@ from flocks.provider.provider import (
     StreamChunk,
 )
 from flocks.provider.sdk.openai_base import (
+    DEFAULT_HTTP_TIMEOUT,
     ThinkTagExtractor,
+    apply_openai_token_limit,
+    build_reasoning_metadata,
+    create_chat_completion_with_fallbacks,
+    _coerce_bool,
     _normalize_stream_usage,
-    _supports_include_usage_fallback,
-    extract_reasoning_content,
+    extract_reasoning_content_with_source,
+    extract_reasoning_details,
+    format_openai_content,
+    format_openai_messages,
+    resolve_openai_token_limit,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -36,10 +44,6 @@ log = Log.create(service="provider.openai_compatible")
 class OpenAICompatibleProvider(BaseProvider):
     """OpenAI Compatible API provider"""
 
-    _MINIMAX_EMPTY_RESPONSE_TARGETS = {
-        "minimax-m2.5",
-        "minimax-m2.7",
-    }
     _MINIMAX_EMPTY_RESPONSE_RETRY_DELAY_SECONDS = 3
     
     def __init__(self):
@@ -92,7 +96,20 @@ class OpenAICompatibleProvider(BaseProvider):
 
                 custom_settings = getattr(self._config, "custom_settings", None) or {}
                 verify_ssl = resolve_verify_ssl(custom_settings, default=True)
-                http_client = httpx.AsyncClient(verify=verify_ssl, timeout=120.0)
+                # Honour the same env-var / per-provider trust_env contract as
+                # OpenAIProvider and OpenAIBaseProvider. Timeout is shared via
+                # DEFAULT_HTTP_TIMEOUT from openai_base so all three providers
+                # stay in sync.
+                trust_env = _coerce_bool(
+                    os.getenv("FLOCKS_HTTP_TRUST_ENV"), True
+                )
+                if isinstance(custom_settings, dict) and "trust_env" in custom_settings:
+                    trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
+                http_client = httpx.AsyncClient(
+                    trust_env=trust_env,
+                    verify=verify_ssl,
+                    timeout=DEFAULT_HTTP_TIMEOUT,
+                )
 
                 # Create client
                 self._client = AsyncOpenAI(
@@ -102,7 +119,7 @@ class OpenAICompatibleProvider(BaseProvider):
                 )
                 self.log.info(
                     "openai_compatible.client.created",
-                    {"base_url": base_url, "verify_ssl": verify_ssl},
+                    {"base_url": base_url, "trust_env": trust_env, "verify_ssl": verify_ssl},
                 )
                     
             except ImportError:
@@ -124,7 +141,7 @@ class OpenAICompatibleProvider(BaseProvider):
     @classmethod
     def _is_minimax_empty_response_target(cls, model_id: str) -> bool:
         normalized = cls._normalize_model_id(model_id)
-        return any(target in normalized for target in cls._MINIMAX_EMPTY_RESPONSE_TARGETS)
+        return "minimax" in normalized
 
     @staticmethod
     def _has_non_empty_text_content(content: Any) -> bool:
@@ -143,44 +160,13 @@ class OpenAICompatibleProvider(BaseProvider):
         })
         await asyncio.sleep(delay_seconds)
     
-    @staticmethod
-    def _format_content(content: Any) -> Any:
-        if not isinstance(content, list):
-            return content
-
-        formatted: list[dict] = []
-        for block in content:
-            if not isinstance(block, dict):
-                continue
-            block_type = block.get("type")
-            if block_type == "text" and isinstance(block.get("text"), str):
-                formatted.append({"type": "text", "text": block["text"]})
-            elif block_type == "image" and block.get("data") and block.get("mimeType"):
-                formatted.append({
-                    "type": "image_url",
-                    "image_url": {
-                        "url": f"data:{block['mimeType']};base64,{block['data']}",
-                    },
-                })
-        return formatted
+    # Delegated to the shared canonical implementations in ``openai_base``.
+    _format_content = staticmethod(format_openai_content)
 
     @staticmethod
     def _format_messages(messages: List[ChatMessage]) -> list:
         """Convert ChatMessage list to OpenAI API dicts, preserving tool_calls / tool results."""
-        formatted = []
-        for msg in messages:
-            m: dict = {
-                "role": msg.role,
-                "content": OpenAICompatibleProvider._format_content(msg.content),
-            }
-            if msg.tool_calls:
-                m["tool_calls"] = msg.tool_calls
-            if msg.tool_call_id:
-                m["tool_call_id"] = msg.tool_call_id
-            if msg.name:
-                m["name"] = msg.name
-            formatted.append(m)
-        return formatted
+        return format_openai_messages(messages)
 
     async def chat(
         self,
@@ -195,25 +181,35 @@ class OpenAICompatibleProvider(BaseProvider):
         formatted_messages = self._format_messages(messages)
         
         # Extract parameters
-        max_tokens = kwargs.get("max_tokens")
+        max_tokens = resolve_openai_token_limit(kwargs)
+        max_completion_tokens_explicit = kwargs.get("max_completion_tokens") is not None
         tools = kwargs.get("tools")
         thinking = kwargs.get("thinking")
-        
+
         # Make request
         request_params = {
             "model": model_id,
             "messages": formatted_messages,
         }
 
+        # See the streaming chat_stream() counterpart for the rationale; the
+        # non-streaming path had the same extra_body-swallow bug.
+        extra_body = dict(kwargs.get("extra_body") or {})
         if thinking:
-            request_params["extra_body"] = {"thinking": thinking}
+            extra_body["thinking"] = thinking
         else:
             temperature = kwargs.get("temperature")
             if temperature is not None:
                 request_params["temperature"] = temperature
+        if extra_body:
+            request_params["extra_body"] = extra_body
         
-        if max_tokens:
-            request_params["max_tokens"] = max_tokens
+        apply_openai_token_limit(
+            request_params,
+            max_tokens,
+            prefer_completion_tokens=True,
+            completion_tokens_explicit=max_completion_tokens_explicit,
+        )
         if tools:
             # Some compatible APIs don't support tools
             try:
@@ -221,7 +217,13 @@ class OpenAICompatibleProvider(BaseProvider):
             except Exception:
                 self.log.warn("openai_compatible.tools.not_supported", {"model": model_id})
         
-        response = await client.chat.completions.create(**request_params)
+        response = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            request_params,
+            max_tokens=max_tokens,
+            logger=self.log,
+            log_prefix="openai_compatible",
+        )
 
         # Format response
         choice = response.choices[0]
@@ -255,10 +257,11 @@ class OpenAICompatibleProvider(BaseProvider):
         formatted_messages = self._format_messages(messages)
         
         # Extract parameters
-        max_tokens = kwargs.get("max_tokens")
+        max_tokens = resolve_openai_token_limit(kwargs)
+        max_completion_tokens_explicit = kwargs.get("max_completion_tokens") is not None
         tools = kwargs.get("tools")
         thinking = kwargs.get("thinking")
-        
+
         # Make streaming request
         request_params = {
             "model": model_id,
@@ -267,15 +270,30 @@ class OpenAICompatibleProvider(BaseProvider):
             "stream_options": {"include_usage": True},
         }
 
+        # extra_body assembly: mirror openai_base.py:905-913.  Caller-supplied
+        # extra_body (e.g. ``enable_thinking`` produced by
+        # ``build_provider_options`` for DashScope-style endpoints) MUST be
+        # forwarded — the old code dropped it whenever ``thinking`` was None,
+        # silently disabling thinking for user-configured openai-compatible
+        # endpoints that set ``default_parameters.enable_thinking`` in
+        # flocks.json.  ``thinking`` is merged in last so it can override a
+        # caller-supplied extra_body.thinking if both are set.
+        extra_body = dict(kwargs.get("extra_body") or {})
         if thinking:
-            request_params["extra_body"] = {"thinking": thinking}
+            extra_body["thinking"] = thinking
         else:
             temperature = kwargs.get("temperature")
             if temperature is not None:
                 request_params["temperature"] = temperature
+        if extra_body:
+            request_params["extra_body"] = extra_body
         
-        if max_tokens:
-            request_params["max_tokens"] = max_tokens
+        apply_openai_token_limit(
+            request_params,
+            max_tokens,
+            prefer_completion_tokens=True,
+            completion_tokens_explicit=max_completion_tokens_explicit,
+        )
         if tools:
             # Some compatible APIs don't support tools
             try:
@@ -291,18 +309,13 @@ class OpenAICompatibleProvider(BaseProvider):
             "include_usage": True,
         })
 
-        try:
-            stream = await client.chat.completions.create(**request_params)
-        except Exception as exc:
-            if not _supports_include_usage_fallback(exc):
-                raise
-            self.log.warn("openai_compatible.stream.include_usage_unsupported", {
-                "model": model_id,
-                "error": str(exc),
-            })
-            request_params = dict(request_params)
-            request_params.pop("stream_options", None)
-            stream = await client.chat.completions.create(**request_params)
+        stream = await create_chat_completion_with_fallbacks(
+            client.chat.completions.create,
+            request_params,
+            max_tokens=max_tokens,
+            logger=self.log,
+            log_prefix="openai_compatible",
+        )
 
         # Stateful extractor to separate <think>...</think> from content.
         think_extractor = ThinkTagExtractor()
@@ -340,13 +353,22 @@ class OpenAICompatibleProvider(BaseProvider):
                         })
 
                     # Handle reasoning/thinking content (DeepSeek R1, GLM, Claude proxies, etc.)
-                    reasoning = extract_reasoning_content(delta)
-                    if reasoning:
+                    reasoning, reasoning_source = extract_reasoning_content_with_source(delta)
+                    reasoning_details = extract_reasoning_details(delta)
+                    if reasoning is not None or reasoning_details:
                         emitted_substantive_chunk = True
+                        reasoning_metadata = build_reasoning_metadata(
+                            provider_id=self.id,
+                            model_id=model_id,
+                            reasoning_content=reasoning,
+                            reasoning_source=reasoning_source,
+                            reasoning_details=reasoning_details,
+                        )
                         yield StreamChunk(
                             event_type="reasoning",
-                            reasoning=reasoning,
+                            reasoning=reasoning or "",
                             finish_reason=None,
+                            metadata=reasoning_metadata,
                         )
 
                     # Handle text content – extract inline <think> tags if present
@@ -357,10 +379,17 @@ class OpenAICompatibleProvider(BaseProvider):
                             if seg_type == "reasoning":
                                 if seg_text:
                                     emitted_substantive_chunk = True
+                                reasoning_metadata = build_reasoning_metadata(
+                                    provider_id=self.id,
+                                    model_id=model_id,
+                                    reasoning_content=seg_text,
+                                    reasoning_source="think_tag",
+                                )
                                 yield StreamChunk(
                                     event_type="reasoning",
                                     reasoning=seg_text,
                                     finish_reason=None,
+                                    metadata=reasoning_metadata,
                                 )
                             else:
                                 if seg_text:
@@ -376,10 +405,17 @@ class OpenAICompatibleProvider(BaseProvider):
                         if seg_type == "reasoning":
                             if seg_text:
                                 emitted_substantive_chunk = True
+                            reasoning_metadata = build_reasoning_metadata(
+                                provider_id=self.id,
+                                model_id=model_id,
+                                reasoning_content=seg_text,
+                                reasoning_source="think_tag",
+                            )
                             yield StreamChunk(
                                 event_type="reasoning",
                                 reasoning=seg_text,
                                 finish_reason=None,
+                                metadata=reasoning_metadata,
                             )
                         else:
                             if seg_text:

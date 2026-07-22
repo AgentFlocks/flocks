@@ -1,14 +1,22 @@
 import asyncio
+from copy import copy
 from dataclasses import dataclass
 import time
-from typing import Any, Dict, Optional
+from typing import Any, Callable, Dict, Optional
 
 from flocks.config.config import Config
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
-from flocks.workflow._async_runtime import run_sync as _run_sync_on_shared_loop
+from flocks.workflow._async_runtime import (
+    run_sync as _run_sync_on_shared_loop,
+    run_sync_cancellable as _run_sync_cancellable_on_shared_loop,
+)
+from flocks.workflow.errors import RunCancelledError
 
 
-def _run_coro_sync(coro):
+def _run_coro_sync(
+    coro,
+    cancel_checker: Optional[Callable[[], bool]] = None,
+):
     """Run async provider calls from sync workflow code on the shared workflow loop.
 
     All workflow-triggered async work (config loading, provider.apply_config,
@@ -16,6 +24,8 @@ def _run_coro_sync(coro):
     that loop-bound resources (httpx.AsyncClient, OpenAI streams) never
     outlive their owning loop. See ``flocks.workflow._async_runtime``.
     """
+    if cancel_checker is not None:
+        return _run_sync_cancellable_on_shared_loop(coro, cancel_checker)
     return _run_sync_on_shared_loop(coro)
 
 
@@ -46,6 +56,7 @@ class LLMClient:
         model: Optional[str] = None,
         *,
         provider_id: Optional[str] = None,
+        cancel_checker: Optional[Callable[[], bool]] = None,
     ):
         # NOTE: This module is intentionally synchronous at the edges (workflow runtime),
         # but uses flocks Provider (async) internally for consistency with the rest of flocks.
@@ -56,10 +67,41 @@ class LLMClient:
         self.model = ((model or "") or "").strip()
         self.api_key = (api_key or "").strip() or None
         self.base_url = (base_url or "").strip() or None
+        self.cancel_checker = cancel_checker
         workflow_llm_cfg = self._load_workflow_llm_config()
+        # Only treat ``trust_env`` as user-specified when it actually appears
+        # in workflow.llm config. Otherwise we leave the provider's existing
+        # ``custom_settings['trust_env']`` untouched, which prevents workflow
+        # calls from silently flipping the trust_env policy chosen by the
+        # session / agent that shares the same Provider singleton.
+        self.trust_env_explicit = "trust_env" in workflow_llm_cfg
         self.trust_env = _coerce_bool(workflow_llm_cfg.get("trust_env"), False)
 
         Provider._ensure_initialized()
+
+    def _cancel_requested(self) -> bool:
+        try:
+            return bool(self.cancel_checker and self.cancel_checker())
+        except Exception:
+            return False
+
+    def _raise_if_cancelled(self) -> None:
+        if self._cancel_requested():
+            raise RunCancelledError("<llm>")
+
+    def _sleep_with_cancel(self, delay_s: float) -> None:
+        if delay_s <= 0:
+            return
+        if self.cancel_checker is None:
+            time.sleep(delay_s)
+            return
+        deadline = time.monotonic() + delay_s
+        while True:
+            self._raise_if_cancelled()
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return
+            time.sleep(min(0.1, remaining))
 
     def _get_provider(self, provider_id: str) -> Any:
         provider = Provider.get(provider_id)
@@ -72,7 +114,7 @@ class LLMClient:
 
     def _load_workflow_llm_config(self) -> Dict[str, Any]:
         try:
-            cfg = _run_coro_sync(Config.get())
+            cfg = _run_coro_sync(Config.get(), self.cancel_checker)
         except Exception:
             return {}
         if not hasattr(cfg, "model_dump"):
@@ -86,7 +128,10 @@ class LLMClient:
 
     def _resolve_default_target(self) -> Optional[_ResolvedTarget]:
         try:
-            default_llm = _run_coro_sync(Config.resolve_default_llm())
+            default_llm = _run_coro_sync(
+                Config.resolve_default_llm(),
+                self.cancel_checker,
+            )
         except Exception:
             return None
         if not default_llm:
@@ -189,35 +234,100 @@ class LLMClient:
                 )
         return None
 
-    def _prepare_provider(self, provider_id: str) -> Any:
+    def _clone_provider_for_workflow(self, shared_provider: Any) -> Any:
+        """Create a workflow-local provider instance from the shared singleton.
+
+        Workflow calls run on a dedicated background loop while session / agent
+        calls run on the server loop. Sharing the same provider instance across
+        those callers makes both ``_config`` and any cached async client
+        (``_client``) a process-wide race point. The workflow therefore uses an
+        isolated provider instance seeded from the shared provider's current
+        config/runtime state, but never mutates the shared singleton itself.
+        """
         try:
-            _run_coro_sync(Provider.apply_config(provider_id=provider_id))
+            isolated_provider = type(shared_provider)()
+        except Exception:
+            isolated_provider = copy(shared_provider)
+
+        for attr in ("id", "name", "_api_key", "_base_url", "_endpoint"):
+            if hasattr(shared_provider, attr):
+                try:
+                    setattr(isolated_provider, attr, getattr(shared_provider, attr))
+                except Exception:
+                    pass
+
+        for attr in ("_config_models", "_custom_models"):
+            if hasattr(shared_provider, attr):
+                value = getattr(shared_provider, attr)
+                cloned_value = list(value) if isinstance(value, list) else value
+                try:
+                    setattr(isolated_provider, attr, cloned_value)
+                except Exception:
+                    pass
+
+        if hasattr(isolated_provider, "_client"):
+            try:
+                setattr(isolated_provider, "_client", None)
+            except Exception:
+                pass
+
+        return isolated_provider
+
+    def _prepare_provider(self, provider_id: str) -> Any:
+        """Build a workflow-local provider without mutating the shared singleton."""
+        try:
+            _run_coro_sync(
+                Provider.apply_config(provider_id=provider_id),
+                self.cancel_checker,
+            )
         except Exception:
             # Keep workflow runtime resilient: provider apply_config failure
             # should not block ask() for environments driven by env vars.
             pass
 
-        provider = self._get_provider(provider_id)
-        cfg = getattr(provider, "_config", None)
+        shared_provider = self._get_provider(provider_id)
+        provider = self._clone_provider_for_workflow(shared_provider)
+        cfg = getattr(shared_provider, "_config", None)
         existing_custom = getattr(cfg, "custom_settings", None) or {}
-        custom_settings = dict(existing_custom) if isinstance(existing_custom, dict) else {}
-        custom_settings["trust_env"] = self.trust_env
-
-        provider.configure(
-            ProviderConfig(
-                provider_id=provider_id,
-                api_key=self.api_key if self.api_key is not None else getattr(cfg, "api_key", None),
-                base_url=self.base_url if self.base_url is not None else getattr(cfg, "base_url", None),
-                custom_settings=custom_settings,
-            )
+        custom_settings = (
+            dict(existing_custom) if isinstance(existing_custom, dict) else {}
         )
+        if self.trust_env_explicit:
+            custom_settings["trust_env"] = self.trust_env
 
-        # Some async SDK clients are loop-bound. Reset and recreate per call.
-        if hasattr(provider, "_client"):
-            try:
-                setattr(provider, "_client", None)
-            except Exception:
-                pass
+        desired_api_key = (
+            self.api_key
+            if self.api_key is not None
+            else getattr(cfg, "api_key", None)
+        )
+        if desired_api_key is None:
+            desired_api_key = getattr(shared_provider, "_api_key", None)
+
+        desired_base_url = (
+            self.base_url
+            if self.base_url is not None
+            else getattr(cfg, "base_url", None)
+        )
+        if desired_base_url is None:
+            desired_base_url = getattr(shared_provider, "_base_url", None)
+        if desired_base_url is None:
+            desired_base_url = getattr(shared_provider, "_endpoint", None)
+
+        if (
+            cfg is not None
+            or self.api_key is not None
+            or self.base_url is not None
+            or self.trust_env_explicit
+        ):
+            provider.configure(
+                ProviderConfig(
+                    provider_id=provider_id,
+                    api_key=desired_api_key,
+                    base_url=desired_base_url,
+                    custom_settings=custom_settings,
+                )
+            )
+
         return provider
 
     def _format_target(self, target: _ResolvedTarget) -> str:
@@ -263,12 +373,14 @@ class LLMClient:
         max_retries: int = 0,
         retry_delay_s: float = 1.0,
     ) -> str:
+        self._raise_if_cancelled()
         if model is not None or provider_id is not None:
             return LLMClient(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 model=model if model is not None else self.model,
                 provider_id=provider_id if provider_id is not None else self.provider_id,
+                cancel_checker=self.cancel_checker,
             ).ask(
                 prompt,
                 temperature=temperature,
@@ -284,6 +396,7 @@ class LLMClient:
         delay_s = max(0.0, float(retry_delay_s))
 
         for target in targets:
+            self._raise_if_cancelled()
             validation_error = self._validate_target(target)
             if validation_error:
                 preflight_errors.append((target, validation_error))
@@ -303,11 +416,16 @@ class LLMClient:
 
             last_exc: Optional[Exception] = None
             for attempt in range(retry_count + 1):
+                self._raise_if_cancelled()
                 try:
-                    response = _run_coro_sync(_call())
+                    response = _run_coro_sync(_call(), self.cancel_checker)
                     self.provider_id = target.provider_id
                     self.model = target.model_id
                     return str(getattr(response, "content", "") or "")
+                except RunCancelledError:
+                    raise
+                except asyncio.CancelledError as exc:
+                    raise RunCancelledError("<llm>") from exc
                 except asyncio.TimeoutError as exc:
                     total_attempts = retry_count + 1
                     last_exc = TimeoutError(
@@ -318,7 +436,7 @@ class LLMClient:
                     last_exc = exc
 
                 if attempt < retry_count and delay_s > 0:
-                    time.sleep(delay_s)
+                    self._sleep_with_cancel(delay_s)
 
             if last_exc is not None:
                 runtime_errors.append((target, last_exc))
@@ -336,17 +454,26 @@ def get_llm_client(
     base_url: Optional[str] = None,
     model: Optional[str] = None,
     provider_id: Optional[str] = None,
+    cancel_checker: Optional[Callable[[], bool]] = None,
 ) -> LLMClient:
     return LLMClient(
         api_key=api_key,
         base_url=base_url,
         model=model,
         provider_id=provider_id,
+        cancel_checker=cancel_checker,
     )
 
 
 class LazyLLM:
     """Lazy facade for workflow `llm.ask(...)`."""
+
+    def __init__(
+        self,
+        *,
+        cancel_checker: Optional[Callable[[], bool]] = None,
+    ):
+        self.cancel_checker = cancel_checker
 
     def ask(
         self,
@@ -359,7 +486,11 @@ class LazyLLM:
         max_retries: int = 0,
         retry_delay_s: float = 1.0,
     ) -> str:
-        return get_llm_client(model=model, provider_id=provider_id).ask(
+        return get_llm_client(
+            model=model,
+            provider_id=provider_id,
+            cancel_checker=self.cancel_checker,
+        ).ask(
             prompt,
             temperature=temperature,
             timeout_s=timeout_s,
@@ -371,7 +502,12 @@ class LazyLLM:
 _lazy_llm_singleton: Optional[LazyLLM] = None
 
 
-def get_lazy_llm() -> LazyLLM:
+def get_lazy_llm(
+    *,
+    cancel_checker: Optional[Callable[[], bool]] = None,
+) -> LazyLLM:
+    if cancel_checker is not None:
+        return LazyLLM(cancel_checker=cancel_checker)
     global _lazy_llm_singleton
     if _lazy_llm_singleton is None:
         _lazy_llm_singleton = LazyLLM()

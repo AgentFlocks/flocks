@@ -1,12 +1,15 @@
 """
-Slash command dispatcher tool.
-
-Handles /help, /tools, /skills and other meta-commands that let agents
-inspect or control the Flocks runtime from within a conversation.
+Agent-safe slash command dispatcher tool.
 """
 
-from collections import defaultdict
+from __future__ import annotations
 
+from flocks.command.direct import (
+    build_tools_catalog_summary,
+    list_agent_safe_direct_commands,
+    run_direct_command,
+)
+from flocks.command.help import format_help
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -19,154 +22,145 @@ from flocks.utils.log import Log
 
 log = Log.create(service="tool.slash_command")
 
-_COMMANDS = ["tools", "skills", "workflows", "help", "tasks", "queue", "compact", "plan", "ask"]
-
-_COMMAND_DESCRIPTIONS = {
-    "tools":     "List all available tools grouped by category",
-    "skills":    "List all available skills with descriptions",
-    "workflows": "List all available workflows with descriptions and file paths",
-    "help":      "Show available commands",
-    "tasks":     "Show task center overview",
-    "queue":     "Show task queue status",
-    "compact":   "Summarize the conversation",
-    "plan":      "Create a plan for a task",
-    "ask":       "Ask a question without making changes",
+_READ_ONLY_ARGUMENT_HINTS = {
+    "help": "",
+    "tools": "[list|info `name`]",
+    "skills": "[list]",
+    "agents": "",
+    "workflows": "",
+    "mcp": "[list|status|tools]",
 }
 
-_TOOL_DESCRIPTION = (
-    "Execute a slash command to perform common operations.\n"
-    "Use when the user wants to run a command like /tools, /skills, /help, etc.\n\n"
-    "Available commands:\n"
-    + "\n".join(f"- {cmd}: {desc}" for cmd, desc in _COMMAND_DESCRIPTIONS.items())
-)
 
-_HELP_TEXT = (
-    "Available Slash Commands:\n"
-    + "\n".join(f"- /{cmd}: {desc}" for cmd, desc in _COMMAND_DESCRIPTIONS.items())
-)
-
-_TOOL_CATEGORY_ORDER = ["file", "code", "search", "browser", "terminal", "system", "custom"]
+def _build_agent_safe_commands() -> list:
+    return list_agent_safe_direct_commands()
 
 
-def _truncate_text(text: str, max_chars: int) -> str:
-    normalized = " ".join((text or "").split())
-    if not normalized:
-        return "No description provided."
-    if len(normalized) <= max_chars:
-        return normalized
-    return normalized[: max(0, max_chars - 3)].rstrip() + "..."
+def _build_command_enum() -> list[str]:
+    return [command.name for command in _build_agent_safe_commands()]
 
 
-def build_tools_catalog_summary(
-    max_description_chars: int = 100,
-    include_tip: bool = True,
-) -> str:
-    ToolRegistry.init()
-    tools = ToolRegistry.list_tools()
-    return format_tools_catalog_summary(
-        tools=tools,
-        max_description_chars=max_description_chars,
-        include_tip=include_tip,
+def build_run_slash_command_description() -> str:
+    commands = _build_agent_safe_commands()
+    command_lines = [
+        f"- {command.name}: {command.description}"
+        for command in commands
+    ]
+    return (
+        "Execute an agent-safe slash command for read-only inspection.\n"
+        "Only direct commands that return text without UI or session side effects are exposed.\n\n"
+        "Available commands:\n"
+        + "\n".join(command_lines)
     )
 
 
-def format_tools_catalog_summary(
-    tools: list,
-    max_description_chars: int = 100,
-    include_tip: bool = True,
-) -> str:
-    grouped: dict[str, list[tuple[str, str]]] = defaultdict(list)
-    for tool in tools:
-        if tool.name in {"invalid", "_noop"} or not getattr(tool, "enabled", True):
-            continue
-        category = getattr(tool.category, "value", str(tool.category))
-        grouped[category].append((
-            tool.name,
-            _truncate_text(getattr(tool, "description", ""), max_description_chars),
-        ))
+def refresh_run_slash_command_metadata() -> None:
+    tool = ToolRegistry.get("run_slash_command")
+    if not tool:
+        return
 
-    lines = ["Available Tools (grouped by category):", ""]
-    seen: set[str] = set()
-    for cat in _TOOL_CATEGORY_ORDER:
-        if cat in grouped:
-            lines.append(f"**{cat}**")
-            for name, description in sorted(grouped[cat], key=lambda item: item[0]):
-                lines.append(f"- {name}: {description}")
-            lines.append("")
-            seen.add(cat)
+    tool.info.description = build_run_slash_command_description()
+    for parameter in tool.info.parameters:
+        if parameter.name == "command":
+            parameter.enum = _build_command_enum()
 
-    for cat, items in grouped.items():
-        if cat not in seen:
-            lines.append(f"**{cat}**")
-            for name, description in sorted(items, key=lambda item: item[0]):
-                lines.append(f"- {name}: {description}")
-            lines.append("")
 
-    if include_tip:
-        lines.append("Tip: use /tools info <name> for full details (UI only)")
+def _normalize_arguments(command: str, arguments: str) -> tuple[bool, str]:
+    args = (arguments or "").strip()
+    if command == "help":
+        return (not args, "")
+    if command == "skills":
+        return (args in {"", "list"}, args)
+    if command == "agents":
+        return (not args, "")
+    if command == "workflows":
+        return (not args, "")
+    if command == "tools":
+        if not args or args == "list":
+            return (True, "")
+        if args.startswith("info "):
+            return (bool(args[len("info "):].strip()), args)
+        return (False, args)
+    if command == "mcp":
+        return (args in {"", "list", "status", "tools"}, args)
+    return (False, args)
 
-    return "\n".join(lines).strip()
+
+def _usage_for_command(command: str) -> str:
+    suffix = _READ_ONLY_ARGUMENT_HINTS.get(command, "")
+    if suffix:
+        return f"Usage: /{command} {suffix}"
+    return f"Usage: /{command}"
 
 
 @ToolRegistry.register_function(
     name="run_slash_command",
-    description=_TOOL_DESCRIPTION,
+    description=build_run_slash_command_description(),
     category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
             name="command",
             type=ParameterType.STRING,
-            description="The slash command to run (without the / prefix)",
+            description="The agent-safe slash command to run (without the / prefix)",
             required=True,
-            enum=_COMMANDS,
+            enum=_build_command_enum(),
+        ),
+        ToolParameter(
+            name="arguments",
+            type=ParameterType.STRING,
+            description="Optional command arguments for read-only subcommands, such as `info read_file` or `status`.",
+            required=False,
+            default="",
         ),
     ],
 )
-async def run_slash_command_tool(ctx: ToolContext, command: str) -> ToolResult:
-    """Execute a slash command."""
-    log.info("slash_command.run", {"command": command})
+async def run_slash_command_tool(
+    ctx: ToolContext,
+    command: str,
+    arguments: str = "",
+) -> ToolResult:
+    """Execute an agent-safe slash command."""
+    del ctx
+    refresh_run_slash_command_metadata()
+
+    command = (command or "").strip().lstrip("/").lower()
+    log.info("slash_command.run", {"command": command, "arguments": arguments})
+
+    available_commands = {item.name: item for item in _build_agent_safe_commands()}
+    if command not in available_commands:
+        log.warn("slash_command.unknown", {"command": command})
+        return ToolResult(success=False, error=f"Unknown agent-safe slash command: {command}")
+
+    valid_args, normalized_args = _normalize_arguments(command, arguments)
+    if not valid_args:
+        return ToolResult(
+            success=False,
+            error=(
+                f"Unsupported arguments for /{command}. "
+                f"This tool only exposes read-only direct variants. {_usage_for_command(command)}"
+            ),
+        )
 
     if command == "help":
-        return ToolResult(success=True, output=_HELP_TEXT)
+        return ToolResult(
+            success=True,
+            output=format_help(surface="webui"),
+        )
 
-    if command == "tools":
+    if command == "tools" and not normalized_args:
         return ToolResult(success=True, output=build_tools_catalog_summary())
 
-    if command == "skills":
-        from flocks.skill.skill import Skill
-        skills = await Skill.all()
-        if not skills:
-            return ToolResult(success=True, output="No skills available.")
-        lines = ["Available Skills:", ""]
-        for i, skill in enumerate(skills, 1):
-            lines.append(f"{i}. {skill.name}: {skill.description}")
-        return ToolResult(success=True, output="\n".join(lines))
-
-    if command == "workflows":
-        from flocks.workflow.center import format_workflow_entries, scan_skill_workflows
-        try:
-            entries = await scan_skill_workflows()
-        except Exception as e:
-            return ToolResult(success=False, error=f"Failed to scan workflows: {e}")
-        if not entries:
-            return ToolResult(success=True, output="No workflows found in .flocks/workflow/ directories.")
-        body = format_workflow_entries(entries, markdown=True)
-        output = (
-            "Available Workflows:\n\n"
-            + body
-            + '\n\nUsage: run_workflow(workflow="<path>", inputs={...})'
+    result = await run_direct_command(command, args=normalized_args)
+    if not result.handled:
+        return ToolResult(success=False, error=f"Unhandled slash command: {command}")
+    if result.prompt is not None or result.clear_screen or result.clear_history:
+        return ToolResult(
+            success=False,
+            error=f"Slash command /{command} is not agent-safe in this context.",
         )
-        return ToolResult(success=True, output=output)
+    if not result.success:
+        return ToolResult(success=False, error=result.text or f"Slash command /{command} failed.")
+    return ToolResult(success=True, output=result.text or "")
 
-    ui_only = {
-        "tasks":   "Use /tasks in the UI to view task center",
-        "queue":   "Use /queue in the UI to view task queue",
-        "compact": "Use /compact in the UI to summarize conversation",
-        "plan":    "Use /plan in the UI to enter plan mode",
-        "ask":     "Use /ask in the UI for read-only analysis",
-    }
-    if command in ui_only:
-        return ToolResult(success=True, output=ui_only[command])
 
-    log.warn("slash_command.unknown", {"command": command})
-    return ToolResult(success=False, error=f"Unknown command: {command}")
+refresh_run_slash_command_metadata()

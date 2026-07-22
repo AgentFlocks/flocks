@@ -33,7 +33,7 @@ class TestAPIServiceManagement:
                 "threatbook_api": {"enabled": False},
             }.get(service_id, {})),
             patch(
-                "flocks.server.routes.provider._load_api_service_metadata_data",
+                "flocks.server.routes.provider._load_api_service_summary_metadata_data",
                 side_effect=lambda service_id: metadata_by_id[service_id],
             ),
             patch(
@@ -51,11 +51,12 @@ class TestAPIServiceManagement:
                 side_effect=lambda service_id: [object(), object()] if service_id == "threatbook_api" else [object()],
             ),
         ):
-            mock_tool_registry.init = MagicMock()
+            mock_tool_registry.init_async = AsyncMock()
             mock_tool_registry.get_api_service_ids.return_value = {"fofa"}
 
             result = await list_api_services()
 
+        mock_tool_registry.init_async.assert_awaited_once()
         assert [item.id for item in result] == ["fofa", "threatbook_api"]
         assert result[0].enabled is False
         assert result[0].status == "disabled"
@@ -64,6 +65,35 @@ class TestAPIServiceManagement:
         assert result[1].enabled is False
         assert result[1].status == "disabled"
         assert result[1].tool_count == 2
+
+    def test_api_service_summary_uses_lightweight_metadata_loader(self):
+        from flocks.server.routes import provider as provider_routes
+
+        with (
+            patch(
+                "flocks.server.routes.provider._load_api_service_summary_metadata_data",
+                return_value={
+                    "name": "Example API",
+                    "description": "Summary metadata only",
+                    "version": "1.2.3",
+                },
+            ) as mock_summary_loader,
+            patch(
+                "flocks.server.routes.provider._load_api_service_metadata_data",
+                side_effect=AssertionError("list summaries should not load full API metadata"),
+            ),
+            patch("flocks.server.routes.provider._get_api_service_enabled", return_value=True),
+            patch("flocks.server.routes.provider._get_api_service_tool_infos", return_value=[]),
+            patch("flocks.server.routes.provider._is_api_service_builtin", return_value=False),
+            patch("flocks.config.config_writer.ConfigWriter.get_api_service_raw", return_value={}),
+        ):
+            summary = provider_routes._build_api_service_summary("example_api", {})
+
+        mock_summary_loader.assert_called_once_with("example_api")
+        assert summary.id == "example_api"
+        assert summary.name == "Example API"
+        assert summary.version == "1.2.3"
+        assert summary.tool_count == 0
 
     @pytest.mark.asyncio
     async def test_update_api_service_persists_enabled_flag_and_updates_status_cache(self):
@@ -97,6 +127,10 @@ class TestAPIServiceManagement:
             patch(
                 "flocks.server.routes.provider._build_api_service_summary",
                 return_value=expected_summary,
+            ),
+            patch(
+                "flocks.tool.registry.ToolRegistry.init_async",
+                new=AsyncMock(),
             ),
         ):
             result = await update_api_service(
@@ -389,6 +423,58 @@ class TestProviderYamlMetadata:
         assert metadata["base_url"] == "https://api.example.test"
         assert metadata["enabled"] is False
 
+    def test_load_api_service_summary_metadata_reuses_cached_yaml(self, tmp_path, monkeypatch):
+        from flocks.server.routes import provider as provider_routes
+
+        provider_routes._clear_api_service_summary_metadata_cache()
+        monkeypatch.setattr(provider_routes.api_service_schema_helpers, "_LEGACY_METADATA_DIR", tmp_path)
+        try:
+            with (
+                patch(
+                    "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+                    return_value={"enabled": True},
+                ),
+                patch(
+                    "flocks.server.routes.provider._provider_yaml_cache_key",
+                    return_value=("/plugins/example/_provider.yaml", 123),
+                ),
+                patch(
+                    "flocks.server.routes.provider._load_provider_yaml_summary_metadata",
+                    return_value={
+                        "name": "Example Service",
+                        "description": "Loaded from provider yaml",
+                    },
+                ) as mock_yaml_loader,
+            ):
+                first = provider_routes._load_api_service_summary_metadata_data("example_service")
+                second = provider_routes._load_api_service_summary_metadata_data("example_service")
+
+            mock_yaml_loader.assert_called_once_with("example_service")
+            assert first == second
+            assert first["name"] == "Example Service"
+            assert first["enabled"] is True
+        finally:
+            provider_routes._clear_api_service_summary_metadata_cache()
+
+    def test_summary_descriptor_lookup_uses_cached_discovery(self, monkeypatch):
+        from flocks.server.routes import provider as provider_routes
+
+        calls = []
+
+        def discover_api_service_descriptors(*, refresh=False):
+            calls.append(refresh)
+            if refresh:
+                raise AssertionError("summary lookup should not refresh descriptor discovery")
+            return []
+
+        monkeypatch.setattr(
+            "flocks.config.api_versioning.discover_api_service_descriptors",
+            discover_api_service_descriptors,
+        )
+
+        assert provider_routes._find_api_service_descriptor("missing_service") is None
+        assert calls == [False]
+
     def test_load_provider_yaml_metadata_from_project_plugins(self, tmp_path, monkeypatch):
         from flocks.server.routes.provider import _load_provider_yaml_metadata
 
@@ -399,6 +485,7 @@ class TestProviderYamlMetadata:
             "service_id": "threatbook_api",
             "description": "Threat intelligence",
             "description_cn": "威胁情报",
+            "docs_url": "https://docs.example.com/threatbook",
         }), encoding="utf-8")
         (provider_dir / "threatbook_ip_query.yaml").write_text(yaml.safe_dump({
             "name": "threatbook_ip_query",
@@ -413,6 +500,7 @@ class TestProviderYamlMetadata:
         assert metadata is not None
         assert metadata["name"] == "ThreatBook"
         assert metadata["description_cn"] == "威胁情报"
+        assert metadata["docs_url"] == "https://docs.example.com/threatbook"
         assert metadata["apis"][0]["name"] == "threatbook_ip_query"
 
     @pytest.mark.asyncio
@@ -424,6 +512,7 @@ class TestProviderYamlMetadata:
             return_value={
                 "name": "Qingteng",
                 "description": "Qingteng API service",
+                "docs_url": "https://docs.example.com/qingteng",
                 "credential_fields": [
                     {"key": "base_url", "storage": "config", "config_key": "base_url", "input_type": "url"},
                     {"key": "username", "storage": "config", "config_key": "username"},
@@ -434,6 +523,7 @@ class TestProviderYamlMetadata:
             result = await get_api_service_metadata("qingteng")
 
         assert result.name == "Qingteng"
+        assert result.docs_url == "https://docs.example.com/qingteng"
         assert result.credential_schema is not None
         assert [field["key"] for field in result.credential_schema] == ["base_url", "username", "password"]
         assert result.credential_schema[2]["secret_id"] == "qingteng_password"
@@ -494,6 +584,58 @@ class TestBootstrapUserApiServices:
         assert written["enabled"] is True
         assert written["apiKey"] == "{secret:key}"
         assert written["base_url"] == "https://api.example.com"
+
+    def test_bootstrap_writes_unique_versioned_storage_key(self):
+        tools = {"tdp_tool": _make_api_tool("tdp_tool", "tdp_api")}
+        with patch(
+            "flocks.config.api_versioning.versioned_storage_key_for",
+            return_value="tdp_api_v3_3_10",
+        ):
+            mock_set = self._run_bootstrap(tools, get_raw_side_effect=lambda _: None)
+
+        mock_set.assert_called_once_with("tdp_api_v3_3_10", {"enabled": True})
+
+    def test_bootstrap_then_sync_reads_the_same_versioned_storage_key(self):
+        tool = _make_api_tool("tdp_tool", "tdp_api")
+        tools = {"tdp_tool": tool}
+        services = {
+            "tdp_api": {"apiKey": "legacy-copy"},
+            "tdp_api_v3_3_10": {"apiKey": "versioned-copy"},
+        }
+
+        def get_raw(storage_key: str):
+            value = services.get(storage_key)
+            return value.copy() if value is not None else None
+
+        def set_service(storage_key: str, value: dict):
+            services[storage_key] = value.copy()
+
+        with (
+            patch.object(ToolRegistry, "_tools", tools),
+            patch.object(ToolRegistry, "_enabled_defaults", {"tdp_tool": True}),
+            patch(
+                "flocks.config.api_versioning.versioned_storage_key_for",
+                return_value="tdp_api_v3_3_10",
+            ),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+                side_effect=get_raw,
+            ),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.set_api_service",
+                side_effect=set_service,
+            ),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.list_api_services_raw",
+                side_effect=lambda: services,
+            ),
+        ):
+            ToolRegistry._bootstrap_user_api_services()
+            ToolRegistry._sync_api_service_states()
+
+        assert services["tdp_api_v3_3_10"]["enabled"] is True
+        assert "enabled" not in services["tdp_api"]
+        assert tool.info.enabled is True
 
     def test_bootstrap_does_not_overwrite_explicit_disabled(self):
         """When api_services.<provider>.enabled is False, bootstrap leaves it untouched."""

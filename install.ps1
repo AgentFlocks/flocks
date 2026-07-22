@@ -157,6 +157,22 @@ function Unblock-InstallFiles {
     }
 }
 
+function Remove-ExistingInstallDirectory {
+    param([string]$TargetDir)
+
+    if ([string]::IsNullOrWhiteSpace($TargetDir) -or -not (Test-Path -LiteralPath $TargetDir)) {
+        return
+    }
+
+    Write-Info "Removing previous Flocks installation: $TargetDir"
+    try {
+        Remove-Item -LiteralPath $TargetDir -Recurse -Force -ErrorAction Stop
+    }
+    catch {
+        Fail "Failed to remove previous Flocks installation directory '$TargetDir'. Close any running Flocks process and retry. Error: $($_.Exception.Message)"
+    }
+}
+
 function Invoke-WorkspaceInstaller {
     param(
         [string]$InstallerPath,
@@ -252,9 +268,7 @@ function Main {
         if ((-not [string]::IsNullOrWhiteSpace($installParent)) -and -not (Test-Path -LiteralPath $installParent)) {
             New-Item -ItemType Directory -Path $installParent -Force | Out-Null
         }
-        if (Test-Path $InstallDir) {
-            Remove-Item -Path $InstallDir -Recurse -Force
-        }
+        Remove-ExistingInstallDirectory -TargetDir $InstallDir
         Copy-Item -Path $projectRoot -Destination $InstallDir -Recurse -Force
         Unblock-InstallFiles -TargetDir $InstallDir
 

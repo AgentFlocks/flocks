@@ -94,6 +94,29 @@ class TestRetryable:
         result = SessionRetry.retryable(error)
         assert result is not None
 
+    def test_string_message_connection_error_pattern(self):
+        error = {
+            "name": "APIConnectionError",
+            "data": {"message": "Connection error."},
+        }
+        result = SessionRetry.retryable(error)
+        assert result is not None
+        assert SessionRetry.is_connection_error(error) is True
+
+    def test_string_message_incomplete_chunked_read_is_connection_error(self):
+        error = {
+            "name": "RemoteProtocolError",
+            "data": {
+                "message": (
+                    "peer closed connection without sending complete message body "
+                    "(incomplete chunked read)"
+                )
+            },
+        }
+        result = SessionRetry.retryable(error)
+        assert result == "Connection or Server Error"
+        assert SessionRetry.is_connection_error(error) is True
+
     def test_empty_error_returns_none(self):
         assert SessionRetry.retryable({}) is None
 

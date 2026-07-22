@@ -1,0 +1,79 @@
+name: 360_fw_policy
+description: >
+  360 FW v5.5 策略工具。覆盖防火墙策略、策略组、应用/WEB/防护策略、
+  黑白名单、多域名和 VSYS 等文档中非跳过接口。写操作需要确认。
+category: custom
+enabled: true
+requires_confirmation: true
+provider: 360_fw
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: 策略操作名称。
+      enum:
+        - fw_fwpolicy_list
+        - fw_fwpolicy_get
+        - fw_fwpolicy_create
+        - fw_fwpolicy_update
+        - fw_fwpolicy_delete
+        - fw_fwpolicy_state_update
+        - fw_fwpolicy_move
+        - fw_policy_group_list
+        - fw_policy_group_create
+        - fw_policy_group_delete
+        - fw_app_policy_list
+        - fw_app_policy_create
+        - fw_app_policy_delete
+        - fw_web_policy_list
+        - fw_web_policy_create
+        - fw_web_policy_delete
+        - fw_black_list_list
+        - fw_black_list_create
+        - fw_black_list_delete
+        - fw_white_list_list
+        - fw_white_list_create
+        - fw_white_list_delete
+        - fw_multiple_domains_create
+        - fw_multiple_domains_delete
+        - fw_multiple_ids_create
+        - fw_multiple_ids_delete
+        - fw_protect_policy_list
+        - fw_protect_policy_create
+        - fw_protect_policy_delete
+        - fw_protect_policy_enable_update
+        - fw_vsys_create
+        - fw_vsys_update
+        - fw_vsys_delete
+        - fw_policy_call
+        - test
+    name:
+      type: string
+      description: 策略或对象名称。
+    id:
+      type: integer
+      description: 策略 ID。
+    protocol:
+      type: integer
+      description: 协议族，通常 1 表示 IPv4。
+    enable:
+      type: integer
+      enum: [0, 1]
+      description: 启用状态。
+    method:
+      type: string
+      enum: [GET, POST, PUT, DELETE]
+    path:
+      type: string
+    query:
+      type: object
+    body:
+      type: string
+      description: 完整 JSON payload 字符串。
+  required:
+    - action
+handler:
+  type: script
+  script_file: 360_fw.handler.py
+  function: policy

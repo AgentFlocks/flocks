@@ -1,4 +1,5 @@
 from unittest.mock import AsyncMock
+from types import SimpleNamespace
 
 import pytest
 
@@ -137,3 +138,36 @@ async def test_callable_schema_keeps_user_plugin_tools_visible(monkeypatch: pyte
 
     names = [tool.name for tool in result.tool_infos]
     assert "project_memory" in names
+
+
+@pytest.mark.asyncio
+async def test_callable_schema_dynamically_exposes_device_manage_when_enabled_devices_exist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = [
+        _tool("question", ToolCategory.SYSTEM),
+        _tool("tool_search", ToolCategory.SYSTEM),
+        _tool("device_manage", ToolCategory.SYSTEM),
+    ]
+
+    monkeypatch.setattr("flocks.session.callable_schema.ToolRegistry.list_tools", lambda: tools)
+    monkeypatch.setattr(
+        "flocks.session.callable_schema.get_session_callable_tools",
+        AsyncMock(return_value={"question", "tool_search"}),
+    )
+    monkeypatch.setattr(
+        "flocks.session.callable_schema.ToolRegistry.get",
+        lambda name: SimpleNamespace(info=_tool(name, ToolCategory.SYSTEM))
+        if name == "device_manage"
+        else None,
+    )
+    monkeypatch.setattr(
+        "flocks.tool.device.store.list_devices",
+        AsyncMock(return_value=[SimpleNamespace(enabled=True)]),
+    )
+
+    result = await list_session_callable_tool_infos(session_id="session-device-aware")
+
+    names = [tool.name for tool in result.tool_infos]
+    assert set(names) == {"device_manage", "question", "tool_search"}
+    assert "device_manage" in result.metadata["alwaysLoadToolNames"]

@@ -12,6 +12,11 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+try:
+    from croniter import croniter  # type: ignore[import-untyped]
+except ImportError:
+    croniter = None
+
 from flocks.utils.id import Identifier
 
 
@@ -207,6 +212,25 @@ class TaskExecutionQueueRef(BaseModel):
     started_at: Optional[datetime] = Field(None, alias="startedAt")
 
 
+def validate_cron_expression(cron: str) -> str:
+    normalized = " ".join(cron.split())
+    field_count = len(normalized.split()) if normalized else 0
+    if field_count != 5:
+        raise ValueError(
+            "Invalid cron expression: only 5-field cron is supported "
+            "(`minute hour day month weekday`). "
+            "Example: use `0 6 * * *` for daily 06:00 in Asia/Shanghai. "
+            "6-field cron (e.g. Quartz format with leading seconds, "
+            "such as `0 0 6 * * *`) and shortcuts such as `@daily` "
+            "are not supported."
+        )
+    if croniter is not None and not croniter.is_valid(normalized):
+        raise ValueError(
+            f"Invalid cron expression: {normalized!r} is not a valid 5-field cron."
+        )
+    return normalized
+
+
 def build_schedule(
     *,
     run_once: bool = False,
@@ -215,6 +239,7 @@ def build_schedule(
     cron_description: Optional[str] = None,
     timezone: str = "Asia/Shanghai",
 ) -> TaskTrigger:
+    normalized_cron = validate_cron_expression(cron) if cron else None
     if run_once:
         if not run_at and not cron:
             raise ValueError(
@@ -231,7 +256,7 @@ def build_schedule(
         return TaskTrigger(
             run_immediately=False,
             run_at=run_at_dt,
-            cron=cron,
+            cron=normalized_cron,
             timezone=timezone,
             cron_description=cron_description,
         )
@@ -240,7 +265,7 @@ def build_schedule(
         raise ValueError("cron is required for recurring scheduled tasks")
     return TaskTrigger(
         run_immediately=False,
-        cron=cron,
+        cron=normalized_cron,
         timezone=timezone,
         cron_description=cron_description,
     )

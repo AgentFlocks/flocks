@@ -67,6 +67,23 @@ function Add-UserPathEntryIfMissing {
     }
 }
 
+function Add-ProcessPathEntryIfMissing {
+    param([string]$Entry)
+
+    if ([string]::IsNullOrWhiteSpace($Entry)) { return }
+
+    $processPath = $env:Path
+    if ([string]::IsNullOrWhiteSpace($processPath)) {
+        $env:Path = $Entry
+        return
+    }
+
+    $existing = $processPath -split ';' | Where-Object { ($_.TrimEnd('\','/')).ToLower() -eq $Entry.TrimEnd('\','/').ToLower() }
+    if (-not $existing) {
+        $env:Path = "$Entry;$processPath"
+    }
+}
+
 function Resolve-ChromeExecutablePath {
     param([string]$BrowserRoot)
 
@@ -105,6 +122,20 @@ if (Test-Path (Join-Path $bundledNode "npm.cmd")) {
 }
 else {
     Write-Host "[flocks-bootstrap] warning: bundled node not found at $bundledNode" -ForegroundColor Yellow
+}
+
+$bundledPythonDir = Join-Path $InstallRoot "tools\python"
+$bundledPython = Join-Path $bundledPythonDir "python.exe"
+if (Test-Path $bundledPython) {
+    Add-ProcessPathEntryIfMissing -Entry $bundledPythonDir
+    $env:FLOCKS_BUNDLED_PYTHON = $bundledPython
+    $env:UV_PYTHON = $bundledPython
+    $env:UV_PYTHON_DOWNLOADS = "never"
+    $env:UV_NO_MANAGED_PYTHON = "1"
+    Write-Host "[flocks-bootstrap] configured bundled Python runtime: $bundledPython"
+}
+else {
+    Write-Host "[flocks-bootstrap] warning: bundled Python runtime not found at $bundledPython" -ForegroundColor Yellow
 }
 
 # 2) Expose bundled Chrome for Testing under ~/.flocks/browser so install.ps1's

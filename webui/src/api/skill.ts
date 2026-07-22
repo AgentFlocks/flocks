@@ -23,6 +23,8 @@ export interface Skill {
   source?: string;
   content?: string;
   category?: string;
+  ui_hidden?: boolean;
+  disabled?: boolean;
   // Eligibility
   eligible?: boolean;
   missing?: string[];
@@ -48,7 +50,7 @@ export interface Command {
 }
 
 export interface SkillInstallRequest {
-  /** Install source: clawhub:<name>, github:<owner>/<repo>, https://..., /local/path */
+  /** Install source: clawhub:<name>, github:<owner>/<repo>, safeskill://..., https://..., /local/path */
   source: string;
   /** 'global' (default) or 'project' */
   scope?: string;
@@ -113,9 +115,9 @@ export const skillAPI = {
    * Supported sources:
    *   clawhub:<name>        – clawhub.com registry
    *   github:<owner>/<repo> – GitHub repo (or shorthand owner/repo)
+   *   safeskill://...       – SafeSkill package URI
    *   https://...           – direct URL to SKILL.md
    *   /local/path           – local filesystem
-   *   safeskill:<name>      – SafeSkill registry (future)
    */
   install: (req: SkillInstallRequest) =>
     client.post<SkillInstallResponse>('/api/skills/install', req),
@@ -132,6 +134,13 @@ export const skillAPI = {
       install_id: installId,
       timeout_ms: timeoutMs,
     }),
+
+  /**
+   * Toggle whether a skill is visible in the agent system prompt.
+   * Returns the new disabled state.
+   */
+  toggle: (name: string) =>
+    client.patch<{ name: string; disabled: boolean }>(`/api/skills/${name}/toggle`),
 };
 
 export const commandAPI = {

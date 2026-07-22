@@ -1,8 +1,18 @@
-# Flocks
+<h1 align="center">Flocks</h1>
 
-[English](README.md) | **简体中文**
+<p align="center">
+  AI 原生 SecOps 平台
+</p>
 
-AI 原生 SecOps 平台
+<p align="center">
+  <a href="https://agentflocks.github.io/flocks-docs/"><img alt="文档" src="https://img.shields.io/badge/docs-agentflocks.github.io-555555?style=for-the-badge"></a>
+  <a href="LICENSE.txt"><img alt="License" src="https://img.shields.io/badge/license-Apache--2.0-52b100?style=for-the-badge"></a>
+</p>
+
+<p align="center">
+  <a href="README.md"><img alt="English" src="https://img.shields.io/badge/lang-English-e33f44?style=for-the-badge"></a>
+  <a href="README_zh.md"><img alt="中文" src="https://img.shields.io/badge/lang-%E4%B8%AD%E6%96%87-e33f44?style=for-the-badge"></a>
+</p>
 
 ![Flocks Web](assets/flocks.webp)
 
@@ -114,9 +124,8 @@ flocks stop
 ```
 
 默认服务地址：
-- 后端 API：默认 `http://127.0.0.1:8000`
-- WebUI：默认 `http://127.0.0.1:5173`
-- 远程访问修改 `flocks start --server-host <ip> --webui-host <ip>`
+- Flocks WebUI：`http://127.0.0.1:5173`
+- 远程访问可通过 `flocks start --host <ip>` 配置
 
 更多 CLI 命令使用 `flocks --help`
 
@@ -140,9 +149,8 @@ macOS / Linux
 docker run -d \
   --name flocks \
   -e TZ=Asia/Shanghai \
-  -p 8000:8000 \
   -p 5173:5173 \
-  --shm-size 2gb \
+  --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
   ghcr.io/agentflocks/flocks:latest
 ```
@@ -152,16 +160,13 @@ Windows PowerShell
 docker run -d `
   --name flocks `
   -e TZ=Asia/Shanghai `
-  -p 8000:8000 `
   -p 5173:5173 `
-  --shm-size 2gb `
+  --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```
 
-默认服务地址：
-- 后端 API：默认 `http://127.0.0.1:8000`
-- WebUI：默认 `http://127.0.0.1:5173`
+镜像中的 `EXPOSE` 仅用于声明容器端口；要从宿主机浏览器访问服务，仍需使用 `-p 5173:5173` 映射端口。
 
 ## 4. 常见问题
 
@@ -183,9 +188,12 @@ default = true
 ### 4.2 Docker 问题
 
 Docker 国内镜像地址
-``` bash
-ghcr.nju.edu.cn/agentflocks/flocks:latest
-```
+
+- 1ms GHCR：`docker pull ghcr.1ms.run/agentflocks/flocks:latest`
+- dockerproxy GHCR：`docker pull ghcr.dockerproxy.net/agentflocks/flocks:latest`
+- gh-proxy prefix：`docker pull docker.gh-proxy.com/ghcr.io/agentflocks/flocks:latest`
+- milu GHCR：`docker pull ghcr.milu.moe/agentflocks/flocks:latest`
+- NJU GHCR：`docker pull ghcr.nju.edu.cn/agentflocks/flocks:latest`
 
 启动后 `/home/flocks/.flocks` 权限问题
 
@@ -202,10 +210,18 @@ sudo chown -R <uid>:<gid> ~/.flocks
 
 ### 4.3 远程访问 Flocks 服务
 ```bash
-__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS=<your_domain> \
-flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
+flocks start --host 0.0.0.0
 ```
-虚拟机远程访问失败请指定 host 为虚拟机 IP。
+若从虚拟机远程访问失败，请将 host 指定为虚拟机的 IP。
+
+WebUI 与 API 共用同一个服务地址和端口，API 请求使用同源 `/api` 路径。这样浏览器 Cookie 与 SSE 保持在同一源，适用于局域网访问与反向代理场景。
+
+仅在确实需要浏览器直连后端 URL 时，再显式启用：
+
+```bash
+FLOCKS_WEBUI_DIRECT_BACKEND_URLS=1 \
+flocks start --server-host 0.0.0.0 --webui-host 0.0.0.0
+```
 
 ### 4.4 鉴权与 API Token
 
@@ -218,8 +234,7 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 
 非浏览器客户端（TUI / SDK / 脚本）：
 
-- **本机回环**（`127.0.0.1` / `::1` / `localhost`，且请求不带 `x-forwarded-for` 头）会被自动识别为 `local-service` 管理员，满足同机的 TUI、插件子进程、CLI 调用。
-- **远程**调用必须携带 API Token。Token 存放于 `~/.flocks/config/.secret.json`，secret id 为 `server_api_token`。
+- 所有非浏览器客户端（包括本机回环调用）都必须携带 API Token。Token 存放于 `~/.flocks/config/.secret.json`，secret id 为 `server_api_token`。
 
   在 **服务端** 生成（或轮换）token，会持久化到服务端本机的 secret store：
 
@@ -248,23 +263,25 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 
 反向代理部署：
 
-- 反代必须主动注入 `X-Forwarded-For`。若缺失，凡是直连本机回环的请求都会被自动放行为 `admin`；中间件依靠该头来区分"真本机"与"经由反代的外部请求"。
-- 若反代终止 HTTPS，请同时透传 `X-Forwarded-Proto: https`，以便服务端正确给 Cookie 加 `Secure` 标志。
+- 反代必须主动注入 `X-Forwarded-For`。若缺失该头，且前方存在代理，中间件会拒绝信任回环地址，避免任何直连本机的请求被自动提升为 `admin`。
+- 若反代终止 HTTPS，请同时透传 `X-Forwarded-Proto: https`，以便服务端正确设置安全 Cookie 标志。
+- 浏览器流量优先使用同源反代：WebUI 保持在 `/`，后端流量经 `/api`（必要时还有 `/event`）转发。除非有意让浏览器绕过代理直连后端源站，否则不要在反向代理部署中设置 `VITE_API_BASE_URL`。
+- 对于 SSE 端点，请关闭代理缓冲并保持 HTTP/1.1 启用。
 
 忘记密码 / 应急恢复：
 
-- 在服务器上执行 `flocks admin generate-one-time-password`，账号会被强制置为 `must_reset_password=true`；下次 WebUI 登录会跳转到改密页。**这种状态下所有非浏览器接口都会返回 403**，请勿在不通知调用方的情况下对依赖自动化的账号执行该命令。
+- 在宿主机上执行 `flocks admin generate-one-time-password`。`admin` 账号会被强制置为 `must_reset_password=true`；下次 WebUI 登录会跳转到改密页。**此状态下所有非浏览器端点均返回 403**，若该账号被自动化依赖，请先协调后再执行。
 
 无主 session（CLI / 后台任务 / inbound 渠道）：
 
-- 没有 auth 上下文创建出的 session（CLI 子命令、后台任务、IM 渠道入站 dispatcher）`owner_user_id` 字段为空。bootstrap admin 仍可看到，但**之后新增的 member 账号将完全看不到**。可通过下列命令把这类 session 批量赋给指定 admin：
+- 在无鉴权上下文中创建的 session（CLI 命令、后台任务、IM 渠道入站 dispatcher）`owner_user_id` 为空。bootstrap admin 仍可见，但之后新增的 member 账号不可见。可用以下命令回填归属：
 
   ```bash
   flocks admin reassign-orphan-sessions --username admin --dry-run   # 预览
   flocks admin reassign-orphan-sessions --username admin             # 实际写入
   ```
 
-  命令会输出 `scanned / orphaned / reassigned / failed` 四个计数；只要 `failed` 非零就以 exit code 2 退出，方便 CI / 脚本捕获"部分写入"情况、修复底层故障（一般是临时存储错误）后再次运行。
+  命令会汇总 `scanned / orphaned / reassigned / failed` 计数；`failed` 非零时以退出码 2 结束，便于 CI / 脚本发现部分写入并在修复底层原因（通常为临时存储错误）后重试。
 
 ## 5. 加入社区
 
@@ -272,6 +289,10 @@ flocks start --server-host 127.0.0.1 --webui-host 0.0.0.0
 
 ![企业微信官方交流群二维码](assets/community-wecom-qr.png)
 
-## 6. 开源协议
+## 6. 参与贡献
+
+开发环境、代码规范、测试要求和 Pull Request 流程请参考 [`CONTRIBUTING.md`](CONTRIBUTING.md)。
+
+## 7. 开源协议
 
 Apache License 2.0

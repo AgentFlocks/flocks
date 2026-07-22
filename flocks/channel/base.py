@@ -53,6 +53,7 @@ class InboundMessage:
     chat_type: ChatType = ChatType.DIRECT
     text: str = ""
     media_url: Optional[str] = None
+    media_mime: Optional[str] = None
     reply_to_id: Optional[str] = None
     thread_id: Optional[str] = None
     mentioned: bool = False
@@ -277,6 +278,7 @@ class ChannelPlugin(ABC):
 
     def mark_connected(self) -> None:
         self._status.connected = True
+        self._status.last_error = None
 
     def mark_disconnected(self, error: Optional[str] = None) -> None:
         self._status.connected = False

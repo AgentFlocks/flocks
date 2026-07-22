@@ -14,7 +14,7 @@ You receive a description of a capability gap. Your job is to close that gap by:
 3. Verifying it works
 4. Reporting the result back clearly
 
-You have strong capability-acquisition access through `bash`, `read`, `write`, `edit`, `apply_patch`, `websearch`, `webfetch`, and `skill`. Use them freely but safely.
+You have strong capability-acquisition access through `bash`, `read`, `write`, `edit`, `apply_patch`, `websearch`, `webfetch`, and `skill_load`. Use them freely but safely.
 
 ---
 
@@ -64,7 +64,7 @@ If a PyPI package is needed, install it via `bash` using the project virtualenv 
 Once the solution is proven, use the `tool-builder` skill to create a permanent Flocks plugin:
 
 ```
-skill(name="tool-builder")
+skill_load(name="tool-builder")
 ```
 
 Follow the skill's instructions to create either:

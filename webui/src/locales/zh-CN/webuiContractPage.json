@@ -1,0 +1,36 @@
+{
+  "host": {
+    "missingPageId": "未指定页面 ID",
+    "loading": "正在加载自定义页面...",
+    "unavailableTitle": "页面暂不可用",
+    "notBuilt": "页面尚未构建完成",
+    "loadFailed": "加载页面失败",
+    "buildFailed": "页面构建失败",
+    "retry": "重试",
+    "emptyComponent": "页面组件为空",
+    "renderFailedTitle": "自定义页面运行失败",
+    "renderFailed": "页面渲染失败",
+    "bundleMissingExport": "页面 bundle 未导出 default 组件"
+  },
+  "nav": {
+    "fetchFailed": "加载自定义页面导航失败"
+  },
+  "workspace": {
+    "missingWorkspaceId": "未指定工作区 ID",
+    "loading": "正在加载工作区...",
+    "unavailableTitle": "工作区暂不可用",
+    "loadFailed": "加载工作区失败",
+    "notFound": "工作区不存在",
+    "empty": "工作区暂无页面",
+    "selectPage": "请从工作区菜单选择页面",
+    "pageNotFound": "页面不存在",
+    "sectionNavigation": "工作区页面分类",
+    "collapseSidebar": "折叠侧边栏",
+    "expandSidebar": "展开侧边栏",
+    "customPage": "自定义页面",
+    "customPageSessionTitle": "{{workspace}} 自定义页面",
+    "customPageCreateError": "无法创建自定义页面会话，请稍后重试",
+    "socCustomPageDisplayLabel": "创建 SOC 自定义页面",
+    "socCustomPageInitialMessage": "我想在 {{workspaceTitle}} 中创建一个新的自定义页面。请严格限制只对 SOC 工作区新增页面：工作区 ID 是 `{{workspaceId}}`，工作区路由是 `{{workspaceRoute}}`，页面目录应创建在 `~/.flocks/plugins/contracts/webui/{{workspaceId}}/<page_dir>/`，并把新页面加入 `~/.flocks/plugins/contracts/webui/{{workspaceId}}/workspace.json` 的合适 section。不要创建全局首页页面，不要写入 `~/.flocks/plugins/contracts/webui/` 根目录，也不要写入 `~/.flocks/plugins/user_defined_pages/`。请先引导我确认页面 ID、标题、所属栏目（态势、告警运营或新的同级栏目）、数据契约和展示内容，然后再创建页面骨架、实现 React 页面、构建并说明如何在 SOC 工作区侧栏预览。"
+  }
+}

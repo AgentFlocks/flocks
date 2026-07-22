@@ -6,14 +6,14 @@ import { Config } from "../config/config"
 import { Instance } from "../project/instance"
 import path from "path"
 import os from "os"
-
-import PROMPT_ANTHROPIC from "./prompt/anthropic.txt"
-import PROMPT_ANTHROPIC_WITHOUT_TODO from "./prompt/qwen.txt"
-import PROMPT_BEAST from "./prompt/beast.txt"
-import PROMPT_GEMINI from "./prompt/gemini.txt"
-import PROMPT_ANTHROPIC_SPOOF from "./prompt/anthropic_spoof.txt"
-
-import PROMPT_CODEX from "./prompt/codex_header.txt"
+import {
+  PROMPT_ANTHROPIC,
+  PROMPT_ANTHROPIC_SPOOF,
+  PROMPT_BEAST,
+  PROMPT_CODEX,
+  PROMPT_GENERAL,
+  PROMPT_GEMINI,
+} from "./prompt-source"
 import type { Provider } from "@/provider/provider"
 import { Flag } from "@/flag/flag"
 
@@ -33,7 +33,7 @@ export namespace SystemPrompt {
       return [PROMPT_BEAST]
     if (model.api.id.includes("gemini-")) return [PROMPT_GEMINI]
     if (model.api.id.includes("claude")) return [PROMPT_ANTHROPIC]
-    return [PROMPT_ANTHROPIC_WITHOUT_TODO]
+    return [PROMPT_GENERAL]
   }
 
   export async function environment() {

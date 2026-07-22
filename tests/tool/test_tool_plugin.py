@@ -11,7 +11,9 @@ import pytest
 import yaml
 
 from flocks.tool.tool_loader import (
+    _build_execution_handler,
     _build_http_handler,
+    _build_tcp_connector,
     _extract_response,
     _json_schema_to_params,
     _merge_provider_defaults,
@@ -21,6 +23,7 @@ from flocks.tool.tool_loader import (
     create_yaml_tool,
     delete_python_tool,
     delete_yaml_tool,
+    discover_python_tool_sources,
     find_yaml_tool,
     list_yaml_tools,
     read_yaml_tool,
@@ -468,6 +471,62 @@ class TestYamlToTool:
 
         assert tool.info.source is None
 
+    def test_provider_version_from_provider_yaml(self, tmp_path: Path, monkeypatch):
+        """`version` in _provider.yaml should be propagated to ToolInfo.provider_version."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "sangfor_sip_v92"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {
+            "name": "sangfor_sip",
+            "version": "9.2",
+            "defaults": {"base_url": "https://sip.test/api"},
+        })
+        data = _make_tool_yaml(name="sangfor_sip_assets", url="{base_url}/assets")
+        yaml_path = _write_yaml(api_dir / "sangfor_sip_assets.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        # ``info.provider`` is the storage key (service_id + version) so that
+        # ``api_services`` lookups can keep multiple versions side-by-side.
+        # The unversioned ``service_id`` is preserved on the Tool instance.
+        assert tool.info.provider == "sangfor_sip_v9_2"
+        assert tool.info.provider_version == "9.2"
+        assert getattr(tool, "_service_id", None) == "sangfor_sip"
+        assert getattr(tool, "_provider_version", None) == "9.2"
+
+    def test_provider_version_falls_back_to_defaults_product_version(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """When top-level `version` is missing, fall back to defaults.product_version."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "legacy_provider"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {
+            "name": "legacy_provider",
+            "defaults": {"base_url": "https://x.test", "product_version": "8.1"},
+        })
+        data = _make_tool_yaml(name="legacy_tool", url="{base_url}/x")
+        yaml_path = _write_yaml(api_dir / "legacy_tool.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider_version == "8.1"
+
+    def test_provider_version_absent_when_not_declared(
+        self, tmp_path: Path, monkeypatch,
+    ):
+        """No `version` anywhere → provider_version stays None."""
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path)
+
+        api_dir = tmp_path / "api" / "no_version"
+        api_dir.mkdir(parents=True)
+        _write_yaml(api_dir / "_provider.yaml", {"name": "no_version"})
+        data = _make_tool_yaml(name="no_version_tool")
+        yaml_path = _write_yaml(api_dir / "no_version_tool.yaml", data)
+        tool = yaml_to_tool(data, yaml_path)
+
+        assert tool.info.provider_version is None
+
 
 # ---------------------------------------------------------------------------
 # CRUD helpers
@@ -612,6 +671,41 @@ class TestCrudHelpers:
         assert delete_yaml_tool("project_del_tool") is True
         assert not project_yaml.exists()
         assert find_yaml_tool("project_del_tool") is None
+
+    def test_discover_python_tool_sources_scans_user_and_project_dirs(self, tmp_path: Path, monkeypatch):
+        monkeypatch.setattr("flocks.tool.tool_loader._TOOLS_SUBDIR", tmp_path / "user_tools")
+        monkeypatch.chdir(tmp_path)
+
+        user_python = tmp_path / "user_tools" / "python" / "user_tool.py"
+        user_python.parent.mkdir(parents=True, exist_ok=True)
+        user_python.write_text(textwrap.dedent("""\
+            from flocks.tool.registry import ToolRegistry
+
+            @ToolRegistry.register_function(
+                name="user_tool",
+                description="user tool",
+            )
+            async def user_tool(ctx):
+                return None
+        """))
+
+        project_python = tmp_path / ".flocks" / "plugins" / "tools" / "python" / "project_tool.py"
+        project_python.parent.mkdir(parents=True, exist_ok=True)
+        project_python.write_text(textwrap.dedent("""\
+            from flocks.tool.registry import ToolRegistry
+
+            @ToolRegistry.register_function(
+                name="project_tool",
+                description="project tool",
+            )
+            async def project_tool(ctx):
+                return None
+        """))
+
+        sources = discover_python_tool_sources()
+
+        assert sources["user_tool"] == user_python
+        assert sources["project_tool"] == project_python
 
 
 # ---------------------------------------------------------------------------
@@ -764,9 +858,11 @@ class TestPluginPyRegistration:
 
         old_tools = ToolRegistry._tools.copy()
         old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
         try:
             ToolRegistry._tools = {}
             ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
 
             def _fake_plugin_load() -> None:
                 ToolRegistry.register(Tool(
@@ -778,7 +874,10 @@ class TestPluginPyRegistration:
                     handler=lambda ctx, **kwargs: None,
                 ))
 
-            with patch("flocks.plugin.PluginLoader.load_all", side_effect=_fake_plugin_load):
+            with patch(
+                "flocks.plugin.PluginLoader.load_extension",
+                side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+            ):
                 ToolRegistry._load_plugin_tools()
 
             assert ToolRegistry._plugin_tool_names == ["base64_encode"]
@@ -786,6 +885,185 @@ class TestPluginPyRegistration:
         finally:
             ToolRegistry._tools = old_tools
             ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_loads_legacy_package_entry_points(self):
+        from flocks.tool.registry import ToolRegistry
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("flocks.plugin.PluginLoader.load_extension") as load_extension:
+                ToolRegistry._load_plugin_tools()
+
+            load_extension.assert_called_once_with("TOOLS", load_entry_points=True)
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_marks_project_python_tools_native(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        project_tool_path = tmp_path / ".flocks" / "plugins" / "tools" / "python" / "project_tool.py"
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            def _fake_plugin_load() -> None:
+                ToolRegistry.register(Tool(
+                    info=ToolInfo(
+                        name="project_tool",
+                        description="Project tool",
+                        category=ToolCategory.CUSTOM,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                ))
+
+            with patch(
+                "flocks.plugin.PluginLoader.load_extension",
+                side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+            ):
+                with patch(
+                    "flocks.tool.tool_loader.discover_python_tool_sources",
+                    return_value={"project_tool": project_tool_path},
+                ):
+                    ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["project_tool"].info.source == "plugin_py"
+            assert ToolRegistry._tools["project_tool"].info.native is True
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_marks_user_python_tools_non_native(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        user_tool_path = tmp_path / "user_flocks" / ".flocks" / "plugins" / "tools" / "python" / "user_tool.py"
+        try:
+            ToolRegistry._tools = {}
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            def _fake_plugin_load() -> None:
+                ToolRegistry.register(Tool(
+                    info=ToolInfo(
+                        name="user_tool",
+                        description="User tool",
+                        category=ToolCategory.CUSTOM,
+                        native=True,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                ))
+
+            with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
+                with patch(
+                    "flocks.plugin.PluginLoader.load_extension",
+                    side_effect=lambda *_args, **_kwargs: _fake_plugin_load(),
+                ):
+                    with patch(
+                        "flocks.tool.tool_loader.discover_python_tool_sources",
+                        return_value={"user_tool": user_tool_path},
+                    ):
+                        ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["user_tool"].info.source == "plugin_py"
+            assert ToolRegistry._tools["user_tool"].info.native is False
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_does_not_reclassify_builtin_name_collision(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        colliding_tool_path = tmp_path / ".flocks" / "plugins" / "tools" / "python" / "webfetch.py"
+        try:
+            ToolRegistry._tools = {
+                "webfetch": Tool(
+                    info=ToolInfo(
+                        name="webfetch",
+                        description="Builtin webfetch",
+                        category=ToolCategory.SYSTEM,
+                        source="builtin",
+                        native=True,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                )
+            }
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("flocks.plugin.PluginLoader.load_extension", return_value=None):
+                with patch(
+                    "flocks.tool.tool_loader.discover_python_tool_sources",
+                    return_value={"webfetch": colliding_tool_path},
+                ):
+                    ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["webfetch"].info.source == "builtin"
+            assert ToolRegistry._tools["webfetch"].info.native is True
+            assert ToolRegistry._plugin_tool_names == []
+
+            ToolRegistry._unregister_plugin_tools()
+            assert "webfetch" in ToolRegistry._tools
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
+
+    def test_load_plugin_tools_reconciles_early_registered_python_plugin(self, tmp_path: Path):
+        from flocks.tool.registry import ToolRegistry, ToolInfo, ToolCategory, Tool
+
+        old_tools = ToolRegistry._tools.copy()
+        old_plugin_names = ToolRegistry._plugin_tool_names.copy()
+        old_enabled_defaults = ToolRegistry._enabled_defaults.copy()
+        user_tool_path = tmp_path / "user_flocks" / ".flocks" / "plugins" / "tools" / "python" / "calculator.py"
+        try:
+            ToolRegistry._tools = {
+                "calculator": Tool(
+                    info=ToolInfo(
+                        name="calculator",
+                        description="Calculator",
+                        category=ToolCategory.CUSTOM,
+                    ),
+                    handler=lambda ctx, **kwargs: None,
+                )
+            }
+            ToolRegistry._plugin_tool_names = []
+            ToolRegistry._enabled_defaults = {}
+
+            with patch("pathlib.Path.home", return_value=tmp_path / "user_flocks"):
+                with patch("flocks.plugin.PluginLoader.load_extension", return_value=None):
+                    with patch(
+                        "flocks.tool.tool_loader.discover_python_tool_sources",
+                        return_value={"calculator": user_tool_path},
+                    ):
+                        ToolRegistry._load_plugin_tools()
+
+            assert ToolRegistry._tools["calculator"].info.source == "plugin_py"
+            assert ToolRegistry._tools["calculator"].info.native is False
+            assert ToolRegistry._plugin_tool_names == ["calculator"]
+        finally:
+            ToolRegistry._tools = old_tools
+            ToolRegistry._plugin_tool_names = old_plugin_names
+            ToolRegistry._enabled_defaults = old_enabled_defaults
 
 
 # ---------------------------------------------------------------------------
@@ -883,3 +1161,108 @@ class TestHttpHandler:
 
         assert result.success is True
         assert result.output == [1, 2]
+
+
+class TestTcpConnector:
+    """Regression tests for CLOSE_WAIT socket accumulation under rapid tool calls."""
+
+    def test_connector_forces_socket_close(self):
+        """force_close must be True so per-request sockets don't linger in CLOSE_WAIT."""
+        captured: Dict[str, Any] = {}
+
+        def _fake_connector(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("aiohttp.TCPConnector", side_effect=_fake_connector):
+            _build_tcp_connector(verify_ssl=False)
+
+        assert captured["force_close"] is True
+        assert captured["ssl"] is False
+
+    def test_connector_enables_cleanup_closed_only_on_affected_python(self):
+        """enable_cleanup_closed is only meaningful before the CPython 3.12.7 SSL fix."""
+        import sys as _sys
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_connector(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        with patch("aiohttp.TCPConnector", side_effect=_fake_connector):
+            _build_tcp_connector(verify_ssl=True)
+
+        if _sys.version_info < (3, 12, 7):
+            assert captured.get("enable_cleanup_closed") is True
+        else:
+            assert "enable_cleanup_closed" not in captured
+
+    @pytest.mark.asyncio
+    async def test_http_handler_uses_hardened_connector(self):
+        """The declarative HTTP handler must build its session with the hardened connector."""
+        cfg = {
+            "type": "http",
+            "method": "GET",
+            "url": "https://appliance.example.com/api",
+            "timeout": 10,
+        }
+        handler = _build_http_handler(cfg)
+
+        mock_resp = AsyncMock()
+        mock_resp.status = 200
+        mock_resp.json = AsyncMock(return_value={"ok": True})
+        mock_resp.__aenter__ = AsyncMock(return_value=mock_resp)
+        mock_resp.__aexit__ = AsyncMock(return_value=False)
+
+        mock_session = AsyncMock()
+        mock_session.request = MagicMock(return_value=mock_resp)
+        mock_session.__aenter__ = AsyncMock(return_value=mock_session)
+        mock_session.__aexit__ = AsyncMock(return_value=False)
+
+        captured: Dict[str, Any] = {}
+
+        def _fake_connector(**kwargs):
+            captured.update(kwargs)
+            return MagicMock()
+
+        ctx = ToolContext(session_id="test", message_id="test")
+
+        with patch("aiohttp.TCPConnector", side_effect=_fake_connector), patch(
+            "aiohttp.ClientSession", return_value=mock_session
+        ):
+            result = await handler(ctx)
+
+        assert result.success is True
+        assert captured["force_close"] is True
+
+
+class TestExecutionHandler:
+    @pytest.mark.asyncio
+    async def test_inline_yaml_execution_loads_but_refuses_to_run_by_default(
+        self,
+        tmp_path: Path,
+    ):
+        handler = _build_execution_handler(
+            {"type": "python", "code": "return {'success': True}"},
+            tmp_path / "tool.yaml",
+        )
+        result = await handler(ToolContext(session_id="test", message_id="test"))
+
+        assert result.success is False
+        assert "Inline YAML execution is disabled" in result.error
+
+    @pytest.mark.asyncio
+    async def test_inline_yaml_execution_stays_disabled(
+        self,
+        tmp_path: Path,
+    ):
+        handler = _build_execution_handler(
+            {"type": "python", "code": "return {'success': True, 'value': _kw_['name']}"},
+            tmp_path / "tool.yaml",
+        )
+
+        result = await handler(ToolContext(session_id="test", message_id="test"), name="after")
+
+        assert result.success is False
+        assert "handler.type=script" in result.error

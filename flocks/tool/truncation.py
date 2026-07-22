@@ -15,23 +15,24 @@ Supports:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import time
 from pathlib import Path
 from dataclasses import dataclass
-from typing import Optional
+from typing import Any, Optional
 
 from flocks.utils.log import Log
 from flocks.workspace.manager import WorkspaceManager
 
 log = Log.create(service="tool.truncation")
 
-MAX_LINES = 200
-MAX_BYTES = 10 * 1024  # 10 KB
+MAX_LINES = 1000
+MAX_BYTES = 100 * 1024  # 100 KB
 
 MAX_TOOL_RESULT_CONTEXT_SHARE = 0.3
-HARD_MAX_TOOL_RESULT_CHARS = 10_000
+HARD_MAX_TOOL_RESULT_CHARS = 100_000
 MIN_KEEP_CHARS = 1_000
 
 _OUTPUT_DIR: Optional[Path] = None
@@ -45,7 +46,7 @@ _last_cleanup_ts: float = 0.0
 def _ensure_output_dir() -> Path:
     global _OUTPUT_DIR
     if _OUTPUT_DIR is None:
-        base = WorkspaceManager.get_instance().get_workspace_dir() / "tool-output"
+        base = WorkspaceManager.get_instance().get_default_outputs_dir() / "tool-output"
         base.mkdir(parents=True, exist_ok=True)
         _OUTPUT_DIR = base
     return _OUTPUT_DIR
@@ -279,3 +280,162 @@ def truncate_tool_result_dynamic(
     if len(text) <= max_chars:
         return text, False
     return truncate_tool_result_text(text, max_chars), True
+
+
+# ---------------------------------------------------------------------------
+# JSON-safe truncation (T3 — see docs/design/context-compaction-v2.md §T3)
+# ---------------------------------------------------------------------------
+#
+# The character-level ``truncate_tool_result_text`` is great for free-form
+# logs but can leave a JSON payload syntactically broken — when that
+# happens Anthropic's API returns ``invalid tool_result`` and Claude
+# refuses to recover.  ``truncate_tool_result_text_safe`` parses the
+# payload, recursively shrinks string / list / dict values until it fits
+# inside ``max_chars``, and falls back to the character truncator only
+# when the input is not JSON or trimming did not converge.
+#
+
+_JSON_TRUNC_MARKER = "...[truncated]"
+
+
+def truncate_tool_result_text_safe(
+    text: str,
+    max_chars: int,
+    *,
+    suffix: str = "",
+    min_keep_chars: int = MIN_KEEP_CHARS,
+) -> str:
+    """JSON-aware truncation; falls back to character truncation on plain text.
+
+    Guarantees: when the input parses as JSON, the returned string also
+    parses as JSON (no half-cut keys, no orphan brackets).  When parsing
+    fails the function delegates to ``truncate_tool_result_text`` so
+    callers can use this as a drop-in replacement.
+    """
+    if len(text) <= max_chars:
+        return text
+
+    stripped = text.lstrip()
+    if not stripped or stripped[0] not in '{["':
+        return truncate_tool_result_text(
+            text, max_chars, suffix=suffix, min_keep_chars=min_keep_chars,
+        )
+
+    try:
+        data = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return truncate_tool_result_text(
+            text, max_chars, suffix=suffix, min_keep_chars=min_keep_chars,
+        )
+
+    truncated = _truncate_json_value(data, budget=max_chars)
+    try:
+        serialized = json.dumps(truncated, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return truncate_tool_result_text(
+            text, max_chars, suffix=suffix, min_keep_chars=min_keep_chars,
+        )
+
+    if len(serialized) > max_chars:
+        # Recursion didn't converge (e.g. dict with thousands of keys).
+        # Wrap a slice of the serialised form into a small valid-JSON
+        # envelope.  We deliberately avoid ``truncate_tool_result_text``
+        # here because it appends human-readable suffixes that would
+        # break ``json.loads`` on the consumer side.
+        preview_budget = max(64, max_chars - 200)
+        preview = serialized[:preview_budget]
+        envelope = {
+            "__truncated__": True,
+            "reason": "budget_exceeded",
+            "preview": preview,
+        }
+        wrapped = json.dumps(envelope, ensure_ascii=False)
+        if len(wrapped) > max_chars:
+            # Last resort: char truncate the envelope's preview string.
+            envelope["preview"] = preview[: max(32, max_chars // 2)]
+            wrapped = json.dumps(envelope, ensure_ascii=False)
+        return wrapped
+    return serialized
+
+
+def _truncate_json_value(value: Any, budget: int) -> Any:
+    """Recursively shrink ``value`` until ``json.dumps(value)`` ≤ ``budget``.
+
+    The budget is approximate (counted in characters of the serialised
+    form), not a hard contract — callers should re-check ``len(...)`` and
+    fall back to character truncation if necessary.
+    """
+    try:
+        serialized = json.dumps(value, ensure_ascii=False)
+    except (TypeError, ValueError):
+        return _JSON_TRUNC_MARKER
+    if len(serialized) <= budget:
+        return value
+
+    if isinstance(value, str):
+        keep = max(64, budget - len(_JSON_TRUNC_MARKER) - 2)
+        if keep >= len(value):
+            return value
+        return value[:keep] + _JSON_TRUNC_MARKER
+
+    if isinstance(value, list):
+        truncated_list: list[Any] = []
+        # Reserve ~10% of the budget for the tail ``__truncated__``
+        # marker + JSON brackets / commas so we don't have to fall back
+        # to the character truncator after this branch completes.
+        inner_budget = max(64, int(budget * 0.9) - 60)
+        remaining = inner_budget
+        for idx, item in enumerate(value):
+            item_serialized = json.dumps(item, ensure_ascii=False, default=str)
+            if len(item_serialized) > remaining:
+                if remaining > 80:
+                    # Try to keep a smaller version of this item.
+                    smaller = _truncate_json_value(item, max(64, remaining // 2))
+                    truncated_list.append(smaller)
+                truncated_list.append({
+                    "__truncated__": True,
+                    "omitted_items": len(value) - idx - 1,
+                })
+                break
+            truncated_list.append(item)
+            remaining -= len(item_serialized) + 1  # +1 for the comma
+        # Final guard: pop items from the tail until we are under budget.
+        while truncated_list and len(json.dumps(truncated_list, ensure_ascii=False)) > budget:
+            truncated_list.pop()
+        return truncated_list
+
+    if isinstance(value, dict):
+        truncated_dict: dict[str, Any] = {}
+        remaining = budget
+        omitted_keys: list[str] = []
+        items = list(value.items())
+        for idx, (k, v) in enumerate(items):
+            try:
+                v_serialized = json.dumps(v, ensure_ascii=False, default=str)
+                k_serialized = json.dumps(k, ensure_ascii=False)
+            except (TypeError, ValueError):
+                omitted_keys.append(str(k))
+                continue
+            entry_size = len(v_serialized) + len(k_serialized) + 4  # ': ' + ', '
+            if entry_size > remaining:
+                if remaining > 80 and isinstance(v, (str, list, dict)):
+                    truncated_dict[k] = _truncate_json_value(v, max(64, remaining // 2))
+                    remaining = max(0, remaining - entry_size // 2)
+                else:
+                    omitted_keys.append(str(k))
+                continue
+            truncated_dict[k] = v
+            remaining -= entry_size
+            if remaining < 64:
+                # Any keys we haven't visited yet are dropped — surface
+                # them so the LLM knows we didn't silently lose fields.
+                omitted_keys.extend(str(rest_k) for rest_k, _ in items[idx + 1:])
+                break
+        if omitted_keys:
+            truncated_dict["__truncated__"] = True
+            truncated_dict["__omitted_keys__"] = omitted_keys[:32]
+        return truncated_dict
+
+    # Numbers / bool / None / unknown types — return as-is.  They contribute
+    # negligible characters and aren't expected to be massive.
+    return value

@@ -32,6 +32,30 @@ log = Log.create(service="channel.wecom")
 
 _FRAME_CACHE_MAX = 500
 _DEFAULT_RECONNECT_TIMEOUT_SECONDS = 60.0
+_LEADING_MENTION_RE = re.compile(r"^\s*(?:@\S+(?:\s+|$))+")
+
+
+class _WeComSdkLogger:
+    """Bridge wecom-aibot-sdk logs into Flocks logs while dropping heartbeat debug noise."""
+
+    def debug(self, message: str, *args: Any) -> None:
+        return None
+
+    def info(self, message: str, *args: Any) -> None:
+        return None
+
+    def warn(self, message: str, *args: Any) -> None:
+        log.warning("wecom.sdk.warn", {"message": _format_sdk_log_message(message, args)})
+
+    def error(self, message: str, *args: Any) -> None:
+        log.error("wecom.sdk.error", {"message": _format_sdk_log_message(message, args)})
+
+
+def _format_sdk_log_message(message: str, args: tuple[Any, ...]) -> str:
+    if not args:
+        return str(message)
+    extra = " ".join(str(arg) for arg in args)
+    return f"{message} {extra}"
 
 
 def _parse_reconnect_timeout_seconds(raw: Any) -> tuple[float, Optional[str]]:
@@ -125,6 +149,7 @@ class WeComChannel(ChannelPlugin):
             heartbeat_interval=30_000,
             scene=1,            # SCENE_WECOM_OPENCLAW — 标识为 OpenClaw 连接，MCP 能力依赖此字段
             plug_version="1.0.0",  # 企微服务端用于下发 MCP Server URL 时的版本校验
+            logger=_WeComSdkLogger(),
         )
 
         self._ws_client.on("authenticated", self._handle_authenticated)
@@ -185,6 +210,77 @@ class WeComChannel(ChannelPlugin):
             return DeliveryResult(channel_id="wecom", message_id="")
         except Exception as e:
             retryable = "timeout" in str(e).lower()
+            return DeliveryResult(
+                channel_id="wecom", message_id="",
+                success=False, error=str(e), retryable=retryable,
+            )
+
+    async def send_media(self, ctx: OutboundContext) -> DeliveryResult:
+        if not self._ws_client:
+            return DeliveryResult(
+                channel_id="wecom", message_id="",
+                success=False, error="WebSocket not connected",
+            )
+        if not ctx.media_url:
+            return await self.send_text(ctx)
+
+        try:
+            from flocks.channel.builtin.wecom.media import prepare_wecom_media
+
+            media = await prepare_wecom_media(ctx.media_url)
+            upload = await self._ws_client.upload_media(
+                media.data,
+                type=media.media_type,
+                filename=media.filename,
+            )
+            media_id = upload.get("media_id", "")
+            if not media_id:
+                raise RuntimeError(f"WeCom media upload failed: {upload}")
+
+            frame = (
+                self._frame_cache.pop(ctx.reply_to_id, None)
+                if ctx.reply_to_id else None
+            )
+            if frame:
+                sent = await self._ws_client.reply_media(
+                    frame,
+                    media.media_type,
+                    media_id,
+                    video_title=media.filename if media.media_type == "video" else None,
+                )
+            else:
+                sent = await self._ws_client.send_media_message(
+                    ctx.to,
+                    media.media_type,
+                    media_id,
+                    video_title=media.filename if media.media_type == "video" else None,
+                )
+
+            # WeCom's media payload does not carry companion text. Keep the
+            # attachment first, then send text as a separate message.
+            message_id = _extract_sent_message_id(sent)
+            if ctx.text:
+                text_result = await self.send_text(
+                    OutboundContext(**{**vars(ctx), "media_url": None})
+                )
+                if not text_result.success:
+                    return DeliveryResult(
+                        channel_id="wecom",
+                        message_id=message_id,
+                        chat_id=ctx.to,
+                        success=False,
+                        error=f"WeCom media sent but caption failed: {text_result.error}",
+                        retryable=text_result.retryable,
+                    )
+
+            self.record_message()
+            return DeliveryResult(
+                channel_id="wecom",
+                message_id=message_id,
+                chat_id=ctx.to,
+            )
+        except Exception as e:
+            retryable = "timeout" in str(e).lower() or "rate limit" in str(e).lower()
             return DeliveryResult(
                 channel_id="wecom", message_id="",
                 success=False, error=str(e), retryable=retryable,
@@ -386,7 +482,7 @@ def _parse_frame(frame: dict, config: dict) -> Optional[InboundMessage]:
     chat_id = body.get("chatid") or from_user
 
     if chat_type == ChatType.GROUP:
-        text = re.sub(r"@\S+", "", text).strip()
+        text = _strip_leading_mentions(text)
 
     # WeCom platform only delivers group messages when the bot is @mentioned,
     # so every group message that reaches here is inherently a mention.
@@ -404,6 +500,20 @@ def _parse_frame(frame: dict, config: dict) -> Optional[InboundMessage]:
     )
 
 
+def _extract_sent_message_id(frame: Any) -> str:
+    if not isinstance(frame, dict):
+        return ""
+    body = frame.get("body") or {}
+    if not isinstance(body, dict):
+        return ""
+    return str(body.get("msgid") or body.get("message_id") or "")
+
+
+def _strip_leading_mentions(text: str) -> str:
+    """Remove only the bot mention prefix from a WeCom group message."""
+    return _LEADING_MENTION_RE.sub("", text, count=1).strip()
+
+
 def _extract_content(body: dict) -> tuple[str, Optional[str]]:
     """Extract ``(text, media_url)`` from the frame body."""
     msg_type = body.get("msgtype", "")
@@ -419,22 +529,38 @@ def _extract_content(body: dict) -> tuple[str, Optional[str]]:
         return body.get("voice", {}).get("content", "[语音消息]"), None
 
     if msg_type == "file":
-        url = body.get("file", {}).get("url", "")
+        file_block = body.get("file", {})
+        url = file_block.get("url", "")
+        filename = str(file_block.get("filename", "") or "").strip()
+        if filename:
+            return f"[文件消息: {filename}]", url or None
         return "[文件消息]", url or None
 
     if msg_type == "mixed":
-        return _extract_mixed(body.get("mixed", {})), None
+        text, media_url = _extract_mixed(body.get("mixed", {}))
+        return text, media_url
 
     return "", None
 
 
-def _extract_mixed(mixed: dict) -> str:
-    """Flatten a mixed (图文混排) message into text."""
+def _extract_mixed(mixed: dict) -> tuple[str, Optional[str]]:
+    """Flatten a mixed (图文混排) message into text + first media URL."""
     parts: list[str] = []
+    first_media_url: Optional[str] = None
     for item in mixed.get("msg_item", []):
         item_type = item.get("msgtype", "")
         if item_type == "text":
             parts.append(item.get("text", {}).get("content", ""))
         elif item_type == "image":
             parts.append("[图片]")
-    return " ".join(parts).strip()
+            url = item.get("image", {}).get("url", "")
+            if not first_media_url and url:
+                first_media_url = url
+        elif item_type == "file":
+            file_block = item.get("file", {})
+            filename = str(file_block.get("filename", "") or "").strip()
+            parts.append(f"[文件: {filename}]" if filename else "[文件]")
+            url = file_block.get("url", "")
+            if not first_media_url and url:
+                first_media_url = url
+    return " ".join(parts).strip(), first_media_url

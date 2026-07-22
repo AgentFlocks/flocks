@@ -5,8 +5,17 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
-import { workflowAPI, Workflow, WorkflowEdge, WorkflowExecution, WorkflowNode, WorkflowNodeExecution } from '@/api/workflow';
+import {
+  workflowAPI,
+  Workflow,
+  WorkflowEdge,
+  WorkflowExecution,
+  WorkflowNode,
+  WorkflowNodeExecution,
+  WorkflowSummary,
+} from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
 // ─────────────────────────────────────────────
 // Constants
@@ -54,13 +63,7 @@ function getLatestNodeInputs(nodeId: string, latestExecution?: WorkflowExecution
 function buildSuggestedNodeInputs(
   node: WorkflowNode,
   workflow: Workflow,
-  latestExecution?: WorkflowExecution | null,
 ): Record<string, unknown> {
-  const runtimeInputs = getLatestNodeInputs(node.id, latestExecution);
-  if (runtimeInputs) {
-    return runtimeInputs;
-  }
-
   if (node.id === workflow.workflowJson.start) {
     return workflow.workflowJson.metadata?.sampleInputs ?? {};
   }
@@ -174,11 +177,11 @@ function ExpandedCodeEditor({
   }, [lineNumbers.length]);
 
   return (
-    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-[#30363d] bg-[#0d1117]">
+    <div className="flex h-full min-h-0 min-w-0 overflow-hidden rounded-xl border border-[#4a5563] bg-[#252c35]">
       <div
         aria-hidden="true"
         data-testid="expanded-code-line-numbers"
-        className="flex-shrink-0 overflow-hidden select-none border-r border-[#30363d] bg-[#0b0f14] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#6e7681]"
+        className="flex-shrink-0 overflow-hidden select-none border-r border-[#4a5563] bg-[#20262d] px-3 py-3 text-right font-mono text-[12px] leading-relaxed text-[#9aa7b4]"
       >
         <div ref={lineNumberTrackRef}>
           {lineNumbers.map((lineNumber) => (
@@ -195,7 +198,7 @@ function ExpandedCodeEditor({
         onScroll={syncLineNumberOffset}
         rows={24}
         wrap="off"
-        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-[#0d1117] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#e6edf3] focus:outline-none focus:ring-2 focus:ring-red-400"
+        className="h-full min-h-0 min-w-0 w-full resize-none overflow-auto bg-[#252c35] px-4 py-3 font-mono text-[12px] leading-relaxed text-[#d7dee8] focus:outline-none focus:ring-2 focus:ring-[#539bf5]"
         placeholder={placeholder}
         spellCheck={false}
       />
@@ -291,25 +294,46 @@ export interface NodeInfoPanelProps {
   onSaved: (updated: Workflow) => void;
 }
 
-function RuntimeJsonBlock({ label, value, tone }: {
+function RuntimeJsonBlock({ label, value, tone, copyable = true }: {
   label: string;
   value: Record<string, unknown>;
   tone: 'amber' | 'green';
+  copyable?: boolean;
 }) {
+  const { t } = useTranslation('workflow');
+  const [expanded, setExpanded] = useState(true);
   const bgClass = tone === 'amber' ? 'bg-amber-50 border-amber-100 text-amber-900' : 'bg-green-50 border-green-100 text-green-900';
   const formattedValue = JSON.stringify(value, null, 2);
+  const toggleLabel = expanded
+    ? t('detail.nodeInfo.collapseJsonBlock', { label })
+    : t('detail.nodeInfo.expandJsonBlock', { label });
 
   return (
     <div className="space-y-1.5">
       <div className="flex items-center justify-between gap-2">
         <FL>{label}</FL>
-        <CopyButton text={formattedValue} size="w-3 h-3" />
+        <div className="flex items-center gap-1">
+          {copyable && <CopyButton text={formattedValue} size="w-3 h-3" />}
+          <button
+            type="button"
+            onClick={() => setExpanded((value) => !value)}
+            aria-label={toggleLabel}
+            title={toggleLabel}
+            className="inline-flex items-center gap-1 rounded-md px-1.5 py-1 text-[11px] text-gray-400 transition-colors hover:bg-white/70 hover:text-gray-600"
+          >
+            {expanded
+              ? <ChevronDown className="w-3 h-3" />
+              : <ChevronRight className="w-3 h-3" />}
+          </button>
+        </div>
       </div>
-      <div className={`rounded-lg border px-2.5 py-2 ${bgClass}`}>
-        <pre className="text-[11px] font-mono whitespace-pre-wrap break-all">
-          {formattedValue}
-        </pre>
-      </div>
+      {expanded && (
+        <div className={`rounded-lg border px-2.5 py-2 ${bgClass}`}>
+          <pre className="text-[11px] font-mono whitespace-pre-wrap break-all">
+            {formattedValue}
+          </pre>
+        </div>
+      )}
     </div>
   );
 }
@@ -388,7 +412,7 @@ function NodeRunSection({
   const { t } = useTranslation('workflow');
   const supported = canRunNode(node);
   const [expanded, setExpanded] = useState(true);
-  const suggestedInputs = buildSuggestedNodeInputs(node, workflow, latestExecution);
+  const suggestedInputs = buildSuggestedNodeInputs(node, workflow);
   const latestRuntimeInputs = getLatestNodeInputs(node.id, latestExecution);
   const [rawInputs, setRawInputs] = useState(() => JSON.stringify(suggestedInputs, null, 2));
   const [inputError, setInputError] = useState('');
@@ -396,7 +420,7 @@ function NodeRunSection({
   const [result, setResult] = useState<WorkflowNodeExecution | null>(null);
 
   useEffect(() => {
-    setRawInputs(JSON.stringify(buildSuggestedNodeInputs(node, workflow, latestExecution), null, 2));
+    setRawInputs(JSON.stringify(buildSuggestedNodeInputs(node, workflow), null, 2));
     setInputError('');
     setResult(null);
   }, [node, workflow, latestExecution]);
@@ -483,14 +507,21 @@ function NodeRunSection({
                     </button>
                   </div>
                 </div>
-                <textarea
-                  value={rawInputs}
-                  onChange={(e) => setRawInputs(e.target.value)}
-                  rows={6}
-                  className={`${IB} font-mono resize-y ${inputError ? 'border-red-300 focus:ring-red-300' : ''}`}
-                  placeholder="{}"
-                  spellCheck={false}
-                />
+                <div className="relative">
+                  <CopyButton
+                    text={rawInputs}
+                    size="w-3 h-3"
+                    className="absolute right-2 top-2 z-10 rounded-md border border-gray-200 bg-white/95 p-1.5 text-gray-400 shadow-sm transition-colors hover:bg-white hover:text-gray-600"
+                  />
+                  <textarea
+                    value={rawInputs}
+                    onChange={(e) => setRawInputs(e.target.value)}
+                    rows={6}
+                    className={`${IB} font-mono resize-y pr-10 ${inputError ? 'border-red-300 focus:ring-red-300' : ''}`}
+                    placeholder="{}"
+                    spellCheck={false}
+                  />
+                </div>
                 {inputError && (
                   <p className="text-[11px] text-red-500 flex items-center gap-1">
                     <AlertCircle className="w-3 h-3" />
@@ -515,12 +546,27 @@ function NodeRunSection({
                     <span className={`text-[11px] font-semibold ${result.success ? 'text-green-600' : 'text-red-600'}`}>
                       {result.success ? t('detail.nodeInfo.runNodeSuccess') : t('detail.nodeInfo.runNodeError')}
                     </span>
-                    {result.duration_ms != null && (
-                      <span className="text-[11px] text-gray-400">{(result.duration_ms / 1000).toFixed(2)}s</span>
-                    )}
+                    <div className="flex items-center gap-2">
+                      {result.outputs && Object.keys(result.outputs).length > 0 && (
+                        <CopyButton
+                          text={JSON.stringify(result.outputs, null, 2)}
+                          label={t('detail.nodeInfo.copyOutput')}
+                          size="w-3 h-3"
+                          className="inline-flex items-center rounded-md border border-gray-200 bg-white px-2 py-1 text-[11px] text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                        />
+                      )}
+                      {result.duration_ms != null && (
+                        <span className="text-[11px] text-gray-400">{(result.duration_ms / 1000).toFixed(2)}s</span>
+                      )}
+                    </div>
                   </div>
 
-                  <RuntimeJsonBlock label={t('detail.nodeInfo.runtimeOutputs')} value={result.outputs ?? {}} tone="green" />
+                  <RuntimeJsonBlock
+                    label={t('detail.nodeInfo.runtimeOutputs')}
+                    value={result.outputs ?? {}}
+                    tone="green"
+                    copyable={false}
+                  />
 
                   {result.stdout && (
                     <div className="space-y-1.5">
@@ -559,12 +605,12 @@ function NodeRunSection({
 }
 
 export default function NodeInfoPanel({ node, workflow, latestExecution, width = 260, onClose, onSaved }: NodeInfoPanelProps) {
-  const { t } = useTranslation('workflow');
+  const { t, i18n } = useTranslation('workflow');
   const [form, setForm]       = useState<WorkflowNode>({ ...node });
   const [saving, setSaving]   = useState(false);
   const [savedOk, setSavedOk] = useState(false);
   const [saveErr, setSaveErr] = useState('');
-  const [avail, setAvail]     = useState<Workflow[]>([]);
+  const [avail, setAvail]     = useState<WorkflowSummary[]>([]);
   const [codeEditorOpen, setCodeEditorOpen] = useState(false);
 
   useEffect(() => {
@@ -576,7 +622,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
 
   useEffect(() => {
     if (node.type === 'subworkflow')
-      workflowAPI.list({ excludeId: workflow.id }).then((r) => setAvail(r.data)).catch(() => setAvail([]));
+      workflowAPI.listSummaries({ excludeId: workflow.id }).then((r) => setAvail(r.data)).catch(() => setAvail([]));
   }, [node.type, workflow.id]);
 
   const set = (field: keyof WorkflowNode, value: unknown) =>
@@ -661,7 +707,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 onChange={(e) => set('code', e.target.value)}
                 rows={12}
                 className="w-full px-2.5 py-2.5 rounded-lg text-[11px] font-mono resize-y focus:outline-none focus:ring-2 focus:ring-red-400
-                           bg-[#0d1117] text-[#e6edf3] border border-[#30363d] leading-relaxed"
+                           bg-[#252c35] text-[#d7dee8] border border-[#4a5563] leading-relaxed"
                 placeholder={t('detail.nodeInfo.codePlaceholder')}
                 spellCheck={false}
               />
@@ -750,7 +796,11 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
               <div><FL required>{t('detail.nodeInfo.subworkflow')}</FL>
                 <select value={form.workflow_id ?? ''} onChange={(e) => set('workflow_id', e.target.value)} className={SL}>
                   <option value="">{t('detail.nodeInfo.selectWorkflow')}</option>
-                  {avail.map((wf) => <option key={wf.id} value={wf.id}>{wf.name}</option>)}
+                  {avail.map((wf) => (
+                    <option key={wf.id} value={wf.id}>
+                      {getWorkflowDisplayName(wf, i18n.language)}
+                    </option>
+                  ))}
                 </select>
               </div>
               <JsonField label={t('detail.nodeInfo.inputMapping')} value={form.inputs_mapping} onChange={(v) => set('inputs_mapping', v)} />
@@ -805,7 +855,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
                 {t('detail.nodeInfo.closeExpandedEditor')}
               </button>
             </div>
-            <div className="flex-1 min-h-0 min-w-0 bg-[#0d1117] p-4">
+            <div className="flex-1 min-h-0 min-w-0 bg-[#252c35] p-4">
               <ExpandedCodeEditor
                 value={form.code ?? ''}
                 onChange={(value) => set('code', value)}

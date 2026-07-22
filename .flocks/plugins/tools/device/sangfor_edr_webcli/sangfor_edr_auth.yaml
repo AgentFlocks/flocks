@@ -1,0 +1,72 @@
+name: sangfor_edr_auth
+description: >
+  Manage Sangfor EDR browser authentication state. Use status_auth_state or
+  validate_auth_state before opening pages; use ensure_auth_state to reuse a
+  valid saved auth-state or automatically refresh full browser state through
+  browser daemon / CDP when credentials are configured. Browser actions start
+  or recover the daemon automatically and return structured recovery guidance.
+description_cn: >
+  管理深信服 EDR 浏览器登录态。先用 status_auth_state 或 validate_auth_state
+  检查已保存 state；当 state 缺失或失效且已配置账密时，ensure_auth_state
+  通过 browser daemon / CDP 驱动真实登录页自动登录并重新保存完整浏览器 state。
+  需要浏览器的 action 会自动启动或恢复 daemon，失败时返回结构化恢复指引。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_edr
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum: [status_auth_state, ensure_auth_state, validate_auth_state, refresh_auth_state, complete_manual_login]
+      default: ensure_auth_state
+      description: >
+        Authentication action. status_auth_state returns non-sensitive saved
+        state/credential availability; ensure_auth_state reuses existing state
+        when it appears valid and refreshes when needed; validate_auth_state
+        checks only; refresh_auth_state always performs CDP-assisted browser login;
+        complete_manual_login validates a user-completed login and saves its browser state.
+    captcha_code:
+      type: string
+      description: Optional manual captcha code. When omitted, OCR is used if enabled.
+    base_url:
+      type: string
+      description: Optional EDR base URL to save before running auth, for example https://edr.example.com.
+    username:
+      type: string
+      description: Optional username to save before running auth.
+    password:
+      type: string
+      description: Optional password to save as a secret before running auth.
+    auth_state_path:
+      type: string
+      description: Optional auth-state path. Defaults to ~/.flocks/browser/sangfor-edr/auth-state.json.
+    username_selector:
+      type: string
+      default: "#user,input[name='user'],.username-input,#user_name,#username,input[name='user_name'],input[name='username'],input[type='text']"
+      description: Optional comma-separated selectors for the EDR username input.
+    password_selector:
+      type: string
+      default: "#password,input[name='password'],.input_text_password,input[name='pwd'],input[type='password']"
+      description: Optional comma-separated selectors for the EDR password input.
+    captcha_selector:
+      type: string
+      default: "#code,input[name='code'],.code_input_text,#randcode,#captcha,input[name='randcode'],input[name='captcha'],input[name='verify_code']"
+      description: Optional comma-separated selectors for the EDR captcha input.
+    agreement_selector:
+      type: string
+      description: Optional selector for the EDR user agreement checkbox.
+    submit_selector:
+      type: string
+      default: "#button,input[name='button'],.login-opr-btn,#login,#submit,.login-btn,.btn-login,button[type='submit'],input[type='submit']"
+      description: Optional comma-separated selectors for the EDR login submit control.
+    force_refresh:
+      type: boolean
+      default: false
+      description: Force CDP-assisted browser login even if auth-state exists.
+  required: [action]
+handler:
+  type: script
+  script_file: sangfor_edr.handler.py
+  function: handle

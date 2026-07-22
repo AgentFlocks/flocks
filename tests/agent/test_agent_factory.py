@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -24,6 +25,9 @@ from flocks.agent.agent_factory import (
     scan_and_load,
     inject_dynamic_prompts,
     yaml_to_agent_info,
+    find_yaml_agent,
+    read_yaml_agent,
+    update_yaml_agent,
     delete_yaml_agent,
     _parse_prompt_metadata,
 )
@@ -191,6 +195,21 @@ class TestLoadAgent:
         assert agent is not None
         assert agent.tools == []
 
+    def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: rex
+            tools: []
+        """)
+
+        agent = load_agent(agent_dir)
+
+        assert agent is not None
+        assert agent.tools == ["read", "bash", "tool_search"]
+
     def test_loads_model(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, """
             name: model_agent
@@ -203,6 +222,15 @@ class TestLoadAgent:
         assert agent.model is not None
         assert agent.model.model_id == "gpt-4"
         assert agent.model.provider_id == "openai"
+
+    def test_returns_none_on_invalid_model_config(self, tmp_path):
+        agent_dir = _write_agent_dir(tmp_path, """
+            name: bad_model_agent
+            model:
+              temperature: 0.3
+        """)
+
+        assert load_agent(agent_dir) is None
 
     def test_loads_optional_fields(self, tmp_path):
         agent_dir = _write_agent_dir(tmp_path, """
@@ -285,10 +313,10 @@ class TestLoadAgent:
 class TestScanAndLoad:
 
     def test_scans_builtin_agents(self):
-        """Built-in agents directory must yield at least 13 agents."""
+        """Built-in agents directory must yield at least 10 agents."""
         from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
         result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
-        assert len(result) >= 13
+        assert len(result) >= 10
 
     def test_all_builtin_agent_names_present(self):
         """Every agent shipped with the package must be discoverable and marked native.
@@ -300,8 +328,8 @@ class TestScanAndLoad:
         from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
         result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
         expected = [
-            "rex", "hephaestus", "plan", "explore",
-            "oracle", "librarian", "metis", "momus", "multimodal-looker",
+            "rex", "hephaestus", "explore",
+            "oracle", "librarian", "prometheus", "multimodal-looker",
             "self-enhance", "rex-junior",
         ]
         for name in expected:
@@ -325,6 +353,28 @@ class TestScanAndLoad:
 
         result = scan_and_load(dirs=[extra_dir])
         assert "extra_agent" in result
+
+    def test_skips_invalid_agent_and_continues_scan(self, tmp_path):
+        """A malformed agent config should not prevent other agents from loading."""
+        extra_dir = tmp_path / "extra"
+        bad_dir = extra_dir / "bad_agent"
+        good_dir = extra_dir / "good_agent"
+        bad_dir.mkdir(parents=True)
+        good_dir.mkdir(parents=True)
+        (bad_dir / "agent.yaml").write_text(
+            textwrap.dedent("""
+                name: bad_agent
+                model:
+                  temperature: 0.3
+            """),
+            encoding="utf-8",
+        )
+        (good_dir / "agent.yaml").write_text("name: good_agent\n", encoding="utf-8")
+
+        result = scan_and_load(dirs=[extra_dir])
+
+        assert "bad_agent" not in result
+        assert "good_agent" in result
 
     def test_name_conflict_skips_duplicate(self, tmp_path):
         """When two dirs have the same agent name, first wins."""
@@ -427,7 +477,7 @@ class TestInjectDynamicPrompts:
         """Built-in agents with prompt.md should have non-empty prompts."""
         from flocks.agent.registry import Agent
         # Only built-in agents (native=True) — not dependent on local plugin installation
-        for name in ["explore", "oracle", "momus", "metis", "self-enhance", "multimodal-looker"]:
+        for name in ["explore", "oracle", "prometheus", "self-enhance", "multimodal-looker"]:
             agent = await Agent.get(name)
             assert agent is not None, f"Agent '{name}' not found"
             assert agent.prompt is not None, f"Agent '{name}' should have a prompt from prompt.md"
@@ -509,6 +559,17 @@ class TestYamlToAgentInfo:
         agent = yaml_to_agent_info({"name": "no_tools"}, yaml_path)
         assert agent.tools == []
 
+    def test_rex_empty_tools_expand_to_builtin_toolset(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+            lambda: ["read", "bash", "tool_search"],
+        )
+        yaml_path = self._make_yaml_path(tmp_path)
+
+        agent = yaml_to_agent_info({"name": "rex", "tools": []}, yaml_path)
+
+        assert agent.tools == ["read", "bash", "tool_search"]
+
     def test_model_parsed(self, tmp_path):
         yaml_path = self._make_yaml_path(tmp_path)
         raw = {
@@ -567,7 +628,7 @@ class TestAgentConfigOverrides:
         from flocks.agent.agent_factory import scan_and_load
         result = scan_and_load()
         # All 13 built-ins should be present without a whitelist
-        assert len(result) >= 13
+        assert len(result) >= 10
 
 
 # ===========================================================================
@@ -683,6 +744,23 @@ class TestProjectLevelAgentScan:
         assert "proj-native" in result
         assert result["proj-native"].native is True
 
+    def test_project_agent_pack_nested_agents_are_discovered(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        """Agent packs can expose one-level nested Flocks agent directories."""
+        pack_dir = tmp_path / ".flocks" / "plugins" / "agents" / "pentest-ai-agents"
+        self._write_agent(pack_dir.parent, "pentest-ai-agents")
+        self._write_agent(pack_dir, "web-hunter")
+        self._write_agent(pack_dir, "cloud-security")
+
+        monkeypatch.chdir(tmp_path)
+        result = scan_and_load()
+
+        assert "pentest-ai-agents" in result
+        assert "web-hunter" in result
+        assert "cloud-security" in result
+        assert result["web-hunter"].native is True
+
     def test_user_plugin_agent_is_not_native(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ):
@@ -702,6 +780,91 @@ class TestProjectLevelAgentScan:
 
         assert "custom-agent" in result
         assert result["custom-agent"].native is False
+
+    def test_user_plugin_agent_wins_over_project_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        user_agents_dir = tmp_path / "user_plugins" / "agents"
+        project_dir = tmp_path / "project"
+        project_agents_dir = project_dir / ".flocks" / "plugins" / "agents"
+        self._write_agent(user_agents_dir, "shared-agent")
+        self._write_agent(project_agents_dir, "shared-agent")
+        (user_agents_dir / "shared-agent" / "agent.yaml").write_text(
+            "name: shared-agent\ndescription: user customization\nmode: subagent\n",
+            encoding="utf-8",
+        )
+        (project_agents_dir / "shared-agent" / "agent.yaml").write_text(
+            "name: shared-agent\ndescription: project bundle\nmode: subagent\n",
+            encoding="utf-8",
+        )
+
+        info_log = MagicMock()
+        warn_log = MagicMock()
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", user_agents_dir)
+        monkeypatch.setattr(_factory_module.log, "info", info_log)
+        monkeypatch.setattr(_factory_module.log, "warn", warn_log)
+        monkeypatch.chdir(project_dir)
+
+        result = scan_and_load()
+
+        assert result["shared-agent"].description == "user customization"
+        assert any(
+            call.args and call.args[0] == "agent.factory.lower_priority_skipped"
+            for call in info_log.call_args_list
+        )
+        assert not any(
+            call.args and call.args[0] == "agent.factory.name_conflict"
+            and call.args[1].get("name") == "shared-agent"
+            for call in warn_log.call_args_list
+        )
+
+
+# ===========================================================================
+# Project-level plugin agent CRUD
+# ===========================================================================
+
+class TestProjectLevelYamlCrud:
+    """Project-level plugin agents should be readable and updatable."""
+
+    def _write_project_agent(self, root: Path, name: str) -> Path:
+        agent_dir = root / ".flocks" / "plugins" / "agents" / name
+        agent_dir.mkdir(parents=True)
+        yaml_path = agent_dir / "agent.yaml"
+        yaml_path.write_text(
+            textwrap.dedent(f"""\
+                name: {name}
+                description: Project agent {name}
+                mode: subagent
+                delegatable: true
+            """),
+            encoding="utf-8",
+        )
+        return yaml_path
+
+    def test_find_and_read_project_level_agent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        yaml_path = self._write_project_agent(tmp_path, "proj-editable")
+        monkeypatch.chdir(tmp_path)
+
+        assert find_yaml_agent("proj-editable") == yaml_path
+        raw = read_yaml_agent("proj-editable")
+        assert raw is not None
+        assert raw["name"] == "proj-editable"
+        assert raw["delegatable"] is True
+
+    def test_update_project_level_agent_yaml(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        yaml_path = self._write_project_agent(tmp_path, "proj-toggle")
+        monkeypatch.chdir(tmp_path)
+
+        result = update_yaml_agent("proj-toggle", {"delegatable": False, "temperature": 0.2})
+
+        assert result is True
+        updated = yaml_path.read_text(encoding="utf-8")
+        assert "delegatable: false" in updated
+        assert "temperature: 0.2" in updated
 
 
 # ===========================================================================

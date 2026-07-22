@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -17,7 +17,7 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
-    t: (key: string) => {
+    t: (key: string, options?: Record<string, unknown>) => {
       const translations: Record<string, string> = {
         'form.titleLabel': '标题 *',
         'form.titlePlaceholder': '输入任务标题',
@@ -44,10 +44,41 @@ vi.mock('react-i18next', () => ({
         'form.timezoneShanghai': 'Asia/Shanghai（北京时间 UTC+8）',
         'form.normalLabel': '普通',
         'form.selectWorkflow': '请选择 Workflow',
+        'form.workflowParamsLabel': 'Workflow 参数',
+        'form.workflowParamsHint': '（JSON 对象，会作为 workflow inputs 传入）',
+        'form.workflowParamsPlaceholder': '{\n  "keyword": "example"\n}',
+        'form.workflowParamsInvalid': 'Workflow 参数必须是合法的 JSON 对象',
         'taskSheet.entityType': '任务',
         'taskSheet.createFailed': '创建失败',
         'taskSheet.saveFailed': '保存失败',
+        'taskSheet.create.emptyStateTitle': '暂无创建对话',
+        'taskSheet.create.guidePanelTitle': 'Rex 辅助创建任务',
+        'taskSheet.create.guidePanelDesc': '选择一个引导或案例，Rex 会确认任务目标。',
+        'taskSheet.create.guideSectionTitle': '创建引导',
+        'taskSheet.create.caseSectionTitle': '创建案例',
+        'taskSheet.edit.emptyStateTitle': '暂无编辑对话',
+        'taskSheet.edit.guidePanelTitle': 'Rex 辅助修改任务',
+        'taskSheet.edit.guidePanelDesc': '选择一个编辑入口，Rex 会基于当前任务配置。',
+        'taskSheet.edit.guideSectionTitle': '编辑引导',
+        'taskSheet.edit.caseSectionTitle': '编辑案例',
       };
+      const objects: Record<string, unknown> = {
+        'taskSheet.create.guideActions': [
+          { label: '创建定时任务', description: '确认目标、执行对象和频率', prompt: '创建定时任务 prompt' },
+        ],
+        'taskSheet.create.caseActions': [
+          { label: '每日安全日报', description: '每天输出日报', prompt: '每日安全日报 prompt' },
+        ],
+        'taskSheet.edit.guideActions': [
+          { label: '优化当前任务', description: '诊断并调整字段', prompt: '优化当前任务 {{name}}' },
+        ],
+        'taskSheet.edit.caseActions': [
+          { label: '降低频率', description: '减少执行压力', prompt: '降低频率 {{name}}' },
+        ],
+      };
+      if (options?.returnObjects) {
+        return objects[key] ?? [];
+      }
       return translations[key] ?? key;
     },
     i18n: { language: 'zh-CN' },
@@ -69,7 +100,7 @@ vi.mock('@/api/agent', () => ({
 
 vi.mock('@/api/workflow', () => ({
   workflowAPI: {
-    list: mocks.workflowList,
+    listSummaries: mocks.workflowList,
   },
 }));
 
@@ -104,22 +135,66 @@ vi.mock('@/components/common/EntitySheet', () => ({
     onSubmit,
     submitDisabled,
     submitLoading,
+    onExtractFromRex,
+    rexGuideGroups,
+    rexGuidePanelTitle,
+    rexGuidePanelDesc,
+    rexGuideEmptyTitle,
+    rexAgentName,
   }: {
     children: React.ReactNode;
     onSubmit: () => void | Promise<void>;
     submitDisabled?: boolean;
     submitLoading?: boolean;
+    onExtractFromRex?: (sessionId: string) => Promise<void>;
+    rexGuideGroups?: Array<{ title: string; actions: Array<{ label: string }> }>;
+    rexGuidePanelTitle?: string;
+    rexGuidePanelDesc?: string;
+    rexGuideEmptyTitle?: string;
+    rexAgentName?: string;
   }) => (
-    <div>
+    <div
+      data-testid="entity-sheet"
+      data-guide-title={rexGuidePanelTitle ?? ''}
+      data-guide-desc={rexGuidePanelDesc ?? ''}
+      data-guide-empty-title={rexGuideEmptyTitle ?? ''}
+      data-rex-agent-name={rexAgentName ?? ''}
+      data-guide-group-count={String(rexGuideGroups?.length ?? 0)}
+    >
       <button type="button" onClick={onSubmit} disabled={submitDisabled || submitLoading}>
         提交
       </button>
+      <button type="button" onClick={() => void onExtractFromRex?.('rex-session')}>
+        提取配置
+      </button>
+      {rexGuideGroups?.map((group) => (
+        <section key={group.title}>
+          <h2>{group.title}</h2>
+          {group.actions.map((action) => (
+            <span key={action.label}>{action.label}</span>
+          ))}
+        </section>
+      ))}
       {children}
     </div>
   ),
   useEntitySheet: () => ({
     openRex: vi.fn(),
     openTest: vi.fn(),
+  }),
+}));
+
+vi.mock('@/components/common/useRexComposerControls', () => ({
+  useRexComposerControls: () => ({
+    rexAgentName: 'rex',
+    rexMentionAgents: [],
+    rexModel: null,
+    rexSupportsVision: false,
+    rexContextWindowTokens: null,
+    rexToolbarSlot: null,
+    rexCenterToolbarSlot: null,
+    rexComposerTextareaMinHeight: 48,
+    rexComposerTextareaMaxHeight: 120,
   }),
 }));
 
@@ -188,6 +263,76 @@ describe('TaskSheet', () => {
     mocks.clientPost.mockResolvedValue({ data: {} });
   });
 
+  it('创建任务页接入与 Agent 创建页一致的 Rex 引导配置', () => {
+    render(
+      <TaskSheet
+        defaultScheduleKind="recurring"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    const sheet = screen.getByTestId('entity-sheet');
+    expect(sheet).toHaveAttribute('data-guide-title', 'Rex 辅助创建任务');
+    expect(sheet).toHaveAttribute('data-guide-empty-title', '暂无创建对话');
+    expect(sheet).toHaveAttribute('data-rex-agent-name', 'rex');
+    expect(sheet).toHaveAttribute('data-guide-group-count', '2');
+    expect(screen.getByText('创建引导')).toBeInTheDocument();
+    expect(screen.getByText('创建定时任务')).toBeInTheDocument();
+    expect(screen.getByText('创建案例')).toBeInTheDocument();
+    expect(screen.getByText('每日安全日报')).toBeInTheDocument();
+  });
+
+  it('从 Rex 提取配置时保留 timezone 与 cronDescription', async () => {
+    mocks.getMessages
+      .mockResolvedValueOnce([])
+      .mockResolvedValue([
+        {
+          info: { role: 'assistant', finish: 'stop' },
+          parts: [
+            {
+              type: 'text',
+              text: '```json\n{"title":"东京巡检","scheduleKind":"recurring","cron":"0 1 * * *","timezone":"Asia/Tokyo","cronDescription":"每天东京时间 01:00","userPrompt":"检查重点资产"}\n```',
+            },
+          ],
+        },
+      ]);
+
+    render(
+      <TaskSheet
+        defaultScheduleKind="recurring"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByRole('button', { name: '提取配置' }));
+
+    await waitFor(() => {
+      expect(mocks.clientPost).toHaveBeenCalledWith(
+        '/api/session/rex-session/prompt_async',
+        expect.objectContaining({
+          parts: [
+            expect.objectContaining({
+              text: expect.stringContaining('"timezone"'),
+            }),
+          ],
+        }),
+      );
+    });
+
+    await waitFor(() => {
+      expect(screen.getByDisplayValue('东京巡检')).toBeInTheDocument();
+    }, { timeout: 3000 });
+    const timezoneSelect = screen
+      .getAllByRole('combobox')
+      .find((element) => Array
+        .from((element as HTMLSelectElement).options)
+        .some((option) => option.value === 'Asia/Tokyo')) as HTMLSelectElement | undefined;
+    expect(timezoneSelect?.value).toBe('Asia/Tokyo');
+    expect(screen.getByDisplayValue('每天东京时间 01:00')).toBeInTheDocument();
+  });
+
   it('创建循环任务时展示并提交 timezone 与 cronDescription', async () => {
     const user = userEvent.setup();
     const onClose = vi.fn();
@@ -231,5 +376,61 @@ describe('TaskSheet', () => {
 
     expect(onSaved).toHaveBeenCalledTimes(1);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it('创建 workflow 定时任务时提交 JSON 参数到 context', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TaskSheet
+        defaultScheduleKind="recurring"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Workflow' }));
+    await user.type(screen.getByPlaceholderText('输入任务标题'), '每日工作流');
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '0 8 * * *');
+
+    const paramsField = screen.getByDisplayValue('{}');
+    fireEvent.change(paramsField, { target: { value: '{"keyword":"ioc","limit":10}' } });
+
+    await user.click(screen.getByRole('button', { name: '提交' }));
+
+    await waitFor(() => {
+      expect(mocks.createScheduler).toHaveBeenCalledWith(
+        expect.objectContaining({
+          executionMode: 'workflow',
+          context: { keyword: 'ioc', limit: 10 },
+        }),
+      );
+    });
+  });
+
+  it('workflow 参数不是 JSON 对象时阻止提交', async () => {
+    const user = userEvent.setup();
+
+    render(
+      <TaskSheet
+        defaultScheduleKind="recurring"
+        onClose={vi.fn()}
+        onSaved={vi.fn()}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Workflow' }));
+    await user.type(screen.getByPlaceholderText('输入任务标题'), '错误参数');
+    await user.type(screen.getByPlaceholderText('0 9 * * 1-5'), '0 8 * * *');
+
+    const paramsField = screen.getByDisplayValue('{}');
+    fireEvent.change(paramsField, { target: { value: '[]' } });
+
+    await user.click(screen.getByRole('button', { name: '提交' }));
+
+    await waitFor(() => {
+      expect(mocks.toastError).toHaveBeenCalledWith('创建失败', 'Workflow 参数必须是合法的 JSON 对象');
+    });
+    expect(mocks.createScheduler).not.toHaveBeenCalled();
   });
 });
