@@ -92,7 +92,7 @@ log = Log.create(service="tool.device.manage_tool")
             description=(
                 "要创建或更新的非敏感设备配置字段，例如 "
                 "{\"base_url\":\"https://device.local\"}。"
-                "禁止传入 api_key、secret、password、token、cookie、auth_state 等敏感字段。"
+                "禁止传入 api_key、secret、password、token、cookie 等敏感字段。"
             ),
             required=False,
         ),
@@ -297,7 +297,6 @@ _SENSITIVE_FIELD_KEYS = frozenset(
         "access_token",
         "refresh_token",
         "cookie",
-        "auth_state",
     }
 )
 
@@ -325,7 +324,7 @@ def _normalize_update_fields(
         return {}, (
             "拒绝通过 device_manage(action='update') 写入敏感字段："
             + ", ".join(f"`{key}`" for key in sorted(rejected))
-            + "。请在设备接入页面的配置表单中填写密钥、密码、Token、Cookie 或 auth_state。"
+            + "。请在设备接入页面的配置表单中填写密钥、密码、Token 或 Cookie。"
         )
 
     return normalized, None

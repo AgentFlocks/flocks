@@ -154,6 +154,12 @@ async def test_device_manage_create_uses_installed_template_identity():
                 "required": False,
             },
             {
+                "key": "auth_state",
+                "label": "Auth State",
+                "storage": "config",
+                "required": False,
+            },
+            {
                 "key": "password",
                 "label": "Password",
                 "storage": "secret",
@@ -184,7 +190,10 @@ async def test_device_manage_create_uses_installed_template_identity():
             action="create",
             storage_key="360_waf_v5_5",
             device_name="360 WAF",
-            fields={"base_url": "https://192.168.1.100"},
+            fields={
+                "base_url": "https://192.168.1.100",
+                "auth_state": "ready",
+            },
             verify_ssl=False,
         )
 
@@ -193,7 +202,10 @@ async def test_device_manage_create_uses_installed_template_identity():
     assert body.name == "360 WAF"
     assert body.storage_key == "360_waf_v5_5"
     assert body.service_id == "360_waf"
-    assert body.fields == {"base_url": "https://192.168.1.100"}
+    assert body.fields == {
+        "base_url": "https://192.168.1.100",
+        "auth_state": "ready",
+    }
     assert result.success is True
     assert result.output["device_id"] == "dev-360"
     assert result.metadata["sensitive_fields"] == ["password"]
@@ -316,7 +328,11 @@ async def test_device_manage_update_updates_existing_device_non_secret_config():
             make_ctx(),
             action="update",
             device_id="dev-1",
-            fields={"base_url": "https://device.local", "port": 443},
+            fields={
+                "base_url": "https://device.local",
+                "port": 443,
+                "auth_state": "ready",
+            },
             verify_ssl=True,
         )
 
@@ -326,11 +342,12 @@ async def test_device_manage_update_updates_existing_device_non_secret_config():
     assert update_body.fields == {
         "base_url": "https://device.local",
         "port": "443",
+        "auth_state": "ready",
     }
     assert update_body.verify_ssl is True
     assert result.success is True
     assert result.output["device_id"] == "dev-1"
-    assert result.output["updated_fields"] == ["base_url", "port"]
+    assert result.output["updated_fields"] == ["auth_state", "base_url", "port"]
     assert result.metadata["verify_ssl"] is True
 
 

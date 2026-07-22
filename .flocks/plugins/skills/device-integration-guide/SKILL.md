@@ -77,7 +77,6 @@ description: 指导 Flocks 新建、添加和接入安全设备。Use when the u
 - `password`
 - `token`
 - `cookie`
-- `auth_state`
 
 如果用户的目标是补填密钥、修改密码、刷新 Token 或重新登录，只说明应该在设备接入页面对应字段中处理。
 
