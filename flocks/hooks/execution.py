@@ -55,14 +55,20 @@ def current_execution_context() -> dict[str, Any]:
 
 
 @contextmanager
-def execution_context_scope(context: Mapping[str, Any] | None):
+def execution_context_scope(
+    context: Mapping[str, Any] | None,
+    *,
+    inherit: bool = True,
+):
     """Temporarily expose extension-owned context as an opaque carrier.
 
     This adapter intentionally neither validates nor interprets the mapping.
     It allows an ingress hook to associate opaque state with child work after
-    the authentication effect itself has completed.
+    the authentication effect itself has completed.  Set ``inherit=False`` at
+    an ownership boundary so one request's opaque context cannot authorize
+    unrelated queued work.
     """
-    inherited = current_execution_context()
+    inherited = current_execution_context() if inherit else {}
     supplied = dict(context) if isinstance(context, Mapping) else {}
     token = _current_execution_context.set({**inherited, **supplied})
     try:

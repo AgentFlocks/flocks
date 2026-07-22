@@ -1832,38 +1832,42 @@ def _schedule_background_coro(
     session_id: Optional[str] = None,
     action: str = "session.background",
 ) -> None:
-    """Schedule a background coroutine with unified error reporting."""
+    """Schedule a background coroutine with its opaque execution context."""
     import asyncio
+    from flocks.hooks.execution import current_execution_context, execution_context_scope
+
+    execution_context = current_execution_context()
 
     async def _guarded_coro() -> None:
-        try:
-            await coro
-        except Exception as exc:
-            log.error("session.background.error", {
-                "sessionID": session_id,
-                "action": action,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            })
-            if session_id:
-                from flocks.server.routes.event import publish_event
+        with execution_context_scope(execution_context):
+            try:
+                await coro
+            except Exception as exc:
+                log.error("session.background.error", {
+                    "sessionID": session_id,
+                    "action": action,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                })
+                if session_id:
+                    from flocks.server.routes.event import publish_event
 
-                try:
-                    await publish_event("session.error", {
-                        "sessionID": session_id,
-                        "error": {
-                            "name": type(exc).__name__,
-                            "message": str(exc),
-                            "data": {"message": str(exc), "action": action},
-                        },
-                    })
-                except Exception as publish_exc:
-                    log.error("session.background.error.publish_failed", {
-                        "sessionID": session_id,
-                        "action": action,
-                        "error": str(publish_exc),
-                        "error_type": type(publish_exc).__name__,
-                    })
+                    try:
+                        await publish_event("session.error", {
+                            "sessionID": session_id,
+                            "error": {
+                                "name": type(exc).__name__,
+                                "message": str(exc),
+                                "data": {"message": str(exc), "action": action},
+                            },
+                        })
+                    except Exception as publish_exc:
+                        log.error("session.background.error.publish_failed", {
+                            "sessionID": session_id,
+                            "action": action,
+                            "error": str(publish_exc),
+                            "error_type": type(publish_exc).__name__,
+                        })
 
     task = asyncio.get_running_loop().create_task(_guarded_coro())
     _track_background_task(task)
@@ -3283,6 +3287,7 @@ def _event_from_queued_prompt(item, working_directory: str):
 
 
 async def _drain_prompt_queue_locked(session_id: str, working_directory: str) -> bool:
+    from flocks.hooks.execution import execution_context_scope
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
     from flocks.session.interaction_queue import InteractionQueue
@@ -3308,11 +3313,18 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
             "sessionID": session_id,
             "queueID": item.id,
         })
-        await Instance.provide(
-            directory=working_directory,
-            init=instance_bootstrap,
-            fn=lambda: _dispatch_sse_input(session_id, session, event, working_directory),
-        )
+        # A queue item may have been submitted by a different HTTP request and
+        # user.  It must not inherit the context of the task that happened to
+        # finish first; queued work without its own trusted hand-off fails
+        # closed under enforcing extensions.
+        with execution_context_scope({}, inherit=False):
+            await Instance.provide(
+                directory=working_directory,
+                init=instance_bootstrap,
+                fn=lambda: _dispatch_sse_input(
+                    session_id, session, event, working_directory
+                ),
+            )
 
 
 async def _run_prompt_event_chain(session_id: str, session, event, working_directory: str) -> None:

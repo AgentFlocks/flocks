@@ -20,7 +20,11 @@ import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
 from flocks.auth.context import AuthUser
-from flocks.hooks.execution import ExecutionStopped
+from flocks.hooks.execution import (
+    ExecutionStopped,
+    current_execution_context,
+    execution_context_scope,
+)
 from flocks.server.routes import session as session_routes
 from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.message import (
@@ -69,6 +73,26 @@ async def test_shell_route_maps_extension_stop_to_forbidden(
 
     assert error.value.status_code == status.HTTP_403_FORBIDDEN
     assert error.value.detail == "execution stopped by extension"
+
+
+@pytest.mark.asyncio
+async def test_background_session_task_preserves_execution_context() -> None:
+    """Async session work retains opaque ingress context after scheduling."""
+    observed: list[dict[str, object]] = []
+
+    async def _record_context() -> None:
+        observed.append(current_execution_context())
+
+    before = set(getattr(session_routes.router, "_pending_tasks", set()))
+    with execution_context_scope({"workflow_transfer": "opaque-transfer"}):
+        session_routes._schedule_background_coro(_record_context())
+
+    pending = list(getattr(session_routes.router, "_pending_tasks", set()) - before)
+    assert len(pending) == 1
+    await asyncio.gather(*pending)
+
+    assert observed == [{"workflow_transfer": "opaque-transfer"}]
+
 
 class TestSessionCRUD:
     """Basic create / read / update / delete for sessions."""

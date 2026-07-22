@@ -538,8 +538,17 @@ class Tool:
 
             coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
 
-            # Execute the operation through the generic extension lifecycle.
-            from flocks.hooks.execution import execute_with_hooks
+            # Preserve extension-owned ingress context for work created by an
+            # enclosing lifecycle.  Flocks treats this as an opaque carrier;
+            # installed extensions remain responsible for validating its data.
+            from flocks.hooks.execution import current_execution_context, execute_with_hooks
+
+            tool_context_extra = dict(ctx.extra)
+            inherited_context = current_execution_context()
+            if inherited_context and not isinstance(
+                tool_context_extra.get("execution_context"), dict
+            ):
+                tool_context_extra["execution_context"] = inherited_context
 
             result = await execute_with_hooks(
                 {
@@ -554,7 +563,7 @@ class Tool:
                     # Opaque carrier for optional extensions.  Flocks does
                     # not parse, normalize, authorize, or otherwise assign
                     # policy meaning to this caller-provided context.
-                    "tool_context_extra": dict(ctx.extra),
+                    "tool_context_extra": tool_context_extra,
                 },
                 lambda: self.handler(ctx, **coerced_kwargs),
             )

@@ -15,7 +15,12 @@ from starlette.responses import Response
 from flocks.auth.context import AuthUser, get_current_auth_user, set_current_auth_user
 from flocks.channel.base import InboundMessage
 from flocks.channel.inbound.dispatcher import InboundDispatcher
-from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
+from flocks.hooks.execution import (
+    ExecutionStopped,
+    current_execution_context,
+    execute_with_hooks,
+    execution_context_scope,
+)
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.identity import get_current_subject
 from flocks.ingest.kafka.manager import KafkaManager
@@ -860,6 +865,46 @@ async def test_tool_lifecycle_forwards_context_extra_as_opaque_carrier() -> None
     assert observed[0]["tool_context_extra"] == context_extra
     assert observed[0]["tool_context_extra"] is not context_extra
     assert observed[0]["tool_context_extra"]["opaque"] is context_extra["opaque"]
+
+
+@pytest.mark.asyncio
+async def test_tool_lifecycle_forwards_inherited_execution_context() -> None:
+    observed: list[dict] = []
+
+    class LifecycleRecorder(HookBase):
+        async def action_before(self, ctx):
+            observed.append(dict(ctx.input))
+
+    async def handler(_ctx: ToolContext, value: str) -> ToolResult:
+        return ToolResult(success=True, output=value)
+
+    HookPipeline.register("lifecycle-recorder", LifecycleRecorder())
+    tool = Tool(
+        info=ToolInfo(
+            name="inherited-context-carrier",
+            description="Forward inherited neutral context",
+            category=ToolCategory.CUSTOM,
+            parameters=[ToolParameter(name="value", type=ParameterType.STRING)],
+        ),
+        handler=handler,
+    )
+
+    with execution_context_scope({"workflow_transfer": "opaque-transfer"}):
+        result = await tool.execute(
+            ToolContext("session-1", "message-1"), value="ok"
+        )
+
+    assert result.success is True
+    assert observed[0]["tool_context_extra"] == {
+        "execution_context": {"workflow_transfer": "opaque-transfer"}
+    }
+
+
+@pytest.mark.asyncio
+async def test_execution_context_can_be_cleared_at_ownership_boundary() -> None:
+    with execution_context_scope({"workflow_transfer": "opaque-transfer"}):
+        with execution_context_scope({}, inherit=False):
+            assert current_execution_context() == {}
 
 
 @pytest.mark.asyncio
