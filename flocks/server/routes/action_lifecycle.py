@@ -9,10 +9,11 @@ from __future__ import annotations
 
 import inspect
 from functools import wraps
-from typing import Any, Callable, Dict
+from typing import Any, Callable, Dict, Mapping
 
 from fastapi import APIRouter, HTTPException
 
+from flocks.auth.context import get_current_auth_user
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
 
 
@@ -32,6 +33,28 @@ def _argument_shape(arguments: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def _audit_actor(arguments: Mapping[str, Any]) -> Dict[str, str]:
+    """Return trusted actor hints for lifecycle audit correlation."""
+    user = get_current_auth_user()
+    if user is not None:
+        actor_id = str(user.id or "").strip()
+        actor_name = str(user.username or "").strip()
+        if actor_id and actor_name:
+            return {"id": actor_id, "name": actor_name}
+    for value in arguments.values():
+        if isinstance(value, Mapping):
+            actor_id = str(value.get("id") or "").strip()
+            actor_name = str(value.get("username") or value.get("name") or "").strip()
+        else:
+            actor_id = str(getattr(value, "id", "") or "").strip()
+            actor_name = str(
+                getattr(value, "username", "") or getattr(value, "name", "") or ""
+            ).strip()
+        if actor_id and actor_name:
+            return {"id": actor_id, "name": actor_name}
+    return {}
+
+
 def action_operation_payload(
     domain: str,
     endpoint: Callable[..., Any],
@@ -46,6 +69,7 @@ def action_operation_payload(
     action_id = endpoint.__name__
     resource_id = action_id.removeprefix(f"{domain}_") or action_id
     operation = f"{domain}.{action_id}"
+    actor = _audit_actor(arguments)
     return {
         "operation": operation,
         "action": operation,
@@ -53,6 +77,11 @@ def action_operation_payload(
         "execution_domain": "control_plane",
         "resource": {"type": domain, "id": resource_id},
         "action_input": _argument_shape(arguments),
+        "tool_context_extra": {
+            "execution_context": {
+                "audit_actor": actor,
+            }
+        },
     }
 
 

@@ -47,10 +47,7 @@ function formatLocalTime(value: string): string {
 }
 
 function payloadPreview(item: AuditEventItem): string {
-  const data = item.payload ?? item.metadata ?? {};
-  const serialized = JSON.stringify(data, null, 2);
-  if (!serialized || serialized === '{}') return '-';
-  return serialized.length > 260 ? `${serialized.slice(0, 257)}...` : serialized;
+  return payloadFullText(item);
 }
 
 function payloadFullText(item: AuditEventItem): string {
