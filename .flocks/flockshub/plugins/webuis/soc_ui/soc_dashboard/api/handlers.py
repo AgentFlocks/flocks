@@ -32,7 +32,22 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
+TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
 USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
+SOC_PINNED_WORKFLOW_NAMES = {
+    "stream_alert_denoise": "告警降噪工作流",
+    "stream_alert_triage": "告警研判工作流",
+}
+WORKFLOW_DISPLAY_NAMES = {
+    **SOC_PINNED_WORKFLOW_NAMES,
+    "onesec_kafka_investigation": "OneSEC Kafka 告警研判工作流",
+    "tdp_alert_triage": "TDP 告警研判工作流",
+    "sec_alert_unified_ops": "统一告警运营工作流",
+}
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 _workflow_stats_cache: OrderedDict = OrderedDict()
 _CACHE_TTL: float = 30.0
@@ -1069,6 +1084,341 @@ RESULT_LABELS = {
 async def get_activity(ctx, request):
     params = dict(request.query_params)
     return await asyncio.to_thread(_get_activity, params)
+
+
+async def get_task_center(ctx, request):
+    return await asyncio.to_thread(_get_task_center)
+
+
+def _table_exists(conn, table_name):
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+    )
+
+
+def _task_center_empty():
+    return {
+        "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sessionCount": 0,
+        "scheduledTasks": [],
+        "workflows": [],
+        "sourceStatus": {
+            "tasksDb": str(TASK_DB),
+            "workflowDb": str(WORKFLOW_DB),
+            "tasksAvailable": TASK_DB.is_file(),
+            "workflowAvailable": WORKFLOW_DB.is_file(),
+        },
+    }
+
+
+def _task_trigger_value(trigger, key):
+    if not isinstance(trigger, dict):
+        return ""
+    return trigger.get(key) or trigger.get(key[0].lower() + key[1:]) or ""
+
+
+def _today_bounds():
+    now_local = datetime.now().astimezone()
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_start, today_start + timedelta(days=1)
+
+
+def _task_center_task_rows(limit=12):
+    if not TASK_DB.is_file():
+        return 0, [], 0, 0
+    try:
+        with sqlite3.connect(f"file:{TASK_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON")
+            if not (
+                _table_exists(conn, "task_schedulers")
+                and _table_exists(conn, "task_executions")
+            ):
+                return 0, [], 0, 0
+            today_start, tomorrow_start = _today_bounds()
+            today_start_iso = today_start.isoformat(timespec="seconds")
+            tomorrow_start_iso = tomorrow_start.isoformat(timespec="seconds")
+            session_count = _safe_int(
+                conn.execute(
+                    "SELECT COUNT(DISTINCT session_id) FROM task_executions "
+                    "WHERE session_id IS NOT NULL AND session_id <> ''"
+                ).fetchone()[0]
+            )
+            scheduler_rows = conn.execute(
+                "SELECT id, title, mode, status, trigger, execution_mode, workflow_id, updated_at "
+                "FROM task_schedulers WHERE status <> 'archived' "
+                "ORDER BY updated_at DESC"
+            ).fetchall()
+            tasks = []
+            for scheduler in scheduler_rows:
+                summary = conn.execute(
+                    "SELECT COUNT(*) AS execution_count, "
+                    "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS success_count, "
+                    "SUM(CASE WHEN status IN ('pending', 'queued', 'running') THEN 1 ELSE 0 END) AS active_count, "
+                    "SUM(CASE WHEN "
+                    "julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) >= julianday(?) "
+                    "AND julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) < julianday(?) "
+                    "THEN 1 ELSE 0 END) AS today_execution_count "
+                    "FROM task_executions WHERE scheduler_id = ?",
+                    (today_start_iso, tomorrow_start_iso, scheduler["id"]),
+                ).fetchone()
+                latest = conn.execute(
+                    "SELECT status, queued_at, started_at, completed_at, updated_at "
+                    "FROM task_executions WHERE scheduler_id = ? "
+                    "ORDER BY julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) DESC "
+                    "LIMIT 1",
+                    (scheduler["id"],),
+                ).fetchone()
+                trigger = _safe_json_object(scheduler["trigger"])
+                execution_count = max(_safe_int(summary["execution_count"]), 0)
+                success_count = max(_safe_int(summary["success_count"]), 0)
+                active_count = max(_safe_int(summary["active_count"]), 0)
+                today_execution_count = max(_safe_int(summary["today_execution_count"]), 0)
+                last_run_at = ""
+                if latest:
+                    last_run_at = latest["completed_at"] or latest["updated_at"] or latest["started_at"] or latest["queued_at"] or ""
+                tasks.append(
+                    {
+                        "id": scheduler["id"],
+                        "name": scheduler["title"] or scheduler["id"],
+                        "mode": scheduler["mode"] or "once",
+                        "status": scheduler["status"] or "active",
+                        "executionMode": scheduler["execution_mode"] or "agent",
+                        "workflowId": scheduler["workflow_id"] or "",
+                        "executionCount": execution_count,
+                        "todayExecutionCount": today_execution_count,
+                        "successCount": success_count,
+                        "successRate": _ratio(success_count, execution_count),
+                        "activeCount": active_count,
+                        "lastStatus": latest["status"] if latest else "",
+                        "lastRunAt": last_run_at,
+                        "nextRunAt": _task_trigger_value(trigger, "nextRun"),
+                        "cron": _task_trigger_value(trigger, "cron"),
+                        "cronDescription": _task_trigger_value(trigger, "cronDescription"),
+                    }
+                )
+            tasks.sort(
+                key=lambda item: (
+                    item["activeCount"] > 0,
+                    item["lastRunAt"] or "",
+                    item["executionCount"],
+                ),
+                reverse=True,
+            )
+            return (
+                session_count,
+                tasks[:limit],
+                sum(task["executionCount"] for task in tasks),
+                sum(task["todayExecutionCount"] for task in tasks),
+            )
+    except Exception:
+        return 0, [], 0, 0
+
+
+def _workflow_manifest_name_map():
+    roots = [
+        Path.home() / ".flocks" / "plugins" / "workflows",
+        Path.home() / ".flocks" / "workspace" / "workflows",
+        Path(__file__).resolve().parents[4] / "workflows",
+    ]
+    names = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for manifest_path in root.glob("*/manifest.json"):
+            workflow_id = manifest_path.parent.name
+            try:
+                manifest = _safe_json_object(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = {}
+            name = (
+                manifest.get("nameCn")
+                or manifest.get("name")
+                or manifest.get("title")
+                or workflow_id
+            )
+            name_i18n = manifest.get("nameI18n")
+            if isinstance(name_i18n, dict):
+                name = name_i18n.get("zh-CN") or name_i18n.get("zh") or name
+            names.setdefault(workflow_id, str(name))
+    return names
+
+
+def _workflow_config_name_map(conn):
+    if not _table_exists(conn, "workflow_configs"):
+        return {}
+    names = {}
+    for row in conn.execute(
+        "SELECT workflow_id, config FROM workflow_configs WHERE kind = ?",
+        ("workflow.integration-config",),
+    ).fetchall():
+        workflow_id = row["workflow_id"] if isinstance(row, sqlite3.Row) else row[0]
+        config_raw = row["config"] if isinstance(row, sqlite3.Row) else row[1]
+        if not workflow_id:
+            continue
+        config = _safe_json_object(config_raw)
+        workflow = config.get("workflow")
+        if not isinstance(workflow, dict):
+            continue
+        name = workflow.get("name") or workflow.get("title") or workflow.get("id")
+        if name:
+            names.setdefault(str(workflow_id), str(name))
+    return names
+
+
+def _task_center_workflow_rows(limit=12):
+    if not WORKFLOW_DB.is_file():
+        return [], 0, 0
+    try:
+        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON")
+            if not (
+                _table_exists(conn, "workflow_stats")
+                or _table_exists(conn, "workflow_executions")
+            ):
+                return [], 0, 0
+            today_start, tomorrow_start = _today_bounds()
+            today_start_ms = int(today_start.timestamp() * 1000)
+            tomorrow_start_ms = int(tomorrow_start.timestamp() * 1000)
+            workflow_ids = set()
+            if _table_exists(conn, "workflow_stats"):
+                workflow_ids.update(
+                    row[0]
+                    for row in conn.execute("SELECT workflow_id FROM workflow_stats").fetchall()
+                    if row[0]
+                )
+            if _table_exists(conn, "workflow_executions"):
+                workflow_ids.update(
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT workflow_id FROM workflow_executions"
+                    ).fetchall()
+                    if row[0]
+                )
+            names = {
+                **_workflow_manifest_name_map(),
+                **_workflow_config_name_map(conn),
+                **WORKFLOW_DISPLAY_NAMES,
+            }
+            workflow_ids.update(SOC_PINNED_WORKFLOW_NAMES)
+            stats_columns = (
+                {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
+                }
+                if _table_exists(conn, "workflow_stats")
+                else set()
+            )
+            stats_success_expr = "success_count" if "success_count" in stats_columns else "0"
+            stats_error_expr = "error_count" if "error_count" in stats_columns else "0"
+            stats_updated_expr = "updated_at" if "updated_at" in stats_columns else "0"
+            workflows = []
+            for workflow_id in workflow_ids:
+                workflow_name = names.get(workflow_id, workflow_id)
+                if UUID_RE.match(str(workflow_id)) and workflow_name == workflow_id:
+                    continue
+                stats = None
+                if _table_exists(conn, "workflow_stats"):
+                    stats = conn.execute(
+                        f"SELECT call_count, {stats_success_expr}, {stats_error_expr}, {stats_updated_expr} "
+                        "FROM workflow_stats WHERE workflow_id = ?",
+                        (workflow_id,),
+                    ).fetchone()
+                latest = None
+                exec_summary = None
+                if _table_exists(conn, "workflow_executions"):
+                    exec_summary = conn.execute(
+                        "SELECT COUNT(*) AS execution_count, "
+                        "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
+                        "SUM(CASE WHEN status IN ('running') THEN 1 ELSE 0 END) AS active_count, "
+                        "SUM(CASE WHEN COALESCE(finished_at, updated_at, started_at, 0) >= ? "
+                        "AND COALESCE(finished_at, updated_at, started_at, 0) < ? THEN 1 ELSE 0 END) "
+                        "AS today_execution_count "
+                        "FROM workflow_executions WHERE workflow_id = ?",
+                        (today_start_ms, tomorrow_start_ms, workflow_id),
+                    ).fetchone()
+                    latest = conn.execute(
+                        "SELECT id, status, started_at, finished_at, updated_at "
+                        "FROM workflow_executions WHERE workflow_id = ? "
+                        "ORDER BY COALESCE(finished_at, updated_at, started_at, 0) DESC LIMIT 1",
+                        (workflow_id,),
+                    ).fetchone()
+                execution_count = max(
+                    _safe_int(stats["call_count"] if stats else 0),
+                    _safe_int(exec_summary["execution_count"] if exec_summary else 0),
+                )
+                success_count = max(
+                    _safe_int(stats["success_count"] if stats else 0),
+                    _safe_int(exec_summary["success_count"] if exec_summary else 0),
+                )
+                active_count = max(_safe_int(exec_summary["active_count"] if exec_summary else 0), 0)
+                today_execution_count = max(
+                    _safe_int(exec_summary["today_execution_count"] if exec_summary else 0),
+                    0,
+                )
+                last_run_at = 0
+                if latest:
+                    last_run_at = (
+                        _safe_int(latest["finished_at"])
+                        or _safe_int(latest["updated_at"])
+                        or _safe_int(latest["started_at"])
+                    )
+                workflows.append(
+                    {
+                        "id": workflow_id,
+                        "name": workflow_name,
+                        "executionCount": execution_count,
+                        "todayExecutionCount": today_execution_count,
+                        "successCount": success_count,
+                        "successRate": _ratio(success_count, execution_count),
+                        "activeCount": active_count,
+                        "lastStatus": latest["status"] if latest else "",
+                        "lastRunAt": last_run_at,
+                        "latestExecutionHash": str(latest["id"] if latest else ""),
+                    }
+                )
+            soc_order = {
+                "stream_alert_denoise": 3,
+                "stream_alert_triage": 2,
+                "onesec_kafka_investigation": 1,
+                "tdp_alert_triage": 1,
+                "sec_alert_unified_ops": 1,
+            }
+            workflows.sort(
+                key=lambda item: (
+                    item["activeCount"] > 0,
+                    item["lastRunAt"],
+                    item["executionCount"],
+                    soc_order.get(item["id"], 0),
+                ),
+                reverse=True,
+            )
+            return (
+                workflows[:limit],
+                sum(workflow["executionCount"] for workflow in workflows),
+                sum(workflow["todayExecutionCount"] for workflow in workflows),
+            )
+    except Exception:
+        return [], 0, 0
+
+
+def _get_task_center():
+    session_count, tasks, scheduled_execution_count, scheduled_today_execution_count = _task_center_task_rows()
+    workflows, workflow_execution_count, workflow_today_execution_count = _task_center_workflow_rows()
+    return {
+        **_task_center_empty(),
+        "sessionCount": session_count,
+        "scheduledTasks": tasks,
+        "scheduledExecutionCount": scheduled_execution_count,
+        "scheduledTodayExecutionCount": scheduled_today_execution_count,
+        "workflowExecutionCount": workflow_execution_count,
+        "workflowTodayExecutionCount": workflow_today_execution_count,
+        "workflows": workflows,
+    }
 
 
 def _get_activity(params):

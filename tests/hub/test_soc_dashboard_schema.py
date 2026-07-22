@@ -2,7 +2,7 @@ import importlib.util
 import json
 import sqlite3
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 
@@ -210,6 +210,393 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
         "callCount": 43,
         "latestStartedAt": 0,
     }
+
+
+def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path):
+    tasks_db = tmp_path / "tasks.db"
+    today_at_1100 = datetime.now().astimezone().replace(
+        hour=11,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    today_at_1105 = today_at_1100.replace(minute=5)
+    today_at_1110 = today_at_1100.replace(minute=10)
+    tomorrow_at_1205 = (today_at_1100 + timedelta(days=1)).replace(hour=12, minute=5)
+    yesterday_at_1100 = today_at_1100 - timedelta(days=1)
+    yesterday_at_1105 = today_at_1105 - timedelta(days=1)
+    today_ms = int(today_at_1100.timestamp() * 1000)
+    yesterday_ms = int(yesterday_at_1100.timestamp() * 1000)
+    with sqlite3.connect(tasks_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE task_schedulers (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                workflow_id TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE task_executions (
+                id TEXT PRIMARY KEY,
+                scheduler_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                queued_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT,
+                created_at TEXT,
+                session_id TEXT
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO task_schedulers VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    "sched-1",
+                    "每日告警巡检",
+                    "cron",
+                    "active",
+                    json.dumps({"cron": "*/5 * * * *", "nextRun": tomorrow_at_1205.isoformat(timespec="seconds")}),
+                    "workflow",
+                    "stream_alert_denoise",
+                    today_at_1100.isoformat(timespec="seconds"),
+                ),
+            )
+        conn.executemany(
+            "INSERT INTO task_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                        "exec-1",
+                        "sched-1",
+                        "completed",
+                        yesterday_at_1100.isoformat(timespec="seconds"),
+                        (yesterday_at_1100 + timedelta(seconds=1)).isoformat(timespec="seconds"),
+                        (yesterday_at_1100 + timedelta(seconds=10)).isoformat(timespec="seconds"),
+                        (yesterday_at_1100 + timedelta(seconds=10)).isoformat(timespec="seconds"),
+                        yesterday_at_1100.isoformat(timespec="seconds"),
+                        "session-a",
+                    ),
+                (
+                        "exec-2",
+                        "sched-1",
+                        "failed",
+                        yesterday_at_1105.isoformat(timespec="seconds"),
+                        (yesterday_at_1105 + timedelta(seconds=1)).isoformat(timespec="seconds"),
+                        (yesterday_at_1105 + timedelta(seconds=10)).isoformat(timespec="seconds"),
+                        (yesterday_at_1105 + timedelta(seconds=10)).isoformat(timespec="seconds"),
+                        yesterday_at_1105.isoformat(timespec="seconds"),
+                        "session-a",
+                    ),
+                (
+                        "exec-3",
+                        "sched-1",
+                        "running",
+                        today_at_1110.isoformat(timespec="seconds"),
+                        (today_at_1110 + timedelta(seconds=1)).isoformat(timespec="seconds"),
+                        None,
+                        (today_at_1110 + timedelta(seconds=1)).isoformat(timespec="seconds"),
+                        today_at_1110.isoformat(timespec="seconds"),
+                        "session-b",
+                    ),
+            ],
+        )
+        conn.commit()
+
+    workflow_db = tmp_path / "workflow.db"
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_configs (
+                workflow_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER,
+                config TEXT NOT NULL,
+                updated_at INTEGER,
+                PRIMARY KEY (workflow_id, kind)
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
+            [
+                ("custom_workflow", 2, 1, 1, 1784775000000),
+                ("stream_alert_denoise", 10, 9, 1, today_ms),
+                ("e6d5581a-b105-4c75-a102-1d8e6c97e1c1", 1, 0, 0, 1784775700000),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("wf-1", "custom_workflow", "error", yesterday_ms, yesterday_ms + 1000, yesterday_ms + 1000),
+                ("wf-2", "stream_alert_denoise", "success", today_ms, today_ms + 1000, today_ms + 1000),
+                (
+                    "wf-dynamic",
+                    "e6d5581a-b105-4c75-a102-1d8e6c97e1c1",
+                    "running",
+                    1784775700000,
+                    None,
+                    1784775700000,
+                ),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_configs VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    "custom_workflow",
+                    "workflow.integration-config",
+                    1,
+                    json.dumps({"workflow": {"id": "custom_workflow", "name": "自定义处置流"}}),
+                    1784775000000,
+                ),
+                (
+                    "stream_alert_denoise",
+                    "workflow.integration-config",
+                    1,
+                    json.dumps({"workflow": {"id": "stream_alert_denoise", "name": "流式告警降噪"}}),
+                    1784775600000,
+                ),
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tasks_db
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+
+    assert payload["sessionCount"] == 2
+    assert payload["scheduledTasks"] == [
+        {
+            "id": "sched-1",
+            "name": "每日告警巡检",
+            "mode": "cron",
+            "status": "active",
+            "executionMode": "workflow",
+            "workflowId": "stream_alert_denoise",
+            "executionCount": 3,
+            "todayExecutionCount": 1,
+            "successCount": 1,
+            "successRate": 0.3333,
+            "activeCount": 1,
+            "lastStatus": "running",
+            "lastRunAt": (today_at_1110 + timedelta(seconds=1)).isoformat(timespec="seconds"),
+            "nextRunAt": tomorrow_at_1205.isoformat(timespec="seconds"),
+            "cron": "*/5 * * * *",
+            "cronDescription": "",
+        }
+    ]
+    assert payload["scheduledExecutionCount"] == 3
+    assert payload["scheduledTodayExecutionCount"] == 1
+    assert payload["workflowExecutionCount"] == 12
+    assert payload["workflowTodayExecutionCount"] == 1
+    assert [workflow["id"] for workflow in payload["workflows"]] == [
+        "stream_alert_denoise",
+        "custom_workflow",
+        "stream_alert_triage",
+    ]
+    assert [workflow["name"] for workflow in payload["workflows"]] == [
+        "告警降噪工作流",
+        "自定义处置流",
+        "告警研判工作流",
+    ]
+    assert payload["workflows"][0]["executionCount"] == 10
+    assert payload["workflows"][0]["todayExecutionCount"] == 1
+    assert payload["workflows"][0]["successCount"] == 9
+    assert payload["workflows"][0]["successRate"] == 0.9
+    assert payload["workflows"][0]["latestExecutionHash"] == "wf-2"
+
+
+def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
+    now = datetime.now().astimezone().replace(microsecond=0)
+    older = now - timedelta(hours=3)
+    recent = now - timedelta(minutes=5)
+    future = now + timedelta(hours=2)
+    older_ms = int(older.timestamp() * 1000)
+    recent_ms = int(recent.timestamp() * 1000)
+
+    tasks_db = tmp_path / "tasks.db"
+    with sqlite3.connect(tasks_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE task_schedulers (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                status TEXT NOT NULL,
+                trigger TEXT NOT NULL,
+                execution_mode TEXT NOT NULL,
+                workflow_id TEXT,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE task_executions (
+                id TEXT PRIMARY KEY,
+                scheduler_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                queued_at TEXT,
+                started_at TEXT,
+                completed_at TEXT,
+                updated_at TEXT,
+                created_at TEXT,
+                session_id TEXT
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO task_schedulers VALUES (?, ?, 'cron', 'active', ?, 'agent', '', ?)",
+            [
+                ("sched-active", "正在执行任务", "{}", older.isoformat()),
+                ("sched-recent", "最近完成任务", "{}", recent.isoformat()),
+                ("sched-popular", "高频历史任务", "{}", older.isoformat()),
+                (
+                    "sched-future",
+                    "未来待执行任务",
+                    json.dumps({"nextRun": future.isoformat(timespec="seconds")}),
+                    now.isoformat(),
+                ),
+            ],
+        )
+        task_exec_rows = [
+            (
+                "exec-active",
+                "sched-active",
+                "running",
+                older.isoformat(timespec="seconds"),
+                older.isoformat(timespec="seconds"),
+                None,
+                older.isoformat(timespec="seconds"),
+                older.isoformat(timespec="seconds"),
+                "s-active",
+            ),
+            (
+                "exec-recent",
+                "sched-recent",
+                "completed",
+                recent.isoformat(timespec="seconds"),
+                recent.isoformat(timespec="seconds"),
+                (recent + timedelta(seconds=3)).isoformat(timespec="seconds"),
+                (recent + timedelta(seconds=3)).isoformat(timespec="seconds"),
+                recent.isoformat(timespec="seconds"),
+                "s-recent",
+            ),
+        ]
+        for index in range(5):
+            when = older - timedelta(minutes=index)
+            task_exec_rows.append(
+                (
+                    f"exec-popular-{index}",
+                    "sched-popular",
+                    "completed",
+                    when.isoformat(timespec="seconds"),
+                    when.isoformat(timespec="seconds"),
+                    (when + timedelta(seconds=2)).isoformat(timespec="seconds"),
+                    (when + timedelta(seconds=2)).isoformat(timespec="seconds"),
+                    when.isoformat(timespec="seconds"),
+                    "s-popular",
+                )
+            )
+        conn.executemany(
+            "INSERT INTO task_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            task_exec_rows,
+        )
+        conn.commit()
+
+    workflow_db = tmp_path / "workflow.db"
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL,
+                finished_at INTEGER,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
+            [
+                ("wf-active", 1, 0, 0, older_ms),
+                ("wf-recent", 1, 1, 0, recent_ms),
+                ("wf-popular", 6, 6, 0, older_ms),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?)",
+            [
+                ("run-active", "wf-active", "running", older_ms, None, older_ms),
+                ("run-recent", "wf-recent", "success", recent_ms, recent_ms + 1000, recent_ms + 1000),
+                ("run-popular", "wf-popular", "success", older_ms, older_ms + 1000, older_ms + 1000),
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tasks_db
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+
+    assert [task["id"] for task in payload["scheduledTasks"][:4]] == [
+        "sched-active",
+        "sched-recent",
+        "sched-popular",
+        "sched-future",
+    ]
+    assert [workflow["id"] for workflow in payload["workflows"][:3]] == [
+        "wf-active",
+        "wf-recent",
+        "wf-popular",
+    ]
 
 
 def test_soc_dashboard_workflow_progress_marks_unavailable_database(tmp_path: Path):
