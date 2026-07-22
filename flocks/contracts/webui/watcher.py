@@ -143,6 +143,14 @@ class WebUIPagesWatcher:
             return None
         if not rel.parts:
             return None
+        # Ignore events under dot-prefixed dirs. The Hub installer stages
+        # WebUI packages into sibling scratch dirs (``.<plugin>.<rand>`` /
+        # ``.<plugin>.bak``) inside this watched root before its atomic
+        # swap. Reacting to those writes would race the installer's own
+        # build — on Windows the watcher's file handles block the swap
+        # with a WinError 5 access-denied — and surface half-built pages.
+        if any(part.startswith(".") for part in rel.parts):
+            return None
 
         if rel.name == WORKSPACE_MANIFEST_FILE:
             workspace_id = self._store.workspace_id_for_path(src)

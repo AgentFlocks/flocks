@@ -104,3 +104,39 @@ def test_watcher_classifies_workspace_manifest_change(tmp_path):
 
     assert page_id == "scene_workspace"
     assert pending.manifest_changed
+
+
+def test_watcher_ignores_installer_scratch_dir_events(tmp_path):
+    """Events under the Hub installer's ``.<name>.<rand>`` / ``.<name>.bak``
+    scratch dirs must be dropped *before* any store lookup — reacting there
+    races the installer's atomic swap and on Windows blocks it with a
+    WinError 5 access-denied.
+
+    The store is stubbed to raise if consulted, proving the dot-dir guard
+    short-circuits ahead of path resolution rather than relying on the
+    store's own scratch-dir filtering.
+    """
+    root = tmp_path / "webui_pages"
+    root.mkdir(parents=True)
+
+    class _RaisingStore:
+        def workspace_id_for_path(self, _path):
+            raise AssertionError("store should not be consulted for scratch-dir events")
+
+        def page_id_for_path(self, _path):
+            raise AssertionError("store should not be consulted for scratch-dir events")
+
+    watcher = WebUIPagesWatcher(
+        store=_RaisingStore(), builder=_BuilderStub(), api_runtime=_RuntimeStub()
+    )
+
+    for candidate in (
+        root / ".soc_ui.abc123" / "soc_overview" / "src" / "index.tsx",
+        root / ".soc_ui.abc123" / "soc_overview" / "manifest.json",
+        root / ".soc_ui.abc123" / "soc_overview" / "dist" / "page.js",
+        root / ".soc_ui.bak" / "soc_overview" / "workspace.json",
+    ):
+        assert (
+            watcher._classify_event(candidate, root, event_type="modified", is_directory=False)
+            is None
+        )

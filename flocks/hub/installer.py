@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -93,18 +95,11 @@ def _resolve_install_destination(
 def _copy_package(src: Path, dst: Path) -> None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
+    _purge_stale_scratch(parent, dst.name)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
-        backup = None
-        if dst.exists():
-            backup = parent / f".{dst.name}.bak"
-            if backup.exists():
-                shutil.rmtree(backup)
-            dst.replace(backup)
-        tmp.replace(dst)
-        if backup and backup.exists():
-            shutil.rmtree(backup)
+        _replace_dir(tmp, dst)
     except Exception:
         if tmp.exists():
             shutil.rmtree(tmp, ignore_errors=True)
@@ -122,6 +117,53 @@ def _copy_package_contents(src: Path, dst: Path) -> None:
             shutil.copy2(item, target)
 
 
+def _purge_stale_scratch(parent: Path, name: str) -> None:
+    """Remove leftover ``.<name>.<rand>`` / ``.<name>.bak`` staging dirs.
+
+    A failed atomic swap (see :func:`_replace_dir`) can leave scratch and
+    backup dirs behind next to *parent*/*name*. They are never valid
+    installs, but on Windows a lingering ``.<name>.bak`` blocks the next
+    swap, so we clear both before staging a fresh copy.
+    """
+    if not parent.is_dir():
+        return
+    for entry in parent.iterdir():
+        stale = entry.name.startswith(f".{name}.") or entry.name == f".{name}.bak"
+        if not stale:
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+        except OSError:
+            pass
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """``src.replace(dst)`` with a Windows access-denied backoff.
+
+    On Windows an antivirus scan or a directory watcher (e.g. the WebUI
+    page watcher over ``~/.flocks/plugins/contracts/webui``) can hold a
+    transient handle on the freshly written tree, making the atomic swap
+    fail with ``PermissionError`` (WinError 5 / 32). Elsewhere the rename
+    is atomic and never needs retrying.
+    """
+    if sys.platform != "win32":
+        src.replace(dst)
+        return
+    delay = 0.1
+    for attempt in range(6):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
+
+
 def _replace_dir(src: Path, dst: Path) -> None:
     parent = dst.parent
     backup = None
@@ -129,8 +171,8 @@ def _replace_dir(src: Path, dst: Path) -> None:
         backup = parent / f".{dst.name}.bak"
         if backup.exists():
             shutil.rmtree(backup)
-        dst.replace(backup)
-    src.replace(dst)
+        _replace_with_retry(dst, backup)
+    _replace_with_retry(src, dst)
     if backup and backup.exists():
         shutil.rmtree(backup)
 
@@ -185,6 +227,7 @@ def _build_webui_pages(plugin_id: str, install_dir: Path) -> None:
 def _copy_webui_package_with_build(plugin_id: str, src: Path, dst: Path) -> None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
+    _purge_stale_scratch(parent, dst.name)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
