@@ -295,3 +295,30 @@ class TestMcpClientCrossLoopSubmission:
         assert cancelled.is_set() is True
         assert client._owner_task is None
         assert client._command_queue is None
+
+
+class TestMcpClientOwnerFailure:
+    @pytest.mark.asyncio
+    async def test_call_tool_fails_when_owner_exits_during_request(self):
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        client._connected = True
+        client._owner_loop = asyncio.get_running_loop()
+        client._command_queue = asyncio.Queue()
+
+        async def failing_owner() -> None:
+            await client._command_queue.get()
+            raise RuntimeError("HTTP 504 from https://example.com/mcp")
+
+        owner_task = asyncio.create_task(failing_owner())
+        owner_task.add_done_callback(client._handle_owner_task_done)
+        client._owner_task = owner_task
+
+        with pytest.raises(RuntimeError, match="HTTP 504"):
+            await asyncio.wait_for(
+                client.call_tool("demo_tool", {"value": "x"}),
+                timeout=1.0,
+            )
