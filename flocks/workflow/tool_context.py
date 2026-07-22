@@ -89,6 +89,11 @@ async def build_workflow_tool_context(
     extra = {
         "workspace_dir": workspace_dir,
         "main_session_key": effective_session_id,
+        "workflow_context": {
+            "source": "workflow_runtime",
+            "workflow_id": workflow_id,
+            "action_name": action_name,
+        },
     }
     if isinstance(execution_context, Mapping):
         # Generic opaque context transport for nested workflow work.  No OSS

@@ -43,6 +43,11 @@ async def test_build_workflow_tool_context_creates_temp_parent_session_and_messa
     assert session.directory == str(tmp_path)
     assert tool_context.extra["workspace_dir"] == str(tmp_path)
     assert tool_context.extra["main_session_key"] == tool_context.session_id
+    assert tool_context.extra["workflow_context"] == {
+        "source": "workflow_runtime",
+        "workflow_id": "wf-1",
+        "action_name": "invoke",
+    }
 
     message = await Message.get(tool_context.session_id, tool_context.message_id)
     assert message is not None
@@ -81,6 +86,11 @@ async def test_build_workflow_tool_context_reuses_existing_parent_session(
     assert tool_context.agent == "rex-junior"
     assert tool_context.extra["workspace_dir"] == str(tmp_path / "workspace")
     assert tool_context.extra["main_session_key"] == parent.id
+    assert tool_context.extra["workflow_context"] == {
+        "source": "workflow_runtime",
+        "workflow_id": "wf-2",
+        "action_name": "run",
+    }
 
     message = await Message.get(tool_context.session_id, tool_context.message_id)
     assert message is not None

@@ -141,7 +141,11 @@ def _resolve_workflow_display_name_and_total_nodes(
     return workflow_name, None
 
 
-def _create_nested_tool_context(ctx: ToolContext) -> ToolContext:
+def _create_nested_tool_context(
+    ctx: ToolContext,
+    *,
+    workflow_id: str | None = None,
+) -> ToolContext:
     """Create an isolated child ToolContext for workflow node tools.
 
     Workflow execution itself should surface workflow-level progress via
@@ -154,12 +158,20 @@ def _create_nested_tool_context(ctx: ToolContext) -> ToolContext:
     callback, while preserving permissions, event publishing, abort signal, and
     sandbox/session identity.
     """
+    extra = dict(ctx.extra)
+    if workflow_id:
+        extra["workflow_context"] = {
+            "source": "run_workflow_tool",
+            "workflow_id": str(workflow_id),
+            "action_name": "run_workflow",
+        }
+
     return ToolContext(
         session_id=ctx.session_id,
         message_id=ctx.message_id,
         agent=ctx.agent,
         call_id=ctx.call_id,
-        extra=dict(ctx.extra),
+        extra=extra,
         abort_event=ctx.abort,
         permission_callback=ctx._permission_callback,
         metadata_callback=None,
@@ -780,7 +792,10 @@ async def run_workflow_tool(
         )
         execution_started_at = time.time()
 
-        nested_tool_ctx = _create_nested_tool_context(ctx)
+        nested_tool_ctx = _create_nested_tool_context(
+            ctx,
+            workflow_id=display_workflow_id,
+        )
         call_kwargs: Dict[str, Any] = {
             "workflow": workflow_source,
             "inputs": workflow_inputs,
