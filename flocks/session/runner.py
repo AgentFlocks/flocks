@@ -1074,7 +1074,8 @@ class SessionRunner:
             return FailoverDecision(True, "server_error", 3)
 
         if any(pattern in lowered for pattern in (
-            "content policy", "content filter", "safety policy", "policy violation",
+            "content policy", "content filter", "content_filter", "safety policy",
+            "policy violation",
         )):
             return FailoverDecision(True, "content_policy", 0)
         if error_name == "JSONDecodeError" or any(
@@ -1579,7 +1580,6 @@ class SessionRunner:
                 retry_limit = MAX_ERROR_RETRIES
                 if (
                     self._defer_step_errors
-                    and self._failover_available
                     and failover_decision.eligible
                 ):
                     retry_limit = failover_decision.same_model_retries
@@ -2070,9 +2070,42 @@ class SessionRunner:
                 "transportExceptionModule": type(transport_exception).__module__,
             })
         
-        # Check if it's an API error with specific attributes
-        if hasattr(exception, 'status_code'):
-            status_code = getattr(exception, 'status_code')
+        # Provider SDKs expose HTTP status through several shapes. Walk the
+        # normal exception chain so lightweight wrapper errors do not hide it.
+        status_code = None
+        status_exception = None
+        seen: set[int] = set()
+        current: Optional[BaseException] = exception
+        while current is not None and id(current) not in seen:
+            seen.add(id(current))
+            response = getattr(current, "response", None)
+            status_values = (
+                getattr(current, "status_code", None),
+                getattr(response, "status_code", None),
+                getattr(current, "code", None),
+            )
+            for value in status_values:
+                if callable(value):
+                    try:
+                        value = value()
+                    except TypeError:
+                        continue
+                value = getattr(value, "value", value)
+                if isinstance(value, tuple) and value:
+                    value = value[0]
+                try:
+                    normalized = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if 100 <= normalized <= 599:
+                    status_code = normalized
+                    status_exception = current
+                    break
+            if status_code is not None:
+                break
+            current = current.__cause__ or current.__context__
+
+        if status_code is not None:
             error_dict["name"] = "APIError"
             error_dict["data"]["statusCode"] = status_code
             
@@ -2081,9 +2114,13 @@ class SessionRunner:
             error_dict["data"]["isRetryable"] = is_retryable
             
             # Extract response headers if available
-            if hasattr(exception, 'response') and hasattr(exception.response, 'headers'):
-                headers = dict(exception.response.headers)
-                error_dict["data"]["responseHeaders"] = headers
+            response = getattr(status_exception, "response", None)
+            headers = getattr(response, "headers", None)
+            if headers is not None:
+                try:
+                    error_dict["data"]["responseHeaders"] = dict(headers)
+                except (TypeError, ValueError):
+                    pass
         
         # Check for common retryable error patterns
         error_msg = str(exception).lower()

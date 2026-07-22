@@ -1252,6 +1252,49 @@ class Config:
             raise ValueError(f"Failed to read config file {filepath}: {e}")
         
         return await cls.load_text(text, filepath)
+
+    @staticmethod
+    def parse_jsonc(text: str, filepath: Path) -> Dict[str, Any]:
+        """Parse JSON or JSONC text without resolving configuration values."""
+        try:
+            # Remove block comments before processing line comments. This is
+            # the same JSONC syntax accepted by ``load_text``.
+            text_no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
+
+            cleaned_lines = []
+            for line in text_no_comments.split('\n'):
+                in_string = False
+                escape_next = False
+                comment_start = -1
+
+                for index, char in enumerate(line):
+                    if escape_next:
+                        escape_next = False
+                        continue
+                    if char == '\\':
+                        escape_next = True
+                        continue
+                    if char == '"':
+                        in_string = not in_string
+                    if (
+                        not in_string
+                        and index < len(line) - 1
+                        and line[index:index + 2] == '//'
+                    ):
+                        comment_start = index
+                        break
+
+                if comment_start >= 0:
+                    line = line[:comment_start]
+                cleaned_lines.append(line)
+
+            data = json.loads('\n'.join(cleaned_lines))
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"Invalid JSON in {filepath}: {exc}") from exc
+
+        if not isinstance(data, dict):
+            raise ValueError(f"Invalid configuration in {filepath}: expected an object")
+        return data
     
     @classmethod
     async def load_text(cls, text: str, filepath: Path) -> ConfigInfo:
@@ -1276,52 +1319,8 @@ class Config:
         # Replace file references
         text = await cls.replace_file_refs(text, filepath.parent)
         
-        # Try to parse as JSONC (JSON with comments)
-        try:
-            # Remove comments properly
-            # 1. Remove /* */ block comments first
-            text_no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-            
-            # 2. Remove // line comments, but NOT in strings!
-            # We need to be careful not to remove // inside quoted strings (like URLs)
-            # This regex matches // that are NOT inside quotes
-            # Negative lookbehind to avoid matching inside strings
-            lines = text_no_comments.split('\n')
-            cleaned_lines = []
-            for line in lines:
-                # Find // but not inside strings
-                # Simple approach: find first // that is not between quotes
-                in_string = False
-                escape_next = False
-                comment_start = -1
-                
-                for i, char in enumerate(line):
-                    if escape_next:
-                        escape_next = False
-                        continue
-                    
-                    if char == '\\':
-                        escape_next = True
-                        continue
-                    
-                    if char == '"' and not escape_next:
-                        in_string = not in_string
-                    
-                    if not in_string and i < len(line) - 1 and line[i:i+2] == '//':
-                        comment_start = i
-                        break
-                
-                if comment_start >= 0:
-                    line = line[:comment_start]
-                
-                cleaned_lines.append(line)
-            
-            text_no_comments = '\n'.join(cleaned_lines)
-            
-            # Parse JSON
-            data = json.loads(text_no_comments)
-        except json.JSONDecodeError as e:
-            raise ValueError(f"Invalid JSON in {filepath}: {e}")
+        # Try to parse as JSONC (JSON with comments).
+        data = cls.parse_jsonc(text, filepath)
         
         # Validate and parse with Pydantic
         try:

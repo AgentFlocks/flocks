@@ -41,6 +41,7 @@ def fallback_route_stubs(monkeypatch: pytest.MonkeyPatch):
         provider={},
         disabled_providers=[],
         enabled_providers=None,
+        fallback_providers=[],
     )
     apply_config = AsyncMock()
     monkeypatch.setattr(default_model_routes, "ConfigWriter", writer)
@@ -60,6 +61,7 @@ def fallback_route_stubs(monkeypatch: pytest.MonkeyPatch):
         ),
     )
     monkeypatch.setattr(Provider, "apply_config", apply_config)
+    writer.get_fallback_override_source.return_value = None
     writer.runtime_config = runtime_config
     writer.apply_config = apply_config
     return writer
@@ -70,8 +72,11 @@ async def test_get_fallbacks_uses_static_route_and_retains_stale_entries(
     client: AsyncClient,
     fallback_route_stubs: MagicMock,
 ):
-    fallback_route_stubs.get_fallback_providers.return_value = [
-        {"provider_id": "removed-provider", "model_id": "vendor/removed-model"},
+    fallback_route_stubs.runtime_config.fallback_providers = [
+        {
+            "provider_id": "removed-provider",
+            "model_id": "vendor/removed-model",
+        },
     ]
 
     response = await client.get("/api/default-model/fallbacks")
@@ -85,6 +90,48 @@ async def test_get_fallbacks_uses_static_route_and_retains_stale_entries(
             }
         ]
     }
+
+
+@pytest.mark.asyncio
+async def test_get_fallbacks_uses_effective_merged_config(
+    client: AsyncClient,
+    fallback_route_stubs: MagicMock,
+):
+    fallback_route_stubs.get_fallback_providers.return_value = [
+        {"provider_id": "global", "model_id": "global-model"},
+    ]
+    fallback_route_stubs.runtime_config.fallback_providers = [
+        {"provider_id": "inline", "model_id": "effective-model"},
+    ]
+
+    response = await client.get("/api/default-model/fallbacks")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "fallback_providers": [
+            {"provider_id": "inline", "model_id": "effective-model"},
+        ]
+    }
+    fallback_route_stubs.get_fallback_providers.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_put_fallbacks_rejects_higher_priority_override(
+    client: AsyncClient,
+    fallback_route_stubs: MagicMock,
+):
+    fallback_route_stubs.get_fallback_override_source.return_value = (
+        "FLOCKS_CONFIG_CONTENT"
+    )
+
+    response = await client.put(
+        "/api/default-model/fallbacks",
+        json={"fallback_providers": []},
+    )
+
+    assert response.status_code == 409
+    assert "FLOCKS_CONFIG_CONTENT" in response.json()["message"]
+    fallback_route_stubs.set_fallback_providers.assert_not_called()
 
 
 @pytest.mark.asyncio

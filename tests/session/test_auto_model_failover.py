@@ -187,6 +187,131 @@ async def test_runner_applies_failover_retry_thresholds(
     assert call_llm.await_count == expected_calls
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "expected_calls"),
+    [
+        (429, 1),
+        (503, 2),
+    ],
+)
+async def test_last_auto_candidate_keeps_hermes_retry_thresholds(
+    monkeypatch,
+    status_code: int,
+    expected_calls: int,
+):
+    """The last candidate still has Auto's per-model retry budget."""
+    runner = SessionRunner(
+        session=_session(),
+        provider_id="fallback",
+        model_id="fallback-model",
+        defer_step_errors=True,
+        failover_available=False,
+    )
+    last_user = SimpleNamespace(id="msg_user", agent="rex", role="user")
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant = SimpleNamespace(id="msg_assistant")
+    failure = RuntimeError(f"Provider HTTP {status_code}")
+    failure.status_code = status_code
+    call_llm = AsyncMock(side_effect=failure)
+
+    monkeypatch.setattr(
+        "flocks.session.runner.Agent.get",
+        AsyncMock(return_value=SimpleNamespace(
+            name="rex",
+            steps=None,
+            mode="primary",
+            prompt="",
+            tools=[],
+        )),
+    )
+    monkeypatch.setattr("flocks.session.runner.Provider.get", lambda _provider_id: provider)
+    monkeypatch.setattr("flocks.session.runner.Provider.apply_config", AsyncMock())
+    monkeypatch.setattr(
+        "flocks.session.runner.SessionPrompt.build_system_prompts",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hello")]),
+    )
+    monkeypatch.setattr(Message, "get_text_content", AsyncMock(return_value="hello"))
+    monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(Message, "create", AsyncMock(return_value=assistant))
+    monkeypatch.setattr(Message, "update", AsyncMock())
+    monkeypatch.setattr(runner, "_call_llm", call_llm)
+    monkeypatch.setattr("flocks.session.runner.SessionRetry.sleep", AsyncMock())
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.failure is not None
+    assert call_llm.await_count == expected_calls
+
+
+@pytest.mark.parametrize(
+    ("exception", "status_code", "reason"),
+    [
+        (
+            type("GoogleSdkError", (RuntimeError,), {"code": 429})(
+                "Resource exhausted"
+            ),
+            429,
+            "rate_limit",
+        ),
+        (
+            type(
+                "ResponseSdkError",
+                (RuntimeError,),
+                {
+                    "response": SimpleNamespace(
+                        status_code=503,
+                        headers={"retry-after": "1"},
+                    )
+                },
+            )("Service unavailable"),
+            503,
+            "overloaded",
+        ),
+    ],
+)
+def test_exception_status_is_normalized_from_sdk_shapes(
+    exception: Exception,
+    status_code: int,
+    reason: str,
+):
+    runner = SessionRunner(
+        session=_session(),
+        provider_id="primary",
+        model_id="primary-model",
+    )
+
+    error = runner._exception_to_error_dict(exception)
+
+    assert error["data"]["statusCode"] == status_code
+    assert SessionRunner.classify_failover_error(error).reason == reason
+
+
+def test_exception_status_is_normalized_from_cause_chain():
+    inner = type("GoogleSdkError", (RuntimeError,), {"code": 401})(
+        "Unauthenticated"
+    )
+    outer = RuntimeError("Provider wrapper failed")
+    outer.__cause__ = inner
+    runner = SessionRunner(
+        session=_session(),
+        provider_id="primary",
+        model_id="primary-model",
+    )
+
+    error = runner._exception_to_error_dict(outer)
+
+    assert error["data"]["statusCode"] == 401
+    assert SessionRunner.classify_failover_error(error).reason == "auth"
+
+
 def test_local_validation_error_never_fails_over():
     decision = SessionRunner.classify_failover_error({
         "name": "ValidationError",
@@ -205,6 +330,17 @@ def test_model_not_found_without_status_fails_over():
 
     assert decision.eligible is True
     assert decision.reason == "model_not_found"
+    assert decision.same_model_retries == 0
+
+
+def test_content_filter_error_fails_over_immediately():
+    decision = SessionRunner.classify_failover_error({
+        "name": "BadRequestError",
+        "data": {"message": "Response blocked by content_filter"},
+    })
+
+    assert decision.eligible is True
+    assert decision.reason == "content_policy"
     assert decision.same_model_retries == 0
 
 
@@ -470,6 +606,84 @@ async def test_safe_failure_switches_candidate_and_removes_blank_message(monkeyp
     delete.assert_awaited_once_with("ses_auto", "msg_failed")
     assert any(event == "message.removed" for event, _ in events)
     assert any(event == "session.model.fallback" for event, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_queued_user_is_detected_before_replacement_assistant():
+    current_user = SimpleNamespace(id="msg_001", role=MessageRole.USER)
+    queued_user = SimpleNamespace(id="msg_002", role=MessageRole.USER)
+    replacement_assistant = SimpleNamespace(
+        id="msg_003",
+        role=MessageRole.ASSISTANT,
+    )
+
+    detected = await SessionLoop._detect_queued_user_message(
+        "ses_auto",
+        [current_user, queued_user, replacement_assistant],
+        current_user.id,
+        replacement_assistant,
+    )
+
+    assert detected is queued_user
+
+
+@pytest.mark.asyncio
+async def test_preflight_chain_exhaustion_persists_final_error(monkeypatch):
+    ctx = _ctx()
+    last_user = SimpleNamespace(
+        id="msg_user",
+        agent="rex",
+        role=MessageRole.USER,
+    )
+
+    async def preflight_failure(_runner, _messages, _last_user):
+        message = "Provider not configured"
+        return StepResult(
+            action="stop",
+            error=message,
+            failure=StepFailure(
+                message=message,
+                error_data={
+                    "name": "ProviderUnavailableError",
+                    "data": {"message": message},
+                },
+                assistant_message_id=None,
+                reason="provider_unavailable",
+                allow_fallback=True,
+                attempt_state=LlmAttemptState(),
+                attempts=0,
+            ),
+        )
+
+    final_assistant = SimpleNamespace(id="msg_final_error")
+    create = AsyncMock(return_value=final_assistant)
+    monkeypatch.setattr(SessionRunner, "_process_step", preflight_failure)
+    monkeypatch.setattr(Message, "create", create)
+
+    result = await SessionLoop._process_step_with_failover(
+        ctx,
+        LoopCallbacks(),
+        [last_user],
+        last_user,
+    )
+
+    assert result.error == "Provider not configured"
+    assert result.failure is not None
+    assert result.failure.assistant_message_id == final_assistant.id
+    create.assert_awaited_once_with(
+        session_id="ses_auto",
+        role=MessageRole.ASSISTANT,
+        content="",
+        agent="rex",
+        model_id="fallback-model",
+        provider_id="fallback",
+        parent_id=last_user.id,
+        error={
+            "name": "ProviderUnavailableError",
+            "data": {"message": "Provider not configured"},
+        },
+        finish="error",
+    )
 
 
 @pytest.mark.asyncio

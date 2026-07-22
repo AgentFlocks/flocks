@@ -83,8 +83,9 @@ async def get_resolved_default_model():
 )
 async def get_fallback_providers() -> FallbackProvidersConfig:
     """Return the ordered, structurally valid fallback model list."""
+    config = await Config.get()
     return FallbackProvidersConfig(
-        fallback_providers=ConfigWriter.get_fallback_providers()
+        fallback_providers=config.fallback_providers or []
     )
 
 
@@ -98,6 +99,16 @@ async def set_fallback_providers(
     body: FallbackProvidersConfig,
 ) -> FallbackProvidersConfig:
     """Validate and atomically replace the runtime fallback model list."""
+    override_source = ConfigWriter.get_fallback_override_source()
+    if override_source:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Fallback models are overridden by "
+                f"{override_source} and cannot be changed from WebUI"
+            ),
+        )
+
     config = await Config.get()
     await Provider.apply_config(config)
     manager = get_model_manager()
@@ -175,7 +186,13 @@ async def set_fallback_providers(
             "model_id": model_id,
         })
 
-    ConfigWriter.set_fallback_providers(normalized)
+    try:
+        ConfigWriter.set_fallback_providers(normalized)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     return FallbackProvidersConfig(fallback_providers=normalized)
 
 

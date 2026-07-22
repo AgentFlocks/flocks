@@ -34,6 +34,8 @@
     "remove": "Remove fallback",
     "add": "Add fallback model",
     "noModelsToAdd": "No more available models",
+    "loadFailed": "Failed to load fallback configuration. Nothing can be saved until it is reloaded.",
+    "retry": "Retry",
     "close": "Close fallback models",
     "cancel": "Cancel",
     "save": "Save",

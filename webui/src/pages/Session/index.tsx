@@ -548,7 +548,12 @@ export default function SessionPage() {
       return option && option.key !== primaryKey ? [option] : [];
     });
   }, [chatModelOptions, fallbackModels, primaryModelOption?.key]);
-  const canSelectAuto = Boolean(primaryModelOption && availableFallbackOptions.length > 0);
+  const autoSelectionAllowed = !selectedSessionId || Boolean(
+    selectedSession && (selectedSession.category ?? 'user') === 'user',
+  );
+  const canSelectAuto = Boolean(
+    autoSelectionAllowed && primaryModelOption && availableFallbackOptions.length > 0,
+  );
   const effectiveModelOption = selectedModelAuto ? primaryModelOption : selectedModelOption;
   const selectedPromptModel = selectedModelAuto
     ? null
@@ -1001,7 +1006,7 @@ export default function SessionPage() {
   }, [refetchSessions, selectedModelKey, selectedSessionId, toast, t]);
 
   const handleSelectAutoModel = useCallback(async () => {
-    if (!canSelectAuto && !selectedModelAuto) return;
+    if (!autoSelectionAllowed || (!canSelectAuto && !selectedModelAuto)) return;
     const previousModelKey = selectedModelKey;
     setSelectedModelKey(AUTO_MODEL_KEY);
     setShowModelOptions(false);
@@ -1017,7 +1022,7 @@ export default function SessionPage() {
       setSelectedModelKey(previousModelKey);
       toast.error(t('chat.error', 'Error'), err.message);
     }
-  }, [canSelectAuto, refetchSessions, selectedModelAuto, selectedModelKey, selectedSessionId, toast, t]);
+  }, [autoSelectionAllowed, canSelectAuto, refetchSessions, selectedModelAuto, selectedModelKey, selectedSessionId, toast, t]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -2202,7 +2207,7 @@ export default function SessionPage() {
                           <button
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
-                            disabled={!canSelectAuto && !selectedModelAuto}
+                            disabled={!autoSelectionAllowed || (!canSelectAuto && !selectedModelAuto)}
                             className={`w-full rounded-md px-2 py-2 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
                                 ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
@@ -2214,7 +2219,7 @@ export default function SessionPage() {
                               <div className="min-w-0 flex-1">
                                 <div className="text-xs font-medium text-zinc-900 dark:text-zinc-100">{t('modelPicker.auto')}</div>
                                 <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
-                                  {canSelectAuto || selectedModelAuto
+                                  {canSelectAuto || (autoSelectionAllowed && selectedModelAuto)
                                     ? t('modelPicker.autoHint')
                                     : t('modelPicker.autoUnavailable')}
                                 </div>

@@ -446,7 +446,7 @@ class SessionLoop:
         _session_id: str,
         post_messages: List[MessageInfo],
         current_user_id: str,
-        last_message: Optional[MessageInfo],
+        _last_message: Optional[MessageInfo],
     ) -> Optional[MessageInfo]:
         if not post_messages:
             return None
@@ -461,11 +461,11 @@ class SessionLoop:
             return None
         if newest_user.id <= current_user_id:
             return None
-        if last_message is None:
-            return newest_user
-        if newest_user.id > last_message.id:
-            return newest_user
-        return None
+        # A fallback assistant is created after a user message that arrived
+        # while the primary model was running. Its newer ID must not make that
+        # user message look handled; the current turn's user ID is the stable
+        # boundary for queued work.
+        return newest_user
     
     @classmethod
     async def run(
@@ -865,9 +865,22 @@ class SessionLoop:
         cls,
         ctx: LoopContext,
         failure: Any,
+        last_user: MessageInfo,
     ) -> None:
         """Persist only the final Auto candidate failure."""
         if not failure.assistant_message_id:
+            assistant = await Message.create(
+                session_id=ctx.session.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=getattr(last_user, "agent", None) or ctx.agent_name or "rex",
+                model_id=ctx.model_id,
+                provider_id=ctx.provider_id,
+                parent_id=last_user.id,
+                error=failure.error_data,
+                finish="error",
+            )
+            failure.assistant_message_id = assistant.id
             return
         await Message.update(
             ctx.session.id,
@@ -938,7 +951,7 @@ class SessionLoop:
                             expires_at=expires_at,
                             reason="chain_exhausted",
                         )
-                await cls._finalize_deferred_failure(ctx, failure)
+                await cls._finalize_deferred_failure(ctx, failure, last_user)
                 return step_result
 
             # A candidate may be removed only while its attempt is completely
@@ -958,7 +971,7 @@ class SessionLoop:
                         "error": str(exc),
                     })
                 if not deleted:
-                    await cls._finalize_deferred_failure(ctx, failure)
+                    await cls._finalize_deferred_failure(ctx, failure, last_user)
                     return step_result
                 await cls._publish_runtime_event(callbacks, "message.removed", {
                     "sessionID": ctx.session.id,

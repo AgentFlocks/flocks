@@ -93,17 +93,61 @@ class ConfigWriter:
     @classmethod
     def _read_raw(cls) -> Dict[str, Any]:
         """Read flocks.json as raw dict (no secret resolution)."""
-        path = cls._get_config_path()
+        return cls._read_path_raw(cls._get_config_path())
+
+    @classmethod
+    def _read_path_raw(
+        cls,
+        path: Path,
+        *,
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        """Read a JSON/JSONC file without resolving secrets or references."""
         if not path.exists():
             return {}
         try:
             text = path.read_text(encoding="utf-8")
             if not text.strip():
                 return {}
-            return json.loads(text)
-        except (json.JSONDecodeError, OSError) as exc:
+            return Config.parse_jsonc(text, path)
+        except (ValueError, OSError) as exc:
             log.error("config_writer.read_failed", {"path": str(path), "error": str(exc)})
+            if strict:
+                raise ValueError(
+                    f"Unable to read config file {path}: {exc}"
+                ) from exc
             return {}
+
+    @classmethod
+    def get_fallback_override_source(cls) -> Optional[str]:
+        """Return a higher-priority source overriding the writable fallback list."""
+        writable_path = cls._get_config_path().resolve()
+        global_config = Config.get_global()
+
+        inline_content = global_config.config_content
+        if inline_content:
+            try:
+                inline_data = json.loads(inline_content)
+            except json.JSONDecodeError:
+                inline_data = None
+            if (
+                isinstance(inline_data, dict)
+                and inline_data.get("fallback_providers") is not None
+            ):
+                return "FLOCKS_CONFIG_CONTENT"
+
+        candidates = []
+        if global_config.config_path:
+            candidates.append(("FLOCKS_CONFIG", Path(global_config.config_path)))
+        candidates.append(("config.json", global_config.config_dir / "config.json"))
+
+        for source, path in candidates:
+            if not path.exists() or path.resolve() == writable_path:
+                continue
+            data = cls._read_path_raw(path, strict=True)
+            if data.get("fallback_providers") is not None:
+                return source
+        return None
 
     @classmethod
     def _write_raw(cls, data: Dict[str, Any]) -> None:
@@ -476,7 +520,7 @@ class ConfigWriter:
         An empty list removes the top-level key instead of persisting redundant
         empty configuration. Callers are responsible for validating identities.
         """
-        data = cls._read_raw()
+        data = cls._read_path_raw(cls._get_config_path(), strict=True)
         if fallbacks:
             data["fallback_providers"] = [
                 {

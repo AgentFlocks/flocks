@@ -211,3 +211,37 @@ async def test_list_providers_initialization_does_not_block_event_loop(
 
     assert heartbeat_ticks >= 3
     assert response.all == []
+
+
+async def test_list_providers_exposes_runtime_credential_state(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from types import SimpleNamespace
+
+    from flocks.server.routes import provider as provider_routes
+
+    async def _initialized() -> None:
+        return None
+
+    async def _config():
+        raise RuntimeError("no merged config needed for focused route test")
+
+    runtime_provider = SimpleNamespace(
+        name="Missing Credentials",
+        is_configured=lambda: False,
+    )
+    monkeypatch.setattr(provider_routes, "_ensure_provider_initialized", _initialized)
+    monkeypatch.setattr(provider_routes.Config, "get", _config)
+    monkeypatch.setattr(
+        provider_routes.ConfigWriter,
+        "list_provider_ids",
+        lambda: ["missing-credentials"],
+    )
+    monkeypatch.setattr(provider_routes.Provider, "get", lambda _provider_id: runtime_provider)
+    monkeypatch.setattr(provider_routes.Provider, "list_models", lambda _provider_id: [])
+
+    response = await provider_routes.list_providers()
+
+    assert len(response.all) == 1
+    assert response.all[0].configured is False
+    assert response.connected == ["missing-credentials"]

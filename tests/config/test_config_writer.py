@@ -467,6 +467,105 @@ class TestFallbackProviderConfigWriter:
 
         assert ConfigWriter.get_fallback_providers() == fallbacks
 
+    def test_set_fallback_providers_reads_jsonc_without_losing_other_config(
+        self, temp_project
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        jsonc_path = temp_project / "flocks.jsonc"
+        jsonc_path.write_text(
+            """
+            {
+              // Keep the provider configuration when updating fallbacks.
+              "provider": {
+                "anthropic": {
+                  "models": {"claude-sonnet": {}}
+                }
+              },
+              "smallModel": "anthropic/claude-haiku"
+            }
+            """,
+            encoding="utf-8",
+        )
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "anthropic", "model_id": "claude-sonnet"},
+        ])
+
+        updated = json.loads(jsonc_path.read_text(encoding="utf-8"))
+        assert "anthropic" in updated["provider"]
+        assert updated["smallModel"] == "anthropic/claude-haiku"
+        assert updated["fallback_providers"] == [
+            {"provider_id": "anthropic", "model_id": "claude-sonnet"},
+        ]
+
+    def test_set_fallback_providers_does_not_write_when_config_is_invalid(
+        self, temp_project
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        config_path = temp_project / "flocks.json"
+        invalid_content = '{"provider": {'
+        config_path.write_text(invalid_content, encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Unable to read config file"):
+            ConfigWriter.set_fallback_providers([
+                {"provider_id": "anthropic", "model_id": "claude-sonnet"},
+            ])
+
+        assert config_path.read_text(encoding="utf-8") == invalid_content
+
+    def test_detects_inline_fallback_override(
+        self, temp_project, monkeypatch
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv(
+            "FLOCKS_CONFIG_CONTENT",
+            json.dumps({"fallback_providers": []}),
+        )
+        Config._global_config = None
+
+        assert (
+            ConfigWriter.get_fallback_override_source()
+            == "FLOCKS_CONFIG_CONTENT"
+        )
+
+    def test_detects_custom_config_fallback_override(self, temp_project, tmp_path):
+        from flocks.config.config_writer import ConfigWriter
+
+        custom_path = tmp_path / "custom.jsonc"
+        custom_path.write_text(
+            '{"fallback_providers": [/* configured elsewhere */ '
+            '{"provider_id": "openai", "model_id": "gpt-4o"}]}',
+            encoding="utf-8",
+        )
+        Config.get_global().config_path = str(custom_path)
+
+        assert ConfigWriter.get_fallback_override_source() == "FLOCKS_CONFIG"
+
+    def test_detects_config_json_fallback_override(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        (temp_project / "config.json").write_text(
+            json.dumps({"fallback_providers": []}),
+            encoding="utf-8",
+        )
+
+        assert ConfigWriter.get_fallback_override_source() == "config.json"
+
+    def test_higher_priority_config_without_fallback_does_not_block_save(
+        self, temp_project
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        (temp_project / "config.json").write_text(
+            json.dumps({"smallModel": "anthropic/claude-haiku"}),
+            encoding="utf-8",
+        )
+
+        assert ConfigWriter.get_fallback_override_source() is None
+
     def test_set_fallback_providers_preserves_small_model(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
 

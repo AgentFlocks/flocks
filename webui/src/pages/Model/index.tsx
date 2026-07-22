@@ -134,6 +134,8 @@ export default function ModelPage() {
   const [defaultModel, setDefaultModel] = useState<{ provider_id: string; model_id: string } | null>(null);
   const [showDefaultModelDialog, setShowDefaultModelDialog] = useState(false);
   const [fallbackModels, setFallbackModels] = useState<FallbackModelRef[]>([]);
+  const [fallbackModelsLoading, setFallbackModelsLoading] = useState(true);
+  const [fallbackModelsLoadError, setFallbackModelsLoadError] = useState<string | null>(null);
   const [availableRoutingModels, setAvailableRoutingModels] = useState<ModelDefinitionV2[]>([]);
   const [showFallbackModelsDialog, setShowFallbackModelsDialog] = useState(false);
 
@@ -158,18 +160,34 @@ export default function ModelPage() {
     reconnect: { maxRetries: 5, initialDelay: 2000 },
   });
 
+  const loadFallbackModels = useCallback(async (): Promise<boolean> => {
+    setFallbackModelsLoading(true);
+    setFallbackModelsLoadError(null);
+    try {
+      const response = await defaultModelAPI.getFallbacks();
+      setFallbackModels(response.data.fallback_providers || []);
+      return true;
+    } catch (loadError) {
+      setFallbackModelsLoadError(
+        loadError instanceof Error ? loadError.message : 'Failed to load fallback models',
+      );
+      return false;
+    } finally {
+      setFallbackModelsLoading(false);
+    }
+  }, []);
+
   // Fetch dashboard data on mount and validate default model
   useEffect(() => {
     usageAPI.getSummary().then(r => setUsageStats(r.data)).catch(() => {});
+    void loadFallbackModels();
 
     Promise.all([
       defaultModelAPI.getResolved().catch(() => ({ data: null })),
-      modelV2API.listDefinitions({ enabled_only: true }).catch(() => ({ data: { models: [] } })),
-      defaultModelAPI.getFallbacks().catch(() => ({ data: { fallback_providers: [] } })),
-    ]).then(([defaultRes, modelsRes, fallbackRes]) => {
+      modelV2API.listDefinitions({ enabled_only: true }),
+    ]).then(([defaultRes, modelsRes]) => {
       const availableModels = modelsRes.data.models || [];
       setAvailableRoutingModels(availableModels);
-      setFallbackModels(fallbackRes.data.fallback_providers || []);
 
       const dm = defaultRes.data;
       if (!dm) return;
@@ -186,8 +204,10 @@ export default function ModelPage() {
         defaultModelAPI.delete('llm').catch(() => {});
         setDefaultModel(null);
       }
+    }).catch(() => {
+      // Keep the current default model when model definitions cannot be loaded.
     });
-  }, []);
+  }, [loadFallbackModels]);
 
   // Auto-test all configured providers on initial load, with cache (connected: 1h, failed: 5min)
   const [autoTested, setAutoTested] = useState(false);
@@ -665,8 +685,11 @@ export default function ModelPage() {
       {showFallbackModelsDialog && (
         <FallbackModelsDialog
           current={fallbackModels}
+          currentLoading={fallbackModelsLoading}
+          currentLoadError={fallbackModelsLoadError}
           primary={defaultModel}
           providers={providers}
+          onRetryCurrent={loadFallbackModels}
           onClose={() => setShowFallbackModelsDialog(false)}
           onSaved={(models, availableModels) => {
             setFallbackModels(models);
@@ -3084,14 +3107,20 @@ function SetDefaultModelDialog({
 
 function FallbackModelsDialog({
   current,
+  currentLoading,
+  currentLoadError,
   primary,
   providers,
+  onRetryCurrent,
   onClose,
   onSaved,
 }: {
   current: FallbackModelRef[];
+  currentLoading: boolean;
+  currentLoadError: string | null;
   primary: { provider_id: string; model_id: string } | null;
   providers: EnrichedProvider[];
+  onRetryCurrent: () => Promise<boolean>;
   onClose: () => void;
   onSaved: (models: FallbackModelRef[], availableModels: ModelDefinitionV2[]) => void;
 }) {
@@ -3100,15 +3129,42 @@ function FallbackModelsDialog({
   const [draft, setDraft] = useState<FallbackModelRef[]>(() => current.map(model => ({ ...model })));
   const [models, setModels] = useState<ModelDefinitionV2[]>([]);
   const [loading, setLoading] = useState(true);
+  const [modelsLoadError, setModelsLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [adding, setAdding] = useState(false);
 
-  useEffect(() => {
-    modelV2API.listDefinitions({ enabled_only: true })
-      .then(response => setModels(response.data.models || []))
-      .catch(() => setModels([]))
-      .finally(() => setLoading(false));
+  const loadModels = useCallback(async (): Promise<boolean> => {
+    setLoading(true);
+    setModelsLoadError(null);
+    try {
+      const response = await modelV2API.listDefinitions({ enabled_only: true });
+      setModels(response.data.models || []);
+      return true;
+    } catch (loadError) {
+      setModelsLoadError(
+        loadError instanceof Error ? loadError.message : 'Failed to load model definitions',
+      );
+      return false;
+    } finally {
+      setLoading(false);
+    }
   }, []);
+
+  useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
+
+  useEffect(() => {
+    if (currentLoading || currentLoadError) return;
+    setDraft(current.map(model => ({ ...model })));
+  }, [current, currentLoadError, currentLoading]);
+
+  const handleRetryLoad = useCallback(async () => {
+    await Promise.all([
+      currentLoadError ? onRetryCurrent() : Promise.resolve(true),
+      modelsLoadError ? loadModels() : Promise.resolve(true),
+    ]);
+  }, [currentLoadError, loadModels, modelsLoadError, onRetryCurrent]);
 
   const configuredProviderIds = useMemo(
     () => new Set(providers.filter(provider => provider.configured).map(provider => provider.id)),
@@ -3159,6 +3215,8 @@ function FallbackModelsDialog({
       .sort((a, b) => a.providerName.localeCompare(b.providerName));
   }, [draftKeys, primary, providerNames, validModels]);
   const dirty = JSON.stringify(draft) !== JSON.stringify(current);
+  const loadFailed = Boolean(currentLoadError || modelsLoadError);
+  const routingDataLoading = currentLoading || loading;
   const hasInvalidDraft = useMemo(
     () => draft.some((fallback) => {
       const key = `${fallback.provider_id}\u0000${fallback.model_id}`;
@@ -3199,7 +3257,7 @@ function FallbackModelsDialog({
   };
 
   const handleSave = async () => {
-    if (!dirty || saving || hasInvalidDraft) return;
+    if (!dirty || saving || routingDataLoading || loadFailed || hasInvalidDraft) return;
     setSaving(true);
     try {
       await defaultModelAPI.setFallbacks(draft);
@@ -3245,9 +3303,22 @@ function FallbackModelsDialog({
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
-          {loading ? (
+          {routingDataLoading ? (
             <div className="flex justify-center py-10">
               <Loader2 className="h-6 w-6 animate-spin text-gray-400" />
+            </div>
+          ) : loadFailed ? (
+            <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-6 text-center">
+              <AlertCircle className="mx-auto mb-2 h-6 w-6 text-amber-500" />
+              <p className="text-sm font-medium text-amber-800">{t('fallbacks.loadFailed')}</p>
+              <p className="mt-1 text-xs text-amber-700">{currentLoadError || modelsLoadError}</p>
+              <button
+                type="button"
+                onClick={() => void handleRetryLoad()}
+                className="mt-3 rounded-md border border-amber-300 bg-white px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100"
+              >
+                {t('fallbacks.retry')}
+              </button>
             </div>
           ) : (
             <div className="space-y-3">
@@ -3384,7 +3455,7 @@ function FallbackModelsDialog({
           <button
             type="button"
             onClick={() => void handleSave()}
-            disabled={!dirty || saving || loading || hasInvalidDraft}
+            disabled={!dirty || saving || routingDataLoading || loadFailed || hasInvalidDraft}
             className="flex items-center gap-1.5 rounded-lg bg-slate-800 px-4 py-2 text-sm font-medium text-white hover:bg-slate-900 disabled:cursor-not-allowed disabled:opacity-50"
           >
             {saving && <Loader2 className="h-4 w-4 animate-spin" />}

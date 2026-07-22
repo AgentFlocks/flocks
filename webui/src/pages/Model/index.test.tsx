@@ -463,6 +463,45 @@ describe('ModelPage fallback model editor', () => {
     });
   });
 
+  it('blocks fallback edits until a failed fallback load is retried', async () => {
+    const user = userEvent.setup();
+    mocks.getFallbacks
+      .mockRejectedValueOnce(new Error('fallback request failed'))
+      .mockResolvedValueOnce({
+        data: {
+          fallback_providers: [{ provider_id: 'minimax', model_id: 'minimax-m3' }],
+        },
+      });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    expect(await screen.findByText('fallbacks.loadFailed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+    expect(mocks.setFallbacks).not.toHaveBeenCalled();
+
+    await user.click(screen.getByRole('button', { name: 'fallbacks.retry' }));
+    expect((await screen.findAllByText('MiniMax M3')).length).toBeGreaterThan(0);
+    expect(mocks.getFallbacks).toHaveBeenCalledTimes(2);
+  });
+
+  it('blocks fallback edits until model definitions load successfully', async () => {
+    const user = userEvent.setup();
+    mocks.listDefinitions
+      .mockResolvedValueOnce({ data: { models, total: models.length } })
+      .mockResolvedValueOnce({ data: { models, total: models.length } })
+      .mockRejectedValueOnce(new Error('model definitions failed'))
+      .mockResolvedValueOnce({ data: { models, total: models.length } });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    expect(await screen.findByText('fallbacks.loadFailed')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+
+    await user.click(screen.getByRole('button', { name: 'fallbacks.retry' }));
+    await user.click(await screen.findByRole('button', { name: 'fallbacks.add' }));
+    expect((await screen.findAllByRole('button', { name: /MiniMax M3/i })).length).toBeGreaterThan(1);
+  });
+
   it('requires invalid entries to be removed before saving', async () => {
     const user = userEvent.setup();
     mocks.getFallbacks.mockResolvedValue({

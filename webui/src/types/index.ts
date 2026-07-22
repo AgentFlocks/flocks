@@ -434,10 +434,11 @@ export interface ProviderInfoV2 {
   source: string;
   env: string[];
   key: string | null;
+  /** True only when the runtime has the credentials required by this provider. */
+  configured?: boolean;
   options: Record<string, any>;
   models: Record<string, ProviderModelInfo>;
   // Derived on frontend
-  configured?: boolean;
   modelCount?: number;
   category?: ProviderCategory;
 }
