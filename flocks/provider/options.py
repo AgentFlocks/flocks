@@ -272,9 +272,9 @@ def _build_generic_chat_extra_body(
         }
 
     if "kimi-k2.7" in model_lower:
-        # K2.7 is always a thinking model. Moonshot explicitly recommends
-        # omitting the K2.x thinking switch for this model.
-        return None
+        # K2.7 cannot disable thinking. Send the enabled form explicitly
+        # because OpenAI-compatible gateways may not apply Moonshot's default.
+        return {"thinking": {"type": "enabled"}}
 
     if "kimi" in model_lower:
         return {
@@ -420,9 +420,9 @@ def build_provider_options(
                     DEFAULT_KIMI_K3_REASONING_EFFORT,
                 )
         elif "kimi-k2.7" in model_lower:
-            # K2.7 rejects disabled thinking and the official API recommends
-            # omitting the switch. Preserve unrelated configured fields only.
-            extra_body.pop("thinking", None)
+            # K2.7 rejects disabled thinking. Normalize configured values so
+            # direct and gateway-backed endpoints always request reasoning.
+            extra_body["thinking"] = {"type": "enabled"}
         if extra_body:
             options["extra_body"] = extra_body
             log.debug("options.thinking_params.resolved", {

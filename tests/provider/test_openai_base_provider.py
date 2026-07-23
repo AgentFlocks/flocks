@@ -629,7 +629,7 @@ class TestOpenAIBaseProviderTemperature:
         ("model_id", "extra_body"),
         [
             ("kimi-k2.6", {"thinking": {"type": "enabled"}}),
-            ("kimi-k2.7-code", {}),
+            ("kimi-k2.7-code", {"thinking": {"type": "enabled"}}),
             ("kimi-k3", {"reasoning_effort": "max"}),
         ],
     )
