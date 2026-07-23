@@ -38,3 +38,37 @@ def test_get_chat_serializes_agent_projection() -> None:
         },
     ]
     assert response["events"][0]["data"]["content"] == "hello"
+
+
+def test_list_chats_retains_existing_sessions() -> None:
+    manager = ChatManager()
+    older = ChatSession(
+        id="chat-older",
+        message="Review the authentication flow",
+        targets=[],
+        scan_mode="standard",
+        coordinator=AgentCoordinator(),
+        live_view=TuiLiveView(),
+        updated_at=10,
+    )
+    newer = ChatSession(
+        id="chat-newer",
+        message="Map the API attack surface",
+        targets=["https://example.test"],
+        scan_mode="quick",
+        coordinator=AgentCoordinator(),
+        live_view=TuiLiveView(),
+        updated_at=20,
+    )
+    manager._sessions = {older.id: older, newer.id: newer}
+
+    try:
+        response = manager.list_chats()
+        assert set(manager._sessions) == {"chat-older", "chat-newer"}
+    finally:
+        manager._sessions.clear()
+        manager.close()
+
+    assert [chat["id"] for chat in response["chats"]] == ["chat-newer", "chat-older"]
+    assert response["chats"][0]["title"] == "Map the API attack surface"
+    assert response["chats"][0]["targets"] == ["https://example.test"]

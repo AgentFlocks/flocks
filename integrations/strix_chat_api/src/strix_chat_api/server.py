@@ -53,6 +53,9 @@ class ChatApiHandler(BaseHTTPRequestHandler):
             self._json(HTTPStatus.OK, {"status": "ok"})
             return
         chat_id, action = chat_route(parsed.path)
+        if chat_id is None and action == "create":
+            self._json(HTTPStatus.OK, self.server.manager.list_chats())
+            return
         if chat_id is None or action is not None:
             self._json(HTTPStatus.NOT_FOUND, {"detail": "Not found"})
             return

@@ -42,6 +42,9 @@ class StrixChatClient:
     async def start_chat(self, payload: dict[str, Any]) -> dict[str, Any]:
         return await self._request("POST", "/api/v1/chat", json=payload)
 
+    async def list_chats(self) -> dict[str, Any]:
+        return await self._request("GET", "/api/v1/chat")
+
     async def get_chat(self, chat_id: str, *, after: int = 0) -> dict[str, Any]:
         return await self._request(
             "GET",

@@ -54,6 +54,7 @@ class ChatSession:
     coordinator: AgentCoordinator
     live_view: TuiLiveView
     created_at: float = field(default_factory=time.time)
+    updated_at: float = field(default_factory=time.time)
     error: str | None = None
     task: concurrent.futures.Future[Any] | None = None
     event_lock: threading.RLock = field(default_factory=threading.RLock)
@@ -182,6 +183,7 @@ class ChatManager:
                 session = self._sessions.get(chat_id)
             if session is not None:
                 session.error = str(exc) or exc.__class__.__name__
+                session.updated_at = time.time()
 
     def send_message(self, chat_id: str, message: str) -> dict[str, Any]:
         """Append a user turn to the root Strix SDK session."""
@@ -206,7 +208,16 @@ class ChatManager:
             raise ChatNotReadyError("Strix agent is not accepting messages")
         with session.event_lock:
             session.live_view.record_user_message(root_id, text)
+            session.updated_at = time.time()
         return self.get_chat(chat_id)
+
+    def list_chats(self) -> dict[str, Any]:
+        """List retained conversations without destroying their agent sessions."""
+        with self._sessions_lock:
+            sessions = list(self._sessions.values())
+        chats = [_chat_summary(session) for session in sessions]
+        chats.sort(key=lambda item: item["updated_at"], reverse=True)
+        return {"chats": chats}
 
     def get_chat(self, chat_id: str, *, after: int = 0) -> dict[str, Any]:
         """Return JSON-safe session metadata and projected SDK events."""
@@ -221,6 +232,7 @@ class ChatManager:
             "status": status,
             "root_agent_id": root_id,
             "created_at": session.created_at,
+            "updated_at": session.updated_at,
             "targets": list(session.targets),
             "scan_mode": session.scan_mode,
             "error": session.error,
@@ -347,3 +359,20 @@ def _agent_projection(coordinator: AgentCoordinator) -> list[dict[str, Any]]:
         }
         for agent_id, status in list(coordinator.statuses.items())
     ]
+
+
+def _chat_summary(session: ChatSession) -> dict[str, Any]:
+    root_id = _root_agent_id(session.coordinator)
+    title = " ".join(session.message.split())
+    if len(title) > 80:
+        title = f"{title[:77]}..."
+    return {
+        "id": session.id,
+        "title": title,
+        "status": _chat_status(session, root_id),
+        "created_at": session.created_at,
+        "updated_at": session.updated_at,
+        "targets": list(session.targets),
+        "scan_mode": session.scan_mode,
+        "error": session.error,
+    }

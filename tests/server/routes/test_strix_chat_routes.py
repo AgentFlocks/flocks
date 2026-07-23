@@ -49,6 +49,24 @@ def test_start_chat_rejects_invalid_scan_mode() -> None:
     assert response.status_code == 422
 
 
+def test_list_chats_proxies_retained_sessions() -> None:
+    sidecar = AsyncMock()
+    sidecar.list_chats.return_value = {
+        "chats": [
+            {
+                "id": "chat-abc",
+                "title": "Map the attack surface",
+                "status": "waiting",
+            },
+        ],
+    }
+    with patch("flocks.server.routes.strix_chat._client", return_value=sidecar):
+        response = _client().get("/api/integrations/strix/chat")
+    assert response.status_code == 200
+    assert response.json()["chats"][0]["id"] == "chat-abc"
+    sidecar.list_chats.assert_awaited_once_with()
+
+
 def test_get_chat_forwards_incremental_cursor() -> None:
     sidecar = AsyncMock()
     sidecar.get_chat.return_value = {

@@ -48,6 +48,11 @@ async def start_strix_chat(request: StartStrixChatRequest) -> dict[str, Any]:
     )
 
 
+@router.get("")
+async def list_strix_chats() -> dict[str, Any]:
+    return await _call(_client().list_chats())
+
+
 @router.get("/{chat_id}")
 async def get_strix_chat(
     chat_id: str,

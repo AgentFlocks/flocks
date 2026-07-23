@@ -52,6 +52,12 @@ Read projected chat and tool events:
 curl http://127.0.0.1:8486/api/v1/chat/<chat_id>?after=0
 ```
 
+List retained chats:
+
+```bash
+curl http://127.0.0.1:8486/api/v1/chat
+```
+
 Delete the chat to stop its agent loop and remove the live sandbox:
 
 ```bash
