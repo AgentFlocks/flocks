@@ -145,6 +145,7 @@ class AgentInfo(BaseModel):
 
     model: Optional[AgentModel] = None
     prompt: Optional[str] = None
+    prompt_mode: Literal["append", "replace"] = Field("append", alias="promptMode")
     options: Dict[str, Any] = Field(default_factory=dict)
     steps: Optional[int] = Field(default=None, description="Max steps")
 

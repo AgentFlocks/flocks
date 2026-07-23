@@ -387,6 +387,7 @@ class Agent:
 
                 if value.prompt:
                     item.prompt = value.prompt
+                item.prompt_mode = value.prompt_mode
                 if value.prompt_append and item.prompt:
                     item.prompt = item.prompt + "\n\n" + value.prompt_append
                 if value.description:

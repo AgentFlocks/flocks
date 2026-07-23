@@ -7,7 +7,7 @@ Based on Flocks' ported src/session/index.ts
 
 import contextvars
 import re
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Literal, Optional
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -133,6 +133,19 @@ class SessionInfo(BaseModel):
 
     # Session category: "user" for human-initiated conversations, "task" for task-triggered sessions
     category: str = Field("user", description="Session category: user or task")
+
+    # Runtime mode. Pentest sessions keep their structured configuration and
+    # canonical state outside the transcript so child Sessions can inherit it.
+    session_mode: Literal["chat", "pentest"] = Field("chat", alias="mode")
+    pentest_run_id: Optional[str] = Field(None, alias="pentestRunID")
+    pentest_root: Optional[str] = Field(None, alias="pentestRoot")
+    pentest_role: Optional[
+        Literal["orchestrator", "recon", "executor", "verifier"]
+    ] = Field(
+        None,
+        alias="pentestRole",
+    )
+    pentest_config: Optional[Dict[str, Any]] = Field(None, alias="pentest")
 
     # Legacy fields for backwards compatibility
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -552,6 +565,11 @@ class Session:
             "parent_id": "parentID",
             "owner_user_id": "ownerUserID",
             "owner_username": "ownerUsername",
+            "session_mode": "mode",
+            "pentest_run_id": "pentestRunID",
+            "pentest_root": "pentestRoot",
+            "pentest_role": "pentestRole",
+            "pentest_config": "pentest",
         }
         
         # Update fields.

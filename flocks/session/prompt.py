@@ -180,6 +180,22 @@ class SystemPrompt:
         return []
     
     @classmethod
+    def provider_guidance(cls, model_id: Optional[str]) -> str:
+        """Return model-specific guidance without the default Flocks identity."""
+        model_lower = (model_id or "").lower()
+        if "minimax" in model_lower:
+            return get_prompt_minimax()
+        if "gpt-5" in model_lower:
+            return get_prompt_codex()
+        if "gpt-" in model_lower or "o1" in model_lower or "o3" in model_lower:
+            return get_prompt_beast()
+        if "gemini" in model_lower:
+            return get_prompt_gemini()
+        if "claude" in model_lower:
+            return get_prompt_anthropic()
+        return get_prompt_general()
+
+    @classmethod
     def provider(cls, model_id: Optional[str]) -> List[str]:
         """
         Get Block 0: stable identity + model-specific guidance.
@@ -194,40 +210,7 @@ class SystemPrompt:
         Returns:
             List of prompt strings
         """
-        model_lower = (model_id or "").lower()
-
-        if "minimax" in model_lower:
-            prompt = get_prompt_minimax()
-            guidance = prompt if prompt else ""
-            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
-
-        # GPT-5: use codex_header.txt
-        if "gpt-5" in model_lower:
-            prompt = get_prompt_codex()
-            guidance = prompt if prompt else ""
-            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
-
-        # GPT/o1/o3: use beast.txt
-        if "gpt-" in model_lower or "o1" in model_lower or "o3" in model_lower:
-            prompt = get_prompt_beast()
-            guidance = prompt if prompt else ""
-            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
-
-        # Gemini: use gemini.txt
-        if "gemini" in model_lower:
-            prompt = get_prompt_gemini()
-            guidance = prompt if prompt else ""
-            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
-
-        # Claude: use anthropic.txt
-        if "claude" in model_lower:
-            prompt = get_prompt_anthropic()
-            guidance = prompt if prompt else ""
-            return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
-
-        # Other models: use general.txt
-        prompt = get_prompt_general()
-        guidance = prompt if prompt else ""
+        guidance = cls.provider_guidance(model_id)
         return [_compose_provider_block(PROMPT_DEFAULT, guidance)]
     
     @classmethod
@@ -1097,9 +1080,35 @@ class SessionPrompt:
         layers.
         """
         vcs = "git" if session_directory else None
-        if await cls._is_builtin_system_subagent_session(
-            session_id=session_id,
-            agent_name=agent_name,
+        prompt_mode = "append"
+        session = None
+        try:
+            from flocks.agent.registry import Agent
+            from flocks.pentest.prompts import prompt_for_session
+            from flocks.session.session import Session
+
+            session = await Session.get_by_id(session_id)
+            agent = await Agent.get(agent_name)
+            prompt_mode = getattr(agent, "prompt_mode", "append") if agent else "append"
+            if session is not None:
+                agent_prompt, session_mode = prompt_for_session(session, agent_prompt)
+                if session_mode == "replace":
+                    prompt_mode = "replace"
+        except Exception as exc:
+            log.debug(
+                "prompt.mode_resolution_failed",
+                {"session_id": session_id, "agent_name": agent_name, "error": str(exc)},
+            )
+        if prompt_mode == "replace" and not cls._normalize_prompt_text(agent_prompt):
+            prompt_mode = "append"
+        is_pentest = getattr(session, "session_mode", "chat") == "pentest"
+
+        if (
+            not is_pentest
+            and await cls._is_builtin_system_subagent_session(
+                session_id=session_id,
+                agent_name=agent_name,
+            )
         ):
             prompts = await cls._build_subagent_minimal_prompts(
                 session_directory=session_directory,
@@ -1120,13 +1129,15 @@ class SessionPrompt:
         memory_guidance = cls._build_memory_guidance_prompt(
             normalized_tool_names,
             memory_bootstrap_data,
-        )
+        ) if not is_pentest else ""
         memory_snapshot = cls._join_prompt_parts(cls._build_memory_bootstrap_prompts(
             session_id=session_id,
             memory_bootstrap_data=memory_bootstrap_data,
-        ))
+        )) if not is_pentest else ""
 
         async def build_custom_context() -> Optional[str]:
+            if is_pentest:
+                return None
             return cls._join_prompt_parts(
                 await SystemPrompt.custom(directory=session_directory),
             )
@@ -1136,8 +1147,12 @@ class SessionPrompt:
                 static_cache=static_cache,
                 name="provider_identity",
                 cache_scope="global",
-                digest_inputs={"model_id": model_id},
-                builder=lambda: cls._join_prompt_parts(SystemPrompt.provider(model_id)),
+                digest_inputs={"model_id": model_id, "prompt_mode": prompt_mode},
+                builder=lambda: (
+                    SystemPrompt.provider_guidance(model_id)
+                    if prompt_mode == "replace"
+                    else cls._join_prompt_parts(SystemPrompt.provider(model_id))
+                ),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
