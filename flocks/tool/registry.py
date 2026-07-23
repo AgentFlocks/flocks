@@ -1620,7 +1620,7 @@ class ToolRegistry:
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # pentest/ — canonical scope, evidence, finding, and report lifecycle
-    ("flocks.tool.pentest", ["findings", "proxy"]),
+            ("flocks.tool.pentest", ["findings", "proxy"]),
             # device/ — security device asset context and status probes
             ("flocks.tool.device", ["manage_tool"]),
             # channel/ — IM platform messaging
