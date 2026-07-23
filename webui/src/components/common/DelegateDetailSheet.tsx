@@ -178,7 +178,15 @@ export default function DelegateDetailSheet({
             sessionId={sessionId}
             live
             hideInput
-            display={{ compact: false, showTimestamp: true }}
+            display={{
+              compact: false,
+              pageCanvas: true,
+              showTimestamp: true,
+              collapseIntermediateSteps: true,
+              processGroupsDefaultOpen: false,
+              processGroupsOpenWhileActive: true,
+            }}
+            agentName={agentName}
             className="h-full"
             emptyText={t('delegate.emptyChat')}
           />
