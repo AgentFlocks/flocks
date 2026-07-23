@@ -1,5 +1,5 @@
 import React from 'react';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -30,6 +30,9 @@ vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
       if (key === 'status.models') return `${params?.count ?? 0} models`;
+      if (key === 'modelSelection.info') {
+        return 'modelSelection.info';
+      }
       const translations: Record<string, string> = {
         pageTitle: 'Models',
         pageDescription: 'Manage providers',
@@ -366,5 +369,109 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
       api_key: 'sk-replacement-secret',
     }));
+  });
+});
+
+describe('ModelPage default model selector', () => {
+  const providers = [
+    {
+      id: 'openai',
+      name: 'OpenAI Gateway',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+    {
+      id: 'minimax',
+      name: 'MiniMax Cloud',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+  ];
+  const models = [
+    {
+      id: 'gpt-4o',
+      name: 'GPT-4o',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'minimax-m3',
+      name: 'MiniMax Vision M3',
+      provider_id: 'minimax',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: {
+        features: [],
+        supports_streaming: true,
+        supports_tools: true,
+        supports_vision: false,
+        modalities: { input: ['text', 'image'], output: ['text'] },
+      },
+      limits: { context_window: 200000, max_output_tokens: 8192 },
+      pricing: { input: 1.25, output: 5, unit: 1000000, currency: 'USD' },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockResolvedValue({ data: { success: true, latency_ms: 10 } });
+  });
+
+  it('shows provider groups, model identity, vision, and details', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.setDefaultModel'));
+    const heading = await screen.findByRole('heading', { name: 'dashboard.setDefaultModel' });
+    const selector = within(heading.parentElement?.parentElement as HTMLElement);
+
+    expect(selector.getByText('MiniMax Cloud')).toBeInTheDocument();
+    expect(selector.getByText('MiniMax Vision M3')).toBeInTheDocument();
+    expect(selector.getByText('minimax-m3')).toBeInTheDocument();
+    expect(selector.getByText('form.vision')).toBeInTheDocument();
+    expect(selector.getByRole('button', {
+      name: 'modelSelection.info GPT-4o',
+    })).toBeInTheDocument();
+
+    await user.click(selector.getByRole('button', {
+      name: 'modelSelection.info MiniMax Vision M3',
+    }));
+
+    const tooltip = await screen.findByRole('tooltip');
+    expect(within(tooltip).getByText('form.modelId')).toBeInTheDocument();
+    expect(within(tooltip).getByText('form.contextWindow')).toBeInTheDocument();
+    expect(within(tooltip).getByText('form.pricing')).toBeInTheDocument();
+    expect(tooltip).toHaveTextContent('minimax-m3');
+    expect(tooltip).toHaveTextContent(/200(?:K|,?000)/);
+    expect(tooltip).toHaveTextContent(/1\.25/);
+    expect(tooltip).toHaveTextContent(/\b5(?:\.0+)?\b/);
+    expect(tooltip).toHaveTextContent(/USD|\$/);
   });
 });

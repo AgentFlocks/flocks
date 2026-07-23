@@ -4,7 +4,7 @@ Default model management API routes
 Provides endpoints to get/set default models per model type.
 """
 
-from typing import List, Optional
+from typing import List
 
 from fastapi import APIRouter, HTTPException, status
 from pydantic import BaseModel, Field
@@ -58,6 +58,7 @@ async def get_all_defaults() -> DefaultModelListResponse:
 async def get_resolved_default_model():
     """Return the resolved default LLM model (provider_id + model_id)."""
     from flocks.config.config import Config
+
     result = await Config.resolve_default_llm()
     if not result:
         raise HTTPException(

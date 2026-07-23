@@ -148,6 +148,8 @@ export interface SessionChatProps {
   agentName?: string;
   /** Model override to include in prompt_async requests */
   model?: { providerID: string; modelID: string } | null;
+  /** Persist Auto failover before sending through an existing session. */
+  modelAuto?: boolean;
   /** Agents available for one-turn @mention routing. */
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
@@ -1490,6 +1492,7 @@ export default function SessionChat({
   initialDisplayText,
   agentName,
   model,
+  modelAuto = false,
   display,
   welcomeContent,
   conversationBottomSlot,
@@ -1520,6 +1523,18 @@ export default function SessionChat({
   const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
   const effectiveEmptyText = emptyText ?? t('chat.emptyText');
+  const autoModelSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!modelAuto) autoModelSessionRef.current = null;
+  }, [modelAuto]);
+  const ensureAutoModelSession = useCallback(async () => {
+    if (!sessionId || !modelAuto || autoModelSessionRef.current === sessionId) return;
+    await sessionApi.update(sessionId, {
+      model_auto: true,
+      model_pinned: false,
+    });
+    autoModelSessionRef.current = sessionId;
+  }, [modelAuto, sessionId]);
   // Restore any persisted draft on first mount so navigating away (e.g.
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
@@ -1741,6 +1756,7 @@ export default function SessionChat({
     addMessage,
     updateMessage,
     updateMessagePart,
+    removeMessage,
     replaceMessageText,
     markMessageStopped,
     truncateAfterMessage,
@@ -1905,6 +1921,17 @@ export default function SessionChat({
           }
           return;
         }
+        case 'message-removed': {
+          const removedMessage = messagesRef.current.find((message) => message.id === action.messageID);
+          removedMessage?.parts.forEach((part) => {
+            if (part.id) activeToolPartIdsRef.current.delete(part.id);
+          });
+          if (abortedMessageIdRef.current === action.messageID) {
+            abortedMessageIdRef.current = null;
+          }
+          removeMessage(action.messageID);
+          return;
+        }
         case 'message-part-updated': {
           const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
           if (part.id) {
@@ -1982,6 +2009,7 @@ export default function SessionChat({
       sessionId,
       updateMessage,
       updateMessagePart,
+      removeMessage,
       refetch,
       refreshContextUsage,
       applyContextUsagePushSnapshot,
@@ -2483,6 +2511,7 @@ export default function SessionChat({
     } as Message);
 
     try {
+      await ensureAutoModelSession();
       await client.post(`/api/session/${sessionId}/command`, {
         command,
         arguments: args,
@@ -2517,6 +2546,7 @@ export default function SessionChat({
     options?: PromptDisplayOptions,
   ) => {
     if (!sessionId) return;
+    await ensureAutoModelSession();
     const effectiveAgent = agentOverride || agentName;
     const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
@@ -2578,6 +2608,7 @@ export default function SessionChat({
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
     try {
+      await ensureAutoModelSession();
       await enqueuePrompt({
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),

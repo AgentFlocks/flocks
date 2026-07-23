@@ -677,6 +677,9 @@ export function useSessionMessages(sessionId?: string) {
     updateMessagePart: (partInfo: any, delta?: string) => {
       setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
     },
+    removeMessage: (messageId: string) => {
+      setMessages(prev => prev.filter((message) => message.id !== messageId));
+    },
     replaceMessageText: (messageId: string, partId: string, text: string) => {
       setMessages(prev => prev.map((message) => {
         if (message.id !== messageId) return message;
