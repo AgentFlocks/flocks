@@ -78,3 +78,17 @@ def test_get_chat_forwards_incremental_cursor() -> None:
         response = _client().get("/api/integrations/strix/chat/chat-abc?after=41")
     assert response.status_code == 200
     sidecar.get_chat.assert_awaited_once_with("chat-abc", after=41)
+
+
+def test_stop_chat_retains_session() -> None:
+    sidecar = AsyncMock()
+    sidecar.stop_chat.return_value = {
+        "id": "chat-abc",
+        "status": "stopped",
+        "events": [],
+    }
+    with patch("flocks.server.routes.strix_chat._client", return_value=sidecar):
+        response = _client().post("/api/integrations/strix/chat/chat-abc/stop")
+    assert response.status_code == 200
+    assert response.json()["status"] == "stopped"
+    sidecar.stop_chat.assert_awaited_once_with("chat-abc")

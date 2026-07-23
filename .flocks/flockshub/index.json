@@ -14753,10 +14753,9 @@
       "name": "Penetration Testing Workspace",
       "description": "A native Strix-powered conversational workspace for authorized penetration testing.",
       "descriptionCn": "由本地 Strix Agent 原生驱动的渗透测试对话工作区。",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "category": "workflow-automation",
       "tags": [
-        "penetration-testing",
         "web-security",
         "vulnerability"
       ],
@@ -14774,12 +14773,11 @@
       "type": "component",
       "name": "Penetration Testing Workspace",
       "nameCn": "渗透测试工作区",
-      "description": "Composite installer for the native Strix-powered penetration testing workspace.",
-      "descriptionCn": "本地 Strix Agent 渗透测试工作区组件安装器。",
-      "version": "1.0.0",
+      "description": "Installs the Strix workspace and bundled local Chat API source.",
+      "descriptionCn": "安装 Strix 渗透测试工作区及本地 Chat API 源码。",
+      "version": "1.1.0",
       "category": "workflow-automation",
       "tags": [
-        "penetration-testing",
         "web-security",
         "vulnerability"
       ],

@@ -77,6 +77,15 @@ async def send_strix_message(
     return await _call(operation)
 
 
+@router.post("/{chat_id}/stop")
+async def stop_strix_chat(chat_id: str) -> dict[str, Any]:
+    try:
+        operation = _client().stop_chat(chat_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return await _call(operation)
+
+
 @router.delete("/{chat_id}")
 async def delete_strix_chat(chat_id: str) -> dict[str, Any]:
     try:

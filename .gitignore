@@ -134,3 +134,6 @@ changelog.md
 tests/integration_ssh_*.py
 .cursor
 .codex/
+
+# Legacy local Strix sidecar runtime data (source now ships with the Hub component)
+/integrations/strix_chat_api/

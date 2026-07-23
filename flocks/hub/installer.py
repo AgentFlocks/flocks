@@ -441,6 +441,20 @@ async def _install_component_refs(
             existing_path = local.infer_local_install(ref.type, ref.id)
             if existing_path is not None:
                 existing_record = local.get_record(ref.type, ref.id)
+                if existing_record is not None and existing_record.installedBy == component_key:
+                    item.status = "installing"
+                    item.message = "Updating component-managed dependency"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    await install_plugin(
+                        ref.type,
+                        ref.id,
+                        scope=scope,
+                        installed_by=component_key,
+                    )
+                    item.status = "installed"
+                    item.message = "Updated"
+                    await _emit_component_progress(progress, manifest, "item", item=item)
+                    continue
                 if existing_record is not None and _can_adopt_existing_ref(ref, existing_record, component_key, existing_path):
                     adopted_records.append(existing_record)
                     local.save_installed_record(existing_record.model_copy(update={"installedBy": component_key}))

@@ -576,6 +576,48 @@ async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, m
     assert not (home_plugins / "workflows" / "stream_alert_triage").exists()
 
 
+async def test_hub_installs_pentest_workspace_with_strix_chat_source(
+    isolated_hub_env,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    async def noop_refresh(_plugin_type, _changed_path=None):
+        return None
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", noop_refresh)
+    _patch_webui_bundle_build(monkeypatch)
+
+    record = await install_plugin("component", "pentest-workspace")
+    sidecar_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "components"
+        / "pentest-workspace"
+        / "strix_chat_api"
+    )
+
+    assert record.version == "1.1.0"
+    assert (sidecar_dir / "pyproject.toml").is_file()
+    assert (sidecar_dir / "uv.lock").is_file()
+    assert (sidecar_dir / "src" / "strix_chat_api" / "server.py").is_file()
+    assert (sidecar_dir / "tests" / "test_manager.py").is_file()
+
+    webui_workspace = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "contracts"
+        / "webui"
+        / "pentest_ui"
+        / "workspace.json"
+    )
+    webui_workspace.write_text('{"stale": true}', encoding="utf-8")
+
+    await install_plugin("component", "pentest-workspace")
+
+    assert "stale" not in webui_workspace.read_text(encoding="utf-8")
+
+
 async def test_hub_component_uninstall_preserves_existing_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):
     async def noop_refresh(_plugin_type, _changed_path=None):
         return None
