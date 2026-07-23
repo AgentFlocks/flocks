@@ -59,6 +59,7 @@ class PermissionNext:
     _pending: Dict[str, Dict[str, Any]] = {}
     _PENDING_PREFIX = "permission_pending:"
     _REPLY_PREFIX = "permission_reply:"
+    _DEFAULT_TIMEOUT_SECONDS = 300.0
 
     _on_permission_asked: Optional[Callable[[PermissionRequestInfo], Awaitable[None]]] = None
     _on_permission_replied: Optional[Callable[[str, str, str], Awaitable[None]]] = None
@@ -171,6 +172,7 @@ class PermissionNext:
         always: Optional[List[str]] = None,
         tool: Optional[Dict[str, str]] = None,
         request_id: Optional[str] = None,
+        timeout_seconds: Optional[float] = None,
     ) -> str:
         """
         Ask for permission to perform an action.
@@ -223,7 +225,12 @@ class PermissionNext:
         except Exception as exc:
             log.debug("permission.request.publish_failed", {"error": str(exc)})
 
-        timeout_at = asyncio.get_running_loop().time() + 300
+        timeout = (
+            cls._DEFAULT_TIMEOUT_SECONDS
+            if timeout_seconds is None
+            else max(float(timeout_seconds), 0.0)
+        )
+        timeout_at = asyncio.get_running_loop().time() + timeout
         reply: Optional[str] = None
         while reply is None:
             persisted_reply = await cls._consume_persisted_reply(req_id)
@@ -236,7 +243,9 @@ class PermissionNext:
                 cls._pending.pop(req_id, None)
                 await cls._delete_pending_request(req_id)
                 await cls._delete_reply(req_id)
-                raise PermissionError(f"Permission request timed out: {permission}")
+                raise asyncio.TimeoutError(
+                    f"Permission request timed out after {timeout:.0f}s: {permission}"
+                )
 
             try:
                 reply = await asyncio.wait_for(asyncio.shield(future), timeout=min(0.25, remaining))

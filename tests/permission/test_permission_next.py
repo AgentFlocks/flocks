@@ -143,6 +143,28 @@ async def test_ask_returns_allow_when_auto_approve_env_set(
 
 
 @pytest.mark.asyncio
+async def test_ask_times_out_as_denyable_timeout_and_cleans_pending_request(
+    permission_storage,
+) -> None:
+    request_id = "per_confirm_timeout"
+
+    with pytest.raises(asyncio.TimeoutError, match="timed out after 0s"):
+        await PermissionNext.ask(
+            session_id="ses_confirm_timeout",
+            permission="ssh_host_cmd",
+            patterns=["ssh_host_cmd:canonical:hash"],
+            ruleset=[],
+            metadata={},
+            request_id=request_id,
+            timeout_seconds=0,
+        )
+
+    assert request_id not in PermissionNext._pending
+    assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request_id}") is None
+    assert await Storage.get(f"{PermissionNext._REPLY_PREFIX}{request_id}") is None
+
+
+@pytest.mark.asyncio
 async def test_request_is_persisted_before_callback_can_reply(permission_storage) -> None:
     request_id = "per_persist_before_expose"
 

@@ -53,5 +53,71 @@ async def test_ssh_host_command_dry_run_does_not_open_transport(
     )
 
     assert result.success is True
-    assert result.output == {"dry_run": True, "command": "uname -a"}
+    assert result.output == {
+        "dry_run": True,
+        "command": "uname -a",
+        "safety_decision": "ALLOWED",
+        "reason": "static-rule",
+    }
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ssh_host_command_blacklist_blocks_before_transport(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execute = AsyncMock()
+    monkeypatch.setattr(
+        "flocks.tool.security.ssh_host_cmd.execute_ssh_command", execute
+    )
+
+    result = await execute_ssh_host_command(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        host="host-a",
+        command="sudo systemctl restart sshd",
+    )
+
+    assert result.success is False
+    assert "OSS safety blacklist" in (result.error or "")
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ssh_host_command_blacklist_blocks_escaped_executable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execute = AsyncMock()
+    monkeypatch.setattr(
+        "flocks.tool.security.ssh_host_cmd.execute_ssh_command", execute
+    )
+
+    result = await execute_ssh_host_command(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        host="host-a",
+        command=r"r\m -rf /tmp/test",
+    )
+
+    assert result.success is False
+    assert "OSS safety blacklist" in (result.error or "")
+    execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_ssh_host_command_blacklist_dry_run_still_blocks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    execute = AsyncMock()
+    monkeypatch.setattr(
+        "flocks.tool.security.ssh_host_cmd.execute_ssh_command", execute
+    )
+
+    result = await execute_ssh_host_command(
+        ToolContext(session_id="s-1", message_id="m-1"),
+        host="host-a",
+        command="rm -rf /tmp/test",
+        dry_run=True,
+    )
+
+    assert result.success is False
+    assert "OSS safety blacklist" in (result.error or "")
     execute.assert_not_awaited()

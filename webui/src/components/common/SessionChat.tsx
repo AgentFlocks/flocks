@@ -3451,6 +3451,19 @@ export default function SessionChat({
         </div>
       )}
 
+      {hideInput && (pendingPermissions[0] || permissionError) && (
+        <div className="flex-shrink-0 border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950">
+          <div className={!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}>
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
+            />
+          </div>
+        </div>
+      )}
+
       {/* Follow-up input */}
       {!hideInput && (
         <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'} dark:bg-zinc-950`}>

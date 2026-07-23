@@ -3313,11 +3313,10 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
             "sessionID": session_id,
             "queueID": item.id,
         })
-        # A queue item may have been submitted by a different HTTP request and
-        # user.  It must not inherit the context of the task that happened to
-        # finish first; queued work without its own trusted hand-off fails
-        # closed under enforcing extensions.
-        with execution_context_scope({}, inherit=False):
+        # A queue item may be dispatched by a different worker task than the
+        # request that submitted it. Restore the item's captured context (e.g.
+        # trusted identity transfer) and never inherit unrelated worker state.
+        with execution_context_scope(item.execution_context or {}, inherit=False):
             await Instance.provide(
                 directory=working_directory,
                 init=instance_bootstrap,
@@ -3606,10 +3605,12 @@ async def _enqueue_prompt_request(
     request: PromptRequest,
 ):
     from flocks.session.interaction_queue import InteractionQueue
+    from flocks.hooks.execution import current_execution_context
 
     await _require_agent_usable_for_chat(request.agent)
     model = request.model.model_dump(by_alias=True) if request.model else None
     parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
+    execution_context = current_execution_context()
     return await InteractionQueue.enqueue(
         session_id,
         parts=parts,
@@ -3622,6 +3623,7 @@ async def _enqueue_prompt_request(
         mock_reply=request.mockReply,
         tools=request.tools,
         system=request.system,
+        execution_context=execution_context,
     )
 
 
