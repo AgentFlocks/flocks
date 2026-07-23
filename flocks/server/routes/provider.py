@@ -1179,9 +1179,32 @@ def _is_api_service_builtin(provider_id: str, tools: Optional[List[Any]] = None)
 
 def _set_api_service_tools_enabled(provider_id: str, enabled: bool) -> int:
     """Synchronize the enabled state of all tools under an API service."""
-    matched_tools = _get_api_service_tool_infos(provider_id)
-    for tool_info in matched_tools:
-        tool_info.enabled = enabled
+    from flocks.tool.registry import ToolRegistry
+
+    ToolRegistry.init()
+    with ToolRegistry._refresh_lock:
+        matched_tools = _get_api_service_tool_infos(provider_id)
+        tool_settings = ConfigWriter.list_tool_settings()
+        previous_states = {
+            tool_info.name: bool(tool_info.enabled)
+            for tool_info in matched_tools
+        }
+        for tool_info in matched_tools:
+            default_enabled = ToolRegistry.get_default_enabled(tool_info.name)
+            effective_enabled = enabled and (
+                default_enabled if default_enabled is not None else True
+            )
+            setting = tool_settings.get(tool_info.name)
+            if isinstance(setting, dict) and "enabled" in setting:
+                effective_enabled = enabled and bool(setting["enabled"])
+            tool_info.enabled = effective_enabled
+            if effective_enabled and not previous_states[tool_info.name]:
+                ToolRegistry._reset_failure_state(tool_info.name)
+        if any(
+            previous_states[tool_info.name] != bool(tool_info.enabled)
+            for tool_info in matched_tools
+        ):
+            ToolRegistry._bump_revision("api_service_tool_state")
     if matched_tools:
         try:
             from flocks.server.routes.tool import _invalidate_tool_summary_cache

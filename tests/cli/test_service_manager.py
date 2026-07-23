@@ -1480,6 +1480,10 @@ def test_build_frontend_env_sets_portal_defaults_when_env_missing(monkeypatch) -
         env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"]
         == service_manager.DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
     )
+    allowed_hosts = env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"].split(",")
+    assert "127.0.0.1" in allowed_hosts
+    assert "localhost" in allowed_hosts
+    assert "portalflocks.threatbook.cn" in allowed_hosts
 
 
 def test_build_frontend_env_allows_overriding_portal_defaults(monkeypatch) -> None:

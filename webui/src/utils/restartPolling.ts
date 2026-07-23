@@ -1,4 +1,5 @@
 const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
+const RESTART_READINESS_REQUEST_TIMEOUT_MS = 3_000;
 
 export interface RestartReadiness {
   ready: boolean;
@@ -11,9 +12,25 @@ function errorMessage(error: unknown): string {
   return 'request failed';
 }
 
+async function fetchWithTimeout(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, RESTART_READINESS_REQUEST_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 async function readUpgradePageState(): Promise<string | null> {
   try {
-    const rootResponse = await fetch('/', { cache: 'no-store' });
+    const rootResponse = await fetchWithTimeout('/');
     if (!rootResponse.ok) {
       return `root page returned HTTP ${rootResponse.status}`;
     }
@@ -31,7 +48,7 @@ async function readUpgradePageState(): Promise<string | null> {
 
 async function checkHealth(url: string): Promise<Response | null> {
   try {
-    return await fetch(url, { cache: 'no-store' });
+    return await fetchWithTimeout(url);
   } catch {
     return null;
   }
