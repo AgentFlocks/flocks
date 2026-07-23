@@ -67,7 +67,11 @@ class _Recorder:
         self.real_provider.configure = self._original_configure
 
 
-def _build_fake_config(provider_id: str) -> Any:
+def _build_fake_config(
+    provider_id: str,
+    *,
+    model_first_chunk_timeout_s: int = 480,
+) -> Any:
     """Return a SimpleNamespace mimicking ``ConfigInfo`` shape needed by
     ``apply_config``: ``.provider`` dict -> ``.options`` (with model_dump)
     and ``.models``.
@@ -88,6 +92,7 @@ def _build_fake_config(provider_id: str) -> Any:
                 "supports_vision": False,
                 "supports_reasoning": False,
                 "max_tokens": 4096,
+                "stream_first_chunk_timeout_s": model_first_chunk_timeout_s,
             }
         )
     }
@@ -128,6 +133,9 @@ async def test_apply_config_is_idempotent_for_unchanged_input() -> None:
             "apply_config must not rebuild _config_models when the desired "
             "model list matches the existing one"
         )
+        assert provider.get_models()[0].custom_settings == {
+            "stream_first_chunk_timeout_s": 480,
+        }
 
 
 @pytest.mark.asyncio
@@ -174,6 +182,8 @@ async def test_apply_config_still_mutates_when_input_changes() -> None:
 
 
 @pytest.mark.asyncio
+async def test_apply_config_rebuilds_models_when_stream_timeout_changes() -> None:
+    """A model timeout change must invalidate the model-list signature."""
 @pytest.mark.parametrize(
     "options",
     [
@@ -195,6 +205,27 @@ async def test_apply_config_loads_name_and_models_without_credentials(
     provider = Provider.get("openai-compatible")
     assert provider is not None
 
+    first_cfg = _build_fake_config(
+        "openai-compatible",
+        model_first_chunk_timeout_s=480,
+    )
+    with patch("flocks.provider.provider.Config.get", return_value=first_cfg):
+        await Provider.apply_config(provider_id="openai-compatible")
+
+    second_cfg = _build_fake_config(
+        "openai-compatible",
+        model_first_chunk_timeout_s=600,
+    )
+    with patch(
+        "flocks.provider.provider.Config.get",
+        return_value=second_cfg,
+    ), _Recorder(provider) as rec:
+        await Provider.apply_config(provider_id="openai-compatible")
+
+    assert rec.models_assignments == 1
+    assert provider.get_models()[0].custom_settings == {
+        "stream_first_chunk_timeout_s": 600,
+    }
     original_config = provider._config
     original_models = list(getattr(provider, "_config_models", []) or [])
     original_name = provider.name

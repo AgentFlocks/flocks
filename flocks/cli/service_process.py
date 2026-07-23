@@ -54,7 +54,7 @@ class BackendProcessAdapter:
                 restart=True,
             )
         if not tcp_port_accepts_connections(host, port):
-            return ServiceProbeResult(healthy=False, reason=f"port {port} is not listening", restart=True)
+            return ServiceProbeResult(healthy=False, reason=f"port {port} is not listening")
         return ServiceProbeResult(healthy=True, reason="liveness check passed")
 
 
