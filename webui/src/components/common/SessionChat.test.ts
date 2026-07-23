@@ -585,6 +585,19 @@ describe('getMessageBubbleClassName', () => {
     expect(className).toContain('max-w-full');
     expect(className.split(/\s+/)).not.toContain('w-full');
   });
+
+  it.each([false, true])('uses a neutral user bubble background when compact=%s', (compact) => {
+    const className = getMessageBubbleClassName({
+      compact,
+      isUser: true,
+      isEditing: false,
+    });
+
+    expect(className).toContain('bg-[#fafaf8]');
+    expect(className).toContain('border-black/[0.07]');
+    expect(className).not.toContain('bg-sky-50');
+    expect(className).not.toContain('border-sky-100');
+  });
 });
 
 describe('getMessageGroupClassName', () => {
