@@ -62,6 +62,9 @@ class StrixChatClient:
     async def stop_chat(self, chat_id: str) -> dict[str, Any]:
         return await self._request("POST", f"/api/v1/chat/{_chat_id(chat_id)}/stop")
 
+    async def open_view(self, chat_id: str) -> dict[str, Any]:
+        return await self._request("POST", f"/api/v1/chat/{_chat_id(chat_id)}/view")
+
     async def delete_chat(self, chat_id: str) -> dict[str, Any]:
         return await self._request("DELETE", f"/api/v1/chat/{_chat_id(chat_id)}")
 

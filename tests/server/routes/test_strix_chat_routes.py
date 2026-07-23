@@ -92,3 +92,18 @@ def test_stop_chat_retains_session() -> None:
     assert response.status_code == 200
     assert response.json()["status"] == "stopped"
     sidecar.stop_chat.assert_awaited_once_with("chat-abc")
+
+
+def test_open_native_view_proxies_chat_run() -> None:
+    sidecar = AsyncMock()
+    sidecar.open_view.return_value = {
+        "id": "chat-abc",
+        "run_name": "chat-abc",
+        "run_dir": "/tmp/strix_runs/chat-abc",
+        "url": "http://127.0.0.1:43123/?token=secret",
+    }
+    with patch("flocks.server.routes.strix_chat._client", return_value=sidecar):
+        response = _client().post("/api/integrations/strix/chat/chat-abc/view")
+    assert response.status_code == 200
+    assert response.json()["run_name"] == "chat-abc"
+    sidecar.open_view.assert_awaited_once_with("chat-abc")
