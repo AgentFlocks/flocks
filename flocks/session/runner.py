@@ -47,6 +47,11 @@ from flocks.session.streaming.stream_events import (
     ReasoningDeltaEvent,
     ReasoningEndEvent,
 )
+from flocks.session.streaming.timeouts import (
+    DEFAULT_FIRST_CHUNK_TIMEOUT_S,
+    DEFAULT_ONGOING_CHUNK_TIMEOUT_S,
+    resolve_llm_stream_timeouts,
+)
 from flocks.session.callable_schema import list_session_callable_tool_infos
 from flocks.agent.registry import Agent
 from flocks.agent.agent import AgentInfo
@@ -102,13 +107,13 @@ TOOL_RESULT_PREVIEW_CHARS = 160
 # Maximum seconds to wait for the *first* chunk from the LLM stream.
 # If the model never starts responding, the stream times out and the session
 # surfaces a clear error rather than hanging forever.
-LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = 60
+LLM_STREAM_FIRST_CHUNK_TIMEOUT_S = DEFAULT_FIRST_CHUNK_TIMEOUT_S
 
 # Once the stream has started (at least one chunk received), allow a much
 # longer gap between chunks.  Some models pause for extended periods between
 # reasoning and content generation phases; a tight inter-chunk timeout causes
 # spurious failures in those cases.
-LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = 300
+LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S = DEFAULT_ONGOING_CHUNK_TIMEOUT_S
 
 _RETRYABLE_TRANSPORT_EXCEPTIONS = (
     httpx.TransportError,
@@ -3179,6 +3184,14 @@ class SessionRunner:
         llm_call_started_at = time.perf_counter()
         first_chunk_logged = False
         aborted_during_stream = False
+        stream_timeouts = resolve_llm_stream_timeouts(provider, self.model_id)
+        log.debug("runner.llm.stream_timeouts", {
+            "provider_id": self.provider_id,
+            "model_id": self.model_id,
+            "first_chunk_timeout_s": stream_timeouts.first_chunk_s,
+            "ongoing_chunk_timeout_s": stream_timeouts.ongoing_chunk_s,
+            "local_endpoint": stream_timeouts.is_local,
+        })
         try:
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
@@ -3192,8 +3205,8 @@ class SessionRunner:
                     session_id=self.session.id,
                     **provider_options,
                 ),
-                first_chunk_timeout_s=LLM_STREAM_FIRST_CHUNK_TIMEOUT_S,
-                ongoing_chunk_timeout_s=LLM_STREAM_ONGOING_CHUNK_TIMEOUT_S,
+                first_chunk_timeout_s=stream_timeouts.first_chunk_s,
+                ongoing_chunk_timeout_s=stream_timeouts.ongoing_chunk_s,
             ):
                 chunk_counts["total"] += 1
                 self._attempt_state.received_chunk = True
