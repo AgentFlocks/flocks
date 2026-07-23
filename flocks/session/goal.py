@@ -11,6 +11,12 @@ from pydantic import BaseModel, Field
 
 from flocks.provider.options import build_provider_options
 from flocks.provider.provider import ChatMessage, Provider
+from flocks.session.llm_hook_utils import (
+    apply_hook_request_output,
+    restore_text_with_replacements,
+    serialize_chat_message,
+    stream_text_replacements_from_hook_output,
+)
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -174,6 +180,7 @@ async def judge_goal_with_model(
     *,
     provider_id: str,
     model_id: str,
+    session_id: Optional[str] = None,
     initial_clarification: Optional[GoalClarification] = None,
 ) -> tuple[GoalVerdict, str]:
     """Hermes-style model judge using the active session provider/model."""
@@ -183,26 +190,84 @@ async def judge_goal_with_model(
 
     provider_options = build_provider_options(provider_id, model_id)
     provider_options.pop("max_tokens", None)
+    messages = [
+        ChatMessage(role="system", content=_MODEL_JUDGE_SYSTEM_PROMPT),
+        ChatMessage(
+            role="user",
+            content=(
+                f"Goal:\n{_format_goal_context(objective, initial_clarification)}\n\n"
+                "Latest assistant final response (truncated to the last 4KB):\n"
+                f"{_judge_input(last_response)}"
+            ),
+        ),
+    ]
+    replacements: list[tuple[str, str]] = []
+    if session_id:
+        from flocks.hooks.pipeline import HookPipeline, HookStage
+
+        hook_metadata = {
+            "sessionID": session_id,
+            "agent": "goal_judge",
+            "model": {
+                "providerID": provider_id,
+                "modelID": model_id,
+            },
+            "purpose": "goal_judge",
+        }
+        try:
+            llm_before_enabled = await HookPipeline.has_stage_handlers(
+                HookStage.LLM_BEFORE,
+                hook_metadata,
+            )
+        except Exception as exc:
+            log.error("goal.model_judge.hook_stage_probe_failed", {
+                "session_id": session_id,
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "error": str(exc),
+            })
+            raise RuntimeError("Goal judge before-hook stage probe failed; request was not sent") from exc
+
+        if llm_before_enabled:
+            try:
+                hook_ctx = await HookPipeline.run_llm_before({
+                    **hook_metadata,
+                    "request": {
+                        "messageCount": len(messages),
+                        "messages": [serialize_chat_message(message) for message in messages],
+                        "toolCount": 0,
+                        "tools": [],
+                        "providerOptions": dict(provider_options),
+                        "providerToolsEnabled": False,
+                    },
+                })
+                hook_output = getattr(hook_ctx, "output", None) or {}
+                replacements = stream_text_replacements_from_hook_output(hook_output)
+                messages, provider_options = apply_hook_request_output(
+                    messages,
+                    provider_options,
+                    hook_output,
+                )
+                provider_options.pop("max_tokens", None)
+            except Exception as exc:
+                log.error("goal.model_judge.llm_before_failed", {
+                    "session_id": session_id,
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "error": str(exc),
+                })
+                raise RuntimeError("Goal judge before-hook failed; request was not sent") from exc
 
     response = await provider.chat(
         model_id=model_id,
-        messages=[
-            ChatMessage(role="system", content=_MODEL_JUDGE_SYSTEM_PROMPT),
-            ChatMessage(
-                role="user",
-                content=(
-                    f"Goal:\n{_format_goal_context(objective, initial_clarification)}\n\n"
-                    "Latest assistant final response (truncated to the last 4KB):\n"
-                    f"{_judge_input(last_response)}"
-                ),
-            ),
-        ],
+        messages=messages,
         **provider_options,
         max_tokens=JUDGE_MAX_TOKENS,
         temperature=0,
     )
 
-    payload = _extract_json_object(response.content)
+    response_content = restore_text_with_replacements(response.content, replacements)
+    payload = _extract_json_object(response_content)
     verdict = str(payload.get("verdict") or "").strip().lower()
     reason = _trim_reason(str(payload.get("reason") or ""))
     if verdict not in {"complete", "blocked", "waiting", "continue"}:
@@ -352,6 +417,7 @@ class GoalManager:
                     last_response,
                     provider_id=provider_id,
                     model_id=model_id,
+                    session_id=session_id,
                     initial_clarification=state.initial_clarification,
                 )
             except Exception as exc:

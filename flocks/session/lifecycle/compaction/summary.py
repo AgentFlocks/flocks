@@ -13,8 +13,16 @@ from typing import Awaitable, Callable, Dict, Optional, Any
 # here in the future).
 ProgressCallback = Callable[[str, Dict[str, Any]], Awaitable[None]]
 
+from flocks.provider.provider import ChatMessage
 from flocks.utils.log import Log
 from flocks.session.prompt import SessionPrompt
+from flocks.session.llm_hook_utils import (
+    apply_hook_request_output,
+    restore_text_with_replacements,
+    serialize_chat_message,
+    stream_text_replacements_from_hook_output,
+    strip_think_blocks,
+)
 from .models import DEFAULT_COMPACTION_PROMPT_WITH_PREVIOUS
 
 log = Log.create(service="session.compaction.summarization")
@@ -159,16 +167,72 @@ async def _llm_chat_with_timeout(
     messages: list,
     max_tokens: int,
     timeout: int = COMPACTION_TIMEOUT_SECONDS,
+    session_id: Optional[str] = None,
+    purpose: str = "compaction_summary",
 ) -> Any:
     """Call provider_client.chat with a timeout guard."""
-    return await asyncio.wait_for(
+    provider_options: Dict[str, Any] = {"max_tokens": max_tokens}
+    replacements: list[tuple[str, str]] = []
+    if session_id:
+        try:
+            from flocks.hooks.pipeline import HookPipeline, HookStage
+
+            provider_id = (
+                getattr(provider_client, "provider_id", None)
+                or getattr(provider_client, "id", None)
+                or provider_client.__class__.__name__
+            )
+            llm_hook_metadata = {
+                "sessionID": session_id,
+                "agent": "session.compaction",
+                "step": None,
+                "model": {
+                    "providerID": provider_id,
+                    "modelID": model_id,
+                },
+                "purpose": purpose,
+            }
+            if await HookPipeline.has_stage_handlers(HookStage.LLM_BEFORE, llm_hook_metadata):
+                llm_before_ctx = await HookPipeline.run_llm_before({
+                    **llm_hook_metadata,
+                    "request": {
+                        "messageCount": len(messages),
+                        "messages": [serialize_chat_message(message) for message in messages],
+                        "toolCount": 0,
+                        "tools": [],
+                        "providerOptions": dict(provider_options),
+                        "providerToolsEnabled": False,
+                    },
+                })
+                hook_output = getattr(llm_before_ctx, "output", None) or {}
+                messages, provider_options = apply_hook_request_output(
+                    messages,
+                    provider_options,
+                    hook_output,
+                )
+                replacements = stream_text_replacements_from_hook_output(hook_output)
+        except Exception as hook_err:
+            log.error("compaction.llm_before_hook.error", {
+                "session_id": session_id,
+                "purpose": purpose,
+                "error": str(hook_err),
+            })
+            raise RuntimeError("compaction llm_before hook failed; request was not sent") from hook_err
+
+    provider_options.setdefault("max_tokens", max_tokens)
+    response = await asyncio.wait_for(
         provider_client.chat(
             model_id=model_id,
             messages=messages,
-            max_tokens=max_tokens,
+            **provider_options,
         ),
         timeout=timeout,
     )
+    if replacements and response is not None and isinstance(getattr(response, "content", None), str):
+        response.content = restore_text_with_replacements(response.content, replacements)
+    if response is not None and isinstance(getattr(response, "content", None), str):
+        response.content = strip_think_blocks(response.content)
+    return response
 
 
 async def summarize_single_pass(
@@ -181,6 +245,7 @@ async def summarize_single_pass(
     focus_instruction: Optional[str] = None,
     previous_summary: Optional[str] = None,
     chat_messages: Optional[list] = None,
+    session_id: Optional[str] = None,
 ) -> Optional[str]:
     """Generate summary in a single LLM call.
 
@@ -201,8 +266,6 @@ async def summarize_single_pass(
     as "merge new turns into the prior summary" rather than compressing from
     scratch.
     """
-    from flocks.provider.provider import ChatMessage
-
     if chat_messages:
         # Per-message truncation path (hermes-style): every turn contributes
         # a capped fragment (head + tail per message), so early decisions
@@ -236,6 +299,8 @@ async def summarize_single_pass(
             model_id=model_id,
             messages=[ChatMessage(role="user", content=request)],
             max_tokens=max_tokens,
+            session_id=session_id,
+            purpose="compaction_summary",
         )
     except asyncio.TimeoutError:
         log.error("compaction.single_pass.timeout", {
@@ -452,6 +517,8 @@ async def summarize_chunked_iterative(
                 messages=[ChatMessage(role="user", content=chunk_prompt)],
                 max_tokens=chunk_max_tokens,
                 timeout=COMPACTION_TIMEOUT_SECONDS,
+                session_id=session_id,
+                purpose="compaction_summary_chunk",
             )
             duration_ms = (time.perf_counter() - started) * 1000
             if resp and resp.content:
