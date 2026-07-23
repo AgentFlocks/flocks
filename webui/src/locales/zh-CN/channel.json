@@ -73,6 +73,22 @@
   "restartHint": "手动停止并重新建立长连接",
   "restartSuccess": "{{channel}} 已重启",
   "restartFailed": "重启失败",
+  "security": {
+    "defaultAgent": "默认 Agent",
+    "defaultAgentHint": "必须为可见 Agent 之一；未设置时按系统默认",
+    "defaultAgentEmpty": "不指定（使用系统默认）",
+    "visibleAgents": "可见 Agent",
+    "visibleAgentsHint": "仅允许在该 channel session 中选择这些 Agent（留空表示不限制）",
+    "visibleAgentsPlaceholder": "下拉选择并添加可见 Agent",
+    "visibleAgentsEmpty": "未限制，可选择全部可用 Agent",
+    "visibleAgentsSelectedCount": "{{first}}、{{second}} 等 {{count}} 个",
+    "visibleAgentsNoOptions": "暂无可选 Agent",
+    "permissionMode": "权限模式",
+    "permissionModeHint": "该 channel session 的默认权限模式；Session 页面也可以单独调整。",
+    "permissionModeReadonly": "readonly（禁止命令执行）",
+    "permissionModeRequireConfirm": "require-confirm（按需确认）",
+    "permissionModeAutoConfirmAll": "auto-allow-all（自动确认）"
+  },
   "empty": {
     "title": "暂无通道",
     "description": "没有检测到已注册的 IM 通道插件。",

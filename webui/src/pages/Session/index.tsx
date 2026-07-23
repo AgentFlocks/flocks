@@ -19,6 +19,8 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
+import { flocksproPolicyApi, type PermissionMode } from '@/api/flocksproPolicy';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
@@ -133,6 +135,9 @@ export default function SessionPage() {
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
+  const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
+  const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
+  const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [enabledModelDefinitions, setEnabledModelDefinitions] = useState<ModelDefinitionV2[]>([]);
   const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
@@ -456,6 +461,32 @@ export default function SessionPage() {
   }, [showModelOptions]);
 
   useEffect(() => {
+    if (!showPermissionModeOptions) return;
+    const handle = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-permission-mode-selector]')) {
+        setShowPermissionModeOptions(false);
+      }
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showPermissionModeOptions]);
+
+  useEffect(() => {
+    void flocksproUsersApi.hasCapability().then(setProPolicyEnabled);
+  }, []);
+
+  useEffect(() => {
+    if (!proPolicyEnabled || !selectedSessionId) {
+      setSessionPermissionMode(null);
+      return;
+    }
+    void flocksproPolicyApi.getSession(selectedSessionId)
+      .then((result) => setSessionPermissionMode(result.permissionMode))
+      .catch(() => setSessionPermissionMode(null));
+  }, [proPolicyEnabled, selectedSessionId]);
+
+  useEffect(() => {
     if (chatModelOptions.length === 0) {
       setSelectedModelKey(null);
       return;
@@ -562,6 +593,18 @@ export default function SessionPage() {
       toast.error(t('chat.error', 'Error'), err.message);
     }
   }, [refetchSessions, selectedSessionId, toast, t]);
+
+  const handlePermissionModeChange = useCallback(async (
+    permissionMode: PermissionMode,
+  ) => {
+    if (!selectedSessionId || !proPolicyEnabled) return;
+    try {
+      await flocksproPolicyApi.setSession(selectedSessionId, permissionMode);
+      setSessionPermissionMode(permissionMode);
+    } catch (err: any) {
+      toast.error(t('chat.error', 'Error'), err.message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, toast, t]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -1227,7 +1270,8 @@ export default function SessionPage() {
             </div>
           }
           centerToolbarSlot={
-            <div className="relative" data-model-selector>
+            <div className="flex items-center gap-1">
+              <div className="relative" data-model-selector>
               <button
                 type="button"
                 onClick={() => setShowModelOptions(!showModelOptions)}
@@ -1317,6 +1361,49 @@ export default function SessionPage() {
                       {t('modelPicker.addModel')}
                     </button>
                   </div>
+                </div>
+              )}
+              </div>
+              {proPolicyEnabled && selectedSessionId && (
+                <div className="relative" data-permission-mode-selector>
+                  <button
+                    type="button"
+                    onClick={() => setShowPermissionModeOptions((open) => !open)}
+                    className="flex h-7 w-auto items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                    title="Permission Mode"
+                  >
+                    <Shield className="h-3 w-3 shrink-0" />
+                    <span className="max-w-[116px] truncate font-medium">
+                      {sessionPermissionMode ?? 'require-confirm'}
+                    </span>
+                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showPermissionModeOptions && (
+                    <div className="absolute right-0 bottom-full z-50 mb-2 w-52 rounded-lg border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                      {([
+                        ['readonly', '禁止命令执行'],
+                        ['require-confirm', '按需确认'],
+                        ['auto-allow-all', '自动允许确认'],
+                      ] as const).map(([mode, description]) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => {
+                            void handlePermissionModeChange(mode);
+                            setShowPermissionModeOptions(false);
+                          }}
+                          className={`w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                            (sessionPermissionMode ?? 'require-confirm') === mode
+                              ? 'bg-zinc-50 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
+                              : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          <div className="font-medium">{mode}</div>
+                          <div className="mt-0.5 text-[10px] text-zinc-500 dark:text-zinc-400">{description}</div>
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

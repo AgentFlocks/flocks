@@ -547,8 +547,25 @@ class ChannelConfig(BaseModel):
     """
     model_config = {"extra": "allow", "populate_by_name": True}
 
+    @model_validator(mode="before")
+    @classmethod
+    def discard_removed_role_field(cls, data: Any) -> Any:
+        """Ignore removed legacy role data while loading existing config files.
+
+        New API writes reject the field explicitly. Dropping it here allows an
+        existing on-disk config to boot once and removes it on the next save
+        without interpreting it as authorization.
+        """
+        if not isinstance(data, dict):
+            return data
+        normalized = dict(data)
+        normalized.pop("role", None)
+        normalized.pop("permissionMode", None)
+        return normalized
+
     enabled: bool = False
     default_agent: Optional[str] = Field(None, alias="defaultAgent")
+    visible_agents: Optional[List[str]] = Field(None, alias="visibleAgents")
     dm_policy: Optional[str] = Field(None, alias="dmPolicy")
     group_trigger: Optional[str] = Field("mention", alias="groupTrigger")
     allow_from: Optional[List[str]] = Field(None, alias="allowFrom")

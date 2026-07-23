@@ -235,6 +235,7 @@ class SessionBindingService:
         self,
         msg: InboundMessage,
         default_agent: Optional[str] = None,
+        visible_agents: Optional[list[str]] = None,
         scope_override: Optional[GroupSessionScope] = None,
         directory: Optional[str] = None,
     ) -> SessionBinding:
@@ -260,7 +261,33 @@ class SessionBindingService:
         existing = await self._find_binding(
             msg.channel_id, msg.account_id, chat_id, thread_id,
         )
+        allowed_agents = [
+            str(agent).strip()
+            for agent in (visible_agents or [])
+            if str(agent).strip()
+        ]
+        allowed_agent_set = set(allowed_agents)
         if existing:
+            if (
+                allowed_agent_set
+                and str(existing.agent_id or "").strip() not in allowed_agent_set
+            ):
+                # Keep the session id stable but enforce the current agent-visibility
+                # constraint for every inbound turn.
+                fallback_agent = allowed_agents[0]
+                now = time.time()
+                existing = SessionBinding(
+                    channel_id=existing.channel_id,
+                    account_id=existing.account_id,
+                    chat_id=existing.chat_id,
+                    chat_type=existing.chat_type,
+                    thread_id=existing.thread_id,
+                    session_id=existing.session_id,
+                    agent_id=fallback_agent,
+                    created_at=existing.created_at,
+                    last_message_at=now,
+                )
+                await self._insert(existing)
             # Verify the bound session still exists (user may have deleted it via WebUI)
             from flocks.session.session import Session as _Session
             still_alive = await _Session.get_by_id(existing.session_id)

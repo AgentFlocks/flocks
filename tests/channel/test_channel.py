@@ -196,6 +196,7 @@ class TestChannelConfigMerge:
         assert cfg.enabled is False
         assert cfg.group_trigger == "mention"
         assert cfg.default_agent is None
+        assert not hasattr(cfg, "permission_mode")
 
     def test_channel_config_extra_fields(self):
         cfg = ChannelConfig(enabled=True, appId="abc", appSecret="xyz")
@@ -1424,6 +1425,186 @@ class TestMediaFilenameHelpers:
         from flocks.channel.media_filename import sanitize_filename
 
         assert sanitize_filename("../report.bin") == ".._report.bin"
+
+
+class TestChannelPolicySecurityConfig:
+    @pytest.mark.asyncio
+    async def test_dispatch_builds_default_channel_policy_on_cold_start(
+        self, monkeypatch
+    ):
+        from flocks.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            _channel_config_cache,
+        )
+        from flocks.config.config import ChannelConfig
+
+        dispatcher = InboundDispatcher()
+        _channel_config_cache.clear()
+        captured_payload: dict[str, object] = {}
+
+        async def fake_execute_with_hooks(payload, _effect, before=None, after=None):
+            captured_payload.update(payload)
+            return None
+
+        monkeypatch.setattr(
+            "flocks.hooks.execution.execute_with_hooks",
+            fake_execute_with_hooks,
+        )
+        monkeypatch.setattr(
+            InboundDispatcher,
+            "_get_channel_config",
+            staticmethod(AsyncMock(return_value=ChannelConfig())),
+        )
+
+        await dispatcher.dispatch(
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="msg_1",
+                sender_id="ou_user",
+                chat_id="ou_user",
+                chat_type=ChatType.DIRECT,
+                text="hello",
+                raw={"event": "verified"},
+            )
+        )
+
+        policy = captured_payload.get("channel_policy")
+        assert isinstance(policy, dict)
+        assert "permission_mode" not in policy
+        assert policy["visible_agents"] == []
+
+    @pytest.mark.asyncio
+    async def test_dispatch_loads_channel_policy_from_config_on_cold_start(
+        self, monkeypatch
+    ):
+        from flocks.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            _channel_config_cache,
+        )
+
+        dispatcher = InboundDispatcher()
+        _channel_config_cache.clear()
+        captured_payload: dict[str, object] = {}
+
+        async def fake_execute_with_hooks(payload, _effect, before=None, after=None):
+            captured_payload.update(payload)
+            return None
+
+        monkeypatch.setattr(
+            "flocks.hooks.execution.execute_with_hooks",
+            fake_execute_with_hooks,
+        )
+        monkeypatch.setattr(
+            InboundDispatcher,
+            "_get_channel_config",
+            staticmethod(
+                AsyncMock(
+                    return_value=ChannelConfig(
+                        default_agent="ops-agent",
+                        visible_agents=["ops-agent", "qa-agent"],
+                    )
+                )
+            ),
+        )
+
+        await dispatcher.dispatch(
+            InboundMessage(
+                channel_id="feishu",
+                account_id="default",
+                message_id="msg_admin_1",
+                sender_id="ou_admin",
+                chat_id="ou_admin",
+                chat_type=ChatType.DIRECT,
+                text="hello",
+                raw={"event": "verified"},
+            )
+        )
+
+        policy = captured_payload.get("channel_policy")
+        assert isinstance(policy, dict)
+        assert "permission_mode" not in policy
+        assert policy["default_agent"] == "ops-agent"
+        assert policy["visible_agents"] == ["ops-agent", "qa-agent"]
+
+    @pytest.mark.asyncio
+    async def test_get_channel_config_force_refresh_bypasses_fresh_cache(
+        self, monkeypatch
+    ):
+        from flocks.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            _CachedConfig,
+            _channel_config_cache,
+        )
+
+        _channel_config_cache.clear()
+        _channel_config_cache["weixin"] = _CachedConfig(
+            ChannelConfig(permission_mode="auto-allow-all")
+        )
+
+        fake_config = SimpleNamespace(
+            get_channel_config=lambda _channel_id: ChannelConfig(permission_mode="readonly")
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=fake_config),
+        )
+
+        cached = await InboundDispatcher._get_channel_config("weixin")
+        refreshed = await InboundDispatcher._get_channel_config(
+            "weixin",
+            force_refresh=True,
+        )
+
+        assert cached.permission_mode == "auto-allow-all"
+        assert refreshed.permission_mode == "readonly"
+        assert _channel_config_cache["weixin"].config.permission_mode == "readonly"
+
+    @pytest.mark.asyncio
+    async def test_session_binding_enforces_visible_agents_for_existing_binding(
+        self, monkeypatch, tmp_path
+    ):
+        from flocks.channel.inbound.session_binding import (
+            SessionBindingService,
+            close_binding_db,
+        )
+        from flocks.storage.storage import Storage
+
+        await Storage.init(tmp_path / "channel-binding-visible-agent.db")
+        monkeypatch.setattr(
+            "flocks.session.session.Session.create",
+            AsyncMock(return_value=SimpleNamespace(id="session_1")),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(id="session_1")),
+        )
+        service = SessionBindingService()
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            text="hello",
+        )
+
+        try:
+            created = await service.resolve_or_create(
+                msg,
+                default_agent="legacy-agent",
+            )
+            assert created.agent_id == "legacy-agent"
+
+            rebound = await service.resolve_or_create(
+                msg,
+                default_agent="security-agent",
+                visible_agents=["security-agent", "assistant-agent"],
+            )
+            assert rebound.agent_id == "security-agent"
+        finally:
+            await close_binding_db()
 
 
 # ------------------------------------------------------------------

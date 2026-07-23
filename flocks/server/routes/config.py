@@ -40,8 +40,15 @@ def _config_operation_payload(endpoint, args: tuple[Any, ...], kwargs: Dict[str,
         arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
     except TypeError:
         arguments = dict(kwargs)
+    action_name = f"config.{endpoint.__name__}"
     return {
-        "operation": f"config.{endpoint.__name__}",
+        "operation": action_name,
+        # Explicitly mark config mutations as control-plane actions so
+        # policy-gate can apply the intended http_control_plane bypass.
+        "entry": "http_control_plane",
+        "execution_domain": "control_plane",
+        "action": action_name,
+        "resource": {"type": "config", "id": endpoint.__name__},
         "arguments": dict(arguments),
     }
 
@@ -600,8 +607,9 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     flocks.json, so that plaintext secrets never land in that file.
     """
     try:
+        channels_payload = config_data.get("channels")
         # Extract channel sensitive fields into .secret.json before persisting
-        if "channels" in config_data and isinstance(config_data.get("channels"), dict):
+        if isinstance(channels_payload, dict):
             from flocks.security.channel_secrets import extract_channel_secrets
 
             config_data = {**config_data, "channels": extract_channel_secrets(config_data["channels"])}
@@ -614,6 +622,23 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
 
         # Clear cache to reload
         Config.clear_cache()
+        # Refresh only OSS-owned channel routing and Agent visibility config.
+        from flocks.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            invalidate_channel_config_cache,
+        )
+
+        channels = config_data.get("channels")
+        if isinstance(channels, dict) and channels:
+            for channel_id in channels:
+                invalidate_channel_config_cache(str(channel_id))
+            for channel_id in channels:
+                await InboundDispatcher._get_channel_config(
+                    str(channel_id),
+                    force_refresh=True,
+                )
+        else:
+            invalidate_channel_config_cache()
 
         log.info("config.updated")
         return await get_config()

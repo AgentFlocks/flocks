@@ -73,6 +73,22 @@
   "restartHint": "Manually stop and re-establish the long connection",
   "restartSuccess": "{{channel}} restarted",
   "restartFailed": "Restart failed",
+  "security": {
+    "defaultAgent": "Default Agent",
+    "defaultAgentHint": "Must be one of visible agents; falls back to system default when unset",
+    "defaultAgentEmpty": "Unset (use system default)",
+    "visibleAgents": "Visible Agents",
+    "visibleAgentsHint": "Only these agents can be selected in this channel session (empty means no restriction)",
+    "visibleAgentsPlaceholder": "Select and add visible agents",
+    "visibleAgentsEmpty": "No restriction, all chat-available agents are selectable",
+    "visibleAgentsSelectedCount": "{{first}}, {{second}}, and {{count}} selected",
+    "visibleAgentsNoOptions": "No agents available",
+    "permissionMode": "Permission Mode",
+    "permissionModeHint": "Default permission mode for this channel session; it can also be changed from the Session page.",
+    "permissionModeReadonly": "readonly (block command execution)",
+    "permissionModeRequireConfirm": "require-confirm",
+    "permissionModeAutoConfirmAll": "auto-allow-all"
+  },
   "empty": {
     "title": "No Channels",
     "description": "No registered IM channel plugins detected.",
