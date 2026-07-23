@@ -19,6 +19,7 @@ DEFAULT_PARENT_TIMEOUT_SECONDS = 20.0
 DEFAULT_PORT_TIMEOUT_SECONDS = 10.0
 POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
 SUPERVISOR_STOP_TIMEOUT_SECONDS = 20.0
+FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS = 5.0
 LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS = 300.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 
@@ -284,12 +285,13 @@ def _stop_services_before_upgrade(args: argparse.Namespace) -> bool:
     try:
         service_manager.stop_all(_NullConsole())
     except service_manager.ServiceError as exc:
-        _record_handoff_log(f"service_stop_failed error={exc}")
-        return False
+        _record_handoff_log(f"service_graceful_stop_failed error={exc}")
     return _stop_supervisor_before_restart(
         daemon_pid=args.daemon_pid,
         backend_port=args.backend_port,
         service_ports=_service_ports(args),
+        force_daemon_stop=True,
+        timeout_seconds=FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS,
     )
 
 

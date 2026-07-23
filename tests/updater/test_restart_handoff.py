@@ -306,6 +306,42 @@ def test_upgrade_wait_ports_exclude_legacy_cleanup_port(tmp_path: Path) -> None:
     assert restart_handoff._service_ports(args) == (5273,)
 
 
+def test_upgrade_stop_forces_captured_daemon_after_graceful_timeout(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    args = restart_handoff._parse_args(_simple_upgrade_handoff_args(tmp_path))
+
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "stop_all",
+        lambda _console: (_ for _ in ()).throw(
+            service_manager.ServiceError("daemon did not exit"),
+        ),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda **kwargs: events.append(f"stop:{kwargs}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_record_handoff_log",
+        lambda message: events.append(f"log:{message}"),
+    )
+
+    assert restart_handoff._stop_services_before_upgrade(args)
+    assert events == [
+        "log:service_graceful_stop_failed error=daemon did not exit",
+        (
+            "stop:{'daemon_pid': 2468, 'backend_port': 5273, "
+            "'service_ports': (5273,), 'force_daemon_stop': True, "
+            "'timeout_seconds': 5.0}"
+        ),
+    ]
+
+
 def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollback(
     monkeypatch,
     tmp_path: Path,
