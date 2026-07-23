@@ -20,6 +20,7 @@ from flocks.tool.device.models import (
     DeviceIntegrationCreate,
     DeviceIntegrationUpdate,
 )
+from flocks.tool.device.store import fetch_device
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -39,10 +40,10 @@ log = Log.create(service="tool.device.manage_tool")
         "管理已接入安全设备。action=list 用于列出机房、设备、device_id 和工具集；"
         "action=list_templates 用于列出已有设备模板、安装状态和配置字段；"
         "action=create 用于从已安装模板创建设备实例，仅接受非敏感配置；"
-        "action=update 用于写入/更新已有设备实例的非敏感配置字段；"
+        "action=update 用于启停设备或更新模板声明的配置字段；"
         "action=connectivity_test 用于测试指定设备连通性并更新设备卡片状态。"
     ),
-    description_cn="列出设备、更新非敏感配置或测试设备连通性",
+    description_cn="列出设备、按模板更新设备或测试设备连通性",
     category=ToolCategory.SYSTEM,
     parameters=[
         ToolParameter(
@@ -50,7 +51,7 @@ log = Log.create(service="tool.device.manage_tool")
             type=ParameterType.STRING,
             description=(
                 "操作类型：list 列出设备实例；list_templates 列出已有设备模板；"
-                "create 从已安装模板创建设备实例；update 更新已有设备非敏感配置；"
+                "create 从已安装模板创建设备实例；update 启停设备或更新模板字段；"
                 "connectivity_test 测试设备连通性。"
             ),
             required=True,
@@ -90,7 +91,7 @@ log = Log.create(service="tool.device.manage_tool")
             name="fields",
             type=ParameterType.OBJECT,
             description=(
-                "要创建或更新的非敏感设备配置字段，例如 "
+                "要创建或更新的模板配置字段，例如 "
                 "{\"base_url\":\"https://device.local\"}。"
                 "禁止传入 api_key、secret、password、token、cookie 等敏感字段。"
             ),
@@ -100,6 +101,12 @@ log = Log.create(service="tool.device.manage_tool")
             name="verify_ssl",
             type=ParameterType.BOOLEAN,
             description="是否开启 SSL 证书验证。action=create 或 update 时使用。",
+            required=False,
+        ),
+        ToolParameter(
+            name="enabled",
+            type=ParameterType.BOOLEAN,
+            description="是否启用设备。仅 action=update 时使用。",
             required=False,
         ),
     ],
@@ -113,6 +120,7 @@ async def device_manage(
     device_id: Optional[str] = None,
     fields: Optional[dict[str, Any]] = None,
     verify_ssl: Optional[bool] = None,
+    enabled: Optional[bool] = None,
 ) -> ToolResult:
     """List devices/templates, update non-secret config, or run a probe."""
     normalized_action = (action or "").strip()
@@ -129,7 +137,13 @@ async def device_manage(
             verify_ssl,
         )
     if normalized_action == "update":
-        return await _update_device_config(ctx, device_id, fields, verify_ssl)
+        return await _update_device_config(
+            ctx,
+            device_id,
+            fields,
+            verify_ssl,
+            enabled,
+        )
     if normalized_action == "connectivity_test":
         return await _connectivity_test(ctx, device_id)
     return ToolResult(
@@ -301,24 +315,54 @@ _SENSITIVE_FIELD_KEYS = frozenset(
 )
 
 
-def _normalize_update_fields(
+async def _normalize_update_fields(
+    device_id: str,
     fields: Optional[dict[str, Any]],
 ) -> tuple[dict[str, str], Optional[str]]:
     if fields is None:
         return {}, None
     if not isinstance(fields, dict):
         return {}, "fields 必须是对象，例如 {\"base_url\":\"https://device.local\"}。"
+    if not fields:
+        return {}, None
 
-    normalized: dict[str, str] = {}
-    rejected: list[str] = []
-    for raw_key, raw_value in fields.items():
-        key = str(raw_key).strip()
-        if not key:
-            return {}, "fields 不能包含空字段名。"
-        if key.lower() in _SENSITIVE_FIELD_KEYS:
-            rejected.append(key)
-            continue
-        normalized[key] = "" if raw_value is None else str(raw_value)
+    row = await fetch_device(device_id)
+    if row is None:
+        return {}, f"设备 {device_id!r} 未找到。"
+
+    from flocks.tool.device.plugin_index import list_device_templates
+
+    templates = await asyncio.to_thread(list_device_templates, refresh=False)
+    template = next(
+        (
+            item
+            for item in templates
+            if item.storage_key == row["storage_key"] and item.installed
+        ),
+        None,
+    )
+    if template is None:
+        return {}, "未找到该设备对应的已安装模板，无法校验 fields。"
+
+    schema = {
+        str(field.get("key") or "").strip(): field
+        for field in template.credential_schema
+        if str(field.get("key") or "").strip()
+    }
+    normalized = {
+        str(key).strip(): "" if value is None else str(value)
+        for key, value in fields.items()
+    }
+    unknown = sorted(set(normalized).difference(schema))
+    if unknown:
+        return {}, "模板未声明字段：" + ", ".join(f"`{key}`" for key in unknown)
+
+    rejected = sorted(
+        key
+        for key in normalized
+        if key.lower() in _SENSITIVE_FIELD_KEYS
+        or schema[key].get("input_type") == "password"
+    )
 
     if rejected:
         return {}, (
@@ -335,6 +379,7 @@ async def _update_device_config(
     device_id: Optional[str],
     fields: Optional[dict[str, Any]],
     verify_ssl: Optional[bool],
+    enabled: Optional[bool],
 ) -> ToolResult:
     target = (device_id or "").strip()
     if not target:
@@ -343,13 +388,13 @@ async def _update_device_config(
             error="action=update 时 device_id 不能为空。",
         )
 
-    normalized_fields, field_error = _normalize_update_fields(fields)
+    normalized_fields, field_error = await _normalize_update_fields(target, fields)
     if field_error:
         return ToolResult(success=False, error=field_error)
-    if not normalized_fields and verify_ssl is None:
+    if not normalized_fields and verify_ssl is None and enabled is None:
         return ToolResult(
             success=False,
-            error="action=update 至少需要提供 fields 或 verify_ssl。",
+            error="action=update 至少需要提供 fields、verify_ssl 或 enabled。",
         )
 
     log.info(
@@ -359,6 +404,7 @@ async def _update_device_config(
             "session_id": ctx.session_id,
             "fields": sorted(normalized_fields),
             "verify_ssl": verify_ssl,
+            "enabled": enabled,
         },
     )
 
@@ -368,6 +414,7 @@ async def _update_device_config(
             DeviceIntegrationUpdate(
                 fields=normalized_fields or None,
                 verify_ssl=verify_ssl,
+                enabled=enabled,
             ),
         )
     except DeviceNotFoundError:
@@ -401,6 +448,7 @@ async def _update_device_config(
             "device_id": updated.id,
             "updated_fields": sorted(normalized_fields),
             "verify_ssl": updated.verify_ssl,
+            "enabled": updated.enabled,
         },
         title="设备配置已更新",
     )
