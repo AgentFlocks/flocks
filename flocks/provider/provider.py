@@ -4,11 +4,13 @@ AI Provider management
 Manages different AI model providers (Anthropic, OpenAI, Google, etc.)
 """
 
-from typing import Dict, List, Optional, Any, AsyncIterator, Union
-from pydantic import BaseModel, Field, PrivateAttr
 from enum import Enum
+import json
 import os
 import threading
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
+
+from pydantic import BaseModel, Field, PrivateAttr
 
 from flocks.utils.log import Log
 from flocks.config.config import Config
@@ -52,6 +54,11 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
         if pricing is not None
         else None
     )
+    custom_settings = json.dumps(
+        getattr(model, "custom_settings", None) or {},
+        default=str,
+        sort_keys=True,
+    )
     explicit = tuple(sorted(getattr(model, "_explicit_keys", set()) or set()))
     return (
         getattr(model, "id", None),
@@ -59,6 +66,7 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
         getattr(model, "provider_id", None),
         cap_sig,
         pricing_sig,
+        custom_settings,
         explicit,
     )
 
@@ -124,6 +132,7 @@ class ModelInfo(BaseModel):
     provider_id: str = Field(..., description="Provider ID")
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     pricing: Optional[Dict[str, Any]] = Field(None, description="Pricing info")
+    custom_settings: Dict[str, Any] = Field(default_factory=dict)
     _explicit_keys: set = PrivateAttr(default_factory=set)
     """Field names explicitly present in flocks.json (not defaults)."""
 
@@ -855,6 +864,16 @@ class Provider:
                                     context_window=model_dict.get("context_window"),
                                 ),
                                 pricing=_pricing,
+                                custom_settings={
+                                    key: model_dict[key]
+                                    for key in (
+                                        "stream_first_chunk_timeout_s",
+                                        "streamFirstChunkTimeoutSeconds",
+                                        "stream_ongoing_chunk_timeout_s",
+                                        "streamOngoingChunkTimeoutSeconds",
+                                    )
+                                    if key in model_dict
+                                },
                             )
                             model_info._explicit_keys = _explicit_keys
                             desired_models.append(model_info)
