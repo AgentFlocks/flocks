@@ -291,7 +291,7 @@ async def test_goal_model_judge_uses_provider_options_without_main_token_budget(
     kwargs = provider.chat.await_args.kwargs
     assert kwargs["extra_body"] == {"reasoning_split": True}
     assert kwargs["max_tokens"] == JUDGE_MAX_TOKENS
-    assert kwargs["temperature"] == 0
+    assert "temperature" not in kwargs
     assert decision.verdict == "complete"
 
 
