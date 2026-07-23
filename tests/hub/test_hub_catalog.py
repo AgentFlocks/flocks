@@ -596,7 +596,7 @@ async def test_hub_installs_pentest_workspace_with_strix_chat_source(
         / "strix_chat_api"
     )
 
-    assert record.version == "1.1.0"
+    assert record.version == "1.1.1"
     assert (sidecar_dir / "pyproject.toml").is_file()
     assert (sidecar_dir / "uv.lock").is_file()
     assert (sidecar_dir / "src" / "strix_chat_api" / "server.py").is_file()
