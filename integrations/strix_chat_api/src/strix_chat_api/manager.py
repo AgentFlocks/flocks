@@ -224,7 +224,7 @@ class ChatManager:
             "targets": list(session.targets),
             "scan_mode": session.scan_mode,
             "error": session.error,
-            "agents": list(agents.values()),
+            "agents": agents,
             "events": events,
         }
 
