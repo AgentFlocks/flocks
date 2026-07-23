@@ -1,17 +1,16 @@
 name: Dispatch autotest Windows upgrade
 
 on:
-  push:
-    branches:
-      - main
+  release:
+    types: [published]
   workflow_dispatch:
     inputs:
       release_tag:
-        description: "Optional Flocks version tag. Defaults to pyproject.toml version."
+        description: "Optional Flocks version tag. Defaults to the published release tag, then pyproject.toml."
         required: false
         type: string
       release_url:
-        description: "Optional source URL. Defaults to the release or commit URL."
+        description: "Optional source URL. Defaults to the published release URL or commit URL."
         required: false
         type: string
       rollback_version:
@@ -48,6 +47,9 @@ jobs:
           INPUT_RELEASE_URL: ${{ inputs.release_url }}
           INPUT_ROLLBACK_VERSION: ${{ inputs.rollback_version }}
           INPUT_RUN_FORCE_FALLBACK: ${{ inputs.run_force_fallback }}
+          RELEASE_EVENT_TAG: ${{ github.event.release.tag_name }}
+          RELEASE_EVENT_URL: ${{ github.event.release.html_url }}
+          RELEASE_EVENT_ASSETS_JSON: ${{ toJson(github.event.release.assets) }}
           GITHUB_SERVER_URL_VALUE: ${{ github.server_url }}
           GITHUB_REPOSITORY_VALUE: ${{ github.repository }}
           GITHUB_SHA_VALUE: ${{ github.sha }}
@@ -64,8 +66,27 @@ jobs:
           PY
           )"
 
-          release_tag="${INPUT_RELEASE_TAG:-}"
-          release_url="${INPUT_RELEASE_URL:-}"
+          release_tag="${INPUT_RELEASE_TAG:-${RELEASE_EVENT_TAG:-}}"
+          release_url="${INPUT_RELEASE_URL:-${RELEASE_EVENT_URL:-}}"
+          installer_asset_name="$(python3 - <<'PY'
+          import json
+          import os
+
+          assets_json = os.environ.get("RELEASE_EVENT_ASSETS_JSON") or "[]"
+          try:
+              assets = json.loads(assets_json)
+          except json.JSONDecodeError:
+              assets = []
+          if not isinstance(assets, list):
+              assets = []
+
+          for asset in assets:
+              name = str(asset.get("name") or "")
+              if name.lower().endswith(".exe"):
+                  print(name)
+                  break
+          PY
+          )"
 
           if [ -z "$release_tag" ]; then
             release_tag="$pyproject_version"
@@ -88,6 +109,7 @@ jobs:
             echo "rollback_version=${INPUT_ROLLBACK_VERSION:-}"
             echo "run_force_fallback=${INPUT_RUN_FORCE_FALLBACK:-false}"
             echo "artifact_name=$artifact_name"
+            echo "installer_asset_name=$installer_asset_name"
           } >> "$GITHUB_OUTPUT"
 
           {
@@ -98,6 +120,7 @@ jobs:
             echo "- Release URL: ${release_url}"
             echo "- Source ref: ${GITHUB_REF_NAME_VALUE}"
             echo "- Source sha: ${GITHUB_SHA_VALUE}"
+            echo "- Installer asset: ${installer_asset_name}"
             echo "- Rollback version: ${INPUT_ROLLBACK_VERSION:-}"
             echo "- Run force fallback: ${INPUT_RUN_FORCE_FALLBACK:-false}"
             echo "- Expected autotest artifact: ${artifact_name}"
@@ -111,6 +134,7 @@ jobs:
           ROLLBACK_VERSION: ${{ steps.payload.outputs.rollback_version }}
           RUN_FORCE_FALLBACK: ${{ steps.payload.outputs.run_force_fallback }}
           ARTIFACT_NAME: ${{ steps.payload.outputs.artifact_name }}
+          INSTALLER_ASSET_NAME: ${{ steps.payload.outputs.installer_asset_name }}
           SOURCE_REPOSITORY: ${{ github.repository }}
           SOURCE_RUN_ID: ${{ github.run_id }}
           SOURCE_SHA: ${{ github.sha }}
@@ -127,7 +151,7 @@ jobs:
               "client_payload": {
                   "release_tag": os.environ["RELEASE_TAG"],
                   "release_url": os.environ["RELEASE_URL"],
-                  "installer_asset_name": "",
+                  "installer_asset_name": os.environ.get("INSTALLER_ASSET_NAME", ""),
                   "source_repository": os.environ["SOURCE_REPOSITORY"],
                   "source_run_id": os.environ["SOURCE_RUN_ID"],
                   "source_sha": os.environ["SOURCE_SHA"],
