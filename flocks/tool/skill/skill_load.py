@@ -105,6 +105,23 @@ async def skill_tool_impl(
                 "Enable it from the Skills page to use it again."
             )
         )
+
+    try:
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id(ctx.session_id)
+        if session is not None and session.session_mode == "pentest":
+            from flocks.pentest.store import PentestStateStore
+
+            PentestStateStore.from_session(session).record_skill_loaded(
+                session_id=session.id,
+                skill_name=skill.name,
+            )
+    except Exception as exc:
+        return ToolResult(
+            success=False,
+            error=f"Pentest skill budget check failed: {exc}",
+        )
     
     # Request permission
     await ctx.ask(

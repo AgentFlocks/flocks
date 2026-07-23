@@ -1116,6 +1116,18 @@ class StreamProcessor:
 
             cfg = await Config.get()
             self._config_data = cfg.model_dump(by_alias=True, exclude_none=True)
+            from flocks.session.session import Session
+
+            session = await Session.get_by_id(self.session_id)
+            if session is not None and session.session_mode == "pentest":
+                from flocks.pentest.sandbox import apply_pentest_sandbox_config
+
+                self._session_key = session.pentest_run_id or self._session_key
+                self._main_session_key = self._session_key
+                self._config_data = apply_pentest_sandbox_config(
+                    self._config_data,
+                    session,
+                )
         except Exception as e:
             log.warn("stream.sandbox.config_load_failed", {"error": str(e)})
             self._config_data = {}

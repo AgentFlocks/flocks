@@ -546,12 +546,35 @@ class SessionRunner:
         agent: AgentInfo,
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
+        declared_tool_names = getattr(agent, "tools", None)
+        if (
+            self.session.session_mode == "pentest"
+            and self.session.pentest_role == "orchestrator"
+        ):
+            declared_tool_names = [
+                "delegate_task",
+                "pentest_note",
+                "pentest_todo",
+                "finish_pentest",
+            ]
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
-            declared_tool_names=getattr(agent, "tools", None),
+            declared_tool_names=declared_tool_names,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
+        if self.session.session_mode == "pentest":
+            allowed = set(declared_tool_names or [])
+            result.tool_infos = [
+                tool_info
+                for tool_info in result.tool_infos
+                if tool_info.name in allowed
+            ]
+            result.metadata["pentestRole"] = self.session.pentest_role
+            result.metadata["callableToolNames"] = sorted(
+                tool_info.name for tool_info in result.tool_infos
+            )
+            result.metadata["callableToolCount"] = len(result.tool_infos)
         return result.tool_infos, dict(result.metadata)
 
     @staticmethod
@@ -1296,6 +1319,26 @@ class SessionRunner:
         
         # Check if we've reached max steps (matching Flocks logic)
         max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
+        if self.session.session_mode == "pentest":
+            pentest_budget = (self.session.pentest_config or {}).get("budget", {})
+            configured_steps = pentest_budget.get("maxSteps")
+            if configured_steps is not None:
+                max_steps = min(max_steps, int(configured_steps))
+            try:
+                from flocks.pentest.store import PentestStateStore
+
+                PentestStateStore.from_session(
+                    self.session
+                ).assert_execution_budget()
+            except Exception as exc:
+                from flocks.pentest.store import PentestStateError
+
+                if isinstance(exc, PentestStateError):
+                    return StepResult(action="stop", error=str(exc))
+                log.warn(
+                    "runner.pentest_budget_check_failed",
+                    {"session_id": self.session.id, "error": str(exc)},
+                )
         is_last_step = self._step >= max_steps
         
         # Get provider
@@ -3424,6 +3467,14 @@ class SessionRunner:
                     "output": tokens_update["output"],
                     "total": stream_usage.get("total_tokens", 0),
                 })
+                if self.session.session_mode == "pentest":
+                    from flocks.pentest.store import PentestStateStore
+
+                    PentestStateStore.from_session(self.session).record_token_usage(
+                        int(stream_usage.get("total_tokens", 0))
+                        or int(tokens_update["input"])
+                        + int(tokens_update["output"])
+                    )
             except Exception as e:
                 log.warn("runner.stream.usage_update_failed", {"error": str(e)})
         

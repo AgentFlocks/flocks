@@ -24,6 +24,8 @@ from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
 # 使用轻量级元数据查询，避免循环依赖
 from flocks.agent.registry import is_delegatable
+from flocks.pentest.policy import PentestDelegationPolicy
+from flocks.pentest.store import PentestStateError, PentestStateStore
 from flocks.skill.skill import Skill
 from flocks.config.config import Config
 from flocks.tool.subagent_result import format_sync_subagent_result
@@ -352,6 +354,10 @@ async def delegate_task_tool(
     if not category and not subagent_type and not session_id:
         return ToolResult(success=False, error="Must provide either category or subagent_type.")
 
+    parent_session = await Session.get_by_id(ctx.session_id)
+    if not parent_session:
+        return ToolResult(success=False, error="Parent session not found")
+
     await ctx.ask(
         permission="delegate_task",
         patterns=[category or subagent_type or "continue"],
@@ -388,6 +394,26 @@ async def delegate_task_tool(
         session = await Session.get_by_id(session_id)
         if not session:
             return ToolResult(success=False, error=f"Session {session_id} not found")
+        pentest_store = None
+        if getattr(parent_session, "session_mode", "chat") == "pentest":
+            if session.pentest_run_id != parent_session.pentest_run_id:
+                return ToolResult(
+                    success=False,
+                    error="Cannot continue a Session from another pentest run",
+                )
+            if session.parent_id != parent_session.id:
+                return ToolResult(
+                    success=False,
+                    error="Pentest agents may continue only their direct child Sessions",
+                )
+            try:
+                pentest_store = PentestStateStore.from_session(parent_session)
+                pentest_store.record_agent_resumed(
+                    session_id=session.id,
+                    task=description,
+                )
+            except PentestStateError as exc:
+                return ToolResult(success=False, error=str(exc))
         await Message.create(
             session_id=session.id,
             role=MessageRole.USER,
@@ -395,19 +421,35 @@ async def delegate_task_tool(
             agent=session.agent or ctx.agent,
         )
         from flocks.session.session_loop import LoopCallbacks
-        result = await SessionLoop.run(
-            session.id,
-            callbacks=LoopCallbacks(
-                event_publish_callback=ctx.event_publish_callback,
-            ),
-        )
+        try:
+            result = await SessionLoop.run(
+                session.id,
+                callbacks=LoopCallbacks(
+                    event_publish_callback=ctx.event_publish_callback,
+                ),
+            )
+        except Exception as exc:
+            if pentest_store is not None:
+                pentest_store.record_agent_finished(
+                    session_id=session.id,
+                    status="interrupted",
+                    error=str(exc),
+                )
+            raise
         ctx.metadata({"title": f"Continue: {description}", "metadata": {"sessionId": session.id}})
-        return await format_sync_subagent_result(
+        tool_result = await format_sync_subagent_result(
             description=description,
             session_id=session.id,
             loop_result=result,
             metadata={"sessionId": session.id},
         )
+        if pentest_store is not None:
+            pentest_store.record_agent_finished(
+                session_id=session.id,
+                status="completed" if tool_result.success else "interrupted",
+                error=None if tool_result.success else tool_result.error,
+            )
+        return tool_result
 
     if category:
         agent_to_use = "rex-junior"
@@ -454,9 +496,25 @@ async def delegate_task_tool(
     full_prompt = f"{system_content}\n\n{prompt}" if system_content else prompt
 
     # Sync execution
-    parent_session = await Session.get_by_id(ctx.session_id)
-    if not parent_session:
-        return ToolResult(success=False, error="Parent session not found")
+    pentest_role = None
+    pentest_finding_id = None
+    pentest_store = None
+    if getattr(parent_session, "session_mode", "chat") == "pentest":
+        if category:
+            return ToolResult(
+                success=False,
+                error="Pentest sessions must delegate to an explicit pentest agent",
+            )
+        try:
+            pentest_role, pentest_finding_id = PentestDelegationPolicy.validate(
+                parent_session=parent_session,
+                child_agent=agent_to_use or "",
+                prompt=prompt,
+                skills=load_skills,
+            )
+            pentest_store = PentestStateStore.from_session(parent_session)
+        except PentestStateError as exc:
+            return ToolResult(success=False, error=str(exc))
 
     from flocks.project.instance import Instance
 
@@ -471,6 +529,19 @@ async def delegate_task_tool(
         permission=await _subagent_session_permissions(agent_to_use),
         category="task",
     )
+    if pentest_store is not None:
+        create_kwargs.update(
+            session_mode="pentest",
+            pentest_run_id=parent_session.pentest_run_id,
+            pentest_root=parent_session.pentest_root,
+            pentest_role=pentest_role,
+            pentest_config=parent_session.pentest_config,
+            metadata={
+                "pentest_finding_id": pentest_finding_id,
+                "pentest_task": description,
+                "pentest_skills": load_skills,
+            },
+        )
     if category_model and category_model.get("providerID") and category_model.get("modelID"):
         create_kwargs.update(
             provider=category_model["providerID"],
@@ -478,6 +549,18 @@ async def delegate_task_tool(
             model_pinned=bool(explicit_model),
         )
     created = await Session.create(**create_kwargs)
+    if pentest_store is not None:
+        try:
+            pentest_store.record_agent_started(
+                session_id=created.id,
+                parent_session_id=parent_session.id,
+                role=pentest_role or "",
+                task=description,
+                skills=load_skills,
+            )
+        except PentestStateError as exc:
+            await Session.delete(created.project_id, created.id)
+            return ToolResult(success=False, error=str(exc))
     if ctx.extra.get("workflow_temp_parent") is True:
         ctx.extra["workflow_child_session_created"] = True
     await Message.create(
@@ -494,14 +577,23 @@ async def delegate_task_tool(
         description=description,
     )
     ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
-    result = await SessionLoop.run(
-        created.id,
-        provider_id=(category_model or {}).get("providerID"),
-        model_id=(category_model or {}).get("modelID"),
-        callbacks=forwarder.build_callbacks(
-            event_publish_callback=ctx.event_publish_callback,
-        ),
-    )
+    try:
+        result = await SessionLoop.run(
+            created.id,
+            provider_id=(category_model or {}).get("providerID"),
+            model_id=(category_model or {}).get("modelID"),
+            callbacks=forwarder.build_callbacks(
+                event_publish_callback=ctx.event_publish_callback,
+            ),
+        )
+    except Exception as exc:
+        if pentest_store is not None:
+            pentest_store.record_agent_finished(
+                session_id=created.id,
+                status="interrupted",
+                error=str(exc),
+            )
+        raise
     tool_result = await format_sync_subagent_result(
         description=description,
         session_id=created.id,
@@ -509,5 +601,11 @@ async def delegate_task_tool(
         metadata=forwarder.final_metadata,
     )
     result_status = "completed" if tool_result.success else "error"
+    if pentest_store is not None:
+        pentest_store.record_agent_finished(
+            session_id=created.id,
+            status="completed" if tool_result.success else "interrupted",
+            error=None if tool_result.success else tool_result.error,
+        )
     ctx.metadata({"title": description, "metadata": {**forwarder.final_metadata, "status": result_status}})
     return tool_result
