@@ -23,6 +23,7 @@ describe('i18n lazy namespaces', () => {
 
   it('uses workbench and task terminology for session management', () => {
     expect(zhNav.sessions).toBe('工作台');
+    expect(zhNav.workspace).toBe('文件目录');
     expect(zhHome.quickActions.sessions.title).toBe('工作台');
     expect(zhSession.managementTitle).toBe('工作台');
     expect(zhSession.newSession).toBe('新建任务');
@@ -33,6 +34,7 @@ describe('i18n lazy namespaces', () => {
     expect(zhSession.noResults).toBe('没有匹配的任务');
 
     expect(enNav.sessions).toBe('Workbench');
+    expect(enNav.workspace).toBe('File Directory');
     expect(enHome.quickActions.sessions.title).toBe('Workbench');
     expect(enSession.managementTitle).toBe('Workbench');
     expect(enSession.newSession).toBe('New Task');
