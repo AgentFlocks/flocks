@@ -12,17 +12,16 @@ async def _noop_log_init(**_: object) -> None:
     return None
 
 
-def test_doctor_runs_source_installer_from_source_root(monkeypatch, tmp_path) -> None:
+def test_doctor_runs_core_installer_from_source_root(monkeypatch, tmp_path) -> None:
     monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
 
-    calls: list[tuple[list[str], object, bool]] = []
-
-    def fake_run(command, *, cwd, check, env):
-        _ = env
-        calls.append((command, cwd, check))
-
-    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+    calls: list[object] = []
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_run_core_install",
+        lambda source_root, **_kwargs: calls.append(source_root),
+    )
     monkeypatch.setattr(
         "flocks.cli.service_manager.build_status_lines",
         lambda: [
@@ -35,16 +34,30 @@ def test_doctor_runs_source_installer_from_source_root(monkeypatch, tmp_path) ->
 
     assert result.exit_code == 0, result.stdout
     assert "Flocks source directory:" in result.stdout
-    assert "scripts/install.sh" in result.stdout
+    assert "Repairing Flocks core installation" in result.stdout
     assert "安装正常" in result.stdout
     assert "运行状态正常" in result.stdout
     assert len(calls) == 1
 
-    command, cwd, check = calls[0]
-    assert command[0] == "bash"
-    assert command[1].endswith("scripts/install.sh")
-    assert cwd == doctor_cmd._find_source_root()
-    assert check is True
+    assert calls == [doctor_cmd._find_source_root()]
+
+
+def test_doctor_uses_shared_core_install_entry(monkeypatch, tmp_path) -> None:
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path))
+    monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
+    calls: list[object] = []
+
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_run_core_install",
+        lambda source_root, **_kwargs: calls.append(source_root),
+    )
+    monkeypatch.setattr(doctor_cmd, "_print_service_diagnosis", lambda: None)
+
+    result = runner.invoke(cli_main.app, ["doctor"])
+
+    assert result.exit_code == 0, result.stdout
+    assert calls == [doctor_cmd._find_source_root()]
 
 
 def test_doctor_uses_cn_environment_for_zh_install_profile(monkeypatch, tmp_path) -> None:
@@ -54,14 +67,11 @@ def test_doctor_uses_cn_environment_for_zh_install_profile(monkeypatch, tmp_path
     monkeypatch.setattr(cli_main.Log, "init", _noop_log_init)
 
     captured: dict[str, object] = {}
-
-    def fake_run(command, *, cwd, check, env):
-        captured["command"] = command
-        captured["cwd"] = cwd
-        captured["check"] = check
-        captured["env"] = env
-
-    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_run_core_install",
+        lambda source_root, *, env: captured.update(source_root=source_root, env=env),
+    )
     monkeypatch.setattr("flocks.cli.service_manager.build_status_lines", lambda: ["[flocks] 后端未运行", "[flocks] WebUI 未运行"])
 
     result = runner.invoke(cli_main.app, ["doctor"])
@@ -99,7 +109,7 @@ def test_doctor_on_windows_starts_handoff_before_running_installer(monkeypatch, 
     result = runner.invoke(cli_main.app, ["doctor"])
 
     assert result.exit_code == 0, result.stdout
-    assert "scripts/install.ps1" in result.stdout
+    assert "Repairing Flocks core installation" in result.stdout
     assert "installer will continue in this console" in result.stdout
     assert captured["cwd"] == doctor_cmd._find_source_root()
     assert captured["close_fds"] is True
@@ -121,16 +131,14 @@ def test_doctor_windows_handoff_child_runs_installer_synchronously(monkeypatch, 
 
     captured: dict[str, object] = {}
 
-    def fake_run(command, *, cwd, check, env):
-        captured["command"] = command
-        captured["cwd"] = cwd
-        captured["check"] = check
-        captured["env"] = env
-
     def fail_popen(*_args, **_kwargs):
         raise AssertionError("handoff child should run the installer directly")
 
-    monkeypatch.setattr(doctor_cmd.subprocess, "run", fake_run)
+    monkeypatch.setattr(
+        doctor_cmd,
+        "_run_core_install",
+        lambda source_root, *, env: captured.update(source_root=source_root, env=env),
+    )
     monkeypatch.setattr(doctor_cmd.subprocess, "Popen", fail_popen)
     monkeypatch.setattr(
         "flocks.cli.service_manager.build_status_lines",
@@ -143,11 +151,7 @@ def test_doctor_windows_handoff_child_runs_installer_synchronously(monkeypatch, 
     result = runner.invoke(cli_main.app, ["doctor"])
 
     assert result.exit_code == 0, result.stdout
-    command = captured["command"]
-    assert isinstance(command, list)
-    assert command[-1].endswith("scripts/install.ps1")
-    assert captured["cwd"] == doctor_cmd._find_source_root()
-    assert captured["check"] is True
+    assert captured["source_root"] == doctor_cmd._find_source_root()
     assert "安装正常" in result.stdout
     assert "运行状态正常" in result.stdout
 
@@ -175,18 +179,3 @@ def test_service_status_is_healthy_accepts_legacy_backend_and_webui() -> None:
         ]
     )
     assert not doctor_cmd._service_status_is_healthy(["[flocks] 后端运行中: PID=111", "[flocks] WebUI 未运行"])
-
-
-def test_doctor_builds_windows_install_command(monkeypatch) -> None:
-    monkeypatch.setattr(doctor_cmd.shutil, "which", lambda name: None)
-
-    command = doctor_cmd._build_source_install_command(doctor_cmd._find_source_root() / "scripts" / "install.ps1")
-
-    assert command == [
-        "powershell",
-        "-NoProfile",
-        "-ExecutionPolicy",
-        "Bypass",
-        "-File",
-        str(doctor_cmd._find_source_root() / "scripts" / "install.ps1"),
-    ]

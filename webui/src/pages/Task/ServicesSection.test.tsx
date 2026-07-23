@@ -11,7 +11,8 @@ const mocks = vi.hoisted(() => ({
   toastError: vi.fn(),
 }));
 
-vi.mock('@/api/workflow', () => ({
+vi.mock('@/api/workflow', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/workflow')>()),
   workflowAPI: {
     listServices: mocks.listServices,
     publish: mocks.publish,
@@ -113,7 +114,7 @@ describe('ServicesSection', () => {
     await user.click(restartButton);
 
     await waitFor(() => {
-      expect(mocks.publish).toHaveBeenCalledWith('wf-1', { driver: 'docker' });
+      expect(mocks.publish).toHaveBeenCalledWith('wf-1', { driver: 'docker', port: 19000 });
     });
     expect(screen.getByText('服务驱动')).toBeInTheDocument();
     expect(screen.getByText('Docker')).toBeInTheDocument();

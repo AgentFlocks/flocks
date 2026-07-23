@@ -6,6 +6,7 @@ import asyncio
 import os
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from functools import cache
 from typing import Dict, List, Optional, Sequence
 
 import typer
@@ -118,8 +119,13 @@ async def _resolve_project_sessions(project_filter: Optional[str]) -> List[Sessi
     if project_filter is None:
         return sessions
     if project_filter == "":
-        result = await Project.from_directory(os.getcwd())
-        project_filter = result["project"].id
+        resolve_worktree = cache(Project.worktree_for_directory)
+        current_worktree = resolve_worktree(os.getcwd())
+        return [
+            session
+            for session in sessions
+            if session.directory and resolve_worktree(session.directory) == current_worktree
+        ]
     return [session for session in sessions if session.project_id == project_filter]
 
 

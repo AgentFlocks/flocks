@@ -1,13 +1,14 @@
 import React from 'react';
-import { act, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { Message } from '@/types';
 
 import {
-  areChatMessagePartsRenderEqual,
+  areChatTimelineItemsRenderEqual,
   buildInstructionDisplayText,
+  buildChatTimelineItems,
   buildContextUsageBreakdown,
   buildTodoSummary,
   ChatMessageBubble,
@@ -29,9 +30,11 @@ import {
   isActiveSessionStatus,
   listUploadedDocumentPaths,
   shouldRenderMessage,
+  shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
 } from './SessionChat';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
 const clientGetMock = vi.fn();
 const clientPostMock = vi.fn();
@@ -45,6 +48,7 @@ const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const sessionApiGetContextUsageMock = vi.fn();
 const sessionApiGetMock = vi.fn();
+const sessionApiUpdateMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string, options?: Record<string, unknown>) => {
@@ -163,9 +167,13 @@ vi.mock('@/hooks/useReasoningToggle', () => ({
   }),
 }));
 
-vi.mock('@/hooks/usePendingQuestions', () => ({
-  usePendingQuestions: () => pendingQuestionsHookMock,
-}));
+vi.mock('@/features/session-chat', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/features/session-chat')>();
+  return {
+    ...actual,
+    usePendingQuestions: () => pendingQuestionsHookMock,
+  };
+});
 
 vi.mock('./Toast', () => ({
   useToast: () => toastMock,
@@ -183,6 +191,7 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/api/session', () => ({
   sessionApi: {
     get: (...args: unknown[]) => sessionApiGetMock(...args),
+    update: (...args: unknown[]) => sessionApiUpdateMock(...args),
     listPromptQueue: (...args: unknown[]) => sessionApiListPromptQueueMock(...args),
     enqueuePrompt: (...args: unknown[]) => sessionApiEnqueuePromptMock(...args),
     updateQueuedPrompt: (...args: unknown[]) => sessionApiUpdateQueuedPromptMock(...args),
@@ -227,6 +236,7 @@ beforeEach(() => {
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
   sessionApiGetMock.mockResolvedValue({});
+  sessionApiUpdateMock.mockResolvedValue({});
   sessionApiGetContextUsageMock.mockResolvedValue({
     sessionID: 'sess-1',
     usedTokens: 0,
@@ -248,6 +258,7 @@ beforeEach(() => {
     addMessage: vi.fn(),
     updateMessage: vi.fn(),
     updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
     replaceMessageText: vi.fn(),
     truncateAfterMessage: vi.fn(),
   });
@@ -262,6 +273,83 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
     timestamp: 0,
     ...overrides,
   } as Message;
+}
+
+type FetchedMessageFixture = {
+  info: {
+    id: string;
+    sessionID: string;
+    role: 'user' | 'assistant';
+    parentID?: string;
+    finish?: string | null;
+  };
+  parts: Message['parts'];
+};
+
+function makeFetchedMessage(
+  info: Omit<FetchedMessageFixture['info'], 'sessionID'>,
+  parts: Message['parts'] = [],
+): FetchedMessageFixture {
+  return {
+    info: { sessionID: 'sess-1', ...info },
+    parts,
+  };
+}
+
+function mockFallbackPolling({
+  localMessages,
+  fetchedMessages,
+  refetch,
+  status = { 'sess-1': { type: 'busy' } },
+}: {
+  localMessages: Message[];
+  fetchedMessages: FetchedMessageFixture[];
+  refetch: () => unknown;
+  status?: Record<string, { type: string }>;
+}) {
+  useSessionMessagesMock.mockReturnValue({
+    messages: localMessages,
+    loading: false,
+    refetch,
+    addMessage: vi.fn(),
+    updateMessage: vi.fn(),
+    updateMessagePart: vi.fn(),
+    replaceMessageText: vi.fn(),
+    truncateAfterMessage: vi.fn(),
+  });
+  clientGetMock.mockImplementation((url: string) => {
+    if (url === '/api/session/sess-1/message') {
+      return Promise.resolve({
+        data: {
+          items: fetchedMessages,
+          hasMore: false,
+          nextBefore: null,
+        },
+      });
+    }
+    if (url === '/api/session/status') {
+      return Promise.resolve({ data: status });
+    }
+    return Promise.resolve({ data: {} });
+  });
+}
+
+async function startFallbackPolling(onStreamingDone: () => void) {
+  render(React.createElement(SessionChat, {
+    sessionId: 'sess-1',
+    live: true,
+    onStreamingDone,
+  }));
+  await act(async () => {
+    await Promise.resolve();
+  });
+  clientGetMock.mockClear();
+  act(() => {
+    useSSEOptionsRef.current.onEvent({
+      type: 'session.status',
+      properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+    });
+  });
 }
 
 function mockStatefulSessionMessages() {
@@ -299,6 +387,9 @@ function mockStatefulSessionMessages() {
       addMessage: (message: Message) => setMessages((prev) => [...prev, message]),
       updateMessage: upsertMessage,
       updateMessagePart: vi.fn(),
+      removeMessage: (messageId: string) => setMessages((prev) => prev.filter(
+        (message) => message.id !== messageId,
+      )),
       replaceMessageText: vi.fn(),
       markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
         (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
@@ -428,6 +519,16 @@ describe('getMessageBubbleClassName', () => {
   // The message column owns the available width, so the inner bubble only
   // controls intrinsic sizing (`w-auto` vs `w-full`). Tests here therefore
   // assert width semantics, not legacy max-width literals.
+  it('allows every bubble variant to shrink within the message column', () => {
+    for (const compact of [false, true]) {
+      for (const isUser of [false, true]) {
+        const className = getMessageBubbleClassName({ compact, isUser, isEditing: false });
+        expect(className).toContain('min-w-0');
+        expect(className).toContain('max-w-full');
+      }
+    }
+  });
+
   it('keeps non-editing user bubbles auto-sized in full layout', () => {
     const className = getMessageBubbleClassName({
       compact: false,
@@ -436,7 +537,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-auto');
-    expect(className).not.toContain('w-full');
+    expect(className.split(' ')).not.toContain('w-full');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
@@ -865,6 +966,36 @@ describe('SessionChat standalone thinking indicator', () => {
       consoleError.mockRestore();
     }
   });
+
+  it('removes an intermediate assistant when message.removed arrives', () => {
+    const removeMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'assistant-failed', role: 'assistant', parts: [] })],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage,
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.removed',
+        properties: {
+          sessionID: 'sess-1',
+          messageID: 'assistant-failed',
+        },
+      });
+    });
+
+    expect(removeMessage).toHaveBeenCalledWith('assistant-failed');
+  });
 });
 
 describe('SessionChat instruction display text', () => {
@@ -917,6 +1048,34 @@ describe('SessionChat instruction display text', () => {
 });
 
 describe('SessionChat composer controls', () => {
+  it('enables Auto on an existing session before sending without a model override', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      modelAuto: true,
+      model: null,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'continue{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiUpdateMock).toHaveBeenCalledWith('sess-1', {
+        model_auto: true,
+        model_pinned: false,
+      });
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          messageID: expect.any(String),
+          parts: [{ type: 'text', text: 'continue' }],
+        }),
+      );
+    });
+    expect(sessionApiUpdateMock.mock.invocationCallOrder[0]).toBeLessThan(
+      clientPostMock.mock.invocationCallOrder[0],
+    );
+  });
+
   it('keeps the disabled send button visible in dark mode', () => {
     const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 
@@ -996,6 +1155,155 @@ describe('getRenderableThinkingText', () => {
   });
 });
 
+describe('ChatMessageBubble reasoning streaming', () => {
+  it.each(['reasoning', 'thinking'] as const)(
+    'paces an active %s part after a tool and flushes the completed text',
+    (partType) => {
+      type RafCallback = (time: number) => void;
+      const callbacks = new Map<number, RafCallback>();
+      let nextRafId = 0;
+      vi.stubGlobal('requestAnimationFrame', (callback: RafCallback) => {
+        const id = ++nextRafId;
+        callbacks.set(id, callback);
+        return id;
+      });
+      vi.stubGlobal('cancelAnimationFrame', (id: number) => {
+        callbacks.delete(id);
+      });
+
+      const makeReasoningMessage = (text: string, finish?: Message['finish']) => makeMessage({
+        id: 'assistant-reasoning-stream',
+        role: 'assistant',
+        finish,
+        parts: [
+          {
+            id: 'tool-before-reasoning',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: 'tool',
+            tool: 'read',
+            state: { status: 'completed', output: 'done' },
+          } as any,
+          {
+            id: 'reasoning-stream',
+            messageID: 'assistant-reasoning-stream',
+            sessionID: 'sess-1',
+            type: partType,
+            text,
+          } as any,
+        ],
+      });
+
+      let unmount = () => {};
+      try {
+        const rendered = render(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思'),
+          isActive: true,
+        }));
+        unmount = rendered.unmount;
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程'),
+          isActive: true,
+        }));
+
+        expect(screen.getByText('思考中...')).toBeInTheDocument();
+        expect(screen.getByText('思')).toBeInTheDocument();
+        expect(screen.queryByText('思考过程')).not.toBeInTheDocument();
+
+        act(() => {
+          const pending = [...callbacks.values()];
+          callbacks.clear();
+          pending.forEach(callback => callback(1000 / 60));
+        });
+        expect(screen.getByText('思考')).toBeInTheDocument();
+
+        rendered.rerender(React.createElement(ChatMessageBubble, {
+          message: makeReasoningMessage('思考过程', 'stop'),
+          isActive: false,
+        }));
+        expect(screen.getByText('思考过程')).toBeInTheDocument();
+      } finally {
+        unmount();
+        vi.unstubAllGlobals();
+      }
+    },
+  );
+
+  it('does not animate reasoning while its process group is closed', () => {
+    let nextRafId = 0;
+    const requestAnimationFrameSpy = vi.fn(() => ++nextRafId);
+    vi.stubGlobal('requestAnimationFrame', requestAnimationFrameSpy);
+    vi.stubGlobal('cancelAnimationFrame', vi.fn());
+
+    const messageId = 'assistant-hidden-reasoning';
+    const processGroupKey = `${messageId}:process:0`;
+    const makeHiddenReasoningMessage = (text: string) => makeMessage({
+      id: messageId,
+      role: 'assistant',
+      parts: [
+        {
+          id: 'tool-before-hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'tool',
+          tool: 'read',
+          state: { status: 'completed', output: 'done' },
+        } as any,
+        {
+          id: 'hidden-reasoning',
+          messageID: messageId,
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text,
+        } as any,
+      ],
+    });
+
+    let unmount = () => {};
+    try {
+      const rendered = render(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      unmount = rendered.unmount;
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: false },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).not.toHaveBeenCalled();
+
+      rendered.rerender(React.createElement(ChatMessageBubble, {
+        message: makeHiddenReasoningMessage('隐藏更新继续'),
+        isActive: true,
+        collapseIntermediateSteps: true,
+        processGroupsOpenWhileActive: true,
+        processGroupOpenState: { [processGroupKey]: true },
+      }));
+      expect(requestAnimationFrameSpy).toHaveBeenCalledTimes(1);
+    } finally {
+      unmount();
+      vi.unstubAllGlobals();
+    }
+  });
+});
+
 describe('getMessageErrorText', () => {
   it('prefers user-facing display messages over raw provider errors', () => {
     expect(getMessageErrorText(makeMessage({
@@ -1028,6 +1336,146 @@ describe('getMessageErrorText', () => {
   });
 });
 
+describe('shouldForwardSSEEventToParent', () => {
+  it('forwards global workflow, task, and session update events', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'workflow.updated',
+      properties: { id: 'workflow-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'task.updated',
+      properties: { executionID: 'task-1' },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'session.updated',
+      properties: { id: 'other-session' },
+    }, 'sess-1')).toBe(true);
+  });
+
+  it('forwards chat events only for the current session', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'sess-1' } },
+    }, 'sess-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
+      type: 'message.part.updated',
+      properties: { part: { sessionID: 'other-session' } },
+    }, 'sess-1')).toBe(false);
+    expect(shouldForwardSSEEventToParent({
+      type: 'context.usage.updated',
+      properties: { sessionID: 'other-session' },
+    }, 'sess-1')).toBe(false);
+  });
+
+  it('skips heartbeat-style events without payloads', () => {
+    expect(shouldForwardSSEEventToParent({
+      type: 'server.heartbeat',
+    }, 'sess-1')).toBe(false);
+  });
+});
+
+describe('buildChatTimelineItems', () => {
+  it('filters skipped and non-renderable messages while marking the active assistant', () => {
+    const messages = [
+      makeMessage({
+        id: 'user-1',
+        role: 'user',
+        parts: [{ id: 'user-part', type: 'text', text: 'hello' }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'synthetic-1',
+        role: 'assistant',
+        parts: [{ id: 'synthetic-part', type: 'text', text: '', synthetic: true }] as Message['parts'],
+      }),
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-active',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set([1]),
+      isStreaming: true,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['user-1', 'assistant-active']);
+    expect(items.map((item) => item.isActive)).toEqual([false, true]);
+  });
+
+  it('keeps the same visible set when not streaming', () => {
+    const messages = [
+      makeMessage({
+        id: 'assistant-empty',
+        role: 'assistant',
+        parts: [],
+        finish: null,
+      }),
+      makeMessage({
+        id: 'assistant-text',
+        role: 'assistant',
+        parts: [{ id: 'text-part', type: 'text', text: 'done' }] as Message['parts'],
+        finish: 'stop',
+      }),
+    ];
+
+    const items = buildChatTimelineItems({
+      messages,
+      skipIndices: new Set(),
+      isStreaming: false,
+    });
+
+    expect(items.map((item) => item.message.id)).toEqual(['assistant-text']);
+    expect(items[0].isActive).toBe(false);
+  });
+});
+
+describe('areChatTimelineItemsRenderEqual', () => {
+  it('treats cloned assistant messages with identical visible parts as equal', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      agent: 'rex',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+      finish: 'stop',
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(true);
+  });
+
+  it('detects visible text changes in otherwise stable timeline items', () => {
+    const prevMessage = makeMessage({
+      id: 'assistant-1',
+      role: 'assistant',
+      parts: [{ id: 'text-1', type: 'text', text: 'hello' }] as Message['parts'],
+    });
+    const nextMessage = {
+      ...prevMessage,
+      parts: [{ id: 'text-1', type: 'text', text: 'hello world' }] as Message['parts'],
+    };
+
+    expect(areChatTimelineItemsRenderEqual(
+      [{ message: prevMessage as any, isActive: false }],
+      [{ message: nextMessage as any, isActive: false }],
+    )).toBe(false);
+  });
+});
+
 describe('SessionChat error rendering', () => {
   it('renders empty assistant error messages instead of the thinking indicator', () => {
     useSessionMessagesMock.mockReturnValue({
@@ -1055,6 +1503,35 @@ describe('SessionChat error rendering', () => {
     const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 
     expect(screen.getByText('Connection error.')).toBeInTheDocument();
+    expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
+  });
+
+  it('renders assistant error messages when the only part is blank text', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-error-with-blank-text',
+          role: 'assistant',
+          parts: [{ id: 'blank-text', type: 'text', text: '' }] as Message['parts'],
+          finish: 'error',
+          error: {
+            name: 'EmptyResponseError',
+            data: { message: 'Model returned an empty response.' },
+          } as any,
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('Model returned an empty response.')).toBeInTheDocument();
     expect(container.querySelectorAll('.animate-bounce')).toHaveLength(0);
   });
 });
@@ -1814,6 +2291,82 @@ describe('SessionChat intermediate process collapse', () => {
   });
 });
 
+describe('SessionChat optimistic message identity', () => {
+  it('uses the optimistic user message ID for the persisted prompt', async () => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '测试 question 工具{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    expect(addMessage).toHaveBeenCalledTimes(1);
+    expect(clientPostMock.mock.calls.filter(
+      ([url]) => url === '/api/session/sess-1/prompt_async',
+    )).toHaveLength(1);
+    const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+    const promptCall = clientPostMock.mock.calls.find(
+      ([url]) => url === '/api/session/sess-1/prompt_async',
+    );
+    const payload = promptCall?.[1] as { messageID?: string } | undefined;
+    expect(payload?.messageID).toBe(optimisticMessage.id);
+  });
+
+  it('uses the optimistic user message ID for slash commands', async () => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '/tools{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/command',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    expect(addMessage).toHaveBeenCalledTimes(1);
+    expect(clientPostMock.mock.calls.filter(
+      ([url]) => url === '/api/session/sess-1/command',
+    )).toHaveLength(1);
+    const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+    const commandCall = clientPostMock.mock.calls.find(
+      ([url]) => url === '/api/session/sess-1/command',
+    );
+    const payload = commandCall?.[1] as { messageID?: string } | undefined;
+    expect(payload?.messageID).toBe(optimisticMessage.id);
+  });
+});
+
 describe('SessionChat agent mentions', () => {
   const mentionAgents = [
     {
@@ -1953,6 +2506,32 @@ describe('SessionChat agent mentions', () => {
         }),
       );
     });
+  });
+});
+
+describe('SessionChat slash command routing', () => {
+  it('sends absolute filesystem paths as normal prompts instead of slash commands', async () => {
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+    }));
+
+    const text = '/tmp/stream_alert_denoise/rex_integration_guide.md\n\nuse this file';
+    const textarea = screen.getByPlaceholderText('请输入消息') as HTMLTextAreaElement;
+    fireEvent.change(textarea, { target: { value: text } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          parts: [{ type: 'text', text }],
+        }),
+      );
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/command',
+      expect.anything(),
+    );
   });
 });
 
@@ -2641,65 +3220,259 @@ describe('streaming activity helpers', () => {
 });
 
 describe('SessionChat fallback polling', () => {
-  it('does not finish streaming while fetched messages still contain a running tool', async () => {
+  it('reconciles pending questions while the session is busy', async () => {
     vi.useFakeTimers();
-    const refetch = vi.fn();
-    const onStreamingDone = vi.fn();
     try {
-      useSessionMessagesMock.mockReturnValue({
-        messages: [
-          makeMessage({
-            id: 'assistant-1',
-            finish: 'tool-calls',
-            parts: [
-              { id: 'tool-1', type: 'tool', state: { status: 'running' } } as Message['parts'][number],
-            ],
-          }),
-        ],
-        loading: false,
-        refetch,
-        addMessage: vi.fn(),
-        updateMessage: vi.fn(),
-        updateMessagePart: vi.fn(),
-        replaceMessageText: vi.fn(),
-        truncateAfterMessage: vi.fn(),
-      });
-      clientGetMock.mockResolvedValueOnce({
-        data: {
-          items: [
-            {
-              info: {
-                id: 'assistant-1',
-                sessionID: 'sess-1',
-                role: 'assistant',
-                finish: 'tool-calls',
-              },
-              parts: [
-                { id: 'tool-1', type: 'tool', state: { status: 'running' } },
-              ],
-            },
-          ],
-          hasMore: false,
-          nextBefore: null,
-        },
-      });
-
       render(React.createElement(SessionChat, {
         sessionId: 'sess-1',
         live: true,
-        onStreamingDone,
       }));
+
+      await act(async () => {
+        await Promise.resolve();
+      });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
+
       act(() => {
         useSSEOptionsRef.current.onEvent({
           type: 'session.status',
           properties: { sessionID: 'sess-1', status: { type: 'busy' } },
         });
       });
+      pendingQuestionsHookMock.fetchPendingQuestions.mockClear();
 
-      await vi.advanceTimersByTimeAsync(5_000);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(2_000);
+      });
+
+      expect(pendingQuestionsHookMock.fetchPendingQuestions).toHaveBeenCalledWith('sess-1');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('refetches when polling finds a pending question missing from local messages', async () => {
+    vi.useFakeTimers();
+    let resolveRefetch: (() => void) | undefined;
+    const refetch = vi.fn(() => new Promise<void>((resolve) => {
+      resolveRefetch = resolve;
+    }));
+    const onStreamingDone = vi.fn();
+    try {
+      pendingQuestionsHookMock.pendingQuestions = {
+        'call-question-1': {
+          requestId: 'request-question-1',
+          questions: [{ question: 'Continue?' }],
+        },
+      };
+      mockFallbackPolling({
+        localMessages: [
+          makeMessage({ id: 'user-1', role: 'user' }),
+          makeMessage({ id: 'assistant-1', parentID: 'user-1' }),
+        ],
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'user-1', role: 'user' }),
+          makeFetchedMessage(
+            { id: 'assistant-1', role: 'assistant', parentID: 'user-1', finish: 'tool-calls' },
+            [{
+              id: 'question-tool-1',
+              messageID: 'assistant-1',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'question',
+              callID: 'call-question-1',
+              state: {
+                status: 'completed',
+                input: { questions: [{ question: 'Continue?' }] },
+              },
+            } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(clientGetMock.mock.calls.filter(
+        ([url]) => url === '/api/session/sess-1/message',
+      )).toHaveLength(2);
+
+      await act(async () => {
+        resolveRefetch?.();
+        await Promise.resolve();
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('ignores a missing running question from a historical turn while the session is busy', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      const localMessages = [
+        makeMessage({ id: 'old-user', role: 'user' }),
+        makeMessage({ id: 'old-assistant', parentID: 'old-user', finish: 'tool-calls' }),
+        makeMessage({ id: 'current-user', role: 'user' }),
+        makeMessage({ id: 'current-assistant', parentID: 'current-user' }),
+      ];
+      mockFallbackPolling({
+        localMessages,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'old-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'old-assistant',
+              role: 'assistant',
+              parentID: 'old-user',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'old-tool',
+              type: 'tool',
+              tool: 'question',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+          makeFetchedMessage({ id: 'current-user', role: 'user' }),
+          makeFetchedMessage({
+            id: 'current-assistant',
+            role: 'assistant',
+            parentID: 'current-user',
+            finish: null,
+          }),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
+        params: { page: true, limit: 50, include_archived: true },
+      });
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
+      expect(refetch).not.toHaveBeenCalled();
+      expect(onStreamingDone).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('finishes streaming when only a historical turn has a running question', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      const localMessages = [
+        makeMessage({ id: 'old-user', role: 'user' }),
+        makeMessage({ id: 'old-assistant', parentID: 'old-user', finish: 'tool-calls' }),
+        makeMessage({ id: 'current-user', role: 'user' }),
+        makeMessage({ id: 'current-assistant', parentID: 'current-user', finish: 'stop' }),
+      ];
+      mockFallbackPolling({
+        localMessages,
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'old-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'old-assistant',
+              role: 'assistant',
+              parentID: 'old-user',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'old-tool',
+              type: 'tool',
+              tool: 'question',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+          makeFetchedMessage({ id: 'current-user', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'current-assistant',
+              role: 'assistant',
+              parentID: 'current-user',
+              finish: 'stop',
+            },
+            [{ id: 'current-text', type: 'text', text: 'done' } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+        status: {},
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(refetch).toHaveBeenCalledTimes(1);
+      expect(onStreamingDone).toHaveBeenCalledTimes(1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
+      expect(refetch).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('does not refetch a missing non-question tool while it is still running', async () => {
+    vi.useFakeTimers();
+    const refetch = vi.fn();
+    const onStreamingDone = vi.fn();
+    try {
+      mockFallbackPolling({
+        localMessages: [
+          makeMessage({ id: 'user-1', role: 'user' }),
+          makeMessage({ id: 'assistant-1', parentID: 'user-1', finish: 'tool-calls' }),
+        ],
+        fetchedMessages: [
+          makeFetchedMessage({ id: 'user-1', role: 'user' }),
+          makeFetchedMessage(
+            {
+              id: 'assistant-1',
+              role: 'assistant',
+              parentID: 'user-1',
+              finish: 'tool-calls',
+            },
+            [{
+              id: 'tool-1',
+              type: 'tool',
+              tool: 'bash',
+              state: { status: 'running' },
+            } as Message['parts'][number]],
+          ),
+        ],
+        refetch,
+      });
+      await startFallbackPolling(onStreamingDone);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_000);
+      });
 
       expect(refetch).not.toHaveBeenCalled();
       expect(onStreamingDone).not.toHaveBeenCalled();
+      expect(clientGetMock).not.toHaveBeenCalledWith('/api/session/status');
       expect(clientGetMock).toHaveBeenCalledWith('/api/session/sess-1/message', {
         params: { page: true, limit: 50, include_archived: true },
       });

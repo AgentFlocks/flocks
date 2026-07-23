@@ -5,7 +5,7 @@
   "name": "Chaitin SafeLine WAF",
   "description": "Chaitin SafeLine WAF OpenAPI integration.",
   "descriptionCn": "长亭雷池 WAF OpenAPI 接入。",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "Flocks Team",
   "license": "MIT",
   "category": "integration",

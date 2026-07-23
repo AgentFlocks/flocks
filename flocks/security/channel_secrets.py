@@ -18,6 +18,9 @@ log = Log.create(service="security.channel_secrets")
 SENSITIVE_FIELD_NAMES: Set[str] = {
     "appSecret",
     "botToken",
+    "appToken",
+    "slackAppToken",
+    "slackBotToken",
     "secret",
     "clientSecret",
     "apiKey",

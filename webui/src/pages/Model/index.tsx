@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { useState, useEffect, useMemo, useCallback, useRef, useId } from 'react';
+import { createPortal } from 'react-dom';
 import { useTranslation } from 'react-i18next';
 import {
   Brain, Cog, TestTube, Trash2, Search,
@@ -8,6 +9,7 @@ import {
   ChevronDown, Check, AlertCircle, Loader2,
   X, Shield, Pencil, Star, AlertTriangle,
   CheckCircle2,
+  Info,
 } from 'lucide-react';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -31,7 +33,7 @@ import {
 import type {
   ProviderCredentials, ModelDefinitionV2, UsageStats,
   CatalogProvider, CatalogModel, CatalogCredentialField, ModelSettingV2,
-  CustomModelCreate,
+  CustomModelCreate, ProviderCredentialInput,
 } from '@/types';
 
 // ==================== Provider Auth Helpers ====================
@@ -159,12 +161,13 @@ export default function ModelPage() {
 
     Promise.all([
       defaultModelAPI.getResolved().catch(() => ({ data: null })),
-      modelV2API.listDefinitions({ enabled_only: true }).catch(() => ({ data: { models: [] } })),
+      modelV2API.listDefinitions({ enabled_only: true }),
     ]).then(([defaultRes, modelsRes]) => {
+      const availableModels = modelsRes.data.models || [];
+
       const dm = defaultRes.data;
       if (!dm) return;
 
-      const availableModels = modelsRes.data.models || [];
       const isValid = availableModels.some(
         m => m.provider_id === dm.provider_id && m.id === dm.model_id
       );
@@ -177,6 +180,8 @@ export default function ModelPage() {
         defaultModelAPI.delete('llm').catch(() => {});
         setDefaultModel(null);
       }
+    }).catch(() => {
+      // Keep the current default model when model definitions cannot be loaded.
     });
   }, []);
 
@@ -418,7 +423,7 @@ export default function ModelPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -505,7 +510,15 @@ export default function ModelPage() {
                   onConfigure={async () => {
                     await handleSelectProvider(provider);
                     if (selectedProviderRef.current?.id === provider.id) {
-                      setShowConfigDialog(true);
+                      try {
+                        const res = await providerAPI.revealCredentials(provider.id);
+                        if (selectedProviderRef.current?.id === provider.id) {
+                          setCredentials(res.data);
+                          setShowConfigDialog(true);
+                        }
+                      } catch (err: any) {
+                        toast.error(t('configFailed'), err.message);
+                      }
                     }
                   }}
                 />
@@ -554,7 +567,10 @@ export default function ModelPage() {
           provider={selectedProvider}
           existingCredentials={credentials}
           models={providerModels}
-          onClose={() => setShowConfigDialog(false)}
+          onClose={() => {
+            setShowConfigDialog(false);
+            setCredentials(null);
+          }}
           onConfigured={async () => {
             if (selectedProvider) {
               const res = await providerAPI.getCredentials(selectedProvider.id).catch(() => ({ data: null }));
@@ -612,6 +628,7 @@ export default function ModelPage() {
       {showDefaultModelDialog && (
         <SetDefaultModelDialog
           current={defaultModel}
+          providers={providers}
           onClose={() => setShowDefaultModelDialog(false)}
           onSaved={(m) => {
             setDefaultModel(m);
@@ -622,6 +639,7 @@ export default function ModelPage() {
           }}
         />
       )}
+
     </div>
   );
 }
@@ -655,7 +673,7 @@ function DashboardStrip({
   }, [i18n.language]);
 
   return (
-    <div className="grid grid-cols-5 gap-3 mb-4">
+    <div className="grid grid-cols-2 gap-3 mb-4 lg:grid-cols-5">
       {/* Default Model Card */}
       <div className="rounded-lg border p-3 bg-purple-50 text-purple-700 border-purple-200">
         <div className="flex items-center justify-between mb-1 opacity-70">
@@ -2179,7 +2197,11 @@ function getDefaultReasoningToggleValue(providerId: string, modelId: string): bo
 
 function allowsBuiltInVisionToggle(modelId: string): boolean {
   const lowered = modelId.toLowerCase();
-  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+  return (
+    lowered.includes('qwen3.6-plus')
+    || lowered.includes('kimi-k2.6')
+    || lowered.includes('kimi-k2.7-code')
+  );
 }
 
 // ==================== Configure Dialog ====================
@@ -2269,19 +2291,22 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
   };
 
   const handleSubmit = async () => {
-    if (!apiKey.trim() && !providerAllowsEmptyApiKey(provider.id)) {
+    const nextApiKey = apiKey.trim();
+    const apiKeyChanged = nextApiKey !== existingKey.trim();
+    if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
       toast.warning('Please enter API Key');
       return;
     }
     try {
       setLoading(true);
-      await providerAPI.setCredentials(provider.id, {
-        api_key: apiKey.trim() || 'not-needed',
+      const payload: ProviderCredentialInput = {
         base_url: baseUrl.trim() || undefined,
         provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
           ? (providerName.trim() || undefined)
           : undefined,
-      });
+      };
+      if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
+      await providerAPI.setCredentials(provider.id, payload);
 
       // Sync catalog model list: add newly selected, delete deselected
       if (catalogModels.length > 0) {
@@ -2320,24 +2345,29 @@ function ConfigureProviderDialog({ provider, existingCredentials, models, onClos
       { apiKey, baseUrl },
     );
 
+    const nextApiKey = apiKey.trim();
+    const apiKeyChanged = nextApiKey !== existingKey.trim();
+    if (!nextApiKey && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
+      toast.warning('Please enter API Key first');
+      return;
+    }
+
     // Persist pending credential changes before testing so the backend uses
     // the latest base URL even when the API key itself did not change.
-    if (apiKey.trim() && hasPendingChanges) {
+    if (hasPendingChanges) {
       try {
-        await providerAPI.setCredentials(provider.id, {
-          api_key: apiKey.trim(),
+        const payload: ProviderCredentialInput = {
           base_url: baseUrl.trim() || undefined,
           provider_name: (provider.id === 'openai-compatible' || provider.id.startsWith('custom-'))
             ? (providerName.trim() || undefined)
             : undefined,
-        });
+        };
+        if (nextApiKey && apiKeyChanged) payload.api_key = nextApiKey;
+        await providerAPI.setCredentials(provider.id, payload);
       } catch (err: any) {
         toast.error(t('deleteFailed'), err.message);
         return;
       }
-    } else if (!apiKey.trim() && !hasExisting && !providerAllowsEmptyApiKey(provider.id)) {
-      toast.warning('Please enter API Key first');
-      return;
     }
     try {
       setTesting(true);
@@ -2451,7 +2481,7 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
         <div>
           <label className="block text-sm font-medium text-gray-700 mb-1.5">
             API Key
-            {!providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
+            {!hasExisting && !providerAllowsEmptyApiKey(provider.id) && <span className="text-slate-500"> *</span>}
             {provider.id === 'ollama' && <span className="text-gray-400 font-normal ml-1">{t('form.ollamaNoKey')}</span>}
             {provider.id !== 'ollama' && providerAllowsEmptyApiKey(provider.id) && (
               <span className="text-gray-400 font-normal ml-1">{t('form.apiKeyOptional')}</span>
@@ -2464,7 +2494,9 @@ ${hasExisting ? '你已有凭证配置，可以更新或测试连接。' : '请�
               onChange={(e) => setApiKey(e.target.value)}
               className="w-full px-3 py-2 pr-10 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
               placeholder={
-                provider.id === 'ollama'
+                hasExisting
+                  ? t('form.apiKeyKeepExisting')
+                  : provider.id === 'ollama'
                   ? 'Not required, leave empty'
                   : providerAllowsEmptyApiKey(provider.id)
                     ? t('form.apiKeyOptionalPlaceholder')
@@ -2864,15 +2896,216 @@ function ModelDetailSheet({
   );
 }
 
+// ==================== Shared Model Selection ====================
+
+type ModelSelectionGroup = {
+  providerId: string;
+  providerName: string;
+  models: ModelDefinitionV2[];
+};
+
+function modelSupportsVision(model: ModelDefinitionV2): boolean {
+  const capabilities = model.capabilities;
+  return capabilities?.supports_vision === true
+    || capabilities?.features?.includes('vision') === true
+    || capabilities?.modalities?.input?.includes('image') === true;
+}
+
+function groupModelsForSelection(
+  models: ModelDefinitionV2[],
+  providerNames: Map<string, string>,
+): ModelSelectionGroup[] {
+  const grouped = new Map<string, ModelDefinitionV2[]>();
+  models.forEach(model => {
+    const entries = grouped.get(model.provider_id) ?? [];
+    entries.push(model);
+    grouped.set(model.provider_id, entries);
+  });
+  return Array.from(grouped.entries())
+    .map(([providerId, providerModels]) => ({
+      providerId,
+      providerName: providerNames.get(providerId) || providerId,
+      models: providerModels.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id)),
+    }))
+    .sort((a, b) => a.providerName.localeCompare(b.providerName));
+}
+
+function formatModelContextWindow(model: ModelDefinitionV2): string {
+  const contextWindow = model.limits?.context_window;
+  if (!contextWindow) return '—';
+  if (contextWindow >= 1_000_000) {
+    return `${Number((contextWindow / 1_000_000).toFixed(1))}M`;
+  }
+  if (contextWindow >= 1_000) {
+    return `${Number((contextWindow / 1_000).toFixed(1))}K`;
+  }
+  return String(contextWindow);
+}
+
+function formatModelPricing(
+  model: ModelDefinitionV2,
+  freeLabel: string,
+  unavailableLabel: string,
+): string {
+  const pricing = model.pricing;
+  if (!pricing) return unavailableLabel;
+  if (pricing.input === 0 && pricing.output === 0) return freeLabel;
+  const symbol = pricing.currency === 'CNY' ? '¥' : pricing.currency === 'USD' ? '$' : `${pricing.currency} `;
+  return `${symbol}${pricing.input} / ${symbol}${pricing.output} / 1M`;
+}
+
+function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {
+  const { t } = useTranslation('model');
+  const tooltipId = useId();
+  const [position, setPosition] = useState<{ x: number; y: number } | null>(null);
+
+  const show = useCallback((target: HTMLElement) => {
+    const rect = target.getBoundingClientRect();
+    const tooltipHalfWidth = 128;
+    const viewportPadding = 8;
+    setPosition({
+      x: Math.min(
+        window.innerWidth - tooltipHalfWidth - viewportPadding,
+        Math.max(tooltipHalfWidth + viewportPadding, rect.left + rect.width / 2),
+      ),
+      y: rect.top - 8,
+    });
+  }, []);
+  const hide = useCallback(() => setPosition(null), []);
+  const label = `${t('modelSelection.info')} ${model.name || model.id}`;
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={label}
+        aria-describedby={position ? tooltipId : undefined}
+        onClick={event => {
+          event.stopPropagation();
+          show(event.currentTarget);
+        }}
+        onFocus={event => show(event.currentTarget)}
+        onBlur={hide}
+        onPointerEnter={event => show(event.currentTarget)}
+        onPointerLeave={hide}
+        onMouseEnter={event => show(event.currentTarget)}
+        onMouseLeave={hide}
+        className="mr-3 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-gray-300 transition-colors hover:bg-gray-100 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-1"
+      >
+        <Info className="h-4 w-4" aria-hidden="true" />
+      </button>
+      {position && typeof document !== 'undefined' && createPortal(
+        <div
+          id={tooltipId}
+          role="tooltip"
+          className="pointer-events-none fixed z-[1000] w-64 -translate-x-1/2 -translate-y-full rounded-lg border border-gray-200 bg-white px-3 py-2.5 text-xs leading-relaxed text-gray-600 shadow-lg"
+          style={{ left: position.x, top: position.y }}
+        >
+          <div className="mb-1.5 truncate font-semibold text-gray-900">{model.name || model.id}</div>
+          <dl className="space-y-1">
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-gray-400">{t('form.modelId')}</dt>
+              <dd className="min-w-0 flex-1 break-all text-right font-mono text-[11px] text-gray-700">{model.id}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-gray-400">{t('form.contextWindow')}</dt>
+              <dd className="min-w-0 flex-1 text-right text-gray-700">{formatModelContextWindow(model)}</dd>
+            </div>
+            <div className="flex gap-2">
+              <dt className="shrink-0 text-gray-400">{t('form.pricing')}</dt>
+              <dd className="min-w-0 flex-1 text-right text-gray-700">
+                {formatModelPricing(model, t('modelSelection.free'), t('modelSelection.unavailable'))}
+              </dd>
+            </div>
+          </dl>
+          <div className="absolute left-1/2 top-full -translate-x-1/2 border-4 border-transparent border-t-gray-200" />
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function ModelSelectionList({
+  groups,
+  selectedKey,
+  pendingKey,
+  disabled = false,
+  onSelect,
+}: {
+  groups: ModelSelectionGroup[];
+  selectedKey?: string | null;
+  pendingKey?: string | null;
+  disabled?: boolean;
+  onSelect: (model: ModelDefinitionV2) => void;
+}) {
+  const { t } = useTranslation('model');
+
+  return (
+    <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+      {groups.map(group => (
+        <div key={group.providerId}>
+          <div className="border-b border-gray-100 bg-gray-50 px-4 py-2 text-xs font-semibold uppercase tracking-wide text-gray-500">
+            {group.providerName}
+          </div>
+          {group.models.map(model => {
+            const key = `${model.provider_id}/${model.id}`;
+            const selected = selectedKey === key;
+            return (
+              <div
+                key={key}
+                className={`flex min-w-0 items-center border-b border-gray-100 transition-colors last:border-0 ${
+                  selected ? 'bg-slate-50' : 'bg-white hover:bg-gray-50'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={() => onSelect(model)}
+                  disabled={disabled}
+                  aria-pressed={selected}
+                  className="flex min-w-0 flex-1 items-center gap-3 px-4 py-3 text-left text-sm text-gray-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-slate-400 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  <span className={`min-w-0 flex-1 truncate ${selected ? 'font-semibold text-slate-900' : 'font-medium text-gray-800'}`}>
+                    {model.name || model.id}
+                  </span>
+                  {modelSupportsVision(model) && (
+                    <span
+                      title={t('form.vision')}
+                      className="shrink-0 rounded-md bg-gray-100 px-2 py-0.5 text-[10px] font-semibold text-gray-600"
+                    >
+                      {t('form.vision')}
+                    </span>
+                  )}
+                  <span className="max-w-[42%] shrink-0 truncate text-xs text-gray-400" title={model.id}>
+                    {model.id}
+                  </span>
+                  {pendingKey === key ? (
+                    <Loader2 className="h-4 w-4 shrink-0 animate-spin text-gray-400" />
+                  ) : selected ? (
+                    <Check className="h-4 w-4 shrink-0 text-slate-700" />
+                  ) : null}
+                </button>
+                <ModelSelectionInfo model={model} />
+              </div>
+            );
+          })}
+        </div>
+      ))}
+    </div>
+  );
+}
+
 // ==================== Set Default Model Dialog ====================
 
 function SetDefaultModelDialog({
   current,
+  providers,
   onClose,
   onSaved,
   onCleared,
 }: {
   current: { provider_id: string; model_id: string } | null;
+  providers: EnrichedProvider[];
   onClose: () => void;
   onSaved: (m: { provider_id: string; model_id: string }) => void;
   onCleared?: () => void;
@@ -2883,12 +3116,33 @@ function SetDefaultModelDialog({
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState<string | null>(null);
   const [invalidWarning, setInvalidWarning] = useState<string | null>(null);
+  const closeButtonRef = useRef<HTMLButtonElement>(null);
+
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    closeButtonRef.current?.focus();
+    return () => previouslyFocused?.focus();
+  }, []);
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape' || saving) return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onClose, saving]);
 
   useEffect(() => {
     setLoading(true);
     setInvalidWarning(null);
     modelV2API.listDefinitions({ enabled_only: true }).then(r => {
-      const loadedModels = r.data.models || [];
+      const loadedModels = (r.data.models || []).filter(
+        model => model.model_type === 'llm',
+      );
       setModels(loadedModels);
 
       // 校验当前默认模型是否仍在可用列表中
@@ -2906,15 +3160,14 @@ function SetDefaultModelDialog({
     }).catch(() => {}).finally(() => setLoading(false));
   }, []);
 
-  // Group by provider_id
-  const grouped = useMemo(() => {
-    const map: Record<string, ModelDefinitionV2[]> = {};
-    for (const m of models) {
-      if (!map[m.provider_id]) map[m.provider_id] = [];
-      map[m.provider_id].push(m);
-    }
-    return map;
-  }, [models]);
+  const providerNames = useMemo(
+    () => new Map(providers.map(provider => [provider.id, provider.name || provider.id])),
+    [providers],
+  );
+  const grouped = useMemo(
+    () => groupModelsForSelection(models, providerNames),
+    [models, providerNames],
+  );
 
   const handleSelect = async (providerId: string, modelId: string) => {
     setSaving(`${providerId}/${modelId}`);
@@ -2937,21 +3190,36 @@ function SetDefaultModelDialog({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/50 flex items-center justify-center z-50" onClick={onClose}>
+    <div
+      className="fixed inset-0 bg-black/50 flex items-center justify-center z-50"
+      onClick={() => {
+        if (!saving) onClose();
+      }}
+    >
       <div
-        className="bg-white rounded-xl shadow-xl w-full max-w-md max-h-[70vh] flex flex-col"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="default-model-dialog-title"
+        className="bg-white rounded-xl shadow-xl w-full max-w-xl max-h-[78vh] flex flex-col"
         onClick={e => e.stopPropagation()}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-gray-200">
-          <h2 className="text-lg font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
-          <button onClick={onClose} className="text-gray-400 hover:text-gray-600">
+          <h2 id="default-model-dialog-title" className="text-lg font-semibold text-gray-900">{t('dashboard.setDefaultModel')}</h2>
+          <button
+            ref={closeButtonRef}
+            type="button"
+            onClick={onClose}
+            disabled={saving !== null}
+            aria-label={t('modelSelection.closeDefault')}
+            className="text-gray-400 hover:text-gray-600 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 disabled:opacity-50"
+          >
             <X className="w-5 h-5" />
           </button>
         </div>
 
-        <div className="flex-1 overflow-y-auto">
+        <div className="min-h-0 flex-1 overflow-y-auto px-5 py-4">
           {invalidWarning && (
-            <div className="mx-4 mt-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
+            <div className="mb-3 flex items-start gap-2 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-700">
               <AlertTriangle className="mt-0.5 w-3.5 h-3.5 flex-shrink-0" />
               <span>{invalidWarning}</span>
             </div>
@@ -2960,35 +3228,16 @@ function SetDefaultModelDialog({
             <div className="flex justify-center py-10">
               <Loader2 className="w-6 h-6 animate-spin text-gray-400" />
             </div>
-          ) : Object.keys(grouped).length === 0 ? (
+          ) : grouped.length === 0 ? (
             <div className="py-10 text-center text-sm text-gray-500">{t('detail.noModels')}</div>
           ) : (
-            Object.entries(grouped).map(([providerId, provModels]) => (
-              <div key={providerId}>
-                <div className="px-5 py-2 text-xs font-semibold text-gray-500 bg-gray-50 border-b border-gray-100 uppercase tracking-wide">
-                  {providerId}
-                </div>
-                {provModels.map(m => {
-                  const isActive = current?.provider_id === providerId && current?.model_id === m.id;
-                  const key = `${providerId}/${m.id}`;
-                  return (
-                    <button
-                      key={m.id}
-                      onClick={() => handleSelect(providerId, m.id)}
-                      disabled={saving !== null}
-                      className={`w-full flex items-center justify-between px-5 py-3 text-sm text-left hover:bg-gray-50 transition-colors border-b border-gray-100 last:border-0 ${isActive ? 'text-purple-700 font-medium' : 'text-gray-700'}`}
-                    >
-                      <span className="truncate">{m.name || m.id}</span>
-                      {saving === key ? (
-                        <Loader2 className="w-4 h-4 animate-spin text-gray-400 flex-shrink-0" />
-                      ) : isActive ? (
-                        <Check className="w-4 h-4 text-purple-600 flex-shrink-0" />
-                      ) : null}
-                    </button>
-                  );
-                })}
-              </div>
-            ))
+            <ModelSelectionList
+              groups={grouped}
+              selectedKey={current ? `${current.provider_id}/${current.model_id}` : null}
+              pendingKey={saving}
+              disabled={saving !== null}
+              onSelect={model => void handleSelect(model.provider_id, model.id)}
+            />
           )}
         </div>
       </div>

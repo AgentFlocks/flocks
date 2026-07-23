@@ -11,13 +11,15 @@ import time
 from dataclasses import dataclass
 from types import SimpleNamespace
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any, AsyncGenerator, Callable, Optional
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from fastapi.exceptions import RequestValidationError
+from starlette.datastructures import MutableHeaders
 from starlette.exceptions import HTTPException as StarletteHTTPException
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from flocks.utils.log import Log, LogLevel
 from flocks.config.config import Config
@@ -336,6 +338,7 @@ async def lifespan(app: FastAPI):
     try:
         from flocks.server.routes.workflow import (
             reconcile_published_workflow_api_services,
+            start_workflow_api_health_monitor,
             sync_workflows_from_filesystem,
         )
 
@@ -344,6 +347,7 @@ async def lifespan(app: FastAPI):
             log.info("workflow.sync.done", {"imported": imported})
             api_services = await reconcile_published_workflow_api_services()
             log.info("workflow.api_services.reconciled", api_services)
+            app.state.startup_background_tasks.append(start_workflow_api_health_monitor())
 
         _schedule_startup_phase(app, log, "workflow.sync_filesystem", _sync_workflows_phase)
     except Exception as e:
@@ -469,18 +473,6 @@ async def lifespan(app: FastAPI):
         _schedule_startup_phase(app, log, "workflow.trigger_runtime.start", _delayed_trigger_runtime_start)
     except Exception as e:
         log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
-
-    try:
-        from flocks.updater.updater import recover_upgrade_state
-
-        await _run_startup_phase(
-            log,
-            "updater.recover_upgrade_state",
-            lambda: asyncio.to_thread(recover_upgrade_state),
-        )
-        log.info("updater.recovery.checked")
-    except Exception as e:
-        log.warning("updater.recovery.failed", {"error": str(e)})
 
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
@@ -814,132 +806,277 @@ class _DeferredCORSMiddleware:
         await self._inner(scope, receive, send)
 
 
-@app.middleware("http")
-async def security_headers_middleware(request: Request, call_next):
-    """Attach baseline browser security headers to every HTTP response."""
-    response = await call_next(request)
-    for name, value in _SECURITY_HEADERS.items():
-        response.headers.setdefault(name, value)
-    return response
+class _SecurityHeadersMiddleware:
+    """Attach baseline browser security headers without spawning request tasks."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def send_with_security_headers(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                headers = MutableHeaders(scope=message)
+                for name, value in _SECURITY_HEADERS.items():
+                    headers.setdefault(name, value)
+            await send(message)
+
+        await self.app(scope, receive, send_with_security_headers)
 
 
-@app.middleware("http")
-async def instance_context_middleware(request: Request, call_next):
-    """
-    Provide Instance context for all requests (except global routes)
-    
-    Middleware that wraps all routes with Instance.provide().
-    Gets directory from:
-    1. Query parameter 'directory'
-    2. Header 'x-flocks-directory'
-    3. Falls back to current working directory
-    """
-    import os
-    from urllib.parse import unquote
-    from flocks.project.instance import Instance
-    from flocks.project.bootstrap import instance_bootstrap
+app.add_middleware(_SecurityHeadersMiddleware)
 
-    # Skip instance context for global routes, static files, and simple endpoints
-    skip_prefixes = {
-        "/global", "/docs", "/redoc", "/openapi.json", "/health",
-        "/path", "/permission", "/question", "/tui",
-    }
-    
-    if any(request.url.path.startswith(prefix) for prefix in skip_prefixes):
-        return await call_next(request)
-    
-    # Get directory from query param, header, or use cwd
-    # Support both x-flocks-directory (native) and x-flocks-directory (TUI compatibility)
-    directory = request.query_params.get("directory")
-    if not directory:
-        directory = request.headers.get("x-flocks-directory")
-    if not directory:
-        directory = request.headers.get("x-flocks-directory")
-    if not directory:
-        directory = os.getcwd()
-    
-    # Decode URL-encoded directory
-    try:
-        directory = unquote(directory)
-    except Exception:
-        pass  # Use original value if decode fails
-    
-    # Provide instance context for the request
-    async def handle_request():
-        return await call_next(request)
-    
-    return await Instance.provide(
-        directory=directory,
-        init=instance_bootstrap,
-        fn=handle_request
+
+class _InstanceContextMiddleware:
+    """Provide the project instance context without buffering the response body."""
+
+    _SKIP_PREFIXES = (
+        "/global",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/health",
+        "/path",
+        "/permission",
+        "/question",
+        "/tui",
     )
 
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
 
-# Request Logging Middleware
-@app.middleware("http")
-async def log_requests(request: Request, call_next):
-    """Log one completion line for useful requests; suppress successful polling noise."""
-    path = request.url.path
-    started_at = time.monotonic()
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
 
-    try:
-        response = await call_next(request)
-    except Exception as exc:
-        duration_ms = int((time.monotonic() - started_at) * 1000)
-        log.error("request.error", {
-            "method": request.method,
-            "path": path,
-            "duration": duration_ms,
-            "error": str(exc),
-        })
-        raise
+        path = scope.get("path", "")
+        if path.startswith(self._SKIP_PREFIXES):
+            await self.app(scope, receive, send)
+            return
 
-    if _should_log_request(path, response.status_code):
-        duration_ms = int((time.monotonic() - started_at) * 1000)
-        log.info("request.complete", {
-            "method": request.method,
-            "path": path,
-            "status": response.status_code,
-            "duration": duration_ms,
-        })
+        from urllib.parse import unquote
+        from flocks.project.instance import Instance
+        from flocks.project.bootstrap import instance_bootstrap
 
-    return response
+        request = Request(scope, receive=receive)
+        directory = request.query_params.get("directory")
+        if not directory:
+            directory = request.headers.get("x-flocks-directory")
+        if not directory:
+            directory = os.getcwd()
 
+        try:
+            directory = unquote(directory)
+        except Exception:
+            pass
 
-@app.middleware("http")
-async def auth_guard_middleware(request: Request, call_next):
-    """Guard requests with local account auth, except public endpoints."""
-    try:
-        await _run_http_middleware_hooks(request, {"stage": "before_auth"})
-        _blocked, token, _user = await apply_auth_for_request(request)
-    except StarletteHTTPException as exc:
-        return JSONResponse(
-            status_code=exc.status_code,
-            content={"error": "AuthError", "message": exc.detail},
-        )
-    except Exception as exc:
-        log.error("auth.middleware.unexpected", {
-            "path": request.url.path,
-            "error": repr(exc),
-        })
-        return JSONResponse(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+        async def handle_request() -> None:
+            await self.app(scope, receive, send)
+
+        await Instance.provide(
+            directory=directory,
+            init=instance_bootstrap,
+            fn=handle_request,
         )
 
-    try:
-        return await call_next(request)
-    finally:
-        clear_auth_context(token)
+
+app.add_middleware(_InstanceContextMiddleware)
 
 
-@app.middleware("http")
-async def static_webui_middleware(request: Request, call_next):
-    """Serve the SPA shell before auth for browser navigations."""
-    static_response = await maybe_serve_static_webui(request)
-    if static_response is not None:
-        return static_response
-    return await call_next(request)
+class _RequestLoggingMiddleware:
+    """Log response start without retaining an extra task for streaming bodies."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        path = scope.get("path", "")
+        method = scope.get("method", "")
+        started_at = time.monotonic()
+        response_started = False
+
+        async def send_with_request_log(message: Message) -> None:
+            nonlocal response_started
+            if message["type"] == "http.response.start" and not response_started:
+                response_started = True
+                status_code = int(message["status"])
+                if _should_log_request(path, status_code):
+                    duration_ms = int((time.monotonic() - started_at) * 1000)
+                    log.info(
+                        "request.complete",
+                        {
+                            "method": method,
+                            "path": path,
+                            "status": status_code,
+                            "duration": duration_ms,
+                        },
+                    )
+            await send(message)
+
+        try:
+            await self.app(scope, receive, send_with_request_log)
+        except Exception as exc:
+            if not response_started:
+                duration_ms = int((time.monotonic() - started_at) * 1000)
+                log.error(
+                    "request.error",
+                    {
+                        "method": method,
+                        "path": path,
+                        "duration": duration_ms,
+                        "error": str(exc),
+                    },
+                )
+            raise
+
+
+app.add_middleware(_RequestLoggingMiddleware)
+
+
+class _HookRequest(Request):
+    """Preserve request-receive semantics while auth hooks inspect the body.
+
+    A body read is replayed once to the endpoint, a fully consumed stream is
+    replayed as an empty request, and a partially consumed stream continues
+    from upstream. Once a disconnect is observed, downstream reads keep seeing
+    the disconnect instead of polling upstream again.
+    """
+
+    def __init__(self, scope: Scope, receive: Receive) -> None:
+        self._flocks_upstream_receive = receive
+        self._flocks_request_complete = False
+        self._flocks_disconnected = False
+        self._flocks_cached_body: Optional[bytes] = None
+        self._flocks_stream_consumed = False
+        super().__init__(scope, receive=self._receive_for_hook)
+
+    async def _receive_for_hook(self) -> Message:
+        message = await self._flocks_upstream_receive()
+        if message["type"] == "http.request":
+            if not message.get("more_body", False):
+                self._flocks_request_complete = True
+        elif message["type"] == "http.disconnect":
+            self._flocks_disconnected = True
+        return message
+
+    async def body(self) -> bytes:
+        body = await super().body()
+        self._flocks_cached_body = body
+        return body
+
+    async def stream(self) -> AsyncGenerator[bytes, None]:
+        async for chunk in super().stream():
+            if self._flocks_request_complete:
+                self._flocks_stream_consumed = True
+            yield chunk
+        self._flocks_stream_consumed = True
+
+    def downstream_receive(self) -> Receive:
+        """Return the receive callable that preserves the hook's body reads."""
+        has_replay = self._flocks_cached_body is not None or self._flocks_stream_consumed
+        if not has_replay and not self._flocks_disconnected:
+            return self._flocks_upstream_receive
+
+        replay_pending = has_replay
+        replay_body = self._flocks_cached_body if self._flocks_cached_body is not None else b""
+
+        async def receive_for_downstream() -> Message:
+            nonlocal replay_pending
+            if replay_pending:
+                replay_pending = False
+                return {
+                    "type": "http.request",
+                    "body": replay_body,
+                    "more_body": False,
+                }
+            if self._flocks_disconnected:
+                return {"type": "http.disconnect"}
+
+            message = await self._flocks_upstream_receive()
+            if message["type"] == "http.disconnect":
+                self._flocks_disconnected = True
+                return message
+            if has_replay:
+                raise RuntimeError(f"Unexpected message received: {message['type']}")
+            return message
+
+        return receive_for_downstream
+
+
+class _AuthGuardMiddleware:
+    """Bind request auth context in the same ASGI task as the endpoint."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = _HookRequest(scope, receive)
+        try:
+            await _run_http_middleware_hooks(request, {"stage": "before_auth"})
+            _blocked, token, _user = await apply_auth_for_request(request)
+        except StarletteHTTPException as exc:
+            response = JSONResponse(
+                status_code=exc.status_code,
+                content={"error": "AuthError", "message": exc.detail},
+            )
+            await response(scope, receive, send)
+            return
+        except Exception as exc:
+            log.error(
+                "auth.middleware.unexpected",
+                {
+                    "path": request.url.path,
+                    "error": repr(exc),
+                },
+            )
+            response = JSONResponse(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+            )
+            await response(scope, receive, send)
+            return
+
+        try:
+            await self.app(scope, request.downstream_receive(), send)
+        finally:
+            clear_auth_context(token)
+
+
+app.add_middleware(_AuthGuardMiddleware)
+
+
+class _StaticWebUIMiddleware:
+    """Serve the SPA shell before auth without a BaseHTTPMiddleware task."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        request = Request(scope, receive=receive)
+        static_response = await maybe_serve_static_webui(request)
+        if static_response is not None:
+            await static_response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+app.add_middleware(_StaticWebUIMiddleware)
 
 
 # Error Handlers
@@ -964,7 +1101,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Handle HTTP exceptions"""
-    log.error("http.error", {
+    http_log = log.warn if 400 <= exc.status_code < 500 else log.error
+    http_log("http.error", {
         "path": request.url.path,
         "status": exc.status_code,
         "detail": exc.detail,
@@ -1059,6 +1197,8 @@ from flocks.server.routes.workspace import router as workspace_router
 from flocks.server.routes.update import router as update_router
 # Log viewing
 from flocks.server.routes.logs import router as logs_router
+from flocks.server.routes.monitoring import router as monitoring_router
+from flocks.server.routes.stats import router as stats_router
 from flocks.server.routes.auth import router as auth_router
 from flocks.server.routes.admin_users import router as admin_users_router
 from flocks.server.routes.notifications import router as notifications_router
@@ -1120,6 +1260,8 @@ app.include_router(workspace_router, prefix="/api/workspace", tags=["Workspace"]
 app.include_router(update_router, prefix="/api/update", tags=["Update"])
 # Log viewing routes
 app.include_router(logs_router, prefix="/api/logs", tags=["Logs"])
+app.include_router(stats_router, prefix="/api/stats", tags=["Stats"])
+app.include_router(monitoring_router, prefix="/api/monitoring", tags=["Monitoring"])
 app.include_router(auth_router, prefix="/api/auth", tags=["Auth"])
 app.include_router(admin_users_router, prefix="/api/admin", tags=["Admin"])
 app.include_router(notifications_router, prefix="/api/notifications", tags=["Notifications"])
@@ -1182,6 +1324,7 @@ app.include_router(misc_router, tags=["Misc"])
 
 # Permission routes (/permission)
 app.include_router(permission_router, prefix="/permission", tags=["Permission"])
+app.include_router(permission_router, prefix="/api/permission", tags=["Permission"])
 
 # Question routes (/question)
 app.include_router(question_router, prefix="/question", tags=["Question"])

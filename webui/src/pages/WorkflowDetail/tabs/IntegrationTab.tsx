@@ -26,6 +26,7 @@ import {
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import {
+  resolveWorkflowServicePort,
   workflowAPI,
   workflowAPIEndpoints,
   Workflow,
@@ -943,16 +944,24 @@ function PublishSection({
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState('');
   const [driver, setDriver] = useState<WorkflowServiceDriver>('local');
+  const [portInput, setPortInput] = useState('');
   const [apiKeyVisible, setApiKeyVisible] = useState(false);
   const [configExpanded, setConfigExpanded] = useState(false);
   const operationSeqRef = useRef(0);
   const serviceDriver = service ? normalizeServiceDriver(service.driver) : null;
+  const servicePort = resolveWorkflowServicePort(service);
+  const requestedPort = portInput.trim() ? Number(portInput) : undefined;
   const driverChanged = Boolean(serviceDriver && driver !== serviceDriver);
+  const portChanged = Boolean(service && requestedPort !== servicePort);
+  const publishConfigChanged = driverChanged || portChanged;
 
   const applyService = useCallback((nextService: WorkflowService | null) => {
     setService(nextService);
     if (nextService) {
       setDriver(normalizeServiceDriver(nextService.driver));
+      setPortInput(String(resolveWorkflowServicePort(nextService) ?? ''));
+    } else {
+      setPortInput('');
     }
   }, []);
 
@@ -972,12 +981,23 @@ function PublishSection({
   }, [loadService]);
 
   const handlePublish = async () => {
+    if (service && requestedPort === undefined) {
+      setError(t('detail.run.servicePortInvalid'));
+      return;
+    }
+    if (requestedPort !== undefined && (!Number.isInteger(requestedPort) || requestedPort < 1 || requestedPort > 65535)) {
+      setError(t('detail.run.servicePortInvalid'));
+      return;
+    }
     const operationSeq = operationSeqRef.current + 1;
     operationSeqRef.current = operationSeq;
     setPublishing(true);
     setError('');
     try {
-      const res = await workflowAPI.publish(workflowId, { driver });
+      const res = await workflowAPI.publish(workflowId, {
+        driver,
+        ...(requestedPort !== undefined ? { port: requestedPort } : {}),
+      });
       if (operationSeqRef.current === operationSeq) {
         applyService(res.data);
       }
@@ -1065,7 +1085,7 @@ function PublishSection({
     </button>
   );
 
-  const renderDriverSelector = (options?: { showApply?: boolean }) => (
+  const renderPublishConfig = (options?: { showApply?: boolean }) => (
     <div>
       <div className="mb-2 text-xs font-medium text-zinc-500">{t('detail.run.serviceDriver')}</div>
       <div className="flex flex-wrap items-center gap-2">
@@ -1090,7 +1110,7 @@ function PublishSection({
             );
           })}
         </div>
-        {options?.showApply && driverChanged ? (
+        {options?.showApply && publishConfigChanged ? (
           <button
             type="button"
             onClick={handlePublish}
@@ -1098,12 +1118,30 @@ function PublishSection({
             className="inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg border border-gray-200 bg-white px-3 text-xs font-medium text-gray-700 hover:border-gray-300 hover:bg-gray-50 disabled:opacity-60"
           >
             <Rocket className="h-3.5 w-3.5" />
-            {publishing ? t('detail.run.publishing') : t('detail.run.applyDriver')}
+            {publishing ? t('detail.run.publishing') : t('detail.run.applyPublishConfig')}
           </button>
         ) : null}
       </div>
       <div className="mt-2 text-[11px] leading-relaxed text-zinc-500">
         {driver === 'local' ? t('detail.run.driverLocalDesc') : t('detail.run.driverDockerDesc')}
+      </div>
+      <label className="mt-4 block text-xs font-medium text-zinc-500" htmlFor={`workflow-service-port-${workflowId}`}>
+        {t('detail.run.servicePort')}
+      </label>
+      <input
+        id={`workflow-service-port-${workflowId}`}
+        type="number"
+        min={1}
+        max={65535}
+        step={1}
+        value={portInput}
+        onChange={(event) => setPortInput(event.target.value)}
+        disabled={publishing || stopping || deleting}
+        placeholder={t('detail.run.servicePortPlaceholder')}
+        className="mt-2 h-10 w-full rounded-lg border border-gray-300 bg-white px-3.5 font-mono text-xs text-zinc-700 outline-none focus:border-gray-500 disabled:cursor-not-allowed disabled:opacity-50"
+      />
+      <div className="mt-2 text-[11px] leading-relaxed text-zinc-500">
+        {t('detail.run.servicePortDesc')}
       </div>
     </div>
   );
@@ -1181,7 +1219,7 @@ function PublishSection({
                 </div>
                 {configExpanded ? (
                   <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
-                    {renderDriverSelector({ showApply: true })}
+                    {renderPublishConfig({ showApply: true })}
                     <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
                     <div>
                       <div className="mb-2 text-xs font-medium text-zinc-500">Invoke URL</div>
@@ -1252,7 +1290,7 @@ function PublishSection({
                 {configExpanded ? (
                   <div data-testid="api-publish-config" className="space-y-4 border-t border-gray-100 px-4 pb-4 pt-4">
                     <CardGuidePanel action={apiGuideAction} onGuidePrompt={onGuidePrompt} />
-                    {renderDriverSelector()}
+                    {renderPublishConfig()}
                   </div>
                 ) : null}
               </div>

@@ -7,15 +7,24 @@
  * - Rex chat mode (natural language → extract config into form)
  */
 
-import { useMemo, useState } from 'react';
+import { lazy, Suspense, useMemo, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import { BookOpen, Lock, Pencil, Eye, Save, Loader2, Trash2 } from 'lucide-react';
-import ReactMarkdown from 'react-markdown';
 import { skillAPI, Skill } from '@/api/skill';
 import { useToast } from '@/components/common/Toast';
 import EntitySheet from '@/components/common/EntitySheet';
 import { buildGuidedCreateGroups } from '@/components/common/GuidedCreatePanel';
 import { useRexComposerControls } from '@/components/common/useRexComposerControls';
+
+const ReactMarkdown = lazy(() => import('react-markdown'));
+
+function MarkdownFallback() {
+  return (
+    <div className="flex min-h-[160px] items-center justify-center text-gray-400">
+      <Loader2 className="h-4 w-4 animate-spin" />
+    </div>
+  );
+}
 
 interface SkillFormData {
   name: string;
@@ -344,7 +353,9 @@ export default function SkillSheet({ skill, onClose, onSaved, onDeleted }: Skill
               className="px-4 py-3 bg-gray-50 border border-gray-200 rounded-lg text-sm prose prose-sm max-w-none overflow-y-auto"
               style={{ minHeight: '320px', maxHeight: '65vh' }}
             >
-              <ReactMarkdown>{contentForRender || t('sheet.noContent')}</ReactMarkdown>
+              <Suspense fallback={<MarkdownFallback />}>
+                <ReactMarkdown>{contentForRender || t('sheet.noContent')}</ReactMarkdown>
+              </Suspense>
             </div>
           )}
         </div>

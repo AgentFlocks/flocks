@@ -1,4 +1,5 @@
-import { useState, useMemo, useEffect } from 'react';
+import { useState, useMemo, useEffect, useId, useCallback, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { useNavigate } from 'react-router-dom';
 import {
   Workflow as WorkflowIcon,
@@ -14,43 +15,15 @@ import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
 import { useWorkflows } from '@/hooks/useWorkflow';
-import { Workflow } from '@/api/workflow';
+import {
+  WorkflowCapabilityState,
+  WorkflowSummary,
+  WorkflowTriggerStatusSummary,
+  WorkflowTriggerType,
+} from '@/api/workflow';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
-// ---------------------------------------------------------------------------
-// Color helpers (mirrors Agent page)
-// ---------------------------------------------------------------------------
-
-const WORKFLOW_PALETTE = [
-  '#3b82f6', // blue-500
-  '#8b5cf6', // violet-500
-  '#06b6d4', // cyan-500
-  '#10b981', // emerald-500
-  '#f59e0b', // amber-500
-  '#ef4444', // red-500
-  '#ec4899', // pink-500
-  '#6366f1', // indigo-500
-];
-
-function resolveWorkflowColor(workflow: Workflow): string {
-  let h = 0;
-  const seed = workflow.id || workflow.name;
-  for (let i = 0; i < seed.length; i++) {
-    h = seed.charCodeAt(i) + ((h << 5) - h);
-  }
-  return WORKFLOW_PALETTE[Math.abs(h) % WORKFLOW_PALETTE.length];
-}
-
-function hexAlpha(hex: string, alpha: number): string {
-  const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
-
-function isBuiltin(workflow: Workflow): boolean {
+function isBuiltin(workflow: WorkflowSummary): boolean {
   return workflow.source === 'project';
 }
 
@@ -60,6 +33,45 @@ function isBuiltin(workflow: Workflow): boolean {
 
 type SourceFilter = 'all' | 'builtin' | 'custom';
 const PAGE_SIZE = 12;
+const MAX_VISIBLE_TRIGGER_STATUSES = 2;
+const STATUS_TOOLTIP_WIDTH = 224;
+const STATUS_TOOLTIP_MAX_HEIGHT = 240;
+const STATUS_TOOLTIP_GAP = 8;
+
+const CAPABILITY_STATUS_STYLES: Record<WorkflowCapabilityState, { text: string; dot: string }> = {
+  unconfigured: { text: 'text-gray-400', dot: 'bg-gray-300' },
+  starting: { text: 'text-gray-500', dot: 'bg-gray-400' },
+  running: { text: 'text-green-600', dot: 'bg-green-500' },
+  stopped: { text: 'text-red-600', dot: 'bg-red-500' },
+  error: { text: 'text-red-600', dot: 'bg-red-500' },
+};
+
+const TRIGGER_TYPE_LABEL_KEYS = {
+  manual: 'integration.triggerType.manual',
+  schedule: 'integration.triggerType.schedule',
+  webhook: 'integration.triggerType.webhook',
+  syslog: 'integration.triggerType.syslog',
+  kafka: 'integration.triggerType.kafka',
+  internal_event: 'integration.triggerType.internal_event',
+  custom_webhook: 'integration.triggerType.custom_webhook',
+  custom_adapter: 'integration.triggerType.custom_adapter',
+  plugin: 'integration.triggerType.plugin',
+} as const satisfies Record<WorkflowTriggerType, string>;
+
+const CAPABILITY_STATUS_LABEL_KEYS = {
+  unconfigured: 'integration.state.disabled',
+  starting: 'integration.state.disabled',
+  running: 'integration.state.enabled',
+  stopped: 'integration.state.disabled',
+  error: 'integration.state.disabled',
+} as const satisfies Record<WorkflowCapabilityState, string>;
+
+const CAPABILITY_DETAIL_LABEL_KEYS = {
+  unconfigured: 'integration.detailState.unconfigured',
+  starting: 'integration.detailState.starting',
+  stopped: 'integration.detailState.stopped',
+  error: 'integration.detailState.error',
+} as const;
 
 // ---------------------------------------------------------------------------
 // WorkflowPage
@@ -103,7 +115,7 @@ export default function WorkflowPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -256,7 +268,7 @@ function WorkflowSection({
 }: {
   title: string;
   icon: React.ReactNode;
-  workflows: Workflow[];
+  workflows: WorkflowSummary[];
 }) {
   const [page, setPage] = useState(1);
   const totalPages = Math.max(1, Math.ceil(workflows.length / PAGE_SIZE));
@@ -333,10 +345,9 @@ function WorkflowSection({
 // WorkflowCard
 // ---------------------------------------------------------------------------
 
-function WorkflowCard({ workflow }: { workflow: Workflow }) {
+function WorkflowCard({ workflow }: { workflow: WorkflowSummary }) {
   const { t, i18n } = useTranslation('workflow');
   const navigate = useNavigate();
-  const color = resolveWorkflowColor(workflow);
   const builtin = isBuiltin(workflow);
   const displayName = getWorkflowDisplayName(workflow, i18n?.language);
 
@@ -344,6 +355,16 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
     workflow.stats.callCount > 0
       ? ((workflow.stats.successCount / workflow.stats.callCount) * 100).toFixed(1)
       : '—';
+  const apiStatus = workflow.integrationStatus?.api ?? { configured: false, state: 'unconfigured' as const };
+  const triggerStatus = workflow.integrationStatus?.trigger ?? {
+    configured: false,
+    state: 'unconfigured' as const,
+    count: 0,
+    items: [],
+  };
+  const triggerItems = triggerStatus.items ?? [];
+  const visibleTriggerItems = triggerItems.slice(0, MAX_VISIBLE_TRIGGER_STATUSES);
+  const hiddenTriggerItems = triggerItems.slice(MAX_VISIBLE_TRIGGER_STATUSES);
 
   return (
     <div
@@ -352,18 +373,12 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
                  overflow-hidden cursor-pointer transition-all duration-150
                  hover:border-gray-300 hover:shadow-md"
     >
-      {/* Top accent bar */}
-      <div style={{ height: 3, backgroundColor: color }} />
-
       {/* Card body */}
       <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
         {/* Avatar + name row */}
         <div className="flex items-start gap-2.5">
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-            style={{ backgroundColor: hexAlpha(color, 0.12) }}
-          >
-            <WorkflowIcon className="w-4 h-4" style={{ color }} />
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
+            <WorkflowIcon className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
@@ -374,23 +389,18 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
               {/* Source badge */}
               {builtin ? (
                 <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                                 bg-blue-50 text-blue-600 border border-blue-200">
+                                 bg-blue-50 text-blue-600">
                   {t('badge.builtin')}
                 </span>
               ) : (
                 <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                                 bg-teal-50 text-teal-600 border border-teal-200">
+                                 bg-teal-50 text-teal-600">
                   {t('badge.custom')}
                 </span>
               )}
-              {/* Status badge */}
-              <span className="inline-flex items-center px-1.5 py-0.5 rounded border border-gray-200
-                               bg-gray-50 text-gray-500 text-[10px] font-medium">
-                {t(`status.${workflow.status}` as any) ?? workflow.status}
-              </span>
               {/* Node count */}
               <span className="text-[10px] text-gray-400">
-                {workflow.workflowJson.nodes.length} {t('stats.nodes')}
+                {workflow.nodeCount} {t('stats.nodes')}
               </span>
             </div>
           </div>
@@ -402,6 +412,36 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
         <p className="text-xs text-gray-500 leading-relaxed line-clamp-2">
           {workflow.description || t('noDescription')}
         </p>
+
+        <div
+          className="mt-auto pt-1 h-5 flex items-center min-w-0"
+          aria-label={t('integration.aria')}
+        >
+          <div className="min-w-0 flex items-center gap-x-3 overflow-hidden">
+            <CapabilityStatus
+              label={t('integration.api')}
+              state={apiStatus.state}
+              statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[apiStatus.state])}
+            />
+            {triggerItems.length > 0 ? visibleTriggerItems.map(trigger => (
+              <CapabilityStatus
+                key={trigger.id}
+                label={t(TRIGGER_TYPE_LABEL_KEYS[trigger.type])}
+                state={trigger.state}
+                statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[trigger.state])}
+              />
+            )) : (
+              <CapabilityStatus
+                label={t('integration.trigger')}
+                state={triggerStatus.state}
+                statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[triggerStatus.state])}
+              />
+            )}
+          </div>
+          {hiddenTriggerItems.length > 0 && (
+            <OverflowStatusList items={hiddenTriggerItems} />
+          )}
+        </div>
       </div>
 
       {/* Stats footer — kept from original, cleaned to white bg */}
@@ -428,5 +468,164 @@ function WorkflowCard({ workflow }: { workflow: Workflow }) {
         </div>
       </div>
     </div>
+  );
+}
+
+function CapabilityStatus({
+  label,
+  state,
+  statusLabel,
+}: {
+  label: string;
+  state: WorkflowCapabilityState;
+  statusLabel: string;
+}) {
+  const { t } = useTranslation('workflow');
+  const detailLabel = state === 'running'
+    ? null
+    : t(CAPABILITY_DETAIL_LABEL_KEYS[state]);
+  const accessibleLabel = detailLabel
+    ? `${label}：${statusLabel}（${detailLabel}）`
+    : `${label}：${statusLabel}`;
+  const styles = CAPABILITY_STATUS_STYLES[state];
+  return (
+    <span
+      aria-label={accessibleLabel}
+      title={accessibleLabel}
+      className="inline-flex shrink-0 items-center gap-1 whitespace-nowrap text-[11px] leading-4"
+    >
+      <span className={`h-1.5 w-1.5 rounded-full ${styles.dot}`} />
+      <span className="font-medium text-gray-500">{label}</span>
+      <span className={styles.text}>{statusLabel}</span>
+    </span>
+  );
+}
+
+function OverflowStatusList({ items }: { items: WorkflowTriggerStatusSummary[] }) {
+  const { t } = useTranslation('workflow');
+  const tooltipId = useId();
+  const hideTimeoutRef = useRef<number | null>(null);
+  const [position, setPosition] = useState<{
+    x: number;
+    y: number;
+    placement: 'top' | 'bottom';
+    maxHeight: number;
+  } | null>(null);
+
+  const cancelScheduledHide = useCallback(() => {
+    if (hideTimeoutRef.current !== null) {
+      window.clearTimeout(hideTimeoutRef.current);
+      hideTimeoutRef.current = null;
+    }
+  }, []);
+
+  const showTooltip = useCallback((target: HTMLElement) => {
+    cancelScheduledHide();
+    const rect = target.getBoundingClientRect();
+    const viewportWidth = window.innerWidth;
+    const viewportHeight = window.innerHeight;
+    const estimatedHeight = Math.min(STATUS_TOOLTIP_MAX_HEIGHT, 36 + items.length * 24);
+    const availableAbove = Math.max(0, rect.top - STATUS_TOOLTIP_GAP * 2);
+    const availableBelow = Math.max(0, viewportHeight - rect.bottom - STATUS_TOOLTIP_GAP * 2);
+    const placement = availableAbove >= estimatedHeight || availableAbove >= availableBelow
+      ? 'top'
+      : 'bottom';
+    const availableHeight = placement === 'top' ? availableAbove : availableBelow;
+    const x = Math.min(
+      Math.max(rect.right, STATUS_TOOLTIP_WIDTH + STATUS_TOOLTIP_GAP),
+      viewportWidth - STATUS_TOOLTIP_GAP,
+    );
+    setPosition({
+      x,
+      y: placement === 'top'
+        ? rect.top - STATUS_TOOLTIP_GAP
+        : rect.bottom + STATUS_TOOLTIP_GAP,
+      placement,
+      maxHeight: Math.max(48, Math.min(STATUS_TOOLTIP_MAX_HEIGHT, availableHeight)),
+    });
+  }, [cancelScheduledHide, items.length]);
+
+  const hideTooltip = useCallback(() => {
+    cancelScheduledHide();
+    setPosition(null);
+  }, [cancelScheduledHide]);
+
+  const scheduleHideTooltip = useCallback(() => {
+    cancelScheduledHide();
+    hideTimeoutRef.current = window.setTimeout(hideTooltip, 100);
+  }, [cancelScheduledHide, hideTooltip]);
+
+  useEffect(() => {
+    if (!position) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') hideTooltip();
+    };
+    document.addEventListener('pointerdown', hideTooltip);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', hideTooltip);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [hideTooltip, position]);
+
+  useEffect(() => () => cancelScheduledHide(), [cancelScheduledHide]);
+
+  return (
+    <>
+      <button
+        type="button"
+        aria-label={`${t('integration.moreStatuses')}：${items.length}`}
+        aria-expanded={position !== null}
+        aria-describedby={position ? tooltipId : undefined}
+        className="ml-2 shrink-0 cursor-help text-[11px] leading-4 font-medium text-gray-400
+                   hover:text-gray-600 focus-visible:outline-none focus-visible:text-gray-600"
+        onMouseEnter={(event) => showTooltip(event.currentTarget)}
+        onMouseLeave={scheduleHideTooltip}
+        onFocus={(event) => showTooltip(event.currentTarget)}
+        onBlur={hideTooltip}
+        onPointerDown={(event) => event.stopPropagation()}
+        onClick={(event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          showTooltip(event.currentTarget);
+        }}
+      >
+        +{items.length}
+      </button>
+      {position && createPortal(
+        <div
+          id={tooltipId}
+          role="tooltip"
+          className={`pointer-events-auto fixed z-[1000] flex w-56 max-w-[calc(100vw-1rem)] -translate-x-full flex-col
+                      rounded-lg border border-gray-200 bg-white px-3 py-2 shadow-lg
+                      ${position.placement === 'top' ? '-translate-y-full' : ''}`}
+          style={{ left: position.x, top: position.y, maxHeight: position.maxHeight }}
+          onMouseEnter={cancelScheduledHide}
+          onMouseLeave={scheduleHideTooltip}
+        >
+          <div className="mb-1.5 shrink-0 text-[11px] font-semibold text-gray-700">
+            {t('integration.moreStatuses')}
+          </div>
+          <div className="min-h-0 space-y-1.5 overflow-y-auto">
+            {items.map(item => (
+              <div key={item.id} className="flex items-center min-w-0">
+                <CapabilityStatus
+                  label={t(TRIGGER_TYPE_LABEL_KEYS[item.type])}
+                  state={item.state}
+                  statusLabel={t(CAPABILITY_STATUS_LABEL_KEYS[item.state])}
+                />
+              </div>
+            ))}
+          </div>
+          <div
+            className={`absolute right-3 border-4 border-transparent
+                        ${position.placement === 'top'
+              ? 'top-full border-t-gray-200'
+              : 'bottom-full border-b-gray-200'}`}
+          />
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }

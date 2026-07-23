@@ -53,6 +53,8 @@ type WorkflowPromptParams = Record<string, unknown> & {
   backendConfigAccessGuide: string;
 };
 
+type PromptModel = { providerID: string; modelID: string };
+
 function withBackendConfigAccessGuide(
   t: TranslateFn,
   params: Record<string, unknown>,
@@ -109,17 +111,62 @@ export default function ChatTab({
   const workflowIdRef = useRef<string>(workflow.id);
   workflowIdRef.current = workflow.id;
   const historyBtnRef = useRef<HTMLDivElement>(null);
+  const sessionModelHydrationRef = useRef(0);
+  const [sessionPinnedModel, setSessionPinnedModel] = useState<PromptModel | null>(null);
   const { agents: workflowChatAgents } = useChatAgentOptions({
     allowedAgentNames: WORKFLOW_CHAT_AGENT_NAMES,
   });
   const {
     groupedOptions: groupedChatModelOptions,
     loading: loadingChatModels,
+    options: chatModelOptions,
+    canSelectAuto,
+    effectiveModelOption,
+    modelPickerAutoOption,
+    selectAuto,
+    selectModelKey,
+    selectedModelAuto,
     selectedModelOption,
     selectedPromptModel,
+    setSelectedModelAuto,
     setSelectedModelKey,
-  } = useChatModelOptions();
-  const effectiveSupportsVision = selectedModelOption?.supportsVision ?? defaultSupportsVision;
+  } = useChatModelOptions({ enableAuto: true });
+  const sessionPinnedModelKey = sessionPinnedModel
+    ? `${sessionPinnedModel.providerID}::${sessionPinnedModel.modelID}`
+    : null;
+  const hasSessionPinnedModelOption = Boolean(
+    sessionPinnedModelKey && chatModelOptions.some((option) => option.key === sessionPinnedModelKey),
+  );
+  const effectiveSessionPinnedModel = hasSessionPinnedModelOption ? sessionPinnedModel : null;
+  const effectiveSupportsVision = effectiveModelOption?.supportsVision ?? defaultSupportsVision;
+
+  const applySessionModel = useCallback((session: unknown) => {
+    const data = session as {
+      provider?: unknown;
+      model?: unknown;
+      model_auto?: unknown;
+      model_pinned?: unknown;
+    } | null;
+    const providerID = typeof data?.provider === 'string' ? data.provider : '';
+    const modelID = typeof data?.model === 'string' ? data.model : '';
+
+    if (data?.model_auto) {
+      setSessionPinnedModel(null);
+      setSelectedModelAuto(true);
+      return;
+    }
+
+    setSelectedModelAuto(false);
+
+    if (data?.model_pinned && providerID && modelID) {
+      setSessionPinnedModel({ providerID, modelID });
+      setSelectedModelKey(`${providerID}::${modelID}`);
+      return;
+    }
+
+    setSessionPinnedModel(null);
+    setSelectedModelKey(null);
+  }, [setSelectedModelAuto, setSelectedModelKey]);
 
   useEffect(() => {
     workflowRevisionRef.current = workflowRevisionKey(workflow);
@@ -159,6 +206,7 @@ export default function ChatTab({
   } = useSessionChat({
     title: t('detail.chat.sessionTitle', { name: workflowDisplayName }),
     category: 'workflow',
+    modelAuto: selectedModelAuto,
     contextMessage: [
       t('detail.chat.contextMessage', workflowChatPromptParams),
       workflowChatPromptParams.backendConfigAccessGuide,
@@ -170,6 +218,41 @@ export default function ChatTab({
   useEffect(() => {
     onSessionChange?.(sessionId ?? null);
   }, [onSessionChange, sessionId]);
+
+  useEffect(() => {
+    if (!sessionPinnedModelKey) return;
+    if (!chatModelOptions.some((option) => option.key === sessionPinnedModelKey)) return;
+    setSelectedModelKey(sessionPinnedModelKey);
+  }, [chatModelOptions, sessionPinnedModelKey, setSelectedModelKey]);
+
+  useEffect(() => {
+    sessionModelHydrationRef.current += 1;
+    const hydrationId = sessionModelHydrationRef.current;
+
+    if (!sessionId) {
+      setSessionPinnedModel(null);
+      setSelectedModelAuto(false);
+      setSelectedModelKey(null);
+      return;
+    }
+
+    let cancelled = false;
+    client.get(`/api/session/${sessionId}`)
+      .then((res) => {
+        if (cancelled || hydrationId !== sessionModelHydrationRef.current) return;
+        applySessionModel(res.data);
+      })
+      .catch(() => {
+        if (cancelled || hydrationId !== sessionModelHydrationRef.current) return;
+        setSessionPinnedModel(null);
+        setSelectedModelAuto(false);
+        setSelectedModelKey(null);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [applySessionModel, sessionId, setSelectedModelAuto, setSelectedModelKey]);
 
   // Load stored sessions and validate only the active one (lightweight check)
   useEffect(() => {
@@ -275,6 +358,7 @@ export default function ChatTab({
             imageParts,
             agent: effectiveAgent,
             model: effectiveModel,
+            modelAuto: selectedModelAuto,
             displayText: effectiveDisplayText,
           });
         } else {
@@ -286,7 +370,7 @@ export default function ChatTab({
         setInitialMessage(null);
       }
     },
-    [onFirstMessageSent, selectedPromptModel, createSession, createAndSendSession],
+    [onFirstMessageSent, selectedModelAuto, selectedPromptModel, createSession, createAndSendSession],
   );
 
   const handleWelcomeGuidePrompt = useCallback(
@@ -312,6 +396,43 @@ export default function ChatTab({
     setShowHistory(false);
     hasCreatedRef.current = true;
   }, []);
+
+  const handleSelectModel = useCallback((option: {
+    key: string;
+    providerID: string;
+    modelID: string;
+  }) => {
+    sessionModelHydrationRef.current += 1;
+    const nextModel = { providerID: option.providerID, modelID: option.modelID };
+    setSessionPinnedModel(nextModel);
+    selectModelKey(option.key);
+
+    if (!sessionId) return;
+
+    client.patch(`/api/session/${sessionId}`, {
+      provider: option.providerID,
+      model: option.modelID,
+      model_pinned: true,
+      model_auto: false,
+    }).catch((err) => {
+      console.warn('[WorkflowDetail] failed to pin workflow chat model', err);
+    });
+  }, [selectModelKey, sessionId]);
+
+  const handleSelectAuto = useCallback(() => {
+    if (!canSelectAuto) return;
+    sessionModelHydrationRef.current += 1;
+    setSessionPinnedModel(null);
+    selectAuto();
+
+    if (!sessionId) return;
+    client.patch(`/api/session/${sessionId}`, {
+      model_auto: true,
+      model_pinned: false,
+    }).catch((err) => {
+      console.warn('[WorkflowDetail] failed to enable Auto for workflow chat', err);
+    });
+  }, [canSelectAuto, selectAuto, sessionId]);
 
   // Helper: fetch fresh workflow and notify parent if updated
   const checkWorkflowUpdate = useCallback(async () => {
@@ -476,8 +597,9 @@ export default function ChatTab({
           initialMessage={initialMessage}
           onSSEEvent={handleSSEEvent}
           supportsVision={effectiveSupportsVision}
-          contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
-          model={selectedPromptModel}
+          contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
+          model={effectiveSessionPinnedModel ?? selectedPromptModel}
+          modelAuto={selectedModelAuto}
           onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
           composerTextareaMinHeight={48}
           composerTextareaMaxHeight={120}
@@ -492,7 +614,10 @@ export default function ChatTab({
               groupedOptions={groupedChatModelOptions}
               loading={loadingChatModels}
               selectedModelOption={selectedModelOption}
-              onSelectModel={(option) => setSelectedModelKey(option.key)}
+              onSelectModel={handleSelectModel}
+              autoOption={modelPickerAutoOption
+                ? { ...modelPickerAutoOption, onSelect: handleSelectAuto }
+                : undefined}
             />
           }
           conversationBottomSlot={({ sendPrompt, sending, streaming }) => (

@@ -1522,7 +1522,7 @@ async def test_auto_activate_reinstalls_when_existing_pro_marker_is_not_target_b
 
     async def _fake_perform_pro_bundle_install(*args, **kwargs):
         assert args == ()
-        assert kwargs["restart"] is False
+        assert kwargs["restart"] is True
         marker_state["payload"] = {
             "release_id": "rel_20260605",
             "bundle_release_id": "rel_20260605",
@@ -1627,7 +1627,7 @@ async def test_auto_activate_installs_pro_bundle_when_core_version_is_latest(
     async def _fake_perform_pro_bundle_install(*args, **kwargs):
         nonlocal installed
         assert args == ()
-        assert kwargs["restart"] is False
+        assert kwargs["restart"] is True
         yield UpdateProgress(stage="syncing", message="Installing Flocks Pro component...", success=None)
         installed = True
         yield UpdateProgress(stage="done", message="Flocks Pro component installed from v2026.5.9", success=True)

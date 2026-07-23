@@ -1,4 +1,4 @@
-import { useState, useEffect, useLayoutEffect, useCallback, useRef, startTransition } from 'react';
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from 'react';
 import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Session, Message } from '@/types';
@@ -217,77 +217,183 @@ export function applyMessagePartUpdate(
   return updated;
 }
 
-export function useSessions(search = '') {
+type UseSessionsOptions = {
+  projectIds?: string[];
+  pageSize?: number;
+};
+
+function sessionEffectiveProjectId(session: Session): string {
+  return session.effectiveProjectID || session.projectID;
+}
+
+export function useSessions(search = '', options?: UseSessionsOptions) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
+  const [hasMoreByProject, setHasMoreByProject] = useState<Record<string, boolean>>({});
+  const [loadingMoreProjectIds, setLoadingMoreProjectIds] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   // Track whether the initial fetch has completed — refetches should be silent
   const initializedRef = useRef(false);
   const sessionsRef = useRef<Session[]>([]);
   const hasLoadedOnceRef = useRef(false);
-  const requestSeqRef = useRef(0);
+  const replaceRequestSeqRef = useRef(0);
+  const appendRequestSeqByProjectRef = useRef<Map<string, number>>(new Map());
+  const activeAppendProjectsRef = useRef<Set<string>>(new Set());
   const optimisticSessionsRef = useRef<Map<string, Session>>(new Map());
+  const loadedQueryKeyRef = useRef<string | null>(null);
+  const projectIdsKey = options?.projectIds === undefined
+    ? null
+    : [...options.projectIds].sort().join('\u0000');
+  const pageSize = options?.pageSize ?? SESSION_LIST_PAGE_SIZE;
+  const queryKey = `${projectIdsKey ?? '*'}\u0001${pageSize}\u0001${search.trim()}`;
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
 
-  const fetchSessions = useCallback(async (options?: { append?: boolean }) => {
-    const append = Boolean(options?.append);
-    const requestSeq = ++requestSeqRef.current;
+  const fetchSessions = useCallback(async (fetchOptions?: { append?: boolean; projectId?: string }) => {
+    const append = Boolean(fetchOptions?.append);
+    const appendProjectKey = fetchOptions?.projectId ?? '*';
+    const replaceRequestSeq = append
+      ? replaceRequestSeqRef.current
+      : ++replaceRequestSeqRef.current;
+    const appendRequestSeq = append
+      ? (appendRequestSeqByProjectRef.current.get(appendProjectKey) ?? 0) + 1
+      : 0;
+    if (append) {
+      appendRequestSeqByProjectRef.current.set(appendProjectKey, appendRequestSeq);
+    }
+    const isCurrentRequest = () => (
+      append
+        ? replaceRequestSeqRef.current === replaceRequestSeq
+          && appendRequestSeqByProjectRef.current.get(appendProjectKey) === appendRequestSeq
+        : replaceRequestSeqRef.current === replaceRequestSeq
+    );
+    const requestedProjectIds = projectIdsKey === null
+      ? null
+      : projectIdsKey.split('\u0000').filter(Boolean);
+    const targetProjectIds = requestedProjectIds === null
+      ? null
+      : fetchOptions?.projectId
+        ? [fetchOptions.projectId]
+        : requestedProjectIds;
     try {
       // Only show the full-page loading state on the very first fetch.
       // Subsequent refetches (triggered by SSE events) update data silently
       // to avoid unmounting SessionChat and disrupting the active conversation.
       if (append) {
+        activeAppendProjectsRef.current.add(appendProjectKey);
         setLoadingMore(true);
+        if (fetchOptions?.projectId) {
+          setLoadingMoreProjectIds((current) => new Set(current).add(fetchOptions.projectId as string));
+        }
       } else if (!initializedRef.current) {
         setLoading(true);
       }
+      if (!append) {
+        activeAppendProjectsRef.current.clear();
+        setLoadingMore(false);
+        setLoadingMoreProjectIds(new Set());
+      }
       setError(null);
+      if (targetProjectIds?.length === 0) {
+        setSessions([]);
+        setHasMore(false);
+        setHasMoreByProject({});
+        hasLoadedOnceRef.current = true;
+        loadedQueryKeyRef.current = queryKey;
+        return;
+      }
       // Fetch only root sessions: child sessions are internal and never shown
       // in the sidebar, so excluding them avoids extra payload and filtering.
       const startMark = append ? 'sessions:list:older-start' : 'sessions:list:first-start';
       if (typeof performance !== 'undefined') performance.mark(startMark);
-      const response = await sessionApi.list({
-        view: 'list',
-        manager: true,
-        roots: true,
-        limit: SESSION_LIST_PAGE_SIZE,
-        offset: append
-          ? sessionsRef.current.filter(session => !optimisticSessionsRef.current.has(session.id)).length
-          : 0,
-        search: search.trim() || undefined,
-      });
-      if (requestSeq !== requestSeqRef.current) return;
+      const projectTargets = targetProjectIds ?? [undefined];
+      const preserveLoadedDepth = !append && loadedQueryKeyRef.current === queryKey;
+      const responses = await Promise.all(projectTargets.map(async (projectId) => {
+        const loadedCount = sessionsRef.current.filter((session) => (
+          !optimisticSessionsRef.current.has(session.id)
+          && (projectId === undefined || sessionEffectiveProjectId(session) === projectId)
+        )).length;
+        const requestLimit = append
+          ? pageSize
+          : preserveLoadedDepth
+            ? Math.max(pageSize, loadedCount)
+            : pageSize;
+        const offset = append ? loadedCount : 0;
+        const response = await sessionApi.list({
+          view: 'list',
+          manager: true,
+          roots: true,
+          limit: requestLimit,
+          offset,
+          search: search.trim() || undefined,
+          projectID: projectId,
+        });
+        return { projectId, requestLimit, response };
+      }));
+      if (!isCurrentRequest()) return;
       markMeasure(append ? 'sessions:list:older-page' : 'sessions:list:first-render', startMark);
-      if (Array.isArray(response)) {
-        const nextSessions = response.filter(
+      const nextSessions = responses.flatMap(({ response }) => (
+        Array.isArray(response) ? response.filter(
           (s: any) => (!s.category || VISIBLE_CATEGORIES.has(s.category)) && !s.parentID,
+        ) : []
+      ));
+      nextSessions.forEach((session: Session) => optimisticSessionsRef.current.delete(session.id));
+      const nextHasMoreByProject = Object.fromEntries(
+        responses
+          .filter(({ projectId }) => projectId !== undefined)
+          .map(({ projectId, requestLimit, response }) => [
+            projectId as string,
+            Array.isArray(response) && response.length >= requestLimit,
+          ]),
+      );
+      setHasMoreByProject((current) => append
+        ? { ...current, ...nextHasMoreByProject }
+        : nextHasMoreByProject);
+      setSessions((previous) => {
+        if (append) return appendSessionList(previous, nextSessions);
+        if (targetProjectIds === null) {
+          return mergeSessionListWithOptimistic(nextSessions, optimisticSessionsRef.current);
+        }
+        const optimistic = new Map(
+          Array.from(optimisticSessionsRef.current.entries()).filter(([, session]) => (
+            targetProjectIds.includes(sessionEffectiveProjectId(session))
+          )),
         );
-        nextSessions.forEach((session: Session) => optimisticSessionsRef.current.delete(session.id));
-        setSessions(prev => append
-          ? appendSessionList(prev, nextSessions)
-          : mergeSessionListWithOptimistic(nextSessions, optimisticSessionsRef.current));
-        setHasMore(response.length >= SESSION_LIST_PAGE_SIZE);
-        hasLoadedOnceRef.current = true;
-      } else {
-        if (!append && !hasLoadedOnceRef.current) setSessions([]);
-        setHasMore(false);
-      }
+        return mergeSessionListWithOptimistic(nextSessions, optimistic);
+      });
+      setHasMore(targetProjectIds === null
+        ? responses.some(({ requestLimit, response }) => (
+          Array.isArray(response) && response.length >= requestLimit
+        ))
+        : Object.values(nextHasMoreByProject).some(Boolean));
+      hasLoadedOnceRef.current = true;
+      loadedQueryKeyRef.current = queryKey;
     } catch (err: any) {
-      if (requestSeq !== requestSeqRef.current) return;
+      if (!isCurrentRequest()) return;
       setError(err.message || 'Failed to fetch sessions');
       if (!append && !hasLoadedOnceRef.current) setSessions([]);
     } finally {
-      if (requestSeq === requestSeqRef.current) {
+      if (append) {
+        if (appendRequestSeqByProjectRef.current.get(appendProjectKey) === appendRequestSeq) {
+          activeAppendProjectsRef.current.delete(appendProjectKey);
+          setLoadingMore(activeAppendProjectsRef.current.size > 0);
+          if (fetchOptions?.projectId) {
+            setLoadingMoreProjectIds((current) => {
+              const next = new Set(current);
+              next.delete(fetchOptions.projectId as string);
+              return next;
+            });
+          }
+        }
+      } else if (isCurrentRequest()) {
         setLoading(false);
-        setLoadingMore(false);
         initializedRef.current = true;
       }
     }
-  }, [search]);
+  }, [pageSize, projectIdsKey, queryKey, search]);
 
   const updateSessionTitle = useCallback((sessionId: string, title: string) => {
     const optimistic = optimisticSessionsRef.current.get(sessionId);
@@ -338,8 +444,10 @@ export function useSessions(search = '') {
     removeSessions,
     addSession,
     hasMore,
+    hasMoreByProject,
     loadingMore,
-    loadMore: () => fetchSessions({ append: true }),
+    loadingMoreProjectIds,
+    loadMore: (projectId?: string) => fetchSessions({ append: true, projectId }),
   };
 }
 
@@ -350,12 +458,26 @@ export function useSessionMessages(sessionId?: string) {
   const [hasMore, setHasMore] = useState(false);
   const [nextBefore, setNextBefore] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
-  // Tracks part IDs seen in this session to distinguish first-time creation
-  // (structural change → immediate update) from content deltas (low-priority).
-  const knownPartIdsRef = useRef<Set<string>>(new Set());
+  const activeSessionIdRef = useRef(sessionId);
+  const firstPageRequestIdRef = useRef(0);
+  const firstPageInFlightRequestIdRef = useRef<number | null>(null);
+  const olderPageRequestIdRef = useRef(0);
+  const olderPageInFlightRequestIdRef = useRef<number | null>(null);
 
   const fetchMessages = useCallback(async () => {
-    if (!sessionId) return;
+    if (!sessionId || activeSessionIdRef.current !== sessionId) return;
+
+    const requestSessionId = sessionId;
+    const requestId = ++firstPageRequestIdRef.current;
+    firstPageInFlightRequestIdRef.current = requestId;
+    // A fresh first page invalidates pagination based on an older snapshot.
+    olderPageRequestIdRef.current += 1;
+    olderPageInFlightRequestIdRef.current = null;
+    setLoadingOlder(false);
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === requestSessionId
+      && firstPageRequestIdRef.current === requestId
+    );
     
     try {
       setLoading(true);
@@ -366,19 +488,44 @@ export function useSessionMessages(sessionId?: string) {
         params: { page: true, limit: MESSAGE_PAGE_SIZE, include_archived: true },
       });
       markMeasure('session:messages:first-page', startMark);
+      if (!isCurrentRequest()) return;
       const { messages: messagesData, hasMore, nextBefore } = transformMessageResponse(response.data);
       setMessages(prev => mergeLatestFetchedMessages(prev, messagesData));
       setHasMore(hasMore);
       setNextBefore(nextBefore);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch messages');
+      if (isCurrentRequest()) {
+        setError(err.message || 'Failed to fetch messages');
+      }
     } finally {
-      setLoading(false);
+      if (firstPageInFlightRequestIdRef.current === requestId) {
+        firstPageInFlightRequestIdRef.current = null;
+      }
+      if (isCurrentRequest()) {
+        setLoading(false);
+      }
     }
   }, [sessionId]);
 
   const loadOlder = useCallback(async () => {
-    if (!sessionId || !hasMore || !nextBefore || loadingOlder) return;
+    if (
+      !sessionId
+      || activeSessionIdRef.current !== sessionId
+      || firstPageInFlightRequestIdRef.current !== null
+      || olderPageInFlightRequestIdRef.current !== null
+      || !hasMore
+      || !nextBefore
+    ) return;
+
+    const requestSessionId = sessionId;
+    const requestId = ++olderPageRequestIdRef.current;
+    olderPageInFlightRequestIdRef.current = requestId;
+    const firstPageRequestId = firstPageRequestIdRef.current;
+    const isCurrentRequest = () => (
+      activeSessionIdRef.current === requestSessionId
+      && olderPageRequestIdRef.current === requestId
+      && firstPageRequestIdRef.current === firstPageRequestId
+    );
 
     try {
       setLoadingOlder(true);
@@ -394,25 +541,35 @@ export function useSessionMessages(sessionId?: string) {
         },
       });
       markMeasure('session:messages:older-page', startMark);
+      if (!isCurrentRequest()) return;
       const page = transformMessageResponse(response.data);
       setMessages(prev => prependOlderMessages(prev, page.messages));
       setHasMore(page.hasMore);
       setNextBefore(page.nextBefore);
     } catch (err: any) {
-      setError(err.message || 'Failed to fetch older messages');
+      if (isCurrentRequest()) {
+        setError(err.message || 'Failed to fetch older messages');
+      }
     } finally {
-      setLoadingOlder(false);
+      if (olderPageInFlightRequestIdRef.current === requestId) {
+        olderPageInFlightRequestIdRef.current = null;
+      }
+      if (isCurrentRequest()) {
+        setLoadingOlder(false);
+      }
     }
-  }, [hasMore, loadingOlder, nextBefore, sessionId]);
+  }, [hasMore, nextBefore, sessionId]);
 
   // Reset state synchronously before paint when session changes
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
+    activeSessionIdRef.current = sessionId;
     setMessages([]);
     setError(null);
     setHasMore(false);
     setNextBefore(null);
-    knownPartIdsRef.current.clear();
+    olderPageInFlightRequestIdRef.current = null;
+    setLoadingOlder(false);
     if (sessionId) {
       setLoading(true);
     } else {
@@ -456,14 +613,6 @@ export function useSessionMessages(sessionId?: string) {
             providerID: messageInfo.providerID ?? existing.providerID,
             cost: messageInfo.cost ?? existing.cost,
           };
-          // When a message finishes streaming, evict its part IDs from the
-          // known-parts registry to reclaim memory.
-          if (messageInfo.finish) {
-            const parts = updated[existingIndex].parts as any[] | undefined;
-            parts?.forEach((p: any) => {
-              if (p?.id) knownPartIdsRef.current.delete(p.id);
-            });
-          }
           return updated;
         }
 
@@ -521,23 +670,15 @@ export function useSessionMessages(sessionId?: string) {
      * @param partInfo - Part object containing id, messageID, sessionID, type, text, etc.
      * @param delta - Optional text delta for this update.
      *
-     * New parts are structural changes and update synchronously so thinking or
-     * streaming indicators appear immediately. Deltas for known parts are
-     * lowered with startTransition so React can batch high-frequency SSE chunks.
+     * Every SSE update enters message state immediately so a following finish
+     * event cannot overtake the final delta. Display-layer smoothing owns the
+     * frame-level typing cadence and Markdown parse budget.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
-      const isNewPart = !knownPartIdsRef.current.has(partInfo.id);
-      if (isNewPart) {
-        // Structural change: first appearance of this part — must render immediately
-        // so that "thinking" / "streaming" indicators show without delay.
-        knownPartIdsRef.current.add(partInfo.id);
-        setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
-      } else {
-        // Content delta on an existing part — low priority, allow React to batch.
-        startTransition(() => {
-          setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
-        });
-      }
+      setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
+    },
+    removeMessage: (messageId: string) => {
+      setMessages(prev => prev.filter((message) => message.id !== messageId));
     },
     replaceMessageText: (messageId: string, partId: string, text: string) => {
       setMessages(prev => prev.map((message) => {

@@ -32,14 +32,10 @@ export interface NotificationAckStatus {
   acknowledged: boolean;
 }
 
-export const getActiveNotifications = async (
-  locale?: string,
-  currentVersion?: string | null,
-): Promise<UserNotification[]> => {
+export const getActiveNotifications = async (locale?: string): Promise<UserNotification[]> => {
   const response = await client.get<UserNotification[]>('/api/notifications/active', {
     params: {
       ...(locale ? { locale } : {}),
-      ...(currentVersion ? { current_version: currentVersion } : {}),
     },
   });
   return response.data;

@@ -135,6 +135,22 @@ class MessageDedup:
 # Allowlist / authorisation check
 # =====================================================================
 
+def _matches_allow_from(msg: InboundMessage, allow_from: list[str]) -> bool:
+    if msg.channel_id == "whatsapp":
+        try:
+            from flocks.channel.builtin.whatsapp.config import matches_identifier
+
+            aliases = [msg.sender_id]
+            if isinstance(msg.raw, dict):
+                raw_aliases = msg.raw.get("senderAliases")
+                if isinstance(raw_aliases, list):
+                    aliases.extend(str(alias) for alias in raw_aliases if str(alias).strip())
+            return matches_identifier(aliases, allow_from)
+        except Exception:
+            log.warning("allowlist.whatsapp_match_failed", {"sender": msg.sender_id})
+    return msg.sender_id in allow_from
+
+
 def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
     """Return True if the message is allowed through.
 
@@ -147,7 +163,10 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
       non-empty, but are otherwise unrestricted.
     """
     allow_from = config.allow_from
-    dm_policy = config.dm_policy or "open"
+    dm_policy = config.dm_policy
+    if msg.channel_id == "slack" and dm_policy is None and allow_from:
+        dm_policy = "allowlist"
+    dm_policy = dm_policy or "open"
 
     if msg.chat_type == ChatType.DIRECT:
         if dm_policy == "open":
@@ -156,12 +175,12 @@ def _check_allowlist(msg: InboundMessage, config: ChannelConfig) -> bool:
             if not allow_from:
                 log.debug("allowlist.dm_blocked_no_list", {"sender": msg.sender_id})
                 return False
-            return msg.sender_id in allow_from
+            return _matches_allow_from(msg, allow_from)
         if dm_policy == "pairing":
             return True
         return True
 
-    if allow_from and msg.sender_id not in allow_from:
+    if allow_from and not _matches_allow_from(msg, allow_from):
         log.debug("allowlist.group_blocked", {
             "sender": msg.sender_id, "chat_id": msg.chat_id,
         })
@@ -704,6 +723,8 @@ class InboundDispatcher:
                     msg=msg,
                     callbacks=callbacks,
                     scope_override=scope_override,
+                    channel_config=channel_config,
+                    initial_text=command_args or None,
                 )
                 return True
             if parsed.canonical_name == "compact":
@@ -845,6 +866,8 @@ class InboundDispatcher:
         msg: InboundMessage,
         callbacks: ChannelDeliveryCallbacks,
         scope_override: Optional[str],
+        channel_config: ChannelConfig,
+        initial_text: Optional[str] = None,
     ) -> None:
         from flocks.session.session import Session
         from flocks.channel.inbound.session_binding import (
@@ -912,6 +935,26 @@ class InboundDispatcher:
                 ]
             )
         )
+        if initial_text and initial_text.strip():
+            text = initial_text.strip()
+            resolved_model = await _resolve_session_model(new_binding.session_id)
+            await self._append_user_message(
+                new_binding.session_id,
+                text,
+                msg,
+                channel_config,
+                model=resolved_model,
+                agent=new_binding.agent_id,
+            )
+            if msg.channel_id == "feishu":
+                await self._run_agent_with_typing(
+                    new_binding,
+                    new_callbacks,
+                    msg,
+                    channel_config,
+                )
+            else:
+                await self._run_agent(new_binding, new_callbacks)
 
     @staticmethod
     async def _handle_compact_command(
@@ -1011,15 +1054,37 @@ class InboundDispatcher:
             return ChannelConfig()
 
     @staticmethod
+    async def _run_session_loop(binding: Any, loop_callbacks: Any) -> Any:
+        """Run an IM turn with the persisted model preference for its session."""
+        from flocks.session.session import (
+            Session,
+            is_model_auto_session_category,
+        )
+        from flocks.session.session_loop import SessionLoop
+
+        session = await Session.get_by_id(binding.session_id)
+        auto_failover = bool(
+            session
+            and is_model_auto_session_category(
+                getattr(session, "category", "user")
+            )
+            and getattr(session, "model_auto", False)
+        )
+        return await SessionLoop.run(
+            session_id=binding.session_id,
+            agent_name=binding.agent_id,
+            callbacks=loop_callbacks,
+            auto_failover=auto_failover,
+        )
+
+    @staticmethod
     async def _run_agent(binding, callbacks: ChannelDeliveryCallbacks) -> None:
         """Run Agent and deliver the final assistant reply."""
         try:
-            from flocks.session.session_loop import SessionLoop
             loop_callbacks = callbacks.to_loop_callbacks()
-            result = await SessionLoop.run(
-                session_id=binding.session_id,
-                agent_name=binding.agent_id,
-                callbacks=loop_callbacks,
+            result = await InboundDispatcher._run_session_loop(
+                binding,
+                loop_callbacks,
             )
 
             if result.last_message:
@@ -1104,11 +1169,9 @@ class InboundDispatcher:
             runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
             loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)
 
-            from flocks.session.session_loop import SessionLoop
-            result = await SessionLoop.run(
-                session_id=binding.session_id,
-                agent_name=binding.agent_id,
-                callbacks=loop_callbacks,
+            result = await InboundDispatcher._run_session_loop(
+                binding,
+                loop_callbacks,
             )
 
             final_text = None
@@ -1515,7 +1578,7 @@ def _is_placeholder_text(text: str) -> bool:
     )
     if text in placeholders:
         return True
-    return text.startswith("[文件消息:")
+    return text.startswith("[文件消息:") or text.startswith("[图片消息:")
 
 
 # Best-effort eager registration at import time.  Channels that need
@@ -1544,6 +1607,12 @@ try:
 except Exception:  # pragma: no cover
     pass
 
+try:
+    from flocks.channel.builtin.slack import inbound_media as _slack_inbound_media
+    register_inbound_media_downloader("slack", _slack_inbound_media.download_inbound_media)
+except Exception:  # pragma: no cover
+    pass
+
 
 async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     """Dispatch inbound media download to the appropriate channel handler.
@@ -1566,4 +1635,7 @@ async def _download_channel_media(msg: "InboundMessage", config: dict) -> Any:
     if channel_id == "telegram":
         from flocks.channel.builtin.telegram import inbound_media as _telegram_inbound_media
         return await _telegram_inbound_media.download_inbound_media(msg, config)
+    if channel_id == "slack":
+        from flocks.channel.builtin.slack import inbound_media as _slack_inbound_media
+        return await _slack_inbound_media.download_inbound_media(msg, config)
     return None

@@ -8,6 +8,7 @@ import asyncio
 import time
 from typing import Dict, Optional, Any, List
 from flocks.mcp.client import McpClient
+from flocks.mcp.errors import is_method_not_found_error
 from flocks.mcp.types import (
     McpStatus,
     McpStatusInfo,
@@ -226,10 +227,13 @@ class McpServerManager:
                 resources = await client.list_resources()
                 self._resources_cache[name] = resources
             except Exception as e:
-                log.warn("mcp.resources_unavailable", {
-                    "server": name,
-                    "error": str(e)
-                })
+                if is_method_not_found_error(e):
+                    log.info("mcp.resources_unsupported", {"server": name})
+                else:
+                    log.warn("mcp.resources_unavailable", {
+                        "server": name,
+                        "error": str(e)
+                    })
                 self._resources_cache[name] = []
 
             # 5. Register tools
@@ -330,6 +334,10 @@ class McpServerManager:
             await self.init()
 
         return self._status.copy()
+
+    def status_snapshot(self) -> tuple[Dict[str, McpStatusInfo], bool]:
+        """Return current status without triggering MCP initialization."""
+        return self._status.copy(), self._initialized
 
     async def get_server_info(self, name: str) -> Optional[McpServerInfo]:
         """

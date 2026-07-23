@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
-import { Bot, ChevronDown, Cpu, Info } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { Bot, ChevronDown, Cpu, Info, Sparkles } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 
 import type { Agent } from '@/api/agent';
-import { defaultModelAPI, modelV2API } from '@/api/provider';
+import {
+  __resetChatModelResourcesForTesting,
+  useEnabledChatModelDefinitions,
+  useResolvedDefaultModel,
+} from '@/hooks/useChatModelResources';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
@@ -29,12 +33,40 @@ export type ChatModelProviderGroup = {
   models: ChatModelOption[];
 };
 
+export type ChatModelPickerAutoOption = {
+  selected: boolean;
+  disabled: boolean;
+  statusLabel: string;
+  onSelect: () => void;
+};
+
 type SelectorTooltip = {
   title: string;
   lines: string[];
   x: number;
   y: number;
 };
+
+const MODEL_MENU_WIDTH_PX = 320;
+const MODEL_MENU_VIEWPORT_PADDING_PX = 16;
+
+export function getAnchoredMenuLeftOffset(
+  anchorLeft: number,
+  viewportWidth: number,
+  menuWidth = MODEL_MENU_WIDTH_PX,
+  viewportPadding = MODEL_MENU_VIEWPORT_PADDING_PX,
+): number {
+  const constrainedWidth = Math.min(
+    menuWidth,
+    Math.max(0, viewportWidth - viewportPadding * 2),
+  );
+  const rightOverflow = anchorLeft + constrainedWidth + viewportPadding - viewportWidth;
+  return rightOverflow > 0 ? -rightOverflow : 0;
+}
+
+export function __resetChatModelOptionsResourcesForTesting(): void {
+  __resetChatModelResourcesForTesting();
+}
 
 function formatAgentName(name: string): string {
   return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
@@ -65,30 +97,15 @@ export function useChatAgentOptions(options: { allowedAgentNames?: string[] } = 
   };
 }
 
-export function useChatModelOptions() {
+export function useChatModelOptions({ enableAuto = false }: { enableAuto?: boolean } = {}) {
   const { t } = useTranslation('session');
   const { providers, loading: loadingProviders } = useProviders();
-  const [enabledModelDefinitions, setEnabledModelDefinitions] = useState<ModelDefinitionV2[]>([]);
-  const [loadingEnabledModels, setLoadingEnabledModels] = useState(true);
+  const {
+    data: enabledModelDefinitions,
+    loading: loadingEnabledModels,
+  } = useEnabledChatModelDefinitions();
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    setLoadingEnabledModels(true);
-    Promise.resolve(modelV2API.listDefinitions({ enabled_only: true }))
-      .then((response) => {
-        if (!cancelled) setEnabledModelDefinitions(response?.data?.models ?? []);
-      })
-      .catch(() => {
-        if (!cancelled) setEnabledModelDefinitions([]);
-      })
-      .finally(() => {
-        if (!cancelled) setLoadingEnabledModels(false);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, []);
+  const [selectedModelAuto, setSelectedModelAuto] = useState(false);
 
   const options = useMemo<ChatModelOption[]>(() => {
     const providerById = new Map(
@@ -162,24 +179,47 @@ export function useChatModelOptions() {
     [options, selectedModelKey],
   );
 
+  const {
+    data: resolvedDefaultModel,
+    initialized: resolvedDefaultModelInitialized,
+  } = useResolvedDefaultModel(options.length > 0);
+  const primaryModelOption = useMemo(() => {
+    if (!resolvedDefaultModel) return null;
+    return options.find((option) => (
+      option.providerID === resolvedDefaultModel.providerID
+      && option.modelID === resolvedDefaultModel.modelID
+    )) ?? null;
+  }, [options, resolvedDefaultModel]);
+  const canSelectAuto = Boolean(enableAuto && primaryModelOption);
+  const effectiveModelOption = selectedModelAuto ? primaryModelOption : selectedModelOption;
+  const selectModelKey = useCallback((key: string) => {
+    setSelectedModelAuto(false);
+    setSelectedModelKey(key);
+  }, []);
+  const selectAuto = useCallback(() => {
+    if (canSelectAuto) setSelectedModelAuto(true);
+  }, [canSelectAuto]);
+  const modelPickerAutoOption = useMemo<ChatModelPickerAutoOption | undefined>(() => (
+    enableAuto
+      ? {
+          selected: selectedModelAuto,
+          disabled: !canSelectAuto,
+          statusLabel: canSelectAuto
+            ? t('modelPicker.autoHint')
+            : t('modelPicker.autoUnavailable'),
+          onSelect: selectAuto,
+        }
+      : undefined
+  ), [canSelectAuto, enableAuto, selectAuto, selectedModelAuto, t]);
+
   useEffect(() => {
-    if (selectedModelKey || options.length === 0) return;
-    let cancelled = false;
-    Promise.resolve(defaultModelAPI.getResolved())
-      .then((response) => {
-        if (cancelled) return;
-        const { provider_id: providerID, model_id: modelID } = response?.data ?? {};
-        const defaultKey = `${providerID}::${modelID}`;
-        const fallbackKey = options[0]?.key ?? null;
-        setSelectedModelKey(options.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
-      })
-      .catch(() => {
-        if (!cancelled) setSelectedModelKey(options[0]?.key ?? null);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [options, selectedModelKey]);
+    if (selectedModelKey || options.length === 0 || !resolvedDefaultModelInitialized) return;
+    const defaultKey = resolvedDefaultModel
+      ? `${resolvedDefaultModel.providerID}::${resolvedDefaultModel.modelID}`
+      : null;
+    const fallbackKey = options[0]?.key ?? null;
+    setSelectedModelKey(defaultKey && options.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
+  }, [options, resolvedDefaultModel, resolvedDefaultModelInitialized, selectedModelKey]);
 
   useEffect(() => {
     if (loadingEnabledModels || options.length === 0 || !selectedModelKey) return;
@@ -191,11 +231,19 @@ export function useChatModelOptions() {
     groupedOptions,
     loading: loadingProviders || loadingEnabledModels,
     options,
+    canSelectAuto,
+    effectiveModelOption,
+    modelPickerAutoOption,
+    primaryModelOption,
+    selectAuto,
+    selectModelKey,
+    selectedModelAuto,
     selectedModelKey,
     selectedModelOption,
-    selectedPromptModel: selectedModelOption
+    selectedPromptModel: !selectedModelAuto && selectedModelOption
       ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
       : null,
+    setSelectedModelAuto,
     setSelectedModelKey,
   };
 }
@@ -430,16 +478,28 @@ export function ChatModelPicker({
   loading,
   selectedModelOption,
   onSelectModel,
+  autoOption,
 }: {
   groupedOptions: ChatModelProviderGroup[];
   loading: boolean;
   selectedModelOption: ChatModelOption | null;
   onSelectModel: (option: ChatModelOption) => void;
+  autoOption?: ChatModelPickerAutoOption;
 }) {
   const { t } = useTranslation('session');
   const [open, setOpen] = useState(false);
+  const selectorRef = useRef<HTMLDivElement>(null);
+  const [menuLeftOffset, setMenuLeftOffset] = useState(0);
   const { tooltip, showTooltip, hideTooltip } = useSelectorTooltip();
   const hasOptions = groupedOptions.some((group) => group.models.length > 0);
+  const updateMenuLeftOffset = useCallback(() => {
+    const selector = selectorRef.current;
+    if (!selector) return;
+    setMenuLeftOffset(getAnchoredMenuLeftOffset(
+      selector.getBoundingClientRect().left,
+      window.innerWidth,
+    ));
+  }, []);
 
   useEffect(() => {
     if (!open) return;
@@ -455,23 +515,44 @@ export function ChatModelPicker({
     if (!open) hideTooltip();
   }, [hideTooltip, open]);
 
+  useEffect(() => {
+    if (!open) return;
+    updateMenuLeftOffset();
+    window.addEventListener('resize', updateMenuLeftOffset);
+    return () => window.removeEventListener('resize', updateMenuLeftOffset);
+  }, [open, updateMenuLeftOffset]);
+
   return (
-    <div className="relative" data-model-selector>
+    <div ref={selectorRef} className="relative" data-model-selector>
       <button
         type="button"
-        onClick={() => setOpen((value) => !value)}
+        onClick={() => {
+          if (!open) updateMenuLeftOffset();
+          setOpen((value) => !value);
+        }}
         disabled={loading || !hasOptions}
         className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
-        title={selectedModelOption ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}` : t('modelPicker.empty')}
+        title={autoOption?.selected
+          ? `${t('modelPicker.auto')}: ${autoOption.statusLabel}`
+          : selectedModelOption
+            ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}`
+            : t('modelPicker.empty')}
       >
-        <Cpu className="h-3 w-3 shrink-0" />
+        {autoOption?.selected
+          ? <Sparkles className="h-3 w-3 shrink-0" />
+          : <Cpu className="h-3 w-3 shrink-0" />}
         <span className="truncate font-medium">
-          {selectedModelOption?.label ?? (loading ? t('loading') : t('modelPicker.empty'))}
+          {autoOption?.selected
+            ? t('modelPicker.auto')
+            : selectedModelOption?.label ?? (loading ? t('loading') : t('modelPicker.empty'))}
         </span>
         <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
       </button>
       {open && (
-        <div className="absolute right-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+        <div
+          className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+          style={{ transform: `translateX(${menuLeftOffset}px)` }}
+        >
           <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
             <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
             <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
@@ -479,60 +560,98 @@ export function ChatModelPicker({
           <div className="h-[13.5rem] overflow-y-auto p-1.5">
             {loading ? (
               <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
-            ) : groupedOptions.length > 0 ? (
-              groupedOptions.map((group) => (
-                <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
-                  <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
-                    <span className="truncate">{group.providerName}</span>
-                    <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300">
-                      {t('modelPicker.count', { count: group.models.length })}
-                    </span>
-                  </div>
-                  <div className="space-y-0.5">
-                    {group.models.map((option) => (
-                      <button
-                        key={option.key}
-                        type="button"
-                        onClick={() => {
-                          onSelectModel(option);
-                          setOpen(false);
-                        }}
-                        className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
-                          selectedModelOption?.key === option.key
-                            ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                            : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                        }`}
-                      >
-                        <div className="flex min-w-0 items-center gap-2">
-                          <Cpu className={`h-3 w-3 shrink-0 ${selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                          <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
-                          {option.supportsVision === true && (
-                            <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
-                              {t('modelPicker.vision')}
-                            </span>
-                          )}
-                          <div className="ml-auto flex shrink-0 items-center gap-1">
-                            <span
-                              className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                              onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                              onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                              onPointerEnter={(event) => showTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
-                              onMouseEnter={(event) => showTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
-                              onMouseOver={(event) => showTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
-                              onMouseLeave={hideTooltip}
-                              onPointerLeave={hideTooltip}
-                            >
-                              <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
-                            </span>
-                          </div>
-                        </div>
-                      </button>
-                    ))}
-                  </div>
-                </div>
-              ))
             ) : (
-              <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+              <>
+                {autoOption && (
+                  <div className="mb-1 border-b border-zinc-100 pb-1.5 dark:border-zinc-800">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        autoOption.onSelect();
+                        setOpen(false);
+                      }}
+                      disabled={autoOption.disabled}
+                      className={`w-full rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                        autoOption.selected
+                          ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                          : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                      }`}
+                    >
+                      <div className="flex min-w-0 items-center gap-2">
+                        <Sparkles className={`h-3 w-3 shrink-0 ${autoOption.selected ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                        <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                          {t('modelPicker.auto')}
+                        </span>
+                        <span
+                          className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                          onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                          onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                          onPointerEnter={(event) => showTooltip(event.currentTarget, t('modelPicker.auto'), [autoOption.statusLabel])}
+                          onMouseEnter={(event) => showTooltip(event.currentTarget, t('modelPicker.auto'), [autoOption.statusLabel])}
+                          onMouseOver={(event) => showTooltip(event.currentTarget, t('modelPicker.auto'), [autoOption.statusLabel])}
+                          onMouseLeave={hideTooltip}
+                          onPointerLeave={hideTooltip}
+                        >
+                          <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                        </span>
+                      </div>
+                    </button>
+                  </div>
+                )}
+                {groupedOptions.length > 0 ? groupedOptions.map((group) => (
+                  <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
+                    <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
+                      <span className="truncate">{group.providerName}</span>
+                      <span className="shrink-0 rounded bg-zinc-50 px-1.5 py-0.5 text-[9px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-300">
+                        {t('modelPicker.count', { count: group.models.length })}
+                      </span>
+                    </div>
+                    <div className="space-y-0.5">
+                      {group.models.map((option) => (
+                        <button
+                          key={option.key}
+                          type="button"
+                          onClick={() => {
+                            onSelectModel(option);
+                            setOpen(false);
+                          }}
+                          className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
+                            !autoOption?.selected && selectedModelOption?.key === option.key
+                              ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                              : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                          }`}
+                        >
+                          <div className="flex min-w-0 items-center gap-2">
+                            <Cpu className={`h-3 w-3 shrink-0 ${!autoOption?.selected && selectedModelOption?.key === option.key ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                            <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">{option.label}</span>
+                            {option.supportsVision === true && (
+                              <span className="shrink-0 rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+                                {t('modelPicker.vision')}
+                              </span>
+                            )}
+                            <div className="ml-auto flex shrink-0 items-center gap-1">
+                              <span
+                                className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                onPointerEnter={(event) => showTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                onMouseEnter={(event) => showTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                onMouseOver={(event) => showTooltip(event.currentTarget, option.label, [option.pricingLabel, option.contextLabel])}
+                                onMouseLeave={hideTooltip}
+                                onPointerLeave={hideTooltip}
+                              >
+                                <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                              </span>
+                            </div>
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )) : (
+                  <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                )}
+              </>
             )}
           </div>
         </div>

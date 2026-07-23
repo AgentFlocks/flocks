@@ -26,6 +26,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
+import type { ComponentType } from 'react';
 import { useTranslation } from 'react-i18next';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
@@ -34,6 +35,20 @@ import { useTranslation } from 'react-i18next';
 // would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
+
+type LazyLayoutModule = { default: ComponentType<any> };
+
+function lazyLayoutComponent<T extends LazyLayoutModule>(
+  loader: () => Promise<T>,
+  namespaces: readonly string[] = [],
+) {
+  return lazy(() => recoverLazyLoad(
+    Promise.all([
+      loader(),
+      preloadI18nNamespaces(namespaces),
+    ]).then(([module]) => module),
+  ));
+}
 
 function isOnboardingDismissed(): boolean {
   return localStorage.getItem(ONBOARDING_DISMISSED_KEY) === 'true';
@@ -63,9 +78,9 @@ function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
   }
 }
 
-const OnboardingModal = lazy(() => import('@/components/common/OnboardingModal'));
-const UpdateModal = lazy(() => import('@/components/common/UpdateModal'));
-const NotificationModal = lazy(() => import('@/components/common/NotificationModal'));
+const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
+const UpdateModal = lazyLayoutComponent(() => import('@/components/common/UpdateModal'), ['update']);
+const NotificationModal = lazyLayoutComponent(() => import('@/components/common/NotificationModal'), ['notification']);
 import { checkUpdate, type VersionInfo } from '@/api/update';
 import { consoleUpgradeApi } from '@/api/consoleUpgrade';
 import {
@@ -80,6 +95,7 @@ import { useProductName } from '@/contexts/ProductNameContext';
 import { getLocalizedReleaseNotes } from '@/utils/releaseNotes';
 import { UPDATE_DISMISSED_KEY, buildUpdateDismissalKey, isUpdateDismissed } from '@/utils/updateDismissal';
 import { useWebUIContractPages } from '@/hooks/useWebUIContractPages';
+import { preloadI18nNamespaces } from '@/i18nResources';
 import { resolveWebUIContractPageIcon } from '@/utils/webuiContractPageIcons';
 import {
   buildWebUIContractWorkspaceSections,
@@ -87,10 +103,13 @@ import {
 } from '@/utils/webuiContractWorkspaceSections';
 import { sessionApi } from '@/api/session';
 import { useToast } from '@/components/common/Toast';
+import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
+import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
+const UPDATE_CHECK_INITIAL_DELAY_MS = 250;
 
 interface LayoutNavItem {
   name: string;
@@ -179,7 +198,7 @@ export default function Layout() {
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
   const toast = useToast();
-  const { productName } = useProductName();
+  const { productName, proProductName } = useProductName();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -198,6 +217,8 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
+  const notificationGateReady = flocksproStatusReady
+    && (!canManageUpdates || hasCompletedUpdateCheck);
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
@@ -233,12 +254,12 @@ export default function Layout() {
     return () => window.removeEventListener('flocks:open-onboarding', handleOpenOnboarding);
   }, [handleOpenOnboarding]);
 
-  const refreshUpdateStatus = useCallback(async (force = false) => {
-    if (!flocksproStatusReady) return;
+  const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
+    if (!flocksproStatusReady || !canManageUpdates) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
-    if (!force && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
+    if (!bypassMinGap && now - lastUpdateCheckAtRef.current < UPDATE_CHECK_MIN_GAP_MS) return;
 
     checkingUpdateRef.current = true;
     lastUpdateCheckAtRef.current = now;
@@ -285,9 +306,11 @@ export default function Layout() {
   }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive]);
 
   useEffect(() => {
-    if (!flocksproStatusReady) return undefined;
+    if (!flocksproStatusReady || !canManageUpdates) return undefined;
 
-    refreshUpdateStatus(true);
+    const initialCheckTimerId = window.setTimeout(() => {
+      refreshUpdateStatus(true);
+    }, UPDATE_CHECK_INITIAL_DELAY_MS);
 
     const intervalId = window.setInterval(() => {
       if (document.visibilityState === 'visible') {
@@ -309,11 +332,12 @@ export default function Layout() {
     window.addEventListener('focus', handleWindowFocus);
 
     return () => {
+      window.clearTimeout(initialCheckTimerId);
       window.clearInterval(intervalId);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [flocksproStatusReady, refreshUpdateStatus]);
+  }, [canManageUpdates, flocksproStatusReady, refreshUpdateStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -375,16 +399,14 @@ export default function Layout() {
       lastNotificationFetchKeyRef.current = null;
       return;
     }
-    if (!hasCompletedUpdateCheck) return;
-
-    const fetchKey = `${user.id}:${i18n.language}:${currentVersion ?? 'pending-version'}`;
+    const fetchKey = `${user.id}:${i18n.language}`;
     if (lastNotificationFetchKeyRef.current === fetchKey) return;
     const previousFetchKey = lastNotificationFetchKeyRef.current;
     lastNotificationFetchKeyRef.current = fetchKey;
     setBackendNotificationsReady(false);
 
     let cancelled = false;
-    void getActiveNotifications(i18n.language, currentVersion)
+    void getActiveNotifications(i18n.language)
       .then((items) => {
         if (cancelled) return;
         setNotifications((prev) => {
@@ -409,7 +431,7 @@ export default function Layout() {
     return () => {
       cancelled = true;
     };
-  }, [currentVersion, hasCompletedUpdateCheck, i18n.language, user?.id]);
+  }, [i18n.language, user?.id]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -417,7 +439,7 @@ export default function Layout() {
       setUpdateNotificationReady(false);
       return;
     }
-    if (!hasCompletedUpdateCheck) return;
+    if (!notificationGateReady) return;
 
     setUpdateNotificationReady(false);
     const notification = buildUpdateNotification(updateInfo, i18n.language);
@@ -443,7 +465,7 @@ export default function Layout() {
     return () => {
       cancelled = true;
     };
-  }, [hasCompletedUpdateCheck, i18n.language, updateInfo, user?.id]);
+  }, [i18n.language, notificationGateReady, updateInfo, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
@@ -691,31 +713,34 @@ export default function Layout() {
     <div className="min-h-screen bg-gray-50 text-gray-900 dark:bg-zinc-950 dark:text-zinc-100">
       {/* Modals render lazily — fallback={null} keeps the chunk download
           invisible to the user (they're already triggering an async UI). */}
-      <Suspense fallback={null}>
-        {showOnboarding && (
-          <OnboardingModal
-            onClose={() => setShowOnboarding(false)}
-          />
-        )}
-        {showUpdate && (
-          <UpdateModal
-            initialInfo={updateInfo}
-            edition={isFlocksproActive ? 'flockspro' : 'flocks'}
-            canUpgrade={canManageUpdates}
-            onClose={() => setShowUpdate(false)}
-            onDismiss={() => setShowUpdate(false)}
-          />
-        )}
-        {visibleNotifications.length > 0 && (
-          <NotificationModal
-            notifications={visibleNotifications}
-            acknowledgingIds={acknowledgingNotificationIds}
-            onAcknowledge={closeVisibleNotification}
-            onClose={closeVisibleNotification}
-            onDismissForever={dismissVisibleNotificationForever}
-          />
-        )}
-      </Suspense>
+      <LazyLoadErrorBoundary mode="overlay">
+        <Suspense fallback={null}>
+          {showOnboarding && (
+            <OnboardingModal
+              onClose={() => setShowOnboarding(false)}
+            />
+          )}
+          {showUpdate && (
+            <UpdateModal
+              initialInfo={updateInfo}
+              forceInitialCheck={updateInfo === null}
+              edition={isFlocksproActive ? 'flockspro' : 'flocks'}
+              canUpgrade={canManageUpdates}
+              onClose={() => setShowUpdate(false)}
+              onDismiss={() => setShowUpdate(false)}
+            />
+          )}
+          {visibleNotifications.length > 0 && (
+            <NotificationModal
+              notifications={visibleNotifications}
+              acknowledgingIds={acknowledgingNotificationIds}
+              onAcknowledge={closeVisibleNotification}
+              onClose={closeVisibleNotification}
+              onDismissForever={dismissVisibleNotificationForever}
+            />
+          )}
+        </Suspense>
+      </LazyLoadErrorBoundary>
 
       {sidebarOpen && (
         <div
@@ -889,7 +914,7 @@ export default function Layout() {
                     className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                   >
                     <ArrowUpCircle className="h-4 w-4 text-zinc-400" />
-                    {productName}
+                    {proProductName}
                   </Link>
                 )}
                 <button

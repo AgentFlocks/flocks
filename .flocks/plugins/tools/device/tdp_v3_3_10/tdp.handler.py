@@ -66,6 +66,7 @@ INCIDENT_SEARCH_FUZZY_FIELDS = ["attacker_ip", "host_ip", "attack_name", "attack
 CLOUD_ACCESS_FUZZY_FIELDS = ["machine", "cloud_instance"]
 CLOUD_INSTANCE_ACCESS_FUZZY_FIELDS = ["cloud_instance", "external_ip", "machine"]
 MDR_FUZZY_FIELDS = ["task_id", "machine", "asset_info", "threat_name"]
+CUSTOM_RULE_FUZZY_FIELDS = ["threat_name", "threat_msg"]
 SYSTEM_STATUS_ENDPOINTS = {
     "core": "/api/v1/core-status",
     "ioc_update": "/api/v1/ioc-update-status",
@@ -478,7 +479,7 @@ def _condition_time_body(body: dict[str, Any]) -> dict[str, Any]:
 def _incident_search_body(body: dict[str, Any]) -> dict[str, Any]:
     defaults = _body_with_condition_time(
         {
-            "condition": {"duration": {"begin_duration": 0, "end_duration": 24}},
+            "condition": {"duration": {"begin_duration": 0}},
             "page": {"cur_page": 1, "page_size": 20, "sort": [{"sort_by": "last_time", "sort_order": "desc"}]},
         }
     )
@@ -548,6 +549,21 @@ def _inbound_attack_body(body: dict[str, Any]) -> dict[str, Any]:
         ),
         body,
     )
+
+
+def _threat_monitor_body(body: dict[str, Any]) -> dict[str, Any]:
+    time_from, time_to = _default_time_range(days=1)
+    defaults = {
+        "condition": {
+            "time_from": time_from,
+            "time_to": time_to,
+            "sql": "",
+            "size": 1000,
+            "refresh_rate": -1,
+        },
+        "page": {"cur_page": 1, "page_size": 20},
+    }
+    return _deep_merge(defaults, body)
 
 
 def _login_entry_body(body: dict[str, Any]) -> dict[str, Any]:
@@ -721,6 +737,10 @@ def _custom_intel_delete_body(body: Any) -> dict[str, Any]:
     return _deep_merge({"action": "delete", "data": {}}, _dict_body(body))
 
 
+def _custom_rule_list_body(body: Any) -> dict[str, Any]:
+    return _paged_body(body, sort_by="updated_time")
+
+
 def _ip_reputation_list_body(body: Any) -> dict[str, Any]:
     return _paged_body(body, sort_by="updated_at")
 
@@ -825,17 +845,17 @@ SERVICE_ASSET_ACTIONS: JsonActionMap = {
 }
 
 THREAT_HOST_ACTIONS: JsonActionMap = {
-    "summary": ("/api/v1/host/getFallHostSumList", _threat_host_summary_body, "host_get_fall_host_sum_list"),
-    "events": ("/api/v1/host/threat/list", _threat_host_event_body, "host_threat_list"),
+    "alert_host_list": ("/api/v1/host/getFallHostSumList", _threat_host_summary_body, "host_get_fall_host_sum_list"),
+    "host_threat_list": ("/api/v1/host/threat/list", _threat_host_event_body, "host_threat_list"),
 }
 
 INCIDENT_ACTIONS: JsonActionMap = {
-    "search": ("/api/v1/incident/search", _incident_search_body, "incident_search"),
+    "incident_search": ("/api/v1/incident/search", _incident_search_body, "incident_search"),
     "top_attacked_entity": ("/api/v1/incident/topAttackedEntity", _condition_time_body, "incident_top_attacked_entity"),
-    "result": ("/api/v1/incident/result", _dashboard_body, "incident_result"),
-    "timeline": ("/api/v1/incident/timeline", _dashboard_body, "incident_timeline"),
-    "alert_search": ("/api/v1/alert/search", _condition_time_body, "incident_alert_search"),
-    "result_distribution": (
+    "attack_success": ("/api/v1/incident/result", _dashboard_body, "incident_result"),
+    "attack_timeline": ("/api/v1/incident/timeline", _dashboard_body, "incident_timeline"),
+    "attack_alert_list": ("/api/v1/alert/search", _condition_time_body, "incident_alert_search"),
+    "attack_result_distribution": (
         "/api/v1/incident/result/distribution",
         _condition_time_body,
         "incident_result_distribution",
@@ -903,6 +923,10 @@ PLATFORM_CONFIG_ACTIONS: JsonActionMap = {
         _cascade_children_body,
         "device_cascade_platform_children",
     ),
+    "custom_rule_list": ("/api/v1/customRule/list", _custom_rule_list_body, "custom_rule_list"),
+    "custom_rule_add": ("/api/v1/customRule/add", _passthrough_body, "custom_rule_add"),
+    "custom_rule_update": ("/api/v1/customRule/update", _passthrough_body, "custom_rule_update"),
+    "custom_rule_delete": ("/api/v1/customRule/delete", _passthrough_body, "custom_rule_delete"),
     "disposal_log_list": ("/api/v1/disposal/log/list", _disposal_log_list_body, "disposal_log_list"),
 }
 
@@ -1058,6 +1082,27 @@ def _validate_log_sql_expression(action: str, sql: str | None) -> ToolResult | N
                 "Do not use SELECT/FROM. Example: `threat.level = 'attack'` or "
                 "`threat.level = 'attack' AND threat.result = 'success'`."
             ),
+        )
+    return None
+
+
+def _validate_threat_monitor_time_range(time_from: int | None, time_to: int | None) -> ToolResult | None:
+    if (time_from is None) != (time_to is None):
+        return ToolResult(
+            success=False,
+            error="TDP threat monitor requires time_from and time_to together.",
+        )
+    if time_from is None or time_to is None:
+        return None
+    if time_from > time_to:
+        return ToolResult(
+            success=False,
+            error="TDP threat monitor requires time_from to be less than or equal to time_to.",
+        )
+    if time_to - time_from > 24 * 60 * 60:
+        return ToolResult(
+            success=False,
+            error="TDP threat monitor time range cannot exceed 24 hours.",
         )
     return None
 
@@ -1222,7 +1267,7 @@ async def dashboard_status(
 
 async def threat_host_list(
     context: ToolContext,
-    action: str = "summary",
+    action: str = "alert_host_list",
     condition: dict[str, Any] | None = None,
     page: dict[str, Any] | None = None,
     time_from: int | None = None,
@@ -1244,7 +1289,7 @@ async def threat_host_list(
     sort_order: str | None = None,
 ) -> ToolResult:
     del context
-    selected_action = _normalize_action(action, "summary")
+    selected_action = _normalize_action(action, "alert_host_list")
     body = _compose_payload(condition=condition, page=page)
     condition_dict = body.setdefault("condition", {})
     _set_if_present(condition_dict, "time_from", time_from)
@@ -1261,16 +1306,21 @@ async def threat_host_list(
     _set_list_if_present(condition_dict, "host_type", host_type)
     _set_keyword_fuzzy(condition_dict, keyword, HOST_THREAT_FUZZY_FIELDS)
     _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
-    if selected_action == "events":
+    if selected_action == "host_threat_list":
         validation_error = _validate_required_body_fields(selected_action, body, "condition.asset_machine")
         if validation_error:
             return validation_error
-    return await _run_action_json_tool(THREAT_HOST_ACTIONS, default_action="summary", action=selected_action, body=body)
+    return await _run_action_json_tool(
+        THREAT_HOST_ACTIONS,
+        default_action="alert_host_list",
+        action=selected_action,
+        body=body,
+    )
 
 
 async def incident_list(
     context: ToolContext,
-    action: str = "search",
+    action: str = "incident_search",
     condition: dict[str, Any] | None = None,
     page: dict[str, Any] | None = None,
     incident_id: str | None = None,
@@ -1294,9 +1344,9 @@ async def incident_list(
     sort_order: str | None = None,
 ) -> ToolResult:
     del context
-    selected_action = _normalize_action(action, "search")
+    selected_action = _normalize_action(action, "incident_search")
     body = _compose_payload(condition=condition, page=page)
-    if selected_action == "search":
+    if selected_action == "incident_search":
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
         _set_if_present(condition_dict, "time_to", time_to)
@@ -1309,7 +1359,7 @@ async def incident_list(
             _set_if_present(duration, "begin_duration", begin_duration)
             _set_if_present(duration, "end_duration", end_duration)
         _set_keyword_fuzzy(condition_dict, keyword, INCIDENT_SEARCH_FUZZY_FIELDS)
-    elif selected_action == "alert_search":
+    elif selected_action == "attack_alert_list":
         condition_dict = body.setdefault("condition", {})
         _set_if_present(condition_dict, "time_from", time_from)
         _set_if_present(condition_dict, "time_to", time_to)
@@ -1327,17 +1377,17 @@ async def incident_list(
         _set_if_present(body, "time_from", time_from)
         _set_if_present(body, "time_to", time_to)
         _set_if_present(body, "include_risk", include_risk)
-        if selected_action == "timeline":
+        if selected_action == "attack_timeline":
             body["show_attack"] = True if show_attack is None else show_attack
         if attacker is not None:
             body["attacker"] = list(attacker)
     _set_page_overrides(body, cur_page=cur_page, page_size=page_size, sort_by=sort_by, sort_order=sort_order)
     validation_map: dict[str, tuple[str, ...]] = {
         "top_attacked_entity": ("incident_id",),
-        "result": ("incident_id",),
-        "timeline": ("incident_id",),
-        "alert_search": ("condition.id", "page"),
-        "result_distribution": ("incident_id",),
+        "attack_success": ("incident_id",),
+        "attack_timeline": ("incident_id",),
+        "attack_alert_list": ("condition.id", "page"),
+        "attack_result_distribution": ("incident_id",),
         "attacker_ip_list": ("condition.incident_id",),
         "attacker_ip_detail": ("incident_id", "attacker"),
     }
@@ -1346,7 +1396,12 @@ async def incident_list(
         validation_error = _validate_required_body_fields(selected_action, body, *required_fields)
         if validation_error:
             return validation_error
-    return await _run_action_json_tool(INCIDENT_ACTIONS, default_action="search", action=selected_action, body=body)
+    return await _run_action_json_tool(
+        INCIDENT_ACTIONS,
+        default_action="incident_search",
+        action=selected_action,
+        body=body,
+    )
 
 
 async def service_asset_list(
@@ -1581,6 +1636,46 @@ async def inbound_attack(
         "inbound_attack_severity_distribution",
         "/api/v1/threat/inbound-attack/severity-distribution",
         _inbound_attack_body,
+        body,
+    )
+
+
+async def threat_monitor_list(
+    context: ToolContext,
+    condition: dict[str, Any] | None = None,
+    page: dict[str, Any] | None = None,
+    time_from: int | None = None,
+    time_to: int | None = None,
+    sql: str | None = None,
+    size: int | None = None,
+    assets_group: list[Any] | None = None,
+    net_data_type: list[Any] | None = None,
+    refresh_rate: int | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+) -> ToolResult:
+    del context
+    validation_error = _validate_threat_monitor_time_range(time_from, time_to)
+    if validation_error:
+        return validation_error
+    validation_error = _validate_log_sql_expression("threat_monitor_list", sql)
+    if validation_error:
+        return validation_error
+
+    body = _compose_payload(condition=condition, page=page)
+    condition_dict = body.setdefault("condition", {})
+    _set_if_present(condition_dict, "time_from", time_from)
+    _set_if_present(condition_dict, "time_to", time_to)
+    _set_if_present(condition_dict, "sql", sql)
+    _set_if_present(condition_dict, "size", size)
+    _set_list_if_present(condition_dict, "assets_group", assets_group)
+    _set_list_if_present(condition_dict, "net_data_type", net_data_type)
+    _set_if_present(condition_dict, "refresh_rate", refresh_rate)
+    _set_page_overrides(body, cur_page=cur_page, page_size=page_size)
+    return await _run_json_tool(
+        "threat_monitor_list",
+        "/api/v1/monitor/threat/list",
+        _threat_monitor_body,
         body,
     )
 
@@ -1891,6 +1986,17 @@ async def platform_config(
     rule: dict[str, Any] | None = None,
     ips: list[Any] | None = None,
     keyword: str | None = None,
+    custom_rule: dict[str, Any] | None = None,
+    custom_rule_ids: list[Any] | None = None,
+    delete_alert_data: int | None = None,
+    custom_rule_status: list[Any] | None = None,
+    custom_rule_severity: list[Any] | None = None,
+    custom_rule_result: list[Any] | None = None,
+    custom_rule_keyword: str | None = None,
+    cur_page: int | None = None,
+    page_size: int | None = None,
+    sort_by: str | None = None,
+    sort_order: str | None = None,
 ) -> ToolResult:
     del context
     selected_action = _normalize_action(action, "asset_list")
@@ -1906,6 +2012,27 @@ async def platform_config(
             body["lock"] = dict(lock)
     elif selected_action.startswith("white_rule_") and selected_action != "white_rule_search":
         body = _dict_copy(rule)
+    elif selected_action == "custom_rule_list":
+        body = _compose_payload(condition=condition, page=page)
+        condition_dict = body.setdefault("condition", {})
+        _set_list_if_present(condition_dict, "status", custom_rule_status)
+        _set_list_if_present(condition_dict, "threat_severity", custom_rule_severity)
+        _set_list_if_present(condition_dict, "threat_result", custom_rule_result)
+        _set_keyword_fuzzy(condition_dict, custom_rule_keyword, CUSTOM_RULE_FUZZY_FIELDS)
+        _set_page_overrides(
+            body,
+            cur_page=cur_page,
+            page_size=page_size,
+            sort_by=sort_by,
+            sort_order=sort_order,
+        )
+    elif selected_action in {"custom_rule_add", "custom_rule_update"}:
+        body = _dict_copy(custom_rule)
+    elif selected_action == "custom_rule_delete":
+        body = {}
+        if custom_rule_ids is not None:
+            body["suuid"] = list(custom_rule_ids)
+        _set_if_present(body, "delete_alert_data", delete_alert_data)
     elif selected_action == "cascade_children":
         body = {}
         _set_if_present(body, "keyword", keyword)
@@ -1922,6 +2049,32 @@ async def platform_config(
             return validation_error
     elif selected_action == "white_rule_delete":
         validation_error = _validate_required_body_fields(selected_action, body, "id")
+        if validation_error:
+            return validation_error
+    elif selected_action in {"custom_rule_add", "custom_rule_update"}:
+        required_fields = [
+            "threat_name",
+            "threat_msg",
+            "threat_severity",
+            "threat_type",
+            "threat_result",
+            "directions",
+            "body",
+            "attacker",
+            "status",
+        ]
+        if selected_action == "custom_rule_update":
+            required_fields.insert(0, "suuid")
+        validation_error = _validate_required_body_fields(selected_action, body, *required_fields)
+        if validation_error:
+            return validation_error
+    elif selected_action == "custom_rule_delete":
+        validation_error = _validate_non_empty_list_body(
+            selected_action,
+            body,
+            fallback_keys=("suuid",),
+            label="custom rule suuid list",
+        )
         if validation_error:
             return validation_error
     return await _run_action_json_tool(

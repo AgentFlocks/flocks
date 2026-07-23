@@ -1863,19 +1863,73 @@ class Message:
                 return False
             messages = cls._messages_cache.get(session_id, [])
             if idx < len(messages) and messages[idx].id == message_id:
-                messages.pop(idx)
+                missing = object()
+                removed_message = messages.pop(idx)
                 cls._rebuild_id_index(session_id)
-                if session_id in cls._parts_cache:
-                    cls._parts_cache[session_id].pop(message_id, None)
-                cls._parts_revision_cache.get(session_id, {}).pop(message_id, None)
-                cls._parts_serialized_cache.get(session_id, {}).pop(message_id, None)
+                parts_cache = cls._parts_cache.get(session_id)
+                removed_parts = (
+                    parts_cache.pop(message_id, missing)
+                    if parts_cache is not None
+                    else missing
+                )
+                parts_revision_cache = cls._parts_revision_cache.get(session_id)
+                removed_revision = (
+                    parts_revision_cache.pop(message_id, missing)
+                    if parts_revision_cache is not None
+                    else missing
+                )
+                parts_serialized_cache = cls._parts_serialized_cache.get(session_id)
+                removed_serialized = (
+                    parts_serialized_cache.pop(message_id, missing)
+                    if parts_serialized_cache is not None
+                    else missing
+                )
+                had_pending_parts_flush = session_id in cls._parts_flush_tasks
                 cls._cancel_parts_flush_task(session_id)
-                await cls._persist_messages(session_id)
-                if cls._parts_storage_format.get(session_id) == "legacy":
-                    await cls._persist_parts(session_id)
-                else:
-                    await Storage.delete(cls._parts_item_key(session_id, message_id))
-                    cls._parts_persisted_mids.setdefault(session_id, set()).discard(message_id)
+                try:
+                    await cls._persist_messages(session_id)
+                except BaseException:
+                    # Message metadata is the deletion commit point. Restore
+                    # every in-memory index/cache if it was not persisted so a
+                    # later retry or process restart sees the same message.
+                    messages.insert(idx, removed_message)
+                    cls._rebuild_id_index(session_id)
+                    if parts_cache is not None and removed_parts is not missing:
+                        parts_cache[message_id] = removed_parts
+                    if (
+                        parts_revision_cache is not None
+                        and removed_revision is not missing
+                    ):
+                        parts_revision_cache[message_id] = removed_revision
+                    if (
+                        parts_serialized_cache is not None
+                        and removed_serialized is not missing
+                    ):
+                        parts_serialized_cache[message_id] = removed_serialized
+                    if had_pending_parts_flush:
+                        cls._schedule_parts_flush(
+                            session_id,
+                            message_id=message_id,
+                        )
+                    raise
+
+                try:
+                    if cls._parts_storage_format.get(session_id) == "legacy":
+                        await cls._persist_parts(session_id)
+                    else:
+                        await Storage.delete(cls._parts_item_key(session_id, message_id))
+                        cls._parts_persisted_mids.setdefault(session_id, set()).discard(
+                            message_id
+                        )
+                except Exception as exc:
+                    # Metadata deletion has committed. Orphaned parts are not
+                    # user-visible and can be cleaned later; restoring the
+                    # message here would make cache and durable metadata diverge.
+                    log.warn("message.delete.parts_cleanup_failed", {
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "error": str(exc),
+                    })
                 log.info("message.deleted", {"id": message_id, "session_id": session_id})
                 return True
             return False

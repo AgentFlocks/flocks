@@ -163,12 +163,14 @@ async def test_publish_invoke_stop_workflow_service(
 
     docker_calls = []
     json_post_calls = []
+    port_requests = []
 
     async def fake_exec_docker(args, allow_failure=False, **_kwargs):
         docker_calls.append((args, allow_failure))
         return ("container-abc\n", "", 0)
 
-    async def fake_allocate_port() -> int:
+    async def fake_allocate_port(*args, **kwargs) -> int:
+        port_requests.append((args, kwargs))
         return 19123
 
     async def fake_wait_docker_service_healthy(*_args, **_kwargs) -> bool:
@@ -187,6 +189,8 @@ async def test_publish_invoke_stop_workflow_service(
     assert published["status"] == "active"
     assert published["hostPort"] == 19123
     assert len(published["apiKey"]) == 64
+    registry = await center.WorkflowStore.kv_get(center._registry_key(workflow_id))
+    assert registry["servicePort"] == 19123
 
     invoked = await center.invoke_published_workflow(workflow_id, inputs={"k": "v"})
     assert invoked["status"] == "SUCCEEDED"
@@ -196,6 +200,13 @@ async def test_publish_invoke_stop_workflow_service(
     stopped = await center.stop_workflow_service(workflow_id)
     assert stopped["status"] == "stopped"
     assert stopped["stopped"] is True
+    registry = await center.WorkflowStore.kv_get(center._registry_key(workflow_id))
+    assert registry["servicePort"] == 19123
+
+    republished = await center.publish_workflow(workflow_id)
+    assert republished["hostPort"] == 19123
+    assert port_requests[-1][0][0] == 19123
+    await center.stop_workflow_service(workflow_id)
 
     assert any(call[0][:3] == ["run", "-d", "--name"] for call in docker_calls)
     run_call = next(call for call in docker_calls if call[0][:3] == ["run", "-d", "--name"])

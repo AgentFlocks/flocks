@@ -5,18 +5,22 @@ import os
 import socket
 import tempfile
 import time
+import urllib.parse
+import urllib.request
 from pathlib import Path
+
+from websockets.sync.client import connect as websocket_connect
 
 from . import BROWSER_LABEL, PROJECT_ROOT, get_browser_version
 from . import _ipc as ipc
+from . import lifecycle
 from .utils import load_env_file
 
 
-NAME = os.environ.get("BU_NAME", "default")
 VERSION_CACHE = Path(tempfile.gettempdir()) / "flocks-browser-version-cache.json"
 VERSION_CACHE_TTL = 24 * 3600
 DOCTOR_TEXT_LIMIT = 140
-# run_setup: at most two daemon/CDP attach attempts to avoid repeated Allow prompts.
+# run_setup retries transient attach failures once, but exits after manual setup guidance.
 _SETUP_ATTACH_WAIT = 20.0
 _SETUP_RETRY_WAIT = 30.0
 
@@ -31,26 +35,88 @@ def _load_env() -> None:
             continue
         load_env_file(path)
 
+
 _load_env()
+
+NAME = ipc.runtime_paths().name
 
 
 def _log_tail(name: str | None):
     try:
-        return ipc.log_path(name or NAME).read_text().strip().splitlines()[-1]
+        return ipc.log_path(name or NAME).read_text(encoding="utf-8", errors="replace").strip().splitlines()[-1]
     except (FileNotFoundError, IndexError):
         return None
 
 
 def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
-    """Return True when a local browser needs the inspect-page permission flow."""
+    """Return True when a local browser needs remote-debugging setup guidance."""
     lower = (msg or "").lower()
     return (
         "devtoolsactiveport not found" in lower
+        or "chrome remote debugging is not reachable" in lower
+        or "chromium-based browser remote debugging is not reachable" in lower
         or "remote-debugging page" in lower
         or "inspect/#remote-debugging" in lower
         or "not live yet" in lower
         or ("ws handshake failed" in lower and "403" in lower)
     )
+
+
+def _local_debugging_setup_lines(system: str | None = None) -> list[str]:
+    """Return concise manual setup guidance for local Chromium-based debugging."""
+    import platform
+
+    system = system or platform.system()
+    lines = [
+        "Do not look for webSocketDebuggerUrl in chrome://inspect; that page does not reliably show it.",
+        "Close the matching Chromium-based browser if it is already open, then run one command below.",
+    ]
+    if system == "Windows":
+        lines.extend(
+            [
+                "On Windows PowerShell:",
+                '& "$env:ProgramFiles\\Google\\Chrome\\Application\\chrome.exe" --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\\.flocks\\chrome-debug-profile"',
+                '& "${env:ProgramFiles(x86)}\\Microsoft\\Edge\\Application\\msedge.exe" --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\\.flocks\\edge-debug-profile"',
+                'chromium.exe --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\\.flocks\\chromium-debug-profile"',
+                '& "$env:ProgramFiles\\BraveSoftware\\Brave-Browser\\Application\\brave.exe" --remote-debugging-port=9222 --user-data-dir="$env:USERPROFILE\\.flocks\\brave-debug-profile"',
+                "If your browser is installed elsewhere, replace the executable path.",
+            ]
+        )
+    elif system == "Darwin":
+        lines.extend(
+            [
+                "On macOS:",
+                "/Applications/Google\\ Chrome.app/Contents/MacOS/Google\\ Chrome --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/chrome-debug-profile\"",
+                "/Applications/Microsoft\\ Edge.app/Contents/MacOS/Microsoft\\ Edge --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/edge-debug-profile\"",
+                "/Applications/Chromium.app/Contents/MacOS/Chromium --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/chromium-debug-profile\"",
+                "/Applications/Brave\\ Browser.app/Contents/MacOS/Brave\\ Browser --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/brave-debug-profile\"",
+            ]
+        )
+    else:
+        lines.extend(
+            [
+                "On Linux:",
+                "google-chrome --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/chrome-debug-profile\"",
+                "microsoft-edge --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/edge-debug-profile\"",
+                "chromium --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/chromium-debug-profile\"",
+                "brave-browser --remote-debugging-port=9222 --user-data-dir=\"$HOME/.flocks/brave-debug-profile\"",
+            ]
+        )
+    lines.extend(
+        [
+            "Then verify http://127.0.0.1:9222/json/version; Flocks reads the WebSocket URL from that endpoint.",
+            "After the endpoint responds, rerun `flocks browser --setup`.",
+        ]
+    )
+    return lines
+
+
+def _print_local_debugging_setup(out=None) -> None:
+    import sys
+
+    out = out or sys.stderr
+    for line in _local_debugging_setup_lines():
+        print(line, file=out)
 
 
 def _configured_cdp_endpoint(env: dict | None = None) -> tuple[str | None, str | None]:
@@ -63,46 +129,66 @@ def _configured_cdp_endpoint(env: dict | None = None) -> tuple[str | None, str |
     return None, None
 
 
+def _probe_cdp_websocket(url: str, timeout: float = 3.0) -> tuple[bool, str]:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"ws", "wss"} or not parsed.hostname:
+        return False, "invalid WebSocket URL"
+    try:
+        with websocket_connect(url, open_timeout=timeout, close_timeout=timeout) as websocket:
+            websocket.send(json.dumps({"id": 1, "method": "Browser.getVersion"}))
+            response = json.loads(websocket.recv(timeout=timeout))
+        if not isinstance(response, dict) or response.get("id") != 1 or not isinstance(response.get("result"), dict):
+            return False, "Browser.getVersion returned an invalid response"
+    except Exception as error:
+        return False, f"connection failed ({type(error).__name__})"
+    return True, "CDP handshake succeeded"
+
+
+def _probe_cdp_endpoint(name: str, value: str, timeout: float = 3.0) -> tuple[bool, str]:
+    """Verify that an explicit CDP endpoint is reachable and speaks CDP."""
+    if name == "BU_CDP_WS":
+        return _probe_cdp_websocket(value, timeout)
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return False, "invalid HTTP URL"
+    try:
+        with urllib.request.urlopen(f"{value.rstrip('/')}/json/version", timeout=timeout) as response:
+            payload = json.loads(response.read())
+        websocket_url = payload.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str):
+            return False, "/json/version did not return webSocketDebuggerUrl"
+    except Exception as error:
+        return False, f"connection failed ({type(error).__name__})"
+    return _probe_cdp_websocket(websocket_url, timeout)
+
+
 def _is_local_chrome_mode(env: dict | None = None) -> bool:
     return _configured_cdp_endpoint(env)[0] is None
 
 
 def daemon_alive(name: str | None = None) -> bool:
     try:
-        conn = ipc.connect(name or NAME, timeout=1.0)
-        conn.close()
+        ipc.identify(name or NAME, timeout=1.0)
         return True
-    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, socket.timeout, OSError):
+    except (
+        ipc.EndpointRecordError,
+        ipc.IPCProtocolError,
+        FileNotFoundError,
+        ConnectionRefusedError,
+        TimeoutError,
+        socket.timeout,
+        OSError,
+    ):
         return False
 
 
 def _daemon_endpoint_names() -> list[str]:
-    suffix = ".port" if ipc.IS_WINDOWS else ".sock"
-    if ipc.BU_TMP_DIR:
-        return [NAME] if (ipc._TMP / f"bu{suffix}").exists() else []
-    names: list[str] = []
-    for path in sorted(ipc._TMP.glob(f"bu-*{suffix}")):
-        raw = path.name[3 : -len(suffix)]
-        try:
-            ipc._check(raw)
-        except ValueError:
-            continue
-        names.append(raw)
-    return names
+    return ipc.discover_names()
 
 
 def _daemon_browser_connection(name: str):
-    conn = None
     try:
-        conn = ipc.connect(name, timeout=1.0)
-        conn.sendall(b'{"meta":"connection_status"}\n')
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = conn.recv(1 << 16)
-            if not chunk:
-                break
-            data += chunk
-        response = json.loads(data)
+        response = ipc.request(name, {"meta": "connection_status"}, timeout=1.0)
         if "error" in response:
             return None
         page = response.get("page")
@@ -110,6 +196,8 @@ def _daemon_browser_connection(name: str):
             page = {"title": page.get("title") or "(untitled)", "url": page.get("url") or ""}
         return {"name": name, "page": page}
     except (
+        ipc.EndpointRecordError,
+        ipc.IPCProtocolError,
         FileNotFoundError,
         ConnectionRefusedError,
         TimeoutError,
@@ -120,9 +208,12 @@ def _daemon_browser_connection(name: str):
         json.JSONDecodeError,
     ):
         return None
-    finally:
-        if conn:
-            conn.close()
+
+
+def daemon_browser_connected(name: str | None = None) -> bool:
+    """Return whether the selected daemon still has a live browser connection."""
+    effective_name = ipc.runtime_paths(name or NAME).name
+    return _daemon_browser_connection(effective_name) is not None
 
 
 def browser_connections() -> list[dict]:
@@ -140,18 +231,11 @@ def active_browser_connections() -> int:
 
 
 def _daemon_probe(name: str | None, req: dict) -> dict | None:
-    conn = None
     try:
-        conn = ipc.connect(name or NAME, timeout=3.0)
-        conn.sendall((json.dumps(req) + "\n").encode())
-        data = b""
-        while not data.endswith(b"\n"):
-            chunk = conn.recv(1 << 16)
-            if not chunk:
-                break
-            data += chunk
-        return json.loads(data)
+        return ipc.request(name or NAME, req, timeout=3.0)
     except (
+        ipc.EndpointRecordError,
+        ipc.IPCProtocolError,
         FileNotFoundError,
         ConnectionRefusedError,
         TimeoutError,
@@ -162,9 +246,6 @@ def _daemon_probe(name: str | None, req: dict) -> dict | None:
         json.JSONDecodeError,
     ):
         return None
-    finally:
-        if conn:
-            conn.close()
 
 
 def _daemon_has_current_protocol(name: str | None = None) -> bool:
@@ -178,9 +259,12 @@ def _daemon_has_current_protocol(name: str | None = None) -> bool:
 
 def stop_all_daemons() -> list[str]:
     """Stop all browser daemons visible from the current environment."""
-    names = _daemon_endpoint_names()
-    for name in names:
-        restart_daemon(name)
+    names, errors = lifecycle.stop_all_daemons()
+    if errors:
+        import sys
+
+        for name, error in errors.items():
+            print(f"{BROWSER_LABEL}: failed to stop browser session {name!r}: {error}", file=sys.stderr)
     return names
 
 
@@ -191,82 +275,69 @@ def _doctor_short_text(value, limit: int | None = None) -> str:
 
 
 def ensure_daemon(
-    wait: float = 60.0, name: str | None = None, env: dict | None = None, _open_inspect: bool = True
+    wait: float = 60.0, name: str | None = None, env: dict | None = None, _show_debugging_guidance: bool = True
 ) -> None:
     """Ensure a healthy daemon is running, restarting stale sessions when needed."""
-    if daemon_alive(name):
-        if _daemon_has_current_protocol(name):
+    effective_name = ipc.runtime_paths(name or NAME).name
+    if ipc.endpoint_reachable(effective_name):
+        if daemon_alive(effective_name) and _daemon_has_current_protocol(effective_name):
             return
-        restart_daemon(name)
+        lifecycle.stop_daemon(effective_name)
 
     import subprocess
     import sys
 
     local = _is_local_chrome_mode(env)
     for attempt in (0, 1):
-        merged_env = {**os.environ, **({"BU_NAME": name} if name else {}), **(env or {})}
-        proc = subprocess.Popen(
-            [sys.executable, "-m", "flocks.browser.daemon"],
-            env=merged_env,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            **ipc.spawn_kwargs(),
-        )
+        merged_env = {
+            **os.environ,
+            **(env or {}),
+            "BU_NAME": effective_name,
+            "PYTHONIOENCODING": "utf-8:replace",
+        }
+        paths = ipc.runtime_paths(effective_name)
+        paths.ensure_root()
+
+        def spawn_daemon():
+            with paths.log.open("ab", buffering=0) as daemon_log:
+                return subprocess.Popen(
+                    [sys.executable, "-m", "flocks.browser.daemon"],
+                    env=merged_env,
+                    stdout=daemon_log,
+                    stderr=subprocess.STDOUT,
+                    **ipc.spawn_kwargs(),
+                )
+
+        proc = spawn_daemon()
         deadline = time.time() + wait
         while time.time() < deadline:
-            if daemon_alive(name):
+            if daemon_alive(effective_name):
                 return
-            if proc.poll() is not None:
+            return_code = proc.poll()
+            if return_code == ipc.LOCK_BUSY_EXIT_CODE:
+                retry_lock = ipc.DaemonLock(effective_name)
+                if retry_lock.acquire():
+                    retry_lock.release()
+                    proc = spawn_daemon()
+                else:
+                    time.sleep(0.2)
+                continue
+            if return_code is not None:
                 break
             time.sleep(0.2)
-        msg = _log_tail(name) or ""
+        msg = _log_tail(effective_name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
-            restart_daemon(name)
-            if not _open_inspect:
-                raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
-            _open_browser_inspect()
-            print(
-                f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
-                "(for example chrome://inspect or edge://inspect), and tick the checkbox if shown",
-                file=sys.stderr,
-            )
-            continue
-        raise RuntimeError(msg or f"daemon {name or NAME} didn't come up -- check {ipc.log_path(name or NAME)}")
+            restart_daemon(effective_name)
+            if _show_debugging_guidance:
+                print(f"{BROWSER_LABEL}: local Chromium-based browser remote debugging is not reachable.", file=sys.stderr)
+                _print_local_debugging_setup(sys.stderr)
+            raise RuntimeError(msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}")
+        raise RuntimeError(msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}")
 
 
 def restart_daemon(name: str | None = None) -> None:
-    """Best-effort daemon shutdown and endpoint cleanup."""
-    import signal
-
-    pid_file = str(ipc.pid_path(name or NAME))
-    try:
-        conn = ipc.connect(name or NAME, timeout=5.0)
-        conn.sendall(b'{"meta":"shutdown"}\n')
-        conn.recv(1024)
-        conn.close()
-    except Exception:
-        pass
-    try:
-        pid = int(Path(pid_file).read_text())
-    except (FileNotFoundError, ValueError):
-        pid = None
-    if pid:
-        for _ in range(75):
-            try:
-                os.kill(pid, 0)
-                time.sleep(0.2)
-            except (ProcessLookupError, OSError, SystemError):
-                break
-        else:
-            try:
-                os.kill(pid, signal.SIGTERM)
-            except (ProcessLookupError, OSError, SystemError):
-                pass
-    ipc.cleanup_endpoint(name or NAME)
-    try:
-        os.unlink(pid_file)
-    except FileNotFoundError:
-        pass
+    """Safely stop a daemon and clean only artifacts protected by its lock."""
+    lifecycle.stop_daemon(name or NAME)
 
 
 def _version() -> str:
@@ -288,14 +359,14 @@ def _install_mode() -> str:
 
 def _cache_read() -> dict:
     try:
-        return json.loads(VERSION_CACHE.read_text())
+        return json.loads(VERSION_CACHE.read_text(encoding="utf-8-sig", errors="replace"))
     except (FileNotFoundError, ValueError):
         return {}
 
 
 def _cache_write(data: dict) -> None:
     try:
-        VERSION_CACHE.write_text(json.dumps(data))
+        ipc.atomic_write_text(VERSION_CACHE, json.dumps(data))
     except OSError:
         pass
 
@@ -357,47 +428,13 @@ def _chrome_running() -> bool:
     try:
         if system == "Windows":
             output = subprocess.check_output(["tasklist"], timeout=5)
-            names = ("chrome.exe", "chromium.exe", "msedge.exe")
+            names = ("chrome.exe", "chromium.exe", "msedge.exe", "brave.exe")
         else:
             output = subprocess.check_output(["ps", "-A", "-o", "comm="], text=True, timeout=5)
-            names = ("Google Chrome", "chrome", "chromium", "Microsoft Edge", "msedge")
+            names = ("Google Chrome", "chrome", "chromium", "Microsoft Edge", "msedge", "Brave Browser", "brave")
         return _output_contains_process_names(output, names)
     except Exception:
         return False
-
-
-def _open_browser_inspect() -> None:
-    import platform
-    import subprocess
-    import webbrowser
-
-    inspect_targets = [
-        ("Google Chrome", "chrome://inspect/#remote-debugging"),
-        ("Microsoft Edge", "edge://inspect/#remote-debugging"),
-    ]
-    if platform.system() == "Darwin":
-        for app_name, url in inspect_targets:
-            try:
-                subprocess.run(
-                    [
-                        "osascript",
-                        "-e",
-                        f'tell application "{app_name}" to activate',
-                        "-e",
-                        f'tell application "{app_name}" to open location "{url}"',
-                    ],
-                    timeout=5,
-                    check=False,
-                )
-                return
-            except Exception:
-                continue
-    for _app_name, url in inspect_targets:
-        try:
-            if webbrowser.open(url, new=2):
-                return
-        except Exception:
-            continue
 
 
 def run_setup() -> int:
@@ -420,28 +457,28 @@ def run_setup() -> int:
             print("daemon already running but browser connection is stale; restarting.")
             restart_daemon()
     if not endpoint_name and not _chrome_running():
-        print("no Chrome/Chromium/Edge process detected. please start your browser and rerun `flocks browser --setup`.")
+        print("no Chrome/Chromium/Edge/Brave process detected.")
+        print("start a Chromium-based browser with remote debugging, then rerun `flocks browser --setup`.")
+        _print_local_debugging_setup(sys.stdout)
         return 1
     try:
-        ensure_daemon(wait=_SETUP_ATTACH_WAIT, _open_inspect=False)
+        ensure_daemon(wait=_SETUP_ATTACH_WAIT, _show_debugging_guidance=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
         first_err = str(error)
 
-    needs_inspect = _is_local_chrome_mode() and _needs_chrome_remote_debugging_prompt(first_err)
-    if needs_inspect:
-        print("browser remote debugging is not enabled on the current profile.")
-        print("opening your browser's inspect page -- in the tab that opens:")
-        print("  1. if the browser shows the profile picker, pick your normal profile;")
-        print("  2. tick 'Discover network targets' and click Allow if prompted.")
-        _open_browser_inspect()
+    needs_manual_debugging_setup = _is_local_chrome_mode() and _needs_chrome_remote_debugging_prompt(first_err)
+    if needs_manual_debugging_setup:
+        print("Chromium-based browser remote debugging is not reachable for the current profile.")
+        _print_local_debugging_setup(sys.stdout)
+        return 1
     else:
         print(f"attach failed: {first_err}")
         print("retrying once (the browser may still be starting up)...")
 
     try:
-        ensure_daemon(wait=_SETUP_RETRY_WAIT, _open_inspect=False)
+        ensure_daemon(wait=_SETUP_RETRY_WAIT, _show_debugging_guidance=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
@@ -460,7 +497,10 @@ def run_doctor() -> int:
     current = _version()
     mode = _install_mode()
     browser_running = _chrome_running()
-    endpoint_name, _endpoint_value = _configured_cdp_endpoint()
+    endpoint_name, endpoint_value = _configured_cdp_endpoint()
+    endpoint_ok, endpoint_detail = (True, "")
+    if endpoint_name and endpoint_value:
+        endpoint_ok, endpoint_detail = _probe_cdp_endpoint(endpoint_name, endpoint_value)
     daemon = daemon_alive()
     connections = browser_connections()
     latest = _latest_release_tag()
@@ -471,15 +511,20 @@ def run_doctor() -> int:
         mark = "ok  " if ok else "FAIL"
         print(f"  [{mark}] {label}{(' — ' + detail) if detail else ''}")
 
-    target_available = browser_running or bool(endpoint_name)
-    if connections:
+    target_available = endpoint_ok if endpoint_name else browser_running
+    if endpoint_name and not endpoint_ok:
+        next_action = f"fix {endpoint_name}, then run `flocks browser --setup`"
+    elif connections:
         next_action = "ready; use `flocks browser -c 'print(page_info())'`"
     elif target_available and daemon:
         next_action = "attach; run `flocks browser -c 'print(page_info())'` before setup"
     elif target_available:
         next_action = "setup; run `flocks browser --setup`"
     else:
-        next_action = "start Chrome/Chromium/Edge or provide BU_CDP_URL/BU_CDP_WS, then run `flocks browser --setup`"
+        next_action = (
+            "start Chrome/Chromium/Edge/Brave or provide BU_CDP_URL/BU_CDP_WS, "
+            "then run `flocks browser --setup`"
+        )
 
     print(f"{BROWSER_LABEL} doctor")
     print(f"  platform          {platform.system()} {platform.release()}")
@@ -490,19 +535,22 @@ def run_doctor() -> int:
     else:
         print("  latest release    (not configured)")
     if endpoint_name:
-        row("browser target", True, f"configured via {endpoint_name}")
+        detail = (
+            f"configured via {endpoint_name}" if endpoint_ok else f"{endpoint_name} is unreachable: {endpoint_detail}"
+        )
+        row("browser target", endpoint_ok, detail)
     else:
         row(
             "browser running",
             browser_running,
-            "" if browser_running else "start Chrome, Chromium, or Edge and rerun `flocks browser --setup`",
+            "" if browser_running else "start Chrome, Chromium, Edge, or Brave and rerun `flocks browser --setup`",
         )
     row(
         "daemon alive",
         daemon,
         ""
         if daemon
-        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is disabled, follow its inspect-page prompt",
+        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is not reachable, follow its debug-browser instructions",
     )
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:

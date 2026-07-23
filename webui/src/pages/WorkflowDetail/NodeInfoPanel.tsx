@@ -5,7 +5,15 @@
 import { useState, useEffect, useMemo, useRef } from 'react';
 import { useTranslation } from 'react-i18next';
 import { X, AlertCircle, Save, Loader2, ChevronDown, ChevronRight, Play, RotateCcw, Maximize2 } from 'lucide-react';
-import { workflowAPI, Workflow, WorkflowEdge, WorkflowExecution, WorkflowNode, WorkflowNodeExecution } from '@/api/workflow';
+import {
+  workflowAPI,
+  Workflow,
+  WorkflowEdge,
+  WorkflowExecution,
+  WorkflowNode,
+  WorkflowNodeExecution,
+  WorkflowSummary,
+} from '@/api/workflow';
 import CopyButton from '@/components/common/CopyButton';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 
@@ -602,7 +610,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
   const [saving, setSaving]   = useState(false);
   const [savedOk, setSavedOk] = useState(false);
   const [saveErr, setSaveErr] = useState('');
-  const [avail, setAvail]     = useState<Workflow[]>([]);
+  const [avail, setAvail]     = useState<WorkflowSummary[]>([]);
   const [codeEditorOpen, setCodeEditorOpen] = useState(false);
 
   useEffect(() => {
@@ -614,7 +622,7 @@ export default function NodeInfoPanel({ node, workflow, latestExecution, width =
 
   useEffect(() => {
     if (node.type === 'subworkflow')
-      workflowAPI.list({ excludeId: workflow.id }).then((r) => setAvail(r.data)).catch(() => setAvail([]));
+      workflowAPI.listSummaries({ excludeId: workflow.id }).then((r) => setAvail(r.data)).catch(() => setAvail([]));
   }, [node.type, workflow.id]);
 
   const set = (field: keyof WorkflowNode, value: unknown) =>

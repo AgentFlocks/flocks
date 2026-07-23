@@ -154,7 +154,7 @@ export default function LocalTabContent({
                 {/* Stats column */}
                 <div className="flex items-center justify-end gap-1.5 text-xs text-gray-400">
                   <Wrench className="w-3 h-3" />
-                  <span>{t('local.paramsCount', { count: tool.parameters?.length || 0 })}</span>
+                  <span>{t('local.paramsCount', { count: tool.parameters_count ?? tool.parameters?.length ?? 0 })}</span>
                 </div>
 
                 {/* Actions column */}

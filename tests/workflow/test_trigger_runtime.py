@@ -2,10 +2,69 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
+from flocks.tool import ToolContext
 from flocks.workflow.triggers import runtime as runtime_module
+from flocks.workflow.triggers.models import TriggerDefinition
+
+
+@pytest.mark.asyncio
+async def test_trigger_execution_builds_tool_context_for_workflow_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool_context = ToolContext(
+        session_id="trigger-parent",
+        message_id="trigger-message",
+        agent="rex",
+    )
+    build_context = AsyncMock(return_value=tool_context)
+    cleanup_context = AsyncMock()
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        missing_context = kwargs.get("tool_context") is None
+        return SimpleNamespace(
+            status="FAILED" if missing_context else "SUCCEEDED",
+            outputs={},
+            error="Parent session not found" if missing_context else None,
+            history=[],
+            last_node_id="notify",
+            steps=1,
+        )
+
+    monkeypatch.setattr(
+        runtime_module,
+        "build_workflow_tool_context",
+        build_context,
+    )
+    monkeypatch.setattr(runtime_module, "cleanup_workflow_tool_context", cleanup_context)
+    monkeypatch.setattr(runtime_module, "run_workflow", Mock(side_effect=_fake_run_workflow))
+    monkeypatch.setattr(
+        runtime_module,
+        "create_execution_record",
+        AsyncMock(return_value={"id": "exec-1"}),
+    )
+    monkeypatch.setattr(runtime_module, "record_execution_result", AsyncMock())
+
+    trigger = TriggerDefinition.model_validate({"id": "webhook-trigger", "type": "custom_webhook"})
+    runtime = runtime_module.TriggerRuntime()
+
+    result = await runtime._execute_workflow(  # noqa: SLF001
+        workflow_id="wf-trigger",
+        workflow_json={"start": "notify", "nodes": [], "edges": []},
+        trigger=trigger,
+        mapped_inputs={"message": "hello"},
+    )
+
+    assert result["status"] == "success"
+    build_context.assert_awaited_once_with(
+        workflow_id="wf-trigger",
+        action_name="trigger:custom_webhook",
+    )
+    assert runtime_module.run_workflow.call_args.kwargs["tool_context"] is tool_context
+    cleanup_context.assert_awaited_once_with(tool_context)
 
 
 @pytest.mark.asyncio
