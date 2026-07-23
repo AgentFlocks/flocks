@@ -1622,7 +1622,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByRole('button', { name: /Oracle/i })).not.toBeInTheDocument();
   });
 
-  it('resets the chat agent to Rex when creating a new session', async () => {
+  it('opens a blank new-session draft without creating and resets the agent to Rex', async () => {
     const user = userEvent.setup();
     useAgents.mockReturnValue({
       agents: [
@@ -1651,17 +1651,20 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    });
     await user.click(screen.getByRole('button', { name: /Rex/i }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
     expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
-    await waitFor(() => {
-      expect(addSession).toHaveBeenCalledWith(secondSession);
-    });
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+    expect(screen.getByRole('menu', { name: 'projectPicker.title' })).toBeVisible();
     expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
   });
 
@@ -2064,7 +2067,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('resets the selected model to the default when creating a new session', async () => {
+  it('resets the selected model to the default when starting a new session', async () => {
     const user = userEvent.setup();
     useSessions.mockReturnValue({
       sessions: [{
@@ -2100,8 +2103,37 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
     await waitFor(() => {
-      expect(addSession).toHaveBeenCalledWith(secondSession);
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'openai/gpt-4o');
+    });
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+  });
+
+  it('lets the user choose a project before the first message creates the session', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true },
+      ],
+    });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    });
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+    await user.click(screen.getByRole('menuitemradio', { name: 'Labs' }));
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+        projectID: 'prj_labs',
+      });
     });
   });
 

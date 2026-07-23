@@ -969,6 +969,20 @@ export default function SessionPage() {
     setRenameValue('');
   }, [selectMode]);
 
+  const handleStartNewSession = useCallback(() => {
+    writeLastSelectedSessionId(null);
+    setSelectedSessionId(null);
+    setSelectedSessionFallback(null);
+    setPendingInitialMessage(null);
+    setPendingInitialDisplayText(null);
+    setSelectedAgent('rex');
+    setSelectedModelKey(null);
+    setSseStatus('disconnected');
+    setShowAgentOptions(false);
+    setShowModelOptions(false);
+    setShowProjectOptions(true);
+  }, []);
+
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
@@ -1668,7 +1682,7 @@ export default function SessionPage() {
                 ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[#7b8087]" />
                 : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
               <button
-                onClick={() => void handleCreateSession()}
+                onClick={handleStartNewSession}
                 disabled={creating}
                 className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
               >
@@ -2106,7 +2120,7 @@ export default function SessionPage() {
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
-          onCreateNewSession={handleCreateSession}
+          onCreateNewSession={handleStartNewSession}
           onStreamingDone={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
