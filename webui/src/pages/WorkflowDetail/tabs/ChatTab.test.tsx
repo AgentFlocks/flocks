@@ -209,6 +209,10 @@ vi.mock('react-i18next', () => ({
         'detail.chat.welcome.guideSampleShort': '验证样例数据',
         'detail.chat.welcome.guideSampleDesc': '验证输入输出',
         'detail.chat.welcome.samplePrompt': '请先读取 {{guidePath}} 后验证样例。工作流 ID 是 {{id}}，工作流目录是 {{dir}}。',
+        'modelPicker.auto': 'Auto',
+        'modelPicker.title': '选择模型',
+        'modelPicker.hint': '作为本次对话发送时的模型覆盖',
+        'modelPicker.empty': '暂无模型',
         'detail.run.guideApiShort': '发布为 API',
         'detail.run.guideApiDesc': '配置 API 发布',
         'detail.run.guideApiInstruction': '围绕 API 发布读取 guide.md，先 GET {{configEndpoint}}，确认后 PUT {{configEndpoint}}，config.json 和 workflow.json 不是直接写入目标；后端接口不可用时必须停止配置流程',
@@ -264,6 +268,31 @@ function renderChatTab(props: Partial<ComponentProps<typeof ChatTab>> = {}) {
       <ChatTab workflow={workflow} {...props} />
     </MemoryRouter>,
   );
+}
+
+function configureMinimaxChatModel(supportsVision = false) {
+  mockUseProviders.mockReturnValue({
+    providers: [{ id: 'minimax', name: 'MiniMax', configured: true }],
+    connectedIds: ['minimax'],
+    loading: false,
+    error: null,
+    refetch: vi.fn(),
+  });
+  mockModelListDefinitions.mockResolvedValue({
+    data: {
+      models: [{
+        provider_id: 'minimax',
+        id: 'minimax-m3',
+        name: 'minimax-m3',
+        model_type: 'chat',
+        capabilities: { supports_vision: supportsVision },
+        limits: { context_window: 128000 },
+      }],
+    },
+  });
+  mockDefaultModelGetResolved.mockResolvedValue({
+    data: { provider_id: 'minimax', model_id: 'minimax-m3' },
+  });
 }
 
 describe('WorkflowDetail ChatTab', () => {
@@ -709,10 +738,68 @@ describe('WorkflowDetail ChatTab', () => {
       provider: 'minimax',
       model: 'minimax-m3',
       model_pinned: true,
+      model_auto: false,
     });
     await waitFor(() => {
       const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
       expect(latestProps.model).toEqual({ providerID: 'minimax', modelID: 'minimax-m3' });
+    });
+  });
+
+  it('restores Auto from the active workflow chat session', async () => {
+    setStoredSessions(workflow.id, [
+      { id: 'workflow-session-auto', title: 'Existing', createdAt: Date.now() },
+    ]);
+    configureMinimaxChatModel(true);
+    mockClientGet.mockResolvedValue({
+      data: {
+        id: 'workflow-session-auto',
+        model_auto: true,
+        model_pinned: false,
+      },
+    });
+
+    renderChatTab();
+
+    await waitFor(() => {
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.sessionId).toBe('workflow-session-auto');
+      expect(latestProps.modelAuto).toBe(true);
+      expect(latestProps.model).toBeNull();
+      expect(latestProps.supportsVision).toBe(true);
+    });
+    expect(capturedSessionOptions[capturedSessionOptions.length - 1].modelAuto).toBe(true);
+  });
+
+  it('manually enables Auto for the active workflow chat session', async () => {
+    const user = userEvent.setup();
+    setStoredSessions(workflow.id, [
+      { id: 'workflow-session-enable-auto', title: 'Existing', createdAt: Date.now() },
+    ]);
+    configureMinimaxChatModel();
+    mockClientGet.mockResolvedValue({
+      data: {
+        id: 'workflow-session-enable-auto',
+        provider: 'minimax',
+        model: 'minimax-m3',
+        model_pinned: true,
+        model_auto: false,
+      },
+    });
+
+    renderChatTab();
+
+    await user.click(await screen.findByRole('button', { name: /minimax-m3/i }));
+    await user.click(await screen.findByRole('button', { name: 'Auto' }));
+
+    expect(mockClientPatch).toHaveBeenCalledWith('/api/session/workflow-session-enable-auto', {
+      model_auto: true,
+      model_pinned: false,
+    });
+    await waitFor(() => {
+      const latestProps = capturedSessionChatProps[capturedSessionChatProps.length - 1];
+      expect(latestProps.modelAuto).toBe(true);
+      expect(latestProps.model).toBeNull();
     });
   });
 

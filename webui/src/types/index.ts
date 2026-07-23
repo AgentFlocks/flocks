@@ -21,6 +21,8 @@ export interface Session {
   provider?: string;
   model?: string;
   model_pinned?: boolean;
+  /** Runtime provider failover is enabled only after an explicit WebUI selection. */
+  model_auto?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
@@ -432,10 +434,11 @@ export interface ProviderInfoV2 {
   source: string;
   env: string[];
   key: string | null;
+  /** True only when the runtime has the credentials required by this provider. */
+  configured?: boolean;
   options: Record<string, any>;
   models: Record<string, ProviderModelInfo>;
   // Derived on frontend
-  configured?: boolean;
   modelCount?: number;
   category?: ProviderCategory;
 }

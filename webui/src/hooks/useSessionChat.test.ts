@@ -13,8 +13,12 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
 
 const mockPost = vi.fn();
+const mockPatch = vi.fn();
 vi.mock('@/api/client', () => ({
-  default: { post: (...args: unknown[]) => mockPost(...args) },
+  default: {
+    post: (...args: unknown[]) => mockPost(...args),
+    patch: (...args: unknown[]) => mockPatch(...args),
+  },
 }));
 
 import { renderHook, act } from '@testing-library/react';
@@ -25,6 +29,7 @@ const SESSION_ID = 'sess-abc';
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockPatch.mockResolvedValue({ data: {} });
   // /api/session creates a new session
   mockPost.mockImplementation((url: string) => {
     if (url === '/api/session') return Promise.resolve({ data: { id: SESSION_ID } });
@@ -133,6 +138,88 @@ describe('useSessionChat.createAndSend — image forwarding', () => {
     });
 
     expect(mockPost.mock.calls.some(([url]) => url === '/api/session')).toBe(false);
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/existing-session/prompt_async',
+      { parts: [{ type: 'text', text: 'continue' }] },
+    );
+  });
+});
+
+describe('useSessionChat — Auto session creation', () => {
+  it('forwards the hook modelAuto option when creating a session', async () => {
+    const { result } = renderHook(() =>
+      useSessionChat({ title: 'Auto chat', category: 'entity-config', modelAuto: true }),
+    );
+
+    await act(async () => {
+      await result.current.create();
+    });
+
+    expect(mockPost).toHaveBeenCalledWith('/api/session', {
+      title: 'Auto chat',
+      category: 'entity-config',
+      model_auto: true,
+    });
+  });
+
+  it('lets create explicitly override the hook modelAuto option', async () => {
+    const { result } = renderHook(() =>
+      useSessionChat({ title: 'Auto chat', modelAuto: true }),
+    );
+
+    await act(async () => {
+      await result.current.create({ modelAuto: false });
+    });
+
+    expect(mockPost).toHaveBeenCalledWith('/api/session', {
+      title: 'Auto chat',
+      model_auto: false,
+    });
+  });
+
+  it('lets createAndSend enable Auto without adding a synthetic prompt model', async () => {
+    const { result } = renderHook(() =>
+      useSessionChat({ title: 'Auto chat' }),
+    );
+
+    await act(async () => {
+      await result.current.createAndSend({
+        text: 'hello',
+        model: null,
+        modelAuto: true,
+      });
+    });
+
+    expect(mockPost).toHaveBeenCalledWith('/api/session', {
+      title: 'Auto chat',
+      model_auto: true,
+    });
+    expect(mockPost).toHaveBeenCalledWith(
+      `/api/session/${SESSION_ID}/prompt_async`,
+      { parts: [{ type: 'text', text: 'hello' }] },
+    );
+  });
+
+  it('enables Auto before sending through a resumed session', async () => {
+    const { result } = renderHook(() =>
+      useSessionChat({
+        title: 'Auto chat',
+        initialSessionId: 'existing-session',
+        modelAuto: true,
+      }),
+    );
+
+    await act(async () => {
+      await result.current.createAndSend({ text: 'continue' });
+    });
+
+    expect(mockPatch).toHaveBeenCalledWith('/api/session/existing-session', {
+      model_auto: true,
+      model_pinned: false,
+    });
+    expect(mockPatch.mock.invocationCallOrder[0]).toBeLessThan(
+      mockPost.mock.invocationCallOrder[0],
+    );
     expect(mockPost).toHaveBeenCalledWith(
       '/api/session/existing-session/prompt_async',
       { parts: [{ type: 'text', text: 'continue' }] },

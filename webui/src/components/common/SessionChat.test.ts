@@ -48,6 +48,7 @@ const sessionApiResendMessageMock = vi.fn();
 const sessionApiRegenerateMessageMock = vi.fn();
 const sessionApiGetContextUsageMock = vi.fn();
 const sessionApiGetMock = vi.fn();
+const sessionApiUpdateMock = vi.fn();
 const useSessionMessagesMock = vi.fn();
 const useSSEOptionsRef = vi.hoisted(() => ({ current: null as any }));
 const tMock = (key: string, options?: Record<string, unknown>) => {
@@ -190,6 +191,7 @@ vi.mock('@/api/client', () => ({
 vi.mock('@/api/session', () => ({
   sessionApi: {
     get: (...args: unknown[]) => sessionApiGetMock(...args),
+    update: (...args: unknown[]) => sessionApiUpdateMock(...args),
     listPromptQueue: (...args: unknown[]) => sessionApiListPromptQueueMock(...args),
     enqueuePrompt: (...args: unknown[]) => sessionApiEnqueuePromptMock(...args),
     updateQueuedPrompt: (...args: unknown[]) => sessionApiUpdateQueuedPromptMock(...args),
@@ -234,6 +236,7 @@ beforeEach(() => {
   sessionApiResendMessageMock.mockResolvedValue({});
   sessionApiRegenerateMessageMock.mockResolvedValue({});
   sessionApiGetMock.mockResolvedValue({});
+  sessionApiUpdateMock.mockResolvedValue({});
   sessionApiGetContextUsageMock.mockResolvedValue({
     sessionID: 'sess-1',
     usedTokens: 0,
@@ -255,6 +258,7 @@ beforeEach(() => {
     addMessage: vi.fn(),
     updateMessage: vi.fn(),
     updateMessagePart: vi.fn(),
+    removeMessage: vi.fn(),
     replaceMessageText: vi.fn(),
     truncateAfterMessage: vi.fn(),
   });
@@ -383,6 +387,9 @@ function mockStatefulSessionMessages() {
       addMessage: (message: Message) => setMessages((prev) => [...prev, message]),
       updateMessage: upsertMessage,
       updateMessagePart: vi.fn(),
+      removeMessage: (messageId: string) => setMessages((prev) => prev.filter(
+        (message) => message.id !== messageId,
+      )),
       replaceMessageText: vi.fn(),
       markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
         (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
@@ -959,6 +966,36 @@ describe('SessionChat standalone thinking indicator', () => {
       consoleError.mockRestore();
     }
   });
+
+  it('removes an intermediate assistant when message.removed arrives', () => {
+    const removeMessage = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'assistant-failed', role: 'assistant', parts: [] })],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage,
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.removed',
+        properties: {
+          sessionID: 'sess-1',
+          messageID: 'assistant-failed',
+        },
+      });
+    });
+
+    expect(removeMessage).toHaveBeenCalledWith('assistant-failed');
+  });
 });
 
 describe('SessionChat instruction display text', () => {
@@ -1011,6 +1048,31 @@ describe('SessionChat instruction display text', () => {
 });
 
 describe('SessionChat composer controls', () => {
+  it('enables Auto on an existing session before sending without a model override', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      modelAuto: true,
+      model: null,
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'continue{enter}');
+
+    await waitFor(() => {
+      expect(sessionApiUpdateMock).toHaveBeenCalledWith('sess-1', {
+        model_auto: true,
+        model_pinned: false,
+      });
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        { parts: [{ type: 'text', text: 'continue' }] },
+      );
+    });
+    expect(sessionApiUpdateMock.mock.invocationCallOrder[0]).toBeLessThan(
+      clientPostMock.mock.invocationCallOrder[0],
+    );
+  });
+
   it('keeps the disabled send button visible in dark mode', () => {
     const { container } = render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 

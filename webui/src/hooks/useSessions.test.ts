@@ -260,6 +260,22 @@ describe('updateMessagePart scheduling', () => {
     expect((msg!.parts as any[])[0].text).toBe('hello world');
   });
 
+  it('removes a failed assistant placeholder by message id', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({ id: 'keep' }));
+      result.current.addMessage(makeMsg({ id: 'remove-me' }));
+    });
+
+    await act(async () => {
+      result.current.removeMessage('remove-me');
+    });
+
+    expect(result.current.messages.map(message => message.id)).toEqual(['keep']);
+  });
+
   it('applies every known part update without waiting for an animation frame', async () => {
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     await act(async () => {});

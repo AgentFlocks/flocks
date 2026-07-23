@@ -1054,15 +1054,37 @@ class InboundDispatcher:
             return ChannelConfig()
 
     @staticmethod
+    async def _run_session_loop(binding: Any, loop_callbacks: Any) -> Any:
+        """Run an IM turn with the persisted model preference for its session."""
+        from flocks.session.session import (
+            Session,
+            is_model_auto_session_category,
+        )
+        from flocks.session.session_loop import SessionLoop
+
+        session = await Session.get_by_id(binding.session_id)
+        auto_failover = bool(
+            session
+            and is_model_auto_session_category(
+                getattr(session, "category", "user")
+            )
+            and getattr(session, "model_auto", False)
+        )
+        return await SessionLoop.run(
+            session_id=binding.session_id,
+            agent_name=binding.agent_id,
+            callbacks=loop_callbacks,
+            auto_failover=auto_failover,
+        )
+
+    @staticmethod
     async def _run_agent(binding, callbacks: ChannelDeliveryCallbacks) -> None:
         """Run Agent and deliver the final assistant reply."""
         try:
-            from flocks.session.session_loop import SessionLoop
             loop_callbacks = callbacks.to_loop_callbacks()
-            result = await SessionLoop.run(
-                session_id=binding.session_id,
-                agent_name=binding.agent_id,
-                callbacks=loop_callbacks,
+            result = await InboundDispatcher._run_session_loop(
+                binding,
+                loop_callbacks,
             )
 
             if result.last_message:
@@ -1147,11 +1169,9 @@ class InboundDispatcher:
             runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
             loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)
 
-            from flocks.session.session_loop import SessionLoop
-            result = await SessionLoop.run(
-                session_id=binding.session_id,
-                agent_name=binding.agent_id,
-                callbacks=loop_callbacks,
+            result = await InboundDispatcher._run_session_loop(
+                binding,
+                loop_callbacks,
             )
 
             final_text = None

@@ -5,6 +5,8 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 export interface UseSessionChatOptions {
   title: string;
   category?: string;
+  /** Enable runtime model failover when creating a new session. */
+  modelAuto?: boolean;
   /** Context injected via noReply (not visible as user message) */
   contextMessage?: string;
   /** Mock welcome message from assistant */
@@ -21,12 +23,15 @@ export interface CreateAndSendOptions {
   imageParts?: ImagePartData[];
   agent?: string;
   model?: { providerID: string; modelID: string } | null;
+  /** Override Auto mode for the new session created by this send. */
+  modelAuto?: boolean;
   displayText?: string;
 }
 
 export function useSessionChat({
   title,
   category,
+  modelAuto,
   contextMessage,
   welcomeMessage,
   initialSessionId = null,
@@ -38,8 +43,8 @@ export function useSessionChat({
 
   const sessionIdRef = useRef<string | null>(initialSessionId);
   const createPromiseRef = useRef<Promise<string> | null>(null);
-  const optionsRef = useRef({ title, category, contextMessage, welcomeMessage });
-  optionsRef.current = { title, category, contextMessage, welcomeMessage };
+  const optionsRef = useRef({ title, category, modelAuto, contextMessage, welcomeMessage });
+  optionsRef.current = { title, category, modelAuto, contextMessage, welcomeMessage };
 
   const create = useCallback(
     async (overrides?: Partial<UseSessionChatOptions>): Promise<string> => {
@@ -53,8 +58,9 @@ export function useSessionChat({
       const opts = { ...optionsRef.current, ...overrides };
 
       const doCreate = async (): Promise<string> => {
-        const payload: Record<string, string> = { title: opts.title };
+        const payload: Record<string, string | boolean> = { title: opts.title };
         if (opts.category) payload.category = opts.category;
+        if (typeof opts.modelAuto === 'boolean') payload.model_auto = opts.modelAuto;
 
         const res = await client.post('/api/session', payload);
         const sid: string = res.data.id;
@@ -120,9 +126,22 @@ export function useSessionChat({
       imageParts,
       agent,
       model,
+      modelAuto: createModelAuto,
       displayText,
     }: CreateAndSendOptions): Promise<string> => {
-      const sid = await create();
+      const resumedExistingSession = Boolean(sessionIdRef.current);
+      const effectiveModelAuto = typeof createModelAuto === 'boolean'
+        ? createModelAuto
+        : optionsRef.current.modelAuto;
+      const sid = await create(
+        typeof createModelAuto === 'boolean' ? { modelAuto: createModelAuto } : undefined,
+      );
+      if (resumedExistingSession && effectiveModelAuto) {
+        await client.patch(`/api/session/${sid}`, {
+          model_auto: true,
+          model_pinned: false,
+        });
+      }
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };

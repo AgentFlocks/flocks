@@ -500,6 +500,7 @@ class ProviderInfo(BaseModel):
     source: str = Field(default="config", description="Provider source: env, config, custom, api")
     env: List[str] = Field(default_factory=list, description="Environment variable names")
     key: Optional[str] = Field(None, description="API key (if configured)")
+    configured: bool = Field(False, description="Whether runtime credentials are configured")
     options: Dict[str, Any] = Field(default_factory=dict, description="Provider options")
     # Flocks expects models as Dict[modelID, Model], not List[Model]
     models: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Available models")
@@ -596,6 +597,7 @@ async def list_providers() -> ProviderListResponse:
                 source="config",  # Provider source: env, config, custom, api
                 env=[],  # Environment variable names (can be enhanced later)
                 key=None,  # API key not exposed in list
+                configured=provider.is_configured(),
                 options={},
                 models=models_dict,
             )

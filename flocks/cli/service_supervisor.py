@@ -27,8 +27,8 @@ from flocks.cli.service_control import (
 )
 from flocks.cli.service_process import BackendProcessAdapter, ProcessAdapter
 
-SUPERVISOR_CHECK_INTERVAL_SECONDS = 5.0
-SUPERVISOR_HEALTH_FAILURE_THRESHOLD = 2
+SUPERVISOR_CHECK_INTERVAL_SECONDS = 30.0
+SUPERVISOR_HEALTH_FAILURE_THRESHOLD = 10
 SUPERVISOR_BACKOFF_SECONDS = (1.0, 2.0, 5.0, 10.0, 30.0)
 _CLIENT_DISCONNECT_ERRORS = (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)
 

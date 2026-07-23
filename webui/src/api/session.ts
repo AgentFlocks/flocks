@@ -126,7 +126,7 @@ export const sessionApi = {
   /**
    * 创建会话
    */
-  create: async (data?: { title?: string; parentID?: string; projectID?: string }) => {
+  create: async (data?: { title?: string; parentID?: string; projectID?: string; model_auto?: boolean }) => {
     const response = await client.post('/api/session', data || {});
     return response.data;
   },
@@ -142,7 +142,13 @@ export const sessionApi = {
   /**
    * 更新会话
    */
-  update: async (sessionId: string, data: { title?: string; provider?: string; model?: string; model_pinned?: boolean }) => {
+  update: async (sessionId: string, data: {
+    title?: string;
+    provider?: string;
+    model?: string;
+    model_pinned?: boolean;
+    model_auto?: boolean;
+  }) => {
     const response = await client.patch(`/api/session/${sessionId}`, data);
     return response.data;
   },

@@ -746,66 +746,72 @@ class Provider:
             if not provider:
                 continue
 
+            # Provider credentials/options are optional. Model definitions and
+            # display names below still need to load when credentials are
+            # unresolved or supplied outside the main config.
             options = getattr(pconfig, "options", None)
-            if not options:
-                continue
-
+            options_data: Optional[Dict[str, Any]] = None
             if hasattr(options, "model_dump"):
-                options_data = options.model_dump(exclude_none=True, by_alias=False)
+                options_data = options.model_dump(
+                    exclude_none=True,
+                    by_alias=False,
+                )
             elif isinstance(options, dict):
-                options_data = {k: v for k, v in options.items() if v is not None}
-            else:
-                continue
+                options_data = {
+                    key: value
+                    for key, value in options.items()
+                    if value is not None
+                }
 
-            # Handle both Python-style (api_key, base_url) and JS-style (apiKey, baseURL)
-            api_key = (
-                options_data.pop("api_key", None)
-                or options_data.pop("apiKey", None)
-            )
-            base_url = (
-                options_data.pop("base_url", None)
-                or options_data.pop("baseURL", None)
-            )
+            if options_data is not None:
+                # Handle both Python-style (api_key, base_url) and JS-style
+                # (apiKey, baseURL).
+                api_key = (
+                    options_data.pop("api_key", None)
+                    or options_data.pop("apiKey", None)
+                )
+                base_url = (
+                    options_data.pop("base_url", None)
+                    or options_data.pop("baseURL", None)
+                )
 
-            # Treat empty strings as None (e.g. unresolved {secret:xxx})
-            if isinstance(api_key, str) and not api_key.strip():
-                api_key = None
-            if isinstance(base_url, str) and not base_url.strip():
-                base_url = None
+                # Treat empty strings as None (e.g. unresolved {secret:xxx}).
+                if isinstance(api_key, str) and not api_key.strip():
+                    api_key = None
+                if isinstance(base_url, str) and not base_url.strip():
+                    base_url = None
 
-            # Also filter out remaining options that resolved to empty strings
-            options_data = {
-                k: v for k, v in options_data.items()
-                if not (isinstance(v, str) and not v.strip())
-            }
+                # Also filter out remaining options that resolved to empty strings.
+                options_data = {
+                    key: value
+                    for key, value in options_data.items()
+                    if not (isinstance(value, str) and not value.strip())
+                }
 
-            if api_key is None and base_url is None and not options_data:
-                continue
-
-            # ----- Idempotent ProviderConfig update -------------------------------
-            # ``apply_config`` is called from many hot paths: every session
-            # step (``session.runner._step``), every workflow ``llm.ask``,
-            # the ``/session/*`` HTTP routes, plus startup. When session and
-            # workflow run concurrently on different event loops they would
-            # otherwise rewrite the same ``provider._config`` repeatedly and
-            # race on the ``_config_models`` rebuild. Skip mutation whenever
-            # the desired config already matches.
-            desired_cfg = ProviderConfig(
-                provider_id=pid,
-                api_key=api_key,
-                base_url=base_url,
-                custom_settings=options_data,
-            )
-            current_cfg = provider._config
-            current_unchanged = (
-                current_cfg is not None
-                and getattr(current_cfg, "api_key", None) == desired_cfg.api_key
-                and getattr(current_cfg, "base_url", None) == desired_cfg.base_url
-                and (getattr(current_cfg, "custom_settings", None) or {})
-                == (desired_cfg.custom_settings or {})
-            )
-            if not current_unchanged:
-                provider.configure(desired_cfg)
+                if api_key is not None or base_url is not None or options_data:
+                    # ----- Idempotent ProviderConfig update -------------------
+                    # ``apply_config`` is called from many hot paths: every
+                    # session step, every workflow ``llm.ask``, HTTP routes,
+                    # and startup. Skip mutation whenever the desired config
+                    # already matches.
+                    desired_cfg = ProviderConfig(
+                        provider_id=pid,
+                        api_key=api_key,
+                        base_url=base_url,
+                        custom_settings=options_data,
+                    )
+                    current_cfg = provider._config
+                    current_unchanged = (
+                        current_cfg is not None
+                        and getattr(current_cfg, "api_key", None)
+                        == desired_cfg.api_key
+                        and getattr(current_cfg, "base_url", None)
+                        == desired_cfg.base_url
+                        and (getattr(current_cfg, "custom_settings", None) or {})
+                        == (desired_cfg.custom_settings or {})
+                    )
+                    if not current_unchanged:
+                        provider.configure(desired_cfg)
 
             # Update provider display name from flocks.json only for providers
             # that support custom naming (openai-compatible instances and custom-* providers).

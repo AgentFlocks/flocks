@@ -249,6 +249,7 @@ export const defaultModelAPI = {
   /** Delete default model for a type */
   delete: (modelType: string) =>
     client.delete(`/api/default-model/${modelType}`),
+
 };
 
 // ==================== Usage API ====================

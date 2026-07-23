@@ -30,6 +30,12 @@ log = Log.create(service="session")
 # Title prefix patterns for default title detection
 PARENT_TITLE_PREFIX = "New session - "
 CHILD_TITLE_PREFIX = "Child session - "
+MODEL_AUTO_SESSION_CATEGORIES = frozenset({"user", "entity-config", "workflow"})
+
+
+def is_model_auto_session_category(category: Optional[str]) -> bool:
+    """Return whether a session category may use WebUI Auto mode."""
+    return category in MODEL_AUTO_SESSION_CATEGORIES
 
 
 class SessionChangeStats(BaseModel):
@@ -92,6 +98,13 @@ class SessionInfo(BaseModel):
         description=(
             "Whether provider/model were explicitly locked for this session. "
             "Unpinned sessions follow the normal default-model resolution chain."
+        ),
+    )
+    model_auto: bool = Field(
+        False,
+        description=(
+            "Whether WebUI Auto runtime failover was explicitly selected for "
+            "this session. Other session entry points ignore this flag."
         ),
     )
     
@@ -198,11 +211,21 @@ class Session:
             "provider": provider_id,
             "model": model_id,
             "model_pinned": True,
+            "model_auto": False,
         }
 
     @classmethod
     def inherited_model_kwargs(cls, session: Optional[SessionInfo]) -> Dict[str, Any]:
-        """Return pinned model kwargs that should propagate to a child session."""
+        """Return model preference kwargs that should propagate to a new session."""
+        if (
+            session
+            and is_model_auto_session_category(getattr(session, "category", "user"))
+            and getattr(session, "model_auto", False)
+        ):
+            return {
+                "model_auto": True,
+                "model_pinned": False,
+            }
         if not cls.has_pinned_model(session):
             return {}
         return {
@@ -605,6 +628,13 @@ class Session:
         # Soft delete
         await cls.update(project_id, session_id, status="deleted")
         cls._id_index.pop(session_id, None)
+
+        # Auto failover cooldowns are process-local session state. Clear them
+        # here (rather than only in the HTTP route) so recursive child deletes
+        # and non-HTTP deletion paths cannot retain stale entries indefinitely.
+        from flocks.session.session_loop import SessionLoop
+
+        SessionLoop.clear_auto_failover_state(session_id)
         
         # Clear messages
         await Message.clear(session_id)

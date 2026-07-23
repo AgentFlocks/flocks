@@ -1518,7 +1518,10 @@ def _fake_process(pid: int, args: list[str] | None = None, returncode: int | Non
     return SimpleNamespace(pid=pid, args=args or [str(pid)], returncode=returncode, poll=lambda: returncode)
 
 
-def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path: Path) -> None:
+def test_supervisor_restarts_backend_after_tenth_consecutive_port_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
@@ -1535,9 +1538,87 @@ def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path:
         lambda *_args, **_kwargs: calls.append("start:backend") or _fake_process(333, ["backend-new"]),
     )
 
+    assert daemon.interval == 30.0
+    assert daemon.failure_threshold == 10
+
+    for expected_failure_count in range(1, 10):
+        daemon.tick()
+        assert calls == []
+        assert daemon.backend.state == "degraded"
+        assert daemon.backend.health_failure_count == expected_failure_count
+
+    daemon.tick()
+    assert calls == ["stop:后端", "start:backend"]
+    assert daemon.backend.pid == 333
+
+
+def test_supervisor_resets_backend_port_failures_after_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    port_states = iter([False] * 9 + [True] + [False] * 9)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"])
+
+    monkeypatch.setattr(
+        service_process,
+        "tcp_port_accepts_connections",
+        lambda *_args: next(port_states),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda *_args, **_kwargs: calls.append("stop"),
+    )
+
+    for _ in range(9):
+        daemon.tick()
+
+    assert calls == []
+    assert daemon.backend.health_failure_count == 9
+
     daemon.tick()
 
-    assert calls == ["stop:后端", "start:backend"]
+    assert daemon.backend.state == "healthy"
+    assert daemon.backend.health_failure_count == 0
+
+    for _ in range(9):
+        daemon.tick()
+
+    assert calls == []
+    assert daemon.backend.state == "degraded"
+    assert daemon.backend.health_failure_count == 9
+
+
+def test_supervisor_restarts_backend_on_first_probe_after_process_exits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"], returncode=7)
+
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda *_args, **_kwargs: calls.append("stop"),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_start_backend_process",
+        lambda *_args, **_kwargs: calls.append("start") or _fake_process(333, ["backend-new"]),
+    )
+
+    daemon.tick()
+
+    assert calls == ["stop", "start"]
     assert daemon.backend.pid == 333
 
 

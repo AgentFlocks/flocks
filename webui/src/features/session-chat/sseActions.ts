@@ -24,6 +24,7 @@ export type SessionChatSSEAction =
   | { kind: 'session-cleared' }
   | { kind: 'session-status'; statusType?: string; message?: string }
   | { kind: 'message-updated'; info: SessionMessageInfo }
+  | { kind: 'message-removed'; messageID: string }
   | { kind: 'message-part-updated'; part: MessagePart; delta?: string }
   | { kind: 'question-asked'; callID: string; requestId: string; questions: unknown[] }
   | { kind: 'question-resolved'; requestId: string }
@@ -80,6 +81,13 @@ export function resolveSessionChatSSEAction(
   if (type === 'message.updated') {
     if (!isRecord(properties.info) || properties.info.sessionID !== sessionId) return { kind: 'ignore' };
     return { kind: 'message-updated', info: properties.info as SessionMessageInfo };
+  }
+
+  if (type === 'message.removed') {
+    if (!isCurrentSession(properties, sessionId) || typeof properties.messageID !== 'string') {
+      return { kind: 'ignore' };
+    }
+    return { kind: 'message-removed', messageID: properties.messageID };
   }
 
   if (type === 'message.part.updated') {
