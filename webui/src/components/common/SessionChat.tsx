@@ -39,6 +39,7 @@ import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { copyText } from '@/utils/clipboard';
+import { createMessageId } from '@/utils/messageId';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -901,6 +902,54 @@ export function hasActiveToolPart(parts?: Array<Pick<MessagePart, 'type' | 'stat
   return parts?.some(isActiveToolPart) ?? false;
 }
 
+type FetchedMessageWithParts = {
+  info?: {
+    id?: string;
+    role?: string;
+    parentID?: string | null;
+    finish?: string | null;
+    time?: { completed?: number | null };
+  };
+  parts?: MessagePart[];
+};
+
+function getCurrentTurnAssistantMessages(
+  messages: FetchedMessageWithParts[],
+): FetchedMessageWithParts[] | null {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.info?.role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+
+  let turnParentID = latestUserIndex >= 0
+    ? messages[latestUserIndex]?.info?.id
+    : undefined;
+  let turnStartIndex = latestUserIndex + 1;
+
+  // A single tool-heavy turn can exceed the latest-message page. If its user
+  // message is outside the page, recover the turn from the newest assistant's
+  // parent instead of falling back to every historical tool in the page.
+  if (!turnParentID) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const info = messages[index]?.info;
+      if (info?.role === 'assistant' && info.parentID) {
+        turnParentID = info.parentID;
+        turnStartIndex = 0;
+        break;
+      }
+    }
+  }
+
+  if (!turnParentID) return null;
+  return messages.slice(turnStartIndex).filter((message) => (
+    message.info?.role === 'assistant'
+    && message.info.parentID === turnParentID
+  ));
+}
+
 export function isActiveSessionStatus(status?: { type?: string } | null): boolean {
   return status?.type === 'busy' || status?.type === 'compacting' || status?.type === 'retry';
 }
@@ -1725,6 +1774,8 @@ export default function SessionChat({
   // Keep a ref to latest messages so handleAbort can read it without stale closure
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const pendingQuestionsRef = useRef(pendingQuestions);
+  useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
 
   const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
 
@@ -2422,12 +2473,12 @@ export default function SessionChat({
     setIsStreaming(true);
 
     const displayText = args ? `/${command} ${args}` : `/${command}`;
-    const tempId = `temp-${Date.now()}`;
+    const messageId = createMessageId();
     addMessage({
-      id: tempId,
+      id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: [{ id: `${tempId}-part`, type: 'text', text: displayText }],
+      parts: [{ id: `temp-${messageId}-part`, type: 'text', text: displayText }],
       timestamp: Date.now(),
     } as Message);
 
@@ -2436,6 +2487,7 @@ export default function SessionChat({
         command,
         arguments: args,
         agent: agentName,
+        messageID: messageId,
       });
       if (command === 'goal' && args.trim()) {
         goalHydrationVersionRef.current += 1;
@@ -2477,18 +2529,18 @@ export default function SessionChat({
     setIsStreaming(true);
     setPendingAgentName(effectiveAgent || 'rex');
 
-    const tempId = `temp-${Date.now()}`;
+    const messageId = createMessageId();
     const tempParts: MessagePart[] = [];
-    if (visibleText) tempParts.push({ id: `${tempId}-text`, type: 'text', text: visibleText });
+    if (visibleText) tempParts.push({ id: `temp-${messageId}-text`, type: 'text', text: visibleText });
     imageParts.forEach((img, i) => {
-      tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+      tempParts.push({ id: `temp-${messageId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
     });
 
     addMessage({
-      id: tempId,
+      id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text: visibleText }],
+      parts: tempParts.length > 0 ? tempParts : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
       timestamp: Date.now(),
       agent: effectiveAgent,
     } as Message);
@@ -2496,6 +2548,7 @@ export default function SessionChat({
     try {
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
+        messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
@@ -2864,24 +2917,81 @@ export default function SessionChat({
   // Fallback polling to detect completion when SSE events are missed
   useEffect(() => {
     if (!isStreaming || !sessionId) return;
+    let questionRecoveryInFlight = false;
     const timer = setInterval(async () => {
       try {
         const res = await client.get(`/api/session/${sessionId}/message`, {
           params: { page: true, limit: 50, include_archived: true },
         });
-        const msgs: any[] = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+        const msgs: FetchedMessageWithParts[] = Array.isArray(res.data)
+          ? res.data
+          : (res.data?.items || []);
+        const currentTurnAssistantMessages = getCurrentTurnAssistantMessages(msgs);
+        const shouldRecoverQuestionPart = (part: MessagePart) => (
+          isQuestionToolName(part.tool || '')
+          && (
+            isActiveToolPart(part)
+            || !!(part.callID && pendingQuestionsRef.current[part.callID])
+          )
+        );
+        const hasFetchedPendingQuestion = currentTurnAssistantMessages?.some((message) => (
+          (message.parts || []).some((part) => (
+            shouldRecoverQuestionPart(part)
+          ))
+        )) ?? false;
+        if (currentTurnAssistantMessages && hasFetchedPendingQuestion) {
+          const localQuestionPartIds = new Set<string>();
+          const localQuestionCallIds = new Set<string>();
+          for (const message of messagesRef.current) {
+            for (const part of message.parts || []) {
+              if (
+                (part.type !== 'tool' && part.type !== 'toolCall')
+                || !isQuestionToolName(part.tool || '')
+              ) continue;
+              if (part.id) localQuestionPartIds.add(part.id);
+              if (part.callID) localQuestionCallIds.add(part.callID);
+            }
+          }
+          const hasMissingFetchedQuestion = currentTurnAssistantMessages.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => (
+              shouldRecoverQuestionPart(part)
+              && !(
+                (part.id && localQuestionPartIds.has(part.id))
+                || (part.callID && localQuestionCallIds.has(part.callID))
+              )
+            ))
+          ));
+          if (hasMissingFetchedQuestion && !questionRecoveryInFlight) {
+            questionRecoveryInFlight = true;
+            try {
+              await refetch();
+            } finally {
+              questionRecoveryInFlight = false;
+            }
+          }
+        }
+
         const lastMsg = msgs[msgs.length - 1];
         if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
-          const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
-          if (hasFetchedActiveTool) {
-            return;
-          }
+          const currentTurnMessages = currentTurnAssistantMessages
+            ? new Set(currentTurnAssistantMessages)
+            : null;
+          const hasFetchedActiveTool = msgs.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => {
+              if (!isQuestionToolName(part.tool || '')) return isActiveToolPart(part);
+              const isPendingQuestion = isActiveToolPart(part)
+                || !!(part.callID && pendingQuestionsRef.current[part.callID]);
+              if (!isPendingQuestion) return false;
+              return currentTurnMessages === null || currentTurnMessages.has(msg);
+            })
+          ));
+          if (hasFetchedActiveTool) return;
+
           activeToolPartIdsRef.current.clear();
           const statusRes = await client.get('/api/session/status');
           const status = statusRes.data?.[sessionId];
-          if (isActiveSessionStatus(status)) {
-            return;
-          }
+          if (isActiveSessionStatus(status)) return;
+
           refetch();
           setIsStreaming(false);
         }

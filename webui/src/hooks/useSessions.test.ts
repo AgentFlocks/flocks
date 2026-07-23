@@ -714,6 +714,88 @@ describe('updateMessagePart scheduling', () => {
     expect((result.current.messages[1].parts as any[])[0].text).toBe('new reply');
   });
 
+  it('keeps one user message when refetch and delayed SSE reconcile its optimistic ID', async () => {
+    const optimisticId = 'msg_000000000001abcdefghijklmn';
+    vi.mocked(client.get).mockResolvedValueOnce({ data: [] });
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: optimisticId,
+        role: 'user',
+        timestamp: 100,
+        parts: [{
+          id: `temp-${optimisticId}-text`,
+          type: 'text',
+          text: '测试 question 工具',
+        }] as Message['parts'],
+      }));
+    });
+
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: {
+        items: [
+          {
+            info: {
+              id: optimisticId,
+              sessionID: 'sess-1',
+              role: 'user',
+              time: { created: 200 },
+            },
+            parts: [{
+              id: 'user-real-text',
+              messageID: optimisticId,
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '测试 question 工具',
+            }],
+          },
+          {
+            info: {
+              id: 'assistant-question',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              parentID: optimisticId,
+              time: { created: 201 },
+            },
+            parts: [{
+              id: 'question-part',
+              messageID: 'assistant-question',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'question',
+              callID: 'question-call',
+              state: { status: 'running' },
+            }],
+          },
+        ],
+        hasMore: false,
+        nextBefore: null,
+      },
+    });
+
+    await act(async () => {
+      await result.current.refetch();
+      result.current.updateMessage({
+        id: optimisticId,
+        sessionID: 'sess-1',
+        role: 'user',
+        time: { created: 200 },
+      });
+    });
+
+    expect(result.current.messages.filter((message) => message.role === 'user'))
+      .toHaveLength(1);
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      optimisticId,
+      'assistant-question',
+    ]);
+    expect(result.current.messages[0].parts.map((part) => part.id)).toEqual([
+      'user-real-text',
+    ]);
+  });
+
   it('truncateAfterMessage keeps the target by default', async () => {
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     await act(async () => {});
