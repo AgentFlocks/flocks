@@ -87,6 +87,7 @@ def resolve_sandbox_docker_config(
         network=_pick("network", "none"),
         user=_pick("user"),
         cap_drop=_pick("cap_drop", ["ALL"]),
+        cap_add=_pick("cap_add", []),
         env=merged_env if merged_env else None,
         setup_command=_pick("setup_command"),
         pids_limit=_pick("pids_limit"),

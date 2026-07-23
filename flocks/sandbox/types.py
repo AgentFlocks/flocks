@@ -57,6 +57,10 @@ class SandboxDockerConfig(BaseModel):
         default_factory=lambda: ["ALL"],
         description="需要丢弃的 Linux capability",
     )
+    cap_add: List[str] = Field(
+        default_factory=list,
+        description="Explicit Linux capabilities granted after cap_drop",
+    )
     env: Optional[Dict[str, str]] = Field(
         default=None,
         description="注入容器的环境变量",

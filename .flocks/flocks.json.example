@@ -57,6 +57,14 @@
       "max_age_days": 3
     }
   },
+  "pentest": {
+    "enabled": false,
+    "image": "flocks-pentest:latest",
+    "network": "bridge",
+    "pidsLimit": 512,
+    "memory": "4g",
+    "cpus": 2
+  },
   "server": {
     "cors": ["http://127.0.0.1:5173", "http://localhost:5173"]
   },

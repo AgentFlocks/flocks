@@ -195,6 +195,9 @@ def build_sandbox_create_args(
     for cap in cfg.cap_drop:
         args.extend(["--cap-drop", cap])
 
+    for cap in cfg.cap_add:
+        args.extend(["--cap-add", cap])
+
     args.extend(["--security-opt", "no-new-privileges"])
 
     if cfg.seccomp_profile:

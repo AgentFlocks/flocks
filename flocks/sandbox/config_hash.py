@@ -40,6 +40,7 @@ def compute_sandbox_config_hash(
         "network": docker.network,
         "user": docker.user,
         "cap_drop": sorted(docker.cap_drop),
+        "cap_add": sorted(docker.cap_add),
         "env": docker.env or {},
         "pids_limit": docker.pids_limit,
         "memory": docker.memory,

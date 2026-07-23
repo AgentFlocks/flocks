@@ -105,6 +105,7 @@ class AgentConfig(BaseModel):
     top_p: Optional[float] = None
     prompt: Optional[str] = None
     prompt_append: Optional[str] = Field(None, alias="promptAppend")
+    prompt_mode: Literal["append", "replace"] = Field("append", alias="promptMode")
     description: Optional[str] = Field(None, description="Description of when to use the agent")
     description_cn: Optional[str] = Field(
         None,
@@ -709,6 +710,13 @@ class ConfigInfo(BaseModel):
             "Sandbox configuration. Controls Docker container isolation for tool execution. "
             "Keys: mode (off/on), scope (session/agent/shared), "
             "workspace_access (none/ro/rw), workspace_root, docker, tools, prune."
+        ),
+    )
+    pentest: Optional[Dict[str, Any]] = Field(
+        None,
+        description=(
+            "Black-box pentest configuration. Keys include enabled, image, "
+            "maxConcurrentAgents, maxAgents, and strictScope."
         ),
     )
     allow_read_paths: Optional[List[str]] = Field(
