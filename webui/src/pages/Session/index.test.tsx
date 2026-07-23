@@ -1664,7 +1664,8 @@ describe('SessionPage session actions menu', () => {
 
     expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
     expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
-    expect(screen.getByRole('menu', { name: 'projectPicker.title' })).toBeVisible();
+    expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('menu', { name: 'projectPicker.title' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
   });
 
@@ -2126,6 +2127,7 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
     expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+    await user.click(screen.getByRole('button', { name: 'projectPicker.title' }));
     await user.click(screen.getByRole('menuitemradio', { name: 'Labs' }));
     await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
 

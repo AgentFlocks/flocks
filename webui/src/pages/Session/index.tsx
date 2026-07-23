@@ -980,7 +980,7 @@ export default function SessionPage() {
     setSseStatus('disconnected');
     setShowAgentOptions(false);
     setShowModelOptions(false);
-    setShowProjectOptions(true);
+    setShowProjectOptions(false);
   }, []);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
