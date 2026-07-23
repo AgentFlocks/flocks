@@ -306,6 +306,42 @@ def test_upgrade_wait_ports_exclude_legacy_cleanup_port(tmp_path: Path) -> None:
     assert restart_handoff._service_ports(args) == (5273,)
 
 
+def test_upgrade_stop_forces_captured_daemon_after_graceful_timeout(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    args = restart_handoff._parse_args(_simple_upgrade_handoff_args(tmp_path))
+
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "stop_all",
+        lambda _console: (_ for _ in ()).throw(
+            service_manager.ServiceError("daemon did not exit"),
+        ),
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda **kwargs: events.append(f"stop:{kwargs}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_record_handoff_log",
+        lambda message: events.append(f"log:{message}"),
+    )
+
+    assert restart_handoff._stop_services_before_upgrade(args)
+    assert events == [
+        "log:service_graceful_stop_failed error=daemon did not exit",
+        (
+            "stop:{'daemon_pid': 2468, 'backend_port': 5273, "
+            "'service_ports': (5273,), 'force_daemon_stop': True, "
+            "'timeout_seconds': 5.0}"
+        ),
+    ]
+
+
 def test_upgrade_install_failure_keeps_backup_and_temp_without_restart_or_rollback(
     monkeypatch,
     tmp_path: Path,
@@ -674,7 +710,7 @@ def test_v2026_7_1_upgrade_handoff_runs_tasks_and_restarts(monkeypatch, tmp_path
     ]
 
 
-def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
+def test_v2026_7_15_upgrade_handoff_pauses_before_tasks_and_restarts(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -707,8 +743,8 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
     )
     monkeypatch.setattr(
         restart_handoff,
-        "_ensure_backend_port_free",
-        lambda _backend_port: pytest.fail("legacy handover must stop the supervisor first"),
+        "_prepare_legacy_supervisor_for_upgrade",
+        lambda **kwargs: events.append(f"prepare-supervisor:{kwargs}") or True,
     )
     monkeypatch.setattr(
         restart_handoff,
@@ -736,14 +772,64 @@ def test_v2026_7_15_upgrade_handoff_stops_before_tasks_and_restarts(
 
     assert restart_handoff.run(args) == 0
     assert events == [
+        "wait-parent:1234",
+        ("prepare-supervisor:{'daemon_pid': 2468, 'service_ports': (5173,), 'timeout_seconds': 300.0}"),
+        "install",
+        "cleanup-handover",
         (
             "stop-supervisor:{'daemon_pid': 2468, 'backend_port': 5173, "
             "'service_ports': (5173,), 'force_daemon_stop': True}"
         ),
-        "wait-parent:1234",
-        "install",
-        "cleanup-handover",
         f"spawn:{restart_argv}:{tmp_path}:True",
+    ]
+
+
+def test_v2026_7_15_upgrade_handoff_force_stops_after_pause_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    events: list[str] = []
+    restart_argv = ["python.exe", "-m", "flocks.cli.main", "start"]
+    args = _v2026_7_15_handoff_args(tmp_path, restart_argv)
+
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
+    monkeypatch.setattr(
+        restart_handoff,
+        "_wait_for_parent_exit",
+        lambda parent_pid: events.append(f"wait-parent:{parent_pid}") or True,
+    )
+    monkeypatch.setattr(
+        restart_handoff,
+        "_prepare_legacy_supervisor_for_upgrade",
+        lambda **_kwargs: events.append("prepare-supervisor") or False,
+    )
+    monkeypatch.setattr(restart_handoff, "_legacy_supervisor_pid", lambda _args: 2468)
+    monkeypatch.setattr(
+        restart_handoff,
+        "_stop_supervisor_before_restart",
+        lambda **kwargs: events.append(f"stop-supervisor:{kwargs}") or True,
+    )
+    monkeypatch.setattr(restart_handoff, "_run_upgrade_tasks", lambda _args: events.append("install") or None)
+    monkeypatch.setattr(restart_handoff, "_cleanup_legacy_upgrade_handover", lambda _args: True)
+    monkeypatch.setattr(
+        restart_handoff.subprocess,
+        "Popen",
+        lambda _argv, **_kwargs: events.append("spawn") or SimpleNamespace(pid=4321),
+    )
+
+    assert restart_handoff.run(args) == 0
+    assert events == [
+        "log:started parent_pid=1234 backend=127.0.0.1:5173 frontend=127.0.0.1:5173",
+        "wait-parent:1234",
+        "prepare-supervisor",
+        "log:legacy_handover_pause_timeout",
+        (
+            "stop-supervisor:{'daemon_pid': 2468, 'backend_port': 5173, "
+            "'service_ports': (5173,), 'force_daemon_stop': True}"
+        ),
+        "install",
+        "spawn",
+        "log:restart_spawned pid=4321",
     ]
 
 
@@ -1081,6 +1167,106 @@ def test_stop_supervisor_requests_stop_when_health_probe_is_temporarily_unavaila
         poll_interval_seconds=0.001,
     )
     assert events == ["request-stop"]
+
+
+def test_stop_supervisor_force_stops_after_graceful_timeout(monkeypatch) -> None:
+    from flocks.cli import service_control
+
+    events: list[str] = []
+    daemon_running = True
+
+    monkeypatch.setattr(service_control, "supervisor_is_running", lambda _paths: daemon_running)
+    monkeypatch.setattr(
+        restart_handoff.service_manager,
+        "pid_is_running",
+        lambda _pid: daemon_running,
+    )
+    monkeypatch.setattr(restart_handoff, "_backend_port_in_use", lambda _port: False)
+    monkeypatch.setattr(
+        service_control,
+        "request_stop",
+        lambda **_kwargs: events.append("request-stop"),
+    )
+
+    def terminate(pid, _label, _console) -> None:
+        nonlocal daemon_running
+        events.append(f"terminate:{pid}")
+        daemon_running = False
+
+    monkeypatch.setattr(restart_handoff.service_manager, "_terminate_orphan_pid", terminate)
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(f"log:{message}"))
+
+    assert restart_handoff._stop_supervisor_before_restart(
+        daemon_pid=2468,
+        backend_port=5173,
+        force_daemon_stop=True,
+        timeout_seconds=0,
+        poll_interval_seconds=0,
+    )
+    assert events == [
+        "request-stop",
+        "log:supervisor_force_stop_after_timeout pid=2468",
+        "terminate:2468",
+    ]
+
+
+def test_prepare_legacy_supervisor_requests_upgrade_pause(monkeypatch) -> None:
+    from flocks.cli import service_control
+
+    events: list[str] = []
+    paused_status = SimpleNamespace(
+        backend=SimpleNamespace(paused=True),
+        webui=SimpleNamespace(paused=True),
+    )
+    response = SimpleNamespace(json=lambda: {"status": "paused"})
+
+    monkeypatch.setattr(service_control, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(restart_handoff.service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_backend_port_in_use", lambda _port: False)
+    monkeypatch.setattr(service_control, "parse_supervisor_status", lambda _payload: paused_status)
+
+    def control_api_request(method, path, **kwargs):
+        events.append(f"request:{method}:{path}:{kwargs['timeout']}")
+        return response
+
+    monkeypatch.setattr(service_control, "control_api_request", control_api_request)
+
+    assert restart_handoff._prepare_legacy_supervisor_for_upgrade(
+        daemon_pid=2468,
+        service_ports=(5173,),
+        timeout_seconds=45,
+        poll_interval_seconds=0,
+    )
+    assert events == ["request:POST:/upgrade/prepare:45"]
+
+
+def test_prepare_legacy_supervisor_polls_paused_state_after_request_timeout(monkeypatch) -> None:
+    from flocks.cli import service_control
+
+    events: list[str] = []
+    paused_status = SimpleNamespace(
+        backend=SimpleNamespace(paused=True),
+        webui=SimpleNamespace(paused=True),
+    )
+
+    monkeypatch.setattr(service_control, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(restart_handoff.service_manager, "pid_is_running", lambda _pid: True)
+    monkeypatch.setattr(restart_handoff, "_backend_port_in_use", lambda _port: False)
+    monkeypatch.setattr(
+        service_control,
+        "control_api_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(TimeoutError("busy building")),
+    )
+    monkeypatch.setattr(service_control, "read_supervisor_status", lambda **_kwargs: paused_status)
+    monkeypatch.setattr(restart_handoff, "_record_handoff_log", lambda message: events.append(message))
+
+    assert restart_handoff._prepare_legacy_supervisor_for_upgrade(
+        daemon_pid=2468,
+        service_ports=(5173,),
+        timeout_seconds=45,
+        poll_interval_seconds=0,
+    )
+    assert events == ["legacy_handover_prepare_request_failed error=busy building"]
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")

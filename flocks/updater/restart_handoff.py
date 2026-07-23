@@ -19,6 +19,8 @@ DEFAULT_PARENT_TIMEOUT_SECONDS = 20.0
 DEFAULT_PORT_TIMEOUT_SECONDS = 10.0
 POST_STOP_PORT_TIMEOUT_SECONDS = 20.0
 SUPERVISOR_STOP_TIMEOUT_SECONDS = 20.0
+FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS = 5.0
+LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS = 300.0
 DEFAULT_POLL_INTERVAL_SECONDS = 0.25
 
 
@@ -102,19 +104,89 @@ def _stop_supervisor_before_restart(
                 _record_handoff_log(f"supervisor_force_stop_failed error={terminate_exc}")
                 return False
 
+    def stopped() -> bool:
+        return (
+            not service_control.supervisor_is_running(paths)
+            and not service_manager.pid_is_running(daemon_pid)
+            and all(not _backend_port_in_use(port) for port in ports)
+        )
+
     deadline = time.monotonic() + timeout_seconds
     while time.monotonic() < deadline:
-        control_stopped = not service_control.supervisor_is_running(paths)
-        daemon_stopped = not service_manager.pid_is_running(daemon_pid)
-        ports_stopped = all(not _backend_port_in_use(port) for port in ports)
-        if control_stopped and daemon_stopped and ports_stopped:
+        if stopped():
             return True
         time.sleep(poll_interval_seconds)
-    return (
-        not service_control.supervisor_is_running(paths)
-        and not service_manager.pid_is_running(daemon_pid)
-        and all(not _backend_port_in_use(port) for port in ports)
-    )
+    if stopped():
+        return True
+
+    if force_daemon_stop and daemon_pid is not None and service_manager.pid_is_running(daemon_pid):
+        try:
+            _record_handoff_log(f"supervisor_force_stop_after_timeout pid={daemon_pid}")
+            service_manager._terminate_orphan_pid(daemon_pid, "daemon", _NullConsole())
+        except Exception as exc:
+            _record_handoff_log(f"supervisor_force_stop_failed error={exc}")
+            return False
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            if stopped():
+                return True
+            time.sleep(poll_interval_seconds)
+    return stopped()
+
+
+def _prepare_legacy_supervisor_for_upgrade(
+    *,
+    daemon_pid: int | None,
+    service_ports: Sequence[int],
+    timeout_seconds: float = LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS,
+    poll_interval_seconds: float = DEFAULT_POLL_INTERVAL_SECONDS,
+) -> bool:
+    """Pause a v2026.7.15 supervisor after its updater parent exits."""
+    from flocks.cli import service_control
+
+    paths = service_manager.runtime_paths()
+    ports = set(service_ports)
+
+    def paused() -> bool:
+        try:
+            status = service_control.read_supervisor_status(paths=paths, timeout=1.0)
+        except Exception:
+            return False
+        return status.backend.paused and status.webui.paused and all(not _backend_port_in_use(port) for port in ports)
+
+    deadline = time.monotonic() + timeout_seconds
+    try:
+        response = service_control.control_api_request(
+            "POST",
+            "/upgrade/prepare",
+            paths=paths,
+            timeout=timeout_seconds,
+            json={},
+        )
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise RuntimeError("legacy supervisor returned an invalid upgrade prepare response")
+        status = service_control.parse_supervisor_status(payload)
+        if status.backend.paused and status.webui.paused and all(not _backend_port_in_use(port) for port in ports):
+            return True
+    except Exception as exc:
+        _record_handoff_log(f"legacy_handover_prepare_request_failed error={exc}")
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in {404, 405}:
+            return False
+        if (
+            not service_manager.pid_is_running(daemon_pid)
+            and not service_control.supervisor_is_running(paths)
+            and all(not _backend_port_in_use(port) for port in ports)
+        ):
+            return True
+
+    while time.monotonic() < deadline:
+        if paused():
+            return True
+        time.sleep(poll_interval_seconds)
+    return paused()
 
 
 def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
@@ -213,12 +285,13 @@ def _stop_services_before_upgrade(args: argparse.Namespace) -> bool:
     try:
         service_manager.stop_all(_NullConsole())
     except service_manager.ServiceError as exc:
-        _record_handoff_log(f"service_stop_failed error={exc}")
-        return False
+        _record_handoff_log(f"service_graceful_stop_failed error={exc}")
     return _stop_supervisor_before_restart(
         daemon_pid=args.daemon_pid,
         backend_port=args.backend_port,
         service_ports=_service_ports(args),
+        force_daemon_stop=True,
+        timeout_seconds=FORCED_SUPERVISOR_STOP_TIMEOUT_SECONDS,
     )
 
 
@@ -277,9 +350,7 @@ def _start_service_after_upgrade(args: argparse.Namespace) -> tuple[bool, str, s
     stderr = updater_module._clean_process_output(completed.stderr)
     if completed.returncode == 0:
         return True, stdout, stderr
-    _record_handoff_log(
-        f"restart_failed returncode={completed.returncode} stdout={stdout} stderr={stderr}"
-    )
+    _record_handoff_log(f"restart_failed returncode={completed.returncode} stdout={stdout} stderr={stderr}")
     return False, stdout, stderr
 
 
@@ -591,26 +662,36 @@ def run(argv: Sequence[str] | None = None) -> int:
         f"frontend={args.frontend_host}:{args.frontend_port}"
     )
     legacy_daemon_pid = _legacy_supervisor_pid(args) if args.prepare_handover else None
+    legacy_service_ports = tuple(sorted({args.backend_port, args.frontend_port}))
     supervisor_stopped = False
-
-    if args.prepare_handover:
-        supervisor_stopped = _stop_supervisor_before_restart(
-            daemon_pid=legacy_daemon_pid,
-            backend_port=args.backend_port,
-            service_ports=(args.frontend_port,),
-            force_daemon_stop=True,
-        )
-        if not supervisor_stopped:
-            _record_handoff_log("legacy_handover_stop_timeout")
-            _cleanup_dir(args.cleanup_dir)
-            return 1
 
     if args.parent_pid is not None and not _wait_for_parent_exit(args.parent_pid):
         _record_handoff_log(f"parent_exit_timeout parent_pid={args.parent_pid}")
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    if not args.prepare_handover and (args.pro_wheel_path or args.pro_bundle_manifest_path):
+    if args.prepare_handover:
+        legacy_prepared = _prepare_legacy_supervisor_for_upgrade(
+            daemon_pid=legacy_daemon_pid,
+            service_ports=legacy_service_ports,
+            timeout_seconds=max(
+                LEGACY_SUPERVISOR_PREPARE_TIMEOUT_SECONDS,
+                float(args.sync_timeout),
+            ),
+        )
+        if not legacy_prepared:
+            _record_handoff_log("legacy_handover_pause_timeout")
+            supervisor_stopped = _stop_supervisor_before_restart(
+                daemon_pid=legacy_daemon_pid,
+                backend_port=args.backend_port,
+                service_ports=(args.frontend_port,),
+                force_daemon_stop=True,
+            )
+            if not supervisor_stopped:
+                _record_handoff_log("legacy_handover_stop_timeout")
+                _cleanup_dir(args.cleanup_dir)
+                return 1
+    elif args.pro_wheel_path or args.pro_bundle_manifest_path:
         supervisor_stopped = _stop_supervisor_before_restart(
             backend_port=args.backend_port,
             service_ports=(args.frontend_port,),
@@ -644,7 +725,17 @@ def run(argv: Sequence[str] | None = None) -> int:
         _cleanup_dir(args.cleanup_dir)
         return 1
 
-    if not supervisor_stopped and not _stop_supervisor_before_restart():
+    if args.prepare_handover and not supervisor_stopped:
+        supervisor_stopped = _stop_supervisor_before_restart(
+            daemon_pid=legacy_daemon_pid,
+            backend_port=args.backend_port,
+            service_ports=(args.frontend_port,),
+            force_daemon_stop=True,
+        )
+    elif not supervisor_stopped:
+        supervisor_stopped = _stop_supervisor_before_restart()
+
+    if not supervisor_stopped:
         _record_handoff_log("supervisor_stop_timeout")
         _cleanup_dir(args.cleanup_dir)
         return 1

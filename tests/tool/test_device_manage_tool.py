@@ -56,6 +56,18 @@ def make_template(**overrides) -> DeviceTemplate:
     return DeviceTemplate(**data)
 
 
+def make_update_template() -> DeviceTemplate:
+    return make_template(
+        credential_schema=[
+            {"key": "base_url", "storage": "config"},
+            {"key": "username", "storage": "secret", "input_type": "text"},
+            {"key": "auth_state", "storage": "config"},
+            {"key": "password", "storage": "secret", "input_type": "password"},
+            {"key": "api_key", "storage": "secret", "input_type": "password"},
+        ]
+    )
+
+
 def test_device_manage_is_registered():
     tools = {tool.name for tool in ToolRegistry.list_tools()}
     assert "device_manage" in tools
@@ -79,6 +91,7 @@ def test_device_manage_schema_includes_template_discovery_action():
         "storage_key",
         "group_id",
         "fields",
+        "enabled",
         "verify_ssl",
     }
 
@@ -318,20 +331,31 @@ async def test_device_manage_create_leaves_missing_fields_for_page_completion():
 
 
 @pytest.mark.asyncio
-async def test_device_manage_update_updates_existing_device_non_secret_config():
+async def test_device_manage_update_updates_fields_declared_by_template():
     updated_device = make_device(verify_ssl=True)
-    with patch(
-        "flocks.tool.device.manage_tool.update_device",
-        AsyncMock(return_value=updated_device),
-    ) as mocked_update:
+    template = make_update_template()
+    with (
+        patch(
+            "flocks.tool.device.manage_tool.fetch_device",
+            AsyncMock(return_value={"storage_key": template.storage_key}),
+        ),
+        patch(
+            "flocks.tool.device.plugin_index.list_device_templates",
+            return_value=[template],
+        ),
+        patch(
+            "flocks.tool.device.manage_tool.update_device",
+            AsyncMock(return_value=updated_device),
+        ) as mocked_update,
+    ):
         result = await device_manage(
             make_ctx(),
             action="update",
             device_id="dev-1",
             fields={
                 "base_url": "https://device.local",
-                "port": 443,
                 "auth_state": "ready",
+                "username": "admin",
             },
             verify_ssl=True,
         )
@@ -341,37 +365,108 @@ async def test_device_manage_update_updates_existing_device_non_secret_config():
     assert called_device_id == "dev-1"
     assert update_body.fields == {
         "base_url": "https://device.local",
-        "port": "443",
         "auth_state": "ready",
+        "username": "admin",
     }
     assert update_body.verify_ssl is True
     assert result.success is True
     assert result.output["device_id"] == "dev-1"
-    assert result.output["updated_fields"] == ["auth_state", "base_url", "port"]
+    assert result.output["updated_fields"] == [
+        "auth_state",
+        "base_url",
+        "username",
+    ]
     assert result.metadata["verify_ssl"] is True
 
 
 @pytest.mark.asyncio
-async def test_device_manage_update_rejects_sensitive_fields():
+async def test_device_manage_update_changes_enabled_state():
+    updated_device = make_device(enabled=False)
     with patch(
         "flocks.tool.device.manage_tool.update_device",
-        AsyncMock(),
+        AsyncMock(return_value=updated_device),
     ) as mocked_update:
         result = await device_manage(
             make_ctx(),
             action="update",
             device_id="dev-1",
-            fields={"api_key": "secret-value"},
+            enabled=False,
+        )
+
+    update_body = mocked_update.await_args.args[1]
+    assert update_body.enabled is False
+    assert update_body.fields is None
+    assert result.success is True
+    assert result.output["enabled"] is False
+    assert result.metadata["enabled"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field_name", ["password", "api_key"])
+async def test_device_manage_update_rejects_password_fields(field_name: str):
+    template = make_update_template()
+    with (
+        patch(
+            "flocks.tool.device.manage_tool.fetch_device",
+            AsyncMock(return_value={"storage_key": template.storage_key}),
+        ),
+        patch(
+            "flocks.tool.device.plugin_index.list_device_templates",
+            return_value=[template],
+        ),
+        patch(
+            "flocks.tool.device.manage_tool.update_device",
+            AsyncMock(),
+        ) as mocked_update,
+    ):
+        result = await device_manage(
+            make_ctx(),
+            action="update",
+            device_id="dev-1",
+            fields={field_name: "secret-value"},
         )
 
     mocked_update.assert_not_awaited()
     assert result.success is False
     assert "敏感字段" in (result.error or "")
-    assert "api_key" in (result.error or "")
+    assert field_name in (result.error or "")
 
 
 @pytest.mark.asyncio
-async def test_device_manage_update_requires_fields_or_verify_ssl():
+@pytest.mark.parametrize("field_name", ["enabled", "port"])
+async def test_device_manage_update_rejects_fields_missing_from_template(
+    field_name: str,
+):
+    template = make_update_template()
+    with (
+        patch(
+            "flocks.tool.device.manage_tool.fetch_device",
+            AsyncMock(return_value={"storage_key": template.storage_key}),
+        ),
+        patch(
+            "flocks.tool.device.plugin_index.list_device_templates",
+            return_value=[template],
+        ),
+        patch(
+            "flocks.tool.device.manage_tool.update_device",
+            AsyncMock(),
+        ) as mocked_update,
+    ):
+        result = await device_manage(
+            make_ctx(),
+            action="update",
+            device_id="dev-1",
+            fields={field_name: False},
+        )
+
+    mocked_update.assert_not_awaited()
+    assert result.success is False
+    assert "模板未声明字段" in (result.error or "")
+    assert field_name in (result.error or "")
+
+
+@pytest.mark.asyncio
+async def test_device_manage_update_requires_fields_verify_ssl_or_enabled():
     result = await device_manage(
         make_ctx(),
         action="update",
@@ -379,14 +474,20 @@ async def test_device_manage_update_requires_fields_or_verify_ssl():
     )
 
     assert result.success is False
-    assert "至少需要提供 fields 或 verify_ssl" in (result.error or "")
+    assert "至少需要提供 fields、verify_ssl 或 enabled" in (result.error or "")
 
 
 @pytest.mark.asyncio
 async def test_device_manage_update_reports_missing_device_as_tool_error():
-    with patch(
-        "flocks.tool.device.manage_tool.update_device",
-        AsyncMock(side_effect=DeviceNotFoundError("missing")),
+    with (
+        patch(
+            "flocks.tool.device.manage_tool.fetch_device",
+            AsyncMock(return_value=None),
+        ),
+        patch(
+            "flocks.tool.device.manage_tool.update_device",
+            AsyncMock(),
+        ) as mocked_update,
     ):
         result = await device_manage(
             make_ctx(),
@@ -395,6 +496,7 @@ async def test_device_manage_update_reports_missing_device_as_tool_error():
             fields={"base_url": "https://device.local"},
         )
 
+    mocked_update.assert_not_awaited()
     assert result.success is False
     assert "未找到" in (result.error or "")
 
