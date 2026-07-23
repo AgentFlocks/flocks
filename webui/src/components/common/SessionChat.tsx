@@ -3318,7 +3318,7 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
@@ -3376,7 +3376,7 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
@@ -4584,7 +4584,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>
@@ -4610,7 +4610,7 @@ function ChatMessageBubbleInner({
         {avatar}
         <div className="flex flex-col items-start flex-1 min-w-0">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>
@@ -5245,7 +5245,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   };
   const config = statusConfig[status] ?? statusConfig.pending;
   const isBashTool = isBashToolName(toolName);
-  const isLoadSkillTool = toolName === 'load_skill';
+  const isLoadSkillTool = toolName === 'skill_load' || toolName === 'load_skill';
   const todoEntries = toolName === 'todo'
     ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
     : [];
@@ -5268,12 +5268,18 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   const toolDisplayName = isLoadSkillTool
     ? t('chat.tool.loadSkill')
     : toolName.replace(/_/g, ' ');
+  const loadSkillName = isLoadSkillTool
+    ? [state.input?.name, state.input?.skill_name]
+      .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
+      ?.trim()
+    : undefined;
   const processStepLabel = isTodoTool
     ? t('chat.tool.todoUpdated')
     : isLoadSkillTool
       ? toolDisplayName
       : config.label;
   const processStepDetail = workflowHeaderSummary
+    || loadSkillName
     || displayTitle
     || inputSummary
     || toolDisplayName;

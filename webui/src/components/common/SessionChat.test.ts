@@ -2621,13 +2621,14 @@ describe('ChatToolPart load skill rendering', () => {
   const part = {
     id: 'load-skill-part',
     type: 'tool',
-    tool: 'load_skill',
+    tool: 'skill_load',
     callID: 'call-load-skill',
     state: {
       status: 'completed',
       input: {
-        skill_name: 'karpathy-guidelines',
+        name: 'agent-builder',
       },
+      title: 'Loaded skill: agent-builder',
       output: 'Skill loaded',
     },
   } as any;
@@ -2637,8 +2638,9 @@ describe('ChatToolPart load skill rendering', () => {
 
     const processStep = screen.getByTestId('chat-process-tool-step');
     expect(processStep.querySelector('summary')).toHaveTextContent('加载技能');
-    expect(processStep.querySelector('summary')).toHaveTextContent('skill_name=karpathy-guidelines');
-    expect(processStep.querySelector('summary')).not.toHaveTextContent('load skill');
+    expect(processStep.querySelector('summary')).toHaveTextContent('agent-builder');
+    expect(processStep.querySelector('summary')).not.toHaveTextContent('Loaded skill');
+    expect(processStep.querySelector('summary')).not.toHaveTextContent('已完成');
   });
 
   it('uses the localized action name in the expanded tool card', () => {
@@ -2646,6 +2648,24 @@ describe('ChatToolPart load skill rendering', () => {
 
     expect(container.querySelector('summary')).toHaveTextContent('加载技能');
     expect(container.querySelector('summary')).not.toHaveTextContent('load skill');
+  });
+});
+
+describe('ChatMessageBubble session typography', () => {
+  it('uses the outer navigation font size for the agent label', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-agent-label',
+        role: 'assistant',
+        parts: [{
+          id: 'assistant-text',
+          type: 'text',
+          text: '已加载技能。',
+        } as any],
+      }),
+    }));
+
+    expect(screen.getByText('Rex')).toHaveClass('text-sm');
   });
 });
 
