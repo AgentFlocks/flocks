@@ -169,11 +169,31 @@ class TestCuratedCatalogModels:
     def test_moonshot_catalog(self):
         models = get_provider_model_definitions("moonshot")
         assert {m.id for m in models} == {
+            "kimi-k3",
+            "kimi-k2.7-code",
             "kimi-k2.5",
             "kimi-k2.6",
-            "kimi-k2-thinking",
-            "kimi-k2",
         }
+
+        k3 = next(m for m in models if m.id == "kimi-k3")
+        assert k3.capabilities.supports_vision is True
+        assert k3.capabilities.supports_reasoning is True
+        assert k3.capabilities.interleaved["field"] == "reasoning_content"
+        assert k3.pricing.input == 20.0
+        assert k3.pricing.output == 100.0
+        assert k3.pricing.cache_read == 2.0
+        assert k3.limits.context_window == 1048576
+        assert k3.limits.max_output_tokens == 1048576
+
+        k27 = next(m for m in models if m.id == "kimi-k2.7-code")
+        assert k27.capabilities.supports_vision is True
+        assert k27.capabilities.supports_reasoning is True
+        assert k27.capabilities.interleaved["field"] == "reasoning_content"
+        assert k27.pricing.input == 6.5
+        assert k27.pricing.output == 27.0
+        assert k27.pricing.cache_read == 1.3
+        assert k27.limits.context_window == 262144
+        assert k27.limits.max_output_tokens == 32768
 
         k26 = next(m for m in models if m.id == "kimi-k2.6")
         assert k26.capabilities.supports_vision is True
@@ -184,8 +204,6 @@ class TestCuratedCatalogModels:
         assert k26.pricing.cache_read == 1.3
         assert k26.limits.context_window == 256000
 
-        thinking = next(m for m in models if m.id == "kimi-k2-thinking")
-        assert thinking.capabilities.supports_reasoning is True
         k25 = next(m for m in models if m.id == "kimi-k2.5")
         assert k25.capabilities.supports_reasoning is True
         assert k25.capabilities.interleaved["field"] == "reasoning_content"

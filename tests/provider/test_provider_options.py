@@ -58,6 +58,26 @@ class TestBuildProviderOptions:
 
         assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
 
+    def test_moonshot_kimi_k27_forces_official_thinking_payload(self):
+        options = provider_options.build_provider_options(
+            "moonshot",
+            "kimi-k2.7-code",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
+
+    def test_moonshot_kimi_k3_uses_default_reasoning_effort(self):
+        options = provider_options.build_provider_options(
+            "moonshot",
+            "kimi-k3",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "max"}
+
     def test_kimi_k27_forces_thinking_even_when_toggle_is_disabled(self):
         options = provider_options.build_provider_options(
             "threatbook-cn-llm",
