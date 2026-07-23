@@ -199,6 +199,20 @@ async def lifespan(app: FastAPI):
         _recover_orphan_tool_parts,
     )
 
+    async def _recover_pentest_runs() -> None:
+        from flocks.pentest.store import recover_interrupted_runs
+
+        recovered = await recover_interrupted_runs()
+        if recovered:
+            log.info("pentest.runs.recovered", {"count": recovered})
+
+    _schedule_startup_phase(
+        app,
+        log,
+        "pentest.recover_interrupted_runs",
+        _recover_pentest_runs,
+    )
+
     try:
         from flocks.console.scheduler import ConsoleSyncScheduler
 
@@ -1207,6 +1221,7 @@ from flocks.server.routes.console_upgrade import router as console_upgrade_route
 from flocks.server.routes.flockspro_license import router as flockspro_license_router
 from flocks.server.routes.webui import router as webui_pages_router
 from flocks.server.routes.contracts import router as contracts_router
+from flocks.server.routes.pentest import router as pentest_router
 # Original routes with /api/ prefix
 app.include_router(health_router, prefix="/api", tags=["Health"])
 app.include_router(session_router, prefix="/api/session", tags=["Session"])
@@ -1270,6 +1285,7 @@ app.include_router(device_router, prefix="/api/devices", tags=["Device"])
 app.include_router(console_upgrade_router, prefix="/api/console", tags=["ConsoleUpgrade"])
 app.include_router(webui_pages_router, prefix="/api", tags=["WebUI"])
 app.include_router(contracts_router, prefix="/api", tags=["AccessContracts"])
+app.include_router(pentest_router, prefix="/api/pentest", tags=["Pentest"])
 
 # ============================================================
 # TUI Compatible Routes (without /api/ prefix)

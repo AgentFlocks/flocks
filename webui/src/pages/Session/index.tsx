@@ -37,6 +37,12 @@ import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } 
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2, Session } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
+import {
+  DEFAULT_PENTEST_DRAFT,
+  PentestComposerPanel,
+  PentestProgress,
+  type PentestDraft,
+} from './PentestPanel';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -391,6 +397,9 @@ export default function SessionPage() {
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
+  const [pentestEnabled, setPentestEnabled] = useState(false);
+  const [pentestMode, setPentestMode] = useState(false);
+  const [pentestDraft, setPentestDraft] = useState<PentestDraft>(DEFAULT_PENTEST_DRAFT);
   const updateModelMenuLeftOffset = useCallback(() => {
     const selector = modelSelectorRef.current;
     if (!selector) return;
@@ -407,6 +416,18 @@ export default function SessionPage() {
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
+
+  useEffect(() => {
+    let active = true;
+    client.get('/api/config').then(response => {
+      if (active) setPentestEnabled(Boolean(response.data?.pentest?.enabled));
+    }).catch(() => {
+      if (active) setPentestEnabled(false);
+    });
+    return () => {
+      active = false;
+    };
+  }, []);
 
   const sessionProjectIds = useMemo(
     () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
@@ -1034,23 +1055,35 @@ export default function SessionPage() {
     options?: PromptDisplayOptions,
   ) => {
     try {
+      if (pentestMode) {
+        if (!pentestDraft.authorization.confirmed) {
+          toast.warning('Authorization required', 'Confirm authorization before starting Pentest Mode.');
+          return;
+        }
+        if (pentestDraft.targets.some(target => !target.value.trim())) {
+          toast.warning('Target required', 'Add every authorized target before starting.');
+          return;
+        }
+      }
       const response = await client.post('/api/session', {
         title: 'New Session',
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
         ...(selectedModelAuto ? { model_auto: true } : {}),
+        ...(pentestMode ? { mode: 'pentest', pentest: pentestDraft } : {}),
       });
       const newSessionId = response.data.id;
 
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
+      setPentestMode(false);
       setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };
-      const effectiveAgent = agentOverride || selectedAgent || 'rex';
+      const effectiveAgent = pentestMode ? 'rex' : agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
       if (options?.displayText) payload.displayText = options.displayText;
@@ -1060,7 +1093,18 @@ export default function SessionPage() {
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     }
-  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedModelAuto, selectedProjectIDForCreate, toast, t]);
+  }, [
+    addSession,
+    fetchProjects,
+    pentestDraft,
+    pentestMode,
+    searchQuery,
+    selectedAgent,
+    selectedModelAuto,
+    selectedProjectIDForCreate,
+    toast,
+    t,
+  ]);
 
   const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
@@ -2004,6 +2048,26 @@ export default function SessionPage() {
         </div>
 
         {/* Chat — powered by unified SessionChat */}
+        {!selectedSessionId && pentestEnabled && pentestMode && (
+          <div className="px-4 pt-4">
+            <PentestComposerPanel
+              value={pentestDraft}
+              onChange={setPentestDraft}
+              onClose={() => setPentestMode(false)}
+            />
+          </div>
+        )}
+        {selectedSession?.mode === 'pentest' && activeChatSessionId && (
+          <PentestProgress
+            sessionId={activeChatSessionId}
+            onOpenSession={sessionId => {
+              void sessionApi.get(sessionId).then(session => {
+                setSelectedSessionFallback(session as unknown as Session);
+                setSelectedSessionId(sessionId);
+              });
+            }}
+          />
+        )}
         {resolvingSelectedSession ? (
           <div className="flex min-h-0 flex-1 items-center justify-center">
             <LoadingSpinner delayMs={180} />
@@ -2013,7 +2077,13 @@ export default function SessionPage() {
             key={activeChatSessionId ?? 'empty-session'}
             sessionId={activeChatSessionId}
             live={Boolean(activeChatSessionId)}
-          hideInput={selectedSession?.canWrite === false}
+          hideInput={
+            selectedSession?.canWrite === false
+            || (
+              selectedSession?.mode === 'pentest'
+              && selectedSession?.pentestRole !== 'orchestrator'
+            )
+          }
           display={{
             compact: false,
             showActions: true,
@@ -2051,7 +2121,25 @@ export default function SessionPage() {
             />
           )}
           toolbarSlot={
-            <div className="relative" data-agent-selector>
+            <div className="flex items-center gap-1">
+              {pentestEnabled && !selectedSessionId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPentestMode(current => !current);
+                    setSelectedAgent('rex');
+                  }}
+                  className={`flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs font-medium transition-colors ${
+                    pentestMode
+                      ? 'bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300'
+                      : 'text-zinc-600 hover:bg-zinc-200/60 dark:text-zinc-400 dark:hover:bg-zinc-800'
+                  }`}
+                >
+                  <Shield className="h-3 w-3" />
+                  Pentest
+                </button>
+              )}
+              <div className="relative" data-agent-selector>
               <button
                 type="button"
                 onClick={() => setShowAgentOptions(!showAgentOptions)}
@@ -2158,6 +2246,7 @@ export default function SessionPage() {
                   </div>
                 </div>
               )}
+              </div>
             </div>
           }
           centerToolbarSlot={

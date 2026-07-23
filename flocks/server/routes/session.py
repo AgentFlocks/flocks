@@ -199,6 +199,11 @@ class SessionCreateRequest(BaseModel):
         False,
         description="Enable WebUI runtime model failover for this session",
     )
+    session_mode: Literal["chat", "pentest"] = Field("chat", alias="mode")
+    pentest: Optional[Dict[str, Any]] = Field(
+        None,
+        description="Structured black-box pentest configuration",
+    )
 
 
 class FileDiff(BaseModel):
@@ -262,6 +267,10 @@ class SessionResponse(BaseModel):
     canDelete: bool = Field(False, description="Whether current user can delete this session")
     isShared: bool = Field(False, description="Whether this session is locally shared")
     goal: Optional[SessionGoalResponse] = Field(None, description="Persisted session goal state")
+    mode: Literal["chat", "pentest"] = "chat"
+    pentestRunID: Optional[str] = None
+    pentestRole: Optional[str] = None
+    pentest: Optional[Dict[str, Any]] = None
 
 
 class SessionListItem(BaseModel):
@@ -333,6 +342,10 @@ def _session_to_response(
         canWrite=can_write,
         canDelete=can_delete,
         isShared=is_shared,
+        mode=session.session_mode,
+        pentestRunID=session.pentest_run_id,
+        pentestRole=session.pentest_role,
+        pentest=session.pentest_config,
     )
 
 
@@ -746,6 +759,35 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 detail=f"Auto mode is unavailable: {auto_reason}",
             )
 
+    pentest_spec = None
+    pentest_run_id = None
+    if request.session_mode == "pentest":
+        from flocks.config.config import Config
+
+        config = await Config.get()
+        pentest_config = config.pentest or {}
+        if not bool(pentest_config.get("enabled", False)):
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Pentest Mode is disabled",
+            )
+        if request.parentID:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Pentest mode can only be created as a root session",
+            )
+        from flocks.pentest.models import PentestRunSpec
+        from flocks.pentest.store import PentestStateStore
+
+        try:
+            pentest_spec = PentestRunSpec.model_validate(request.pentest or {})
+        except Exception as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"Invalid pentest configuration: {exc}",
+            ) from exc
+        pentest_run_id = PentestStateStore.new_run_id()
+
     from flocks.project.instance import Instance
     from flocks.project.project import (
         DEFAULT_PROJECT_ID,
@@ -832,8 +874,35 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         owner_username=None if is_api_token_client else current_user.username,
         model_auto=request.model_auto,
         model_pinned=False,
+        agent="rex" if request.session_mode == "pentest" else None,
+        session_mode=request.session_mode,
+        pentest_run_id=pentest_run_id,
+        pentest_role="orchestrator" if request.session_mode == "pentest" else None,
+        pentest_config=(
+            pentest_spec.model_dump(by_alias=True) if pentest_spec is not None else None
+        ),
         **({"category": request.category} if request.category else {}),
     )
+    if pentest_spec is not None and pentest_run_id is not None:
+        from flocks.pentest.store import PentestStateStore
+
+        try:
+            store = PentestStateStore.create(
+                run_id=pentest_run_id,
+                root_session_id=session.id,
+                spec=pentest_spec,
+                owner_username=session.owner_username,
+            )
+            updated = await Session.update(
+                project_id=session.project_id,
+                session_id=session.id,
+                pentest_root=str(store.root),
+            )
+            if updated is not None:
+                session = updated
+        except Exception:
+            await Session.delete(session.project_id, session.id)
+            raise
     Project.invalidate_session_stats()
 
     log.info("session.created", {"session_id": session.id})
@@ -1340,6 +1409,21 @@ async def _abort_session_processing(sessionID: str) -> bool:
         bg_cancelled = get_background_manager().cancel_by_parent_session_id(sessionID)
     except Exception as exc:
         log.warn("session.abort.bg_cancel_error", {"error": str(exc)})
+
+    try:
+        session = await Session.get_by_id(sessionID)
+        if (
+            session is not None
+            and session.session_mode == "pentest"
+            and session.pentest_role == "orchestrator"
+        ):
+            from flocks.pentest.store import PentestStateStore
+
+            store = PentestStateStore.from_session(session)
+            store.interrupt_running(reason="Session aborted")
+            store.set_run_status("stopped")
+    except Exception as exc:
+        log.warn("session.abort.pentest_state_error", {"error": str(exc)})
 
     log.info("session.aborted", {
         "session_id": sessionID,
@@ -4100,6 +4184,26 @@ async def send_session_message_async(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
+    if (
+        session.session_mode == "pentest"
+        and session.pentest_role in {"recon", "executor", "verifier"}
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "Pentest child transcripts are read-only; continue them through "
+                "the parent delegate_task call"
+            ),
+        )
+    if (
+        session.session_mode == "pentest"
+        and session.pentest_role == "orchestrator"
+    ):
+        from flocks.pentest.store import PentestStateStore
+
+        store = PentestStateStore.from_session(session)
+        if store.read("run.json").get("status") in {"created", "stopped", "interrupted"}:
+            store.set_run_status("running")
     if http_request is not None:
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)

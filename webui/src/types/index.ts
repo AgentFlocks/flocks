@@ -29,6 +29,10 @@ export interface Session {
   canDelete?: boolean;
   isShared?: boolean;
   goal?: SessionGoalState | null;
+  mode?: 'chat' | 'pentest';
+  pentestRunID?: string;
+  pentestRole?: 'orchestrator' | 'recon' | 'executor' | 'verifier';
+  pentest?: Record<string, unknown>;
 }
 
 export interface SessionGoalState {
