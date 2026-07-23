@@ -1,0 +1,33 @@
+[project]
+name = "strix-chat-api"
+version = "0.1.0"
+description = "Local HTTP chat sidecar for the open-source Strix agent engine"
+requires-python = ">=3.12"
+dependencies = [
+  "strix-agent>=1.1.0,<2",
+]
+
+[project.scripts]
+strix-chat-api = "strix_chat_api.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/strix_chat_api"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.2",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]

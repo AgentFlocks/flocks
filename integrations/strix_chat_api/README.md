@@ -1,0 +1,59 @@
+# Strix Chat API
+
+This sidecar exposes the open-source Strix interactive agent loop as a local
+HTTP chat service. It runs in its own Python environment because Strix and
+Flocks intentionally have independent dependency graphs.
+
+## Run
+
+```bash
+cd integrations/strix_chat_api
+uv sync
+uv run strix-chat-api
+```
+The server binds to `127.0.0.1:8486` by default. Configure it with:
+
+- `STRIX_CHAT_HOST`
+- `STRIX_CHAT_PORT`
+- `STRIX_CHAT_API_TOKEN`
+- the normal Strix variables such as `STRIX_LLM` and `LLM_API_KEY`
+
+Set the same optional token in Flocks as `FLOCKS_STRIX_CHAT_API_TOKEN`.
+
+## API
+
+Start an advisory chat without a target:
+
+```bash
+curl -X POST http://127.0.0.1:8486/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Explain how you would assess this authentication design"}'
+```
+
+Start a target-backed chat:
+
+```bash
+curl -X POST http://127.0.0.1:8486/api/v1/chat \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Map the attack surface first","targets":["/path/to/project"]}'
+```
+
+Continue the same native Strix agent session:
+
+```bash
+curl -X POST http://127.0.0.1:8486/api/v1/chat/<chat_id>/message \
+  -H 'Content-Type: application/json' \
+  -d '{"message":"Now focus on IDOR risks"}'
+```
+
+Read projected chat and tool events:
+
+```bash
+curl http://127.0.0.1:8486/api/v1/chat/<chat_id>?after=0
+```
+
+Delete the chat to stop its agent loop and remove the live sandbox:
+
+```bash
+curl -X DELETE http://127.0.0.1:8486/api/v1/chat/<chat_id>
+```

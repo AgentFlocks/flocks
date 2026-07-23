@@ -1,0 +1,18 @@
+"""Pure URL routing helpers for the dependency-light HTTP server."""
+
+
+def chat_route(path: str) -> tuple[str | None, str | None]:
+    """Resolve a Chat API path to ``(chat_id, action)``."""
+    normalized = path.rstrip("/") or "/"
+    if normalized == "/api/v1/chat":
+        return None, "create"
+    prefix = "/api/v1/chat/"
+    if not normalized.startswith(prefix):
+        return None, None
+    suffix = normalized[len(prefix) :]
+    parts = suffix.split("/")
+    if len(parts) == 1 and parts[0]:
+        return parts[0], None
+    if len(parts) == 2 and parts[0] and parts[1] == "message":
+        return parts[0], "message"
+    return None, None
