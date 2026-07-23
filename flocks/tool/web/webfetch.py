@@ -192,18 +192,40 @@ async def webfetch_tool(
     format: str = "markdown",
     timeout: Optional[int] = None,
 ) -> ToolResult:
-    """
-    Fetch content from a URL
-    
-    Args:
-        ctx: Tool context
-        url: URL to fetch
-        format: Output format (text, markdown, html)
-        timeout: Timeout in seconds
-        
-    Returns:
-        ToolResult with fetched content
-    """
+    """Fetch a URL after applying Pentest Mode scope rules when active."""
+    pentest_session = None
+    pentest_store = None
+    try:
+        from flocks.pentest.policy import check_scope
+        from flocks.pentest.store import PentestStateStore
+        from flocks.session.session import Session
+
+        pentest_session = await Session.get_by_id(ctx.session_id)
+        if (
+            pentest_session is not None
+            and pentest_session.session_mode == "pentest"
+        ):
+            pentest_store = PentestStateStore.from_session(pentest_session)
+            allowed, reason = check_scope(
+                pentest_store.read("run.json").get("spec", {}),
+                url,
+            )
+            if not allowed:
+                return ToolResult(success=False, error=reason)
+    except Exception as exc:
+        return ToolResult(success=False, error=f"Pentest scope check failed: {exc}")
+
+    def finalize(output: str, title: str) -> ToolResult:
+        if pentest_store is not None:
+            from flocks.pentest.redaction import redact_text
+
+            refs = pentest_store.read("run.json").get("spec", {}).get(
+                "secretRefs",
+                [],
+            )
+            output = redact_text(output, refs)
+        return ToolResult(success=True, output=output, title=title, metadata={})
+
     # Validate URL
     if not url.startswith("http://") and not url.startswith("https://"):
         return ToolResult(
@@ -245,8 +267,22 @@ async def webfetch_tool(
         else:
             headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         
+        final_url = url
         async with aiohttp.ClientSession() as session:
             async with session.get(url, headers=headers, timeout=aiohttp.ClientTimeout(total=timeout_sec)) as response:
+                final_url = str(response.url)
+                if pentest_store is not None:
+                    from flocks.pentest.policy import check_scope
+
+                    allowed, reason = check_scope(
+                        pentest_store.read("run.json").get("spec", {}),
+                        final_url,
+                    )
+                    if not allowed:
+                        return ToolResult(
+                            success=False,
+                            error=f"Redirect target denied: {reason}",
+                        )
                 if response.status != 200:
                     return ToolResult(
                         success=False,
@@ -271,7 +307,7 @@ async def webfetch_tool(
                 
                 content_type = response.headers.get("Content-Type", "")
         
-        title = f"{url} ({content_type})"
+        title = f"{final_url} ({content_type})"
         
         # Process content based on format
         if format == "markdown":
@@ -287,12 +323,7 @@ async def webfetch_tool(
         else:  # html
             output = content
         
-        return ToolResult(
-            success=True,
-            output=output,
-            title=title,
-            metadata={}
-        )
+        return finalize(output, title)
         
     except ImportError:
         # Fallback to urllib if aiohttp not available
@@ -305,10 +336,23 @@ async def webfetch_tool(
             })
 
             with urllib.request.urlopen(req, timeout=timeout_sec) as response:
+                final_url = response.geturl()
+                if pentest_store is not None:
+                    from flocks.pentest.policy import check_scope
+
+                    allowed, reason = check_scope(
+                        pentest_store.read("run.json").get("spec", {}),
+                        final_url,
+                    )
+                    if not allowed:
+                        return ToolResult(
+                            success=False,
+                            error=f"Redirect target denied: {reason}",
+                        )
                 content = response.read().decode('utf-8', errors='replace')
                 content_type = response.headers.get("Content-Type", "")
 
-            title = f"{url} ({content_type})"
+            title = f"{final_url} ({content_type})"
 
             if format == "markdown":
                 if "text/html" in content_type:
@@ -323,12 +367,7 @@ async def webfetch_tool(
             else:
                 output = content
 
-            return ToolResult(
-                success=True,
-                output=output,
-                title=title,
-                metadata={}
-            )
+            return finalize(output, title)
 
         except urllib.error.HTTPError as e:
             return ToolResult(

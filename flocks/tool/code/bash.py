@@ -382,6 +382,29 @@ async def bash_tool(
     1. Host execution (default) - directly on the host machine
     2. Sandbox execution - inside a Docker container (when sandbox config is present)
     """
+    session = None
+    try:
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id(ctx.session_id)
+    except Exception:
+        session = None
+    if session is not None and session.session_mode == "pentest":
+        from flocks.pentest.policy import check_command_scope
+        from flocks.pentest.store import PentestStateStore
+
+        store = PentestStateStore.from_session(session)
+        allowed, reason = check_command_scope(
+            store.read("run.json").get("spec", {}),
+            command,
+        )
+        if not allowed:
+            return ToolResult(
+                success=False,
+                error=reason,
+                title=description or "Out-of-scope command blocked",
+            )
+
     # Resolve working directory
     base_dir = get_tool_base_dir()
     cwd = _resolve_workdir(base_dir, workdir)
@@ -398,6 +421,7 @@ async def bash_tool(
     # Check for sandbox configuration
     sandbox = _get_sandbox_config_from_ctx(ctx)
 
+    result: ToolResult
     if sandbox:
         desired_host = (host or "sandbox").strip().lower()
         if desired_host == "host":
@@ -411,7 +435,7 @@ async def bash_tool(
                     title=description or command,
                     metadata={"sandbox": True, "elevated_requested": True},
                 )
-            return await _execute_host(
+            result = await _execute_host(
                 ctx=ctx,
                 command=command,
                 cwd=cwd,
@@ -420,17 +444,18 @@ async def bash_tool(
                 description=description,
                 extra_metadata={"sandbox": True, "elevated": True},
             )
-        return await _execute_sandboxed(
-            ctx=ctx,
-            command=command,
-            cwd=cwd,
-            sandbox=sandbox,
-            timeout_sec=timeout_sec,
-            timeout_ms=timeout_ms,
-            description=description,
-        )
+        else:
+            result = await _execute_sandboxed(
+                ctx=ctx,
+                command=command,
+                cwd=cwd,
+                sandbox=sandbox,
+                timeout_sec=timeout_sec,
+                timeout_ms=timeout_ms,
+                description=description,
+            )
     else:
-        return await _execute_host(
+        result = await _execute_host(
             ctx=ctx,
             command=command,
             cwd=cwd,
@@ -438,6 +463,16 @@ async def bash_tool(
             timeout_ms=timeout_ms,
             description=description,
         )
+    if session is not None and session.session_mode == "pentest":
+        from flocks.pentest.redaction import redact_text
+        from flocks.pentest.store import PentestStateStore
+
+        store = PentestStateStore.from_session(session)
+        refs = store.read("run.json").get("spec", {}).get("secretRefs", [])
+        result.output = redact_text(result.output or "", refs)
+        if result.error:
+            result.error = redact_text(result.error, refs)
+    return result
 
 
 async def _execute_host(

@@ -1619,6 +1619,8 @@ class ToolRegistry:
             ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
+            # pentest/ — canonical scope, evidence, finding, and report lifecycle
+    ("flocks.tool.pentest", ["findings", "proxy"]),
             # device/ — security device asset context and status probes
             ("flocks.tool.device", ["manage_tool"]),
             # channel/ — IM platform messaging
