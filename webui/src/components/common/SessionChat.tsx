@@ -5245,6 +5245,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   };
   const config = statusConfig[status] ?? statusConfig.pending;
   const isBashTool = isBashToolName(toolName);
+  const isLoadSkillTool = toolName === 'load_skill';
   const todoEntries = toolName === 'todo'
     ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
     : [];
@@ -5264,11 +5265,18 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
-  const processStepLabel = isTodoTool ? t('chat.tool.todoUpdated') : config.label;
+  const toolDisplayName = isLoadSkillTool
+    ? t('chat.tool.loadSkill')
+    : toolName.replace(/_/g, ' ');
+  const processStepLabel = isTodoTool
+    ? t('chat.tool.todoUpdated')
+    : isLoadSkillTool
+      ? toolDisplayName
+      : config.label;
   const processStepDetail = workflowHeaderSummary
     || displayTitle
     || inputSummary
-    || toolName.replace(/_/g, ' ');
+    || toolDisplayName;
   const processStepIcon = isTodoTool
     ? <ListTree className="h-[15px] w-[15px]" />
     : config.icon;
@@ -5404,7 +5412,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
             {workflowHeaderSummary ? (
               <span className="text-[11px] text-emerald-700 truncate min-w-0">
                 {workflowHeaderSummary}

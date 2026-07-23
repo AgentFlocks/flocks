@@ -92,6 +92,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.tool.running': '执行中',
   'chat.tool.completed': '已完成',
   'chat.tool.error': '失败',
+  'chat.tool.loadSkill': '加载技能',
   'chat.tool.todoUpdated': '已更新待办',
   'chat.tool.inputParams': '输入参数',
   'chat.tool.outputResult': '输出结果',
@@ -2613,6 +2614,38 @@ describe('ChatToolPart delegate rendering', () => {
 
     expect(screen.getByTestId('chat-process-delegate-step')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-process-tool-step')).not.toBeInTheDocument();
+  });
+});
+
+describe('ChatToolPart load skill rendering', () => {
+  const part = {
+    id: 'load-skill-part',
+    type: 'tool',
+    tool: 'load_skill',
+    callID: 'call-load-skill',
+    state: {
+      status: 'completed',
+      input: {
+        skill_name: 'karpathy-guidelines',
+      },
+      output: 'Skill loaded',
+    },
+  } as any;
+
+  it('uses the localized action name in the process timeline', () => {
+    render(React.createElement(ChatToolPart, { part, processStep: true }));
+
+    const processStep = screen.getByTestId('chat-process-tool-step');
+    expect(processStep.querySelector('summary')).toHaveTextContent('加载技能');
+    expect(processStep.querySelector('summary')).toHaveTextContent('skill_name=karpathy-guidelines');
+    expect(processStep.querySelector('summary')).not.toHaveTextContent('load skill');
+  });
+
+  it('uses the localized action name in the expanded tool card', () => {
+    const { container } = render(React.createElement(ChatToolPart, { part }));
+
+    expect(container.querySelector('summary')).toHaveTextContent('加载技能');
+    expect(container.querySelector('summary')).not.toHaveTextContent('load skill');
   });
 });
 

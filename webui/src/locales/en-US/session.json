@@ -233,6 +233,7 @@
       "running": "Running",
       "completed": "Completed",
       "error": "Failed",
+      "loadSkill": "Load skill",
       "todoUpdated": "Todos updated",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",

@@ -233,6 +233,7 @@
       "running": "执行中",
       "completed": "已完成",
       "error": "失败",
+      "loadSkill": "加载技能",
       "todoUpdated": "已更新待办",
       "inputParams": "输入参数",
       "outputResult": "输出结果",
