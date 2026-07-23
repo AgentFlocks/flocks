@@ -258,7 +258,7 @@ export default function DelegateTaskCard({ part, processStep = false }: Delegate
     return (
       <>
         <details data-testid="chat-process-delegate-step" className="group/delegate min-w-0">
-          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
             <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500 dark:text-violet-400">
               <Bot className="h-4 w-4" />
             </span>

@@ -370,7 +370,7 @@ describe('SessionPage session actions menu', () => {
       pageSize: 20,
     });
     expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    expect(screen.getByText('Original Session')).toBeInTheDocument();
+    expect(screen.getByText('Original Session').closest('h3')).toHaveClass('text-sm');
 
     await user.click(screen.getByRole('button', { name: 'toggleTasks' }));
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
@@ -859,6 +859,7 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
+    expect(projectRow?.firstElementChild).toHaveClass('text-sm');
     await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
     await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.renameAction' }));
     const input = screen.getByLabelText('projectDialog.nameLabel');

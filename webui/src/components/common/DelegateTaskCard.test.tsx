@@ -162,6 +162,7 @@ describe('DelegateTaskCard process step', () => {
     expect(processStep).toHaveTextContent('调研 OpenClaw 最新版本');
     expect(processStep).toHaveTextContent('执行中');
     expect(processStep).toHaveTextContent('后台');
+    expect(processStep.querySelector('summary')).toHaveClass('text-sm');
 
     fireEvent.click(screen.getByRole('button', { name: /查看执行过程/ }));
 

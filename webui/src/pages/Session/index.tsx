@@ -265,12 +265,12 @@ function SessionSidebarItemInner({
             }}
             placeholder={t('renamePlaceholder')}
             disabled={renameSubmitting}
-            className="h-6 w-full min-w-0 rounded-md border border-blue-300 bg-white px-1.5 text-[13px] text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-[#252c35] dark:text-white"
+            className="h-6 w-full min-w-0 rounded-md border border-blue-300 bg-white px-1.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-[#252c35] dark:text-white"
             aria-label={t('rename')}
             data-session-rename-input
           />
         ) : (
-          <h3 className={`flex min-w-0 flex-1 items-center gap-1.5 truncate text-[13px] ${
+          <h3 className={`flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm ${
             selected ? 'font-medium' : 'font-normal'
           }`}>
             <span className="truncate">{session.title}</span>
@@ -1752,7 +1752,7 @@ export default function SessionPage() {
                   return (
                     <div key={group.id} className="group/project relative">
                       <div
-                        className={`flex h-[34px] items-center gap-1 rounded-lg px-2 text-[13px] transition-colors ${
+                        className={`flex h-[34px] items-center gap-1 rounded-lg px-2 text-sm transition-colors ${
                           isSelectedProject
                             ? 'font-semibold text-[#202328] dark:text-white'
                             : 'font-medium text-[#474b51] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
@@ -2079,7 +2079,7 @@ export default function SessionPage() {
           </div>
 
           <div className="flex min-w-0 items-center">
-            <h2 className="truncate text-[13px] font-semibold text-[#555a61] dark:text-[#c3ccd6]">
+            <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>

@@ -3982,7 +3982,7 @@ function ProcessGroupDetails({
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-semibold transition-colors hover:text-zinc-900 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden"
+        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-semibold transition-colors hover:text-zinc-900 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden"
       >
         {summary}
         <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
@@ -4208,7 +4208,7 @@ function ChatMessageBubbleInner({
                       </div>
                     )}
                     {processStep ? (
-                      <div className="mb-[9px] ml-2 mt-[3px] border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-[13px] leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                      <div className="mb-[9px] ml-2 mt-[3px] border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
                         <StreamingMarkdown
                           content={displayText}
                           isStreaming={isActive && !isUser}
@@ -4254,7 +4254,7 @@ function ChatMessageBubbleInner({
                         aria-expanded={isExpanded}
                         onClick={() => togglePart(partKey)}
                         disabled={isThinking}
-                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200"
+                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200"
                       >
                         <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
                           {isThinking ? (
@@ -4267,7 +4267,7 @@ function ChatMessageBubbleInner({
                         <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
-                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-[13px] leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
                           <StreamingReasoningText
                             content={thinkingText}
                             isStreaming={isThinking}
@@ -4916,7 +4916,7 @@ function ChatQuestionResult({
   if (processStep) {
     return (
       <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
           <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
             {statusIcon}
           </span>
@@ -5378,7 +5378,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   if (processStep) {
     return (
       <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
-        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
           <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
             {processStepIcon}
           </span>

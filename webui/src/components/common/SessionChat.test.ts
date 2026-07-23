@@ -1595,6 +1595,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(processGroup.querySelector('summary')).toHaveClass('text-sm');
     expect(processGroup.className).not.toContain('rounded-lg');
     expect(processGroup.closest('[data-process-output="true"]')?.className).not.toContain('bg-white');
     expect(screen.getByText('已读取当前 workflow.md。')).toBeInTheDocument();
@@ -1604,6 +1605,7 @@ describe('SessionChat intermediate process collapse', () => {
     expect(processGroup.open).toBe(true);
     expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
+    expect(screen.getByTestId('chat-process-reasoning-step').querySelector('button')).toHaveClass('text-sm');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('已完成');
   });
 
