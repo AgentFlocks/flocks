@@ -26,7 +26,7 @@ import {
   type LucideIcon,
 } from 'lucide-react';
 import { useState, useEffect, useLayoutEffect, useCallback, useMemo, useRef, lazy, Suspense } from 'react';
-import type { ComponentType } from 'react';
+import type { ComponentType, CSSProperties, KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { useTranslation } from 'react-i18next';
 // Modals are only rendered after the user clicks/triggers them; pulling them
 // into the eager Layout chunk costs ~1.7k LOC + i18n keys + lucide icons that
@@ -35,6 +35,13 @@ import { useTranslation } from 'react-i18next';
 // would force Rollup to bundle the whole module eagerly).
 const ONBOARDING_DISMISSED_KEY = 'flocks_onboarding_dismissed';
 const COLLAPSED_NAV_SECTIONS_KEY = 'flocks_layout_collapsed_nav_sections';
+const SIDEBAR_WIDTH_KEY = 'flocks_layout_sidebar_width';
+const SIDEBAR_DEFAULT_WIDTH = 208;
+const SIDEBAR_MIN_WIDTH = 176;
+const SIDEBAR_MAX_WIDTH = 520;
+const SOC_DASHBOARD_TITLE_KEY = 'soc-dashboard-custom-title-v1';
+const SOC_DASHBOARD_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
+const SOC_DASHBOARD_TITLE_MAX_LENGTH = 64;
 
 type LazyLayoutModule = { default: ComponentType<any> };
 
@@ -76,6 +83,65 @@ function saveCollapsedNavSectionIds(sectionIds: Set<string>): void {
   } catch {
     // Local storage can be unavailable in restricted browser contexts.
   }
+}
+
+function clampSidebarWidth(width: number): number {
+  if (!Number.isFinite(width)) return SIDEBAR_DEFAULT_WIDTH;
+  return Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, Math.round(width)));
+}
+
+function estimateSidebarWidthForName(name?: string | null): number {
+  const normalized = (name || '').trim();
+  if (!normalized) return SIDEBAR_DEFAULT_WIDTH;
+
+  const weightedLength = Array.from(normalized).reduce((total, char) => {
+    return total + (char.charCodeAt(0) > 255 ? 1 : 0.58);
+  }, 0);
+
+  return clampSidebarWidth(weightedLength * 18 + 112);
+}
+
+function readSidebarWidth(): number {
+  try {
+    const rawValue = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+    if (!rawValue) return SIDEBAR_DEFAULT_WIDTH;
+    const parsedValue = Number.parseInt(rawValue, 10);
+    return Number.isFinite(parsedValue) ? clampSidebarWidth(parsedValue) : SIDEBAR_DEFAULT_WIDTH;
+  } catch {
+    return SIDEBAR_DEFAULT_WIDTH;
+  }
+}
+
+function saveSidebarWidth(width: number): void {
+  try {
+    localStorage.setItem(SIDEBAR_WIDTH_KEY, String(clampSidebarWidth(width)));
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+}
+
+function readSocDashboardTitle(): string {
+  try {
+    return localStorage.getItem(SOC_DASHBOARD_TITLE_KEY)?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+function saveSocDashboardTitle(title: string): void {
+  const normalizedTitle = title.trim();
+  try {
+    if (normalizedTitle) {
+      localStorage.setItem(SOC_DASHBOARD_TITLE_KEY, normalizedTitle);
+    } else {
+      localStorage.removeItem(SOC_DASHBOARD_TITLE_KEY);
+    }
+  } catch {
+    // Local storage can be unavailable in restricted browser contexts.
+  }
+  window.dispatchEvent(new CustomEvent(SOC_DASHBOARD_TITLE_CHANGED_EVENT, {
+    detail: { title: normalizedTitle || null },
+  }));
 }
 
 const OnboardingModal = lazyLayoutComponent(() => import('@/components/common/OnboardingModal'));
@@ -189,6 +255,8 @@ export default function Layout() {
   const { user, logout } = useAuth();
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
+  const [sidebarWidth, setSidebarWidth] = useState(readSidebarWidth);
+  const [resizingSidebar, setResizingSidebar] = useState(false);
   const [accountMenuOpen, setAccountMenuOpen] = useState(false);
   const accountMenuRef = useRef<HTMLDivElement | null>(null);
   const isHome = location.pathname === '/';
@@ -198,7 +266,7 @@ export default function Layout() {
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
   const toast = useToast();
-  const { productName, proProductName } = useProductName();
+  const { productName, proProductName, configuredDisplayName } = useProductName();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -225,7 +293,14 @@ export default function Layout() {
   const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(readCollapsedNavSectionIds);
   const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
   const [creatingWorkspaceCustomPageSession, setCreatingWorkspaceCustomPageSession] = useState(false);
+  const [socTitleDialogOpen, setSocTitleDialogOpen] = useState(false);
+  const [socTitleDraft, setSocTitleDraft] = useState(readSocDashboardTitle);
   const workspaceMenuCloseTimerRef = useRef<number | null>(null);
+  const hasCustomDisplayName = Boolean(configuredDisplayName?.trim());
+  const expandedSidebarWidth = sidebarWidth;
+  const sidebarOffsetStyle = {
+    '--layout-sidebar-width': `${expandedSidebarWidth}px`,
+  } as CSSProperties;
 
   useEffect(() => {
     if (!accountMenuOpen) return undefined;
@@ -238,6 +313,72 @@ export default function Layout() {
     document.addEventListener('pointerdown', handlePointerDown);
     return () => document.removeEventListener('pointerdown', handlePointerDown);
   }, [accountMenuOpen]);
+
+  useEffect(() => {
+    if (!hasCustomDisplayName) return;
+    const estimatedWidth = estimateSidebarWidthForName(configuredDisplayName);
+    setSidebarWidth((currentWidth) => {
+      const nextWidth = Math.max(currentWidth, estimatedWidth);
+      if (nextWidth !== currentWidth) {
+        saveSidebarWidth(nextWidth);
+      }
+      return nextWidth;
+    });
+  }, [configuredDisplayName, hasCustomDisplayName]);
+
+  const updateSidebarWidth = useCallback((width: number) => {
+    const nextWidth = clampSidebarWidth(width);
+    setSidebarWidth(nextWidth);
+    saveSidebarWidth(nextWidth);
+  }, []);
+
+  const handleSidebarResizePointerDown = useCallback((event: ReactPointerEvent<HTMLDivElement>) => {
+    if (collapsed) return;
+    event.preventDefault();
+    setResizingSidebar(true);
+
+    const target = event.currentTarget;
+    const pointerId = event.pointerId;
+    try {
+      target.setPointerCapture?.(pointerId);
+    } catch {
+      // Pointer capture is best-effort; dragging still works through window listeners.
+    }
+
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const handlePointerMove = (moveEvent: PointerEvent) => {
+      updateSidebarWidth(moveEvent.clientX);
+    };
+
+    const stopResize = () => {
+      try {
+        target.releasePointerCapture?.(pointerId);
+      } catch {
+        // The pointer may already be released by the browser.
+      }
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      setResizingSidebar(false);
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+  }, [collapsed, updateSidebarWidth]);
+
+  const handleSidebarResizeKeyDown = useCallback((event: ReactKeyboardEvent<HTMLDivElement>) => {
+    if (collapsed) return;
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    updateSidebarWidth(sidebarWidth + (event.key === 'ArrowRight' ? 16 : -16));
+  }, [collapsed, sidebarWidth, updateSidebarWidth]);
 
   // useLayoutEffect runs synchronously before paint, so there's no flash on initial load.
   // It also re-runs when the user navigates back to /, covering both cases in one place.
@@ -584,8 +725,9 @@ export default function Layout() {
   const accountInitial = (user?.username || productName || 'F').trim().charAt(0).toUpperCase();
   const accountRoleLabel = user?.role === 'admin' ? tAuth('admin.roleAdmin') : tAuth('admin.roleMember');
   const hasVisibleUpdate = hasUpdate && canManageUpdates;
+  const hasVisibleProductUpdate = hasVisibleUpdate && !hasCustomDisplayName;
   const showFlocksproUpgradeEntry = canManageUpdates;
-  const productUpdateTitle = hasVisibleUpdate
+  const productUpdateTitle = hasVisibleProductUpdate
     ? t('hasNewVersion', { version: formatUpdateVersion(latestVersion) || '' })
     : productName;
   const settingsReturnState = {
@@ -610,6 +752,7 @@ export default function Layout() {
     ? getLocalizedWebUIContractTitle(activeWorkspaceMenu, i18n.language)
     : '';
   const showWorkspaceCustomPageAction = canCreateWorkspaceCustomPage && isSocWorkspace(activeWorkspaceMenu);
+  const showSocDashboardTitleAction = isSocWorkspace(activeWorkspaceMenu);
 
   const cancelWorkspaceMenuClose = useCallback(() => {
     if (workspaceMenuCloseTimerRef.current === null) return;
@@ -703,6 +846,33 @@ export default function Layout() {
     toast,
   ]);
 
+  const openSocTitleDialog = useCallback(() => {
+    setSocTitleDraft(readSocDashboardTitle());
+    setSocTitleDialogOpen(true);
+    setOpenWorkspaceMenuId(null);
+  }, []);
+
+  const closeSocTitleDialog = useCallback(() => {
+    setSocTitleDialogOpen(false);
+  }, []);
+
+  const handleSaveSocTitle = useCallback(() => {
+    saveSocDashboardTitle(socTitleDraft);
+    setSocTitleDialogOpen(false);
+    if (location.pathname === '/contracts/webui/workspaces/soc_ui/soc-dashboard') {
+      window.setTimeout(() => window.location.reload(), 0);
+    }
+  }, [location.pathname, socTitleDraft]);
+
+  const handleResetSocTitle = useCallback(() => {
+    setSocTitleDraft('');
+    saveSocDashboardTitle('');
+    setSocTitleDialogOpen(false);
+    if (location.pathname === '/contracts/webui/workspaces/soc_ui/soc-dashboard') {
+      window.setTimeout(() => window.location.reload(), 0);
+    }
+  }, [location.pathname]);
+
   const openManualUpdateCheck = useCallback(() => {
     setAccountMenuOpen(false);
     setUpdateInfo(null);
@@ -742,6 +912,64 @@ export default function Layout() {
         </Suspense>
       </LazyLoadErrorBoundary>
 
+      {socTitleDialogOpen && (
+        <div
+          className="fixed inset-0 z-[80] flex items-center justify-center bg-black/40 px-4"
+          onMouseDown={(event) => {
+            if (event.target === event.currentTarget) {
+              closeSocTitleDialog();
+            }
+          }}
+        >
+          <form
+            className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white p-4 shadow-xl dark:border-zinc-800 dark:bg-zinc-900"
+            onSubmit={(event) => {
+              event.preventDefault();
+              handleSaveSocTitle();
+            }}
+          >
+            <h2 className="text-base font-semibold text-zinc-950 dark:text-zinc-50">
+              {tWebUIContractPage('workspace.customTitleDialogTitle')}
+            </h2>
+            <label className="mt-4 block text-sm font-medium text-zinc-700 dark:text-zinc-200">
+              {tWebUIContractPage('workspace.customTitle')}
+              <input
+                autoFocus
+                value={socTitleDraft}
+                onChange={(event) => setSocTitleDraft(event.target.value)}
+                maxLength={SOC_DASHBOARD_TITLE_MAX_LENGTH}
+                placeholder={tWebUIContractPage('workspace.customTitlePlaceholder')}
+                className="mt-2 h-10 w-full rounded-md border border-zinc-200 bg-white px-3 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-100 dark:placeholder:text-zinc-500 dark:focus:border-zinc-500"
+              />
+            </label>
+            <div className="mt-4 flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={handleResetSocTitle}
+                className="inline-flex h-9 items-center rounded-md px-3 text-sm font-semibold text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+              >
+                {tWebUIContractPage('workspace.customTitleReset')}
+              </button>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={closeSocTitleDialog}
+                  className="inline-flex h-9 items-center rounded-md border border-zinc-200 px-3 text-sm font-semibold text-zinc-600 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
+                >
+                  {tWebUIContractPage('workspace.customTitleCancel')}
+                </button>
+                <button
+                  type="submit"
+                  className="inline-flex h-9 items-center rounded-md bg-zinc-950 px-3 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200"
+                >
+                  {tWebUIContractPage('workspace.customTitleSave')}
+                </button>
+              </div>
+            </div>
+          </form>
+        </div>
+      )}
+
       {sidebarOpen && (
         <div
           className="fixed inset-0 bg-gray-600 bg-opacity-75 z-40 lg:hidden dark:bg-black dark:bg-opacity-75"
@@ -751,23 +979,24 @@ export default function Layout() {
 
       <aside
         className={`
-          fixed inset-y-0 left-0 z-50 bg-zinc-100 border-r border-zinc-200 dark:bg-zinc-950 dark:border-zinc-800
-          transition-all duration-300 ease-in-out
+          fixed inset-y-0 left-0 z-50 max-w-[calc(100vw-2rem)] bg-zinc-100 border-r border-zinc-200 dark:bg-zinc-950 dark:border-zinc-800
+          ${resizingSidebar ? '' : 'transition-all duration-300 ease-in-out'}
           lg:translate-x-0
           ${sidebarOpen ? 'translate-x-0' : '-translate-x-full'}
-          ${collapsed ? 'w-16' : 'w-52'}
+          ${collapsed ? 'w-16' : ''}
         `}
+        style={collapsed ? undefined : { width: expandedSidebarWidth }}
       >
         <div className="flex flex-col h-full overflow-visible">
           {/* Logo */}
-          <div className={`flex items-center h-16 flex-shrink-0 ${collapsed ? 'justify-center px-2' : 'pl-6 pr-4'}`}>
+          <div className={`flex min-h-16 items-center flex-shrink-0 ${collapsed ? 'h-16 justify-center px-2' : 'px-4 py-3'}`}>
             {collapsed ? (
               <div
                 className="relative flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900"
                 title={productName}
               >
                 <Sparkles className="w-4 h-4 text-zinc-500 dark:text-zinc-300" />
-                {hasVisibleUpdate && (
+                {hasVisibleProductUpdate && (
                   <button
                     type="button"
                     onClick={() => setShowUpdate(true)}
@@ -780,8 +1009,13 @@ export default function Layout() {
             ) : (
               <>
                 <div className="flex min-w-0 flex-1 items-center gap-2">
-                  <span className="min-w-0 text-xl font-bold text-zinc-900 whitespace-nowrap dark:text-zinc-50">{productName}</span>
-                  {hasVisibleUpdate && (
+                  <span
+                    className={`min-w-0 text-xl font-bold leading-tight text-zinc-900 dark:text-zinc-50 ${hasCustomDisplayName ? 'whitespace-normal [overflow-wrap:anywhere]' : 'truncate'}`}
+                    title={productName}
+                  >
+                    {productName}
+                  </span>
+                  {hasVisibleProductUpdate && (
                     <button
                       type="button"
                       onClick={() => setShowUpdate(true)}
@@ -997,6 +1231,22 @@ export default function Layout() {
           </div>
         </div>
 
+        {!collapsed && (
+          <div
+            role="separator"
+            aria-label={t('resizeNav')}
+            aria-orientation="vertical"
+            aria-valuemin={SIDEBAR_MIN_WIDTH}
+            aria-valuemax={SIDEBAR_MAX_WIDTH}
+            aria-valuenow={expandedSidebarWidth}
+            tabIndex={0}
+            onPointerDown={handleSidebarResizePointerDown}
+            onKeyDown={handleSidebarResizeKeyDown}
+            className="absolute inset-y-0 right-0 hidden w-1 cursor-col-resize touch-none outline-none transition-colors hover:bg-zinc-300 focus-visible:bg-zinc-400 lg:block dark:hover:bg-zinc-700 dark:focus-visible:bg-zinc-600"
+            title={t('resizeNav')}
+          />
+        )}
+
         {/* Collapse tab (desktop) */}
         <button
           onClick={() => setCollapsed(!collapsed)}
@@ -1020,8 +1270,9 @@ export default function Layout() {
           onMouseEnter={cancelWorkspaceMenuClose}
           onMouseLeave={scheduleWorkspaceMenuClose}
           className={`fixed inset-y-0 z-[60] flex w-52 max-w-[calc(100vw-4rem)] flex-col border-r border-zinc-200 bg-zinc-100 text-zinc-600 shadow-2xl shadow-zinc-900/10 transition-[left] duration-300 ease-in-out dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-300 dark:shadow-black/30 ${
-            collapsed ? 'left-16' : 'left-52'
+            collapsed ? 'left-16' : 'left-52 lg:left-[var(--layout-sidebar-width)]'
           }`}
+          style={sidebarOffsetStyle}
         >
           <div className="flex h-16 items-center gap-3 border-b border-zinc-200 px-4 dark:border-white/10">
             {ActiveWorkspaceMenuIcon && (
@@ -1138,6 +1389,18 @@ export default function Layout() {
                 </button>
               </div>
             ) : null}
+
+            {showSocDashboardTitleAction ? (
+              <div className="space-y-1">
+                <button
+                  type="button"
+                  onClick={openSocTitleDialog}
+                  className="flex h-8 w-full items-center rounded-md px-3 text-left text-xs font-semibold uppercase tracking-wider text-zinc-400 transition-colors hover:text-zinc-600 dark:text-zinc-500 dark:hover:text-zinc-300"
+                >
+                  <span className="min-w-0 flex-1 truncate">{tWebUIContractPage('workspace.customTitle')}</span>
+                </button>
+              </div>
+            ) : null}
           </div>
         </nav>
       )}
@@ -1154,7 +1417,8 @@ export default function Layout() {
 
       {/* Main content area */}
       <div
-        className={`flex flex-col h-screen transition-all duration-300 ${collapsed ? 'lg:pl-16' : 'lg:pl-52'}`}
+        className={`flex flex-col h-screen ${resizingSidebar ? '' : 'transition-all duration-300'} ${collapsed ? 'lg:pl-16' : 'lg:pl-[var(--layout-sidebar-width)]'}`}
+        style={sidebarOffsetStyle}
       >
         <main className="flex-1 overflow-hidden bg-gray-50 dark:bg-zinc-950">
           {isFullScreenPage ? (

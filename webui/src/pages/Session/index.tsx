@@ -331,6 +331,7 @@ export default function SessionPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
@@ -740,6 +741,7 @@ export default function SessionPage() {
   useEffect(() => {
     const sessionParam = searchParams.get('session');
     const messageParam = searchParams.get('message');
+    const focusMessageParam = searchParams.get('focusMessage');
     const displayParam = searchParams.get('display');
     if (!sessionParam) return;
 
@@ -754,6 +756,7 @@ export default function SessionPage() {
         setPendingInitialMessage(null);
         setPendingInitialDisplayText(null);
       }
+      setPendingFocusMessageId(focusMessageParam || null);
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
@@ -1949,6 +1952,8 @@ export default function SessionPage() {
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
           initialDisplayText={pendingInitialDisplayText}
+          focusMessageId={pendingFocusMessageId}
+          onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);

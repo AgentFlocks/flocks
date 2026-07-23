@@ -212,6 +212,113 @@ def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path:
     }
 
 
+def test_soc_dashboard_activity_exposes_triage_workflow_link_context(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    now_ms = int(datetime.now().timestamp() * 1000)
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_params TEXT NOT NULL DEFAULT '{}',
+                output_results TEXT NOT NULL DEFAULT '{}',
+                started_at INTEGER NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute(
+            """
+            INSERT INTO workflow_executions
+            (id, workflow_id, status, input_params, output_results, started_at, payload)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "triage-running",
+                "stream_alert_triage",
+                "running",
+                json.dumps({"input_date": "2026-07-23"}),
+                json.dumps(
+                    {
+                        "enriched_alerts_with_triage": [
+                            {"threat_name": "远程命令执行攻击"}
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                now_ms,
+                json.dumps({"sessionId": "session-triage-1", "messageId": "msg-triage-1"}),
+            ),
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.WORKFLOW_DB = workflow_db
+    handlers.DEFAULT_SQLITE_DB = tmp_path / "missing-soc.db"
+    handlers._activity_pruned_at = float("inf")
+
+    payload = handlers._get_activity({"bootstrap": "latest"})
+    triage_events = [
+        event for event in payload["workflowEvents"]
+        if event["workflowId"] == "stream_alert_triage"
+    ]
+
+    assert len(triage_events) == 1
+    triage = triage_events[0]
+    assert triage["stage"] == "triage"
+    assert triage["status"] == "running"
+    assert triage["alert"]["threatName"] == "远程命令执行攻击"
+    assert triage["sessionId"] == "session-triage-1"
+    assert triage["messageId"] == "msg-triage-1"
+
+
+def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_path: Path):
+    soc_db = tmp_path / "soc.db"
+    soc_db.touch()
+    workflow_db = tmp_path / "workflow.db"
+    now_ms = int(datetime.now().timestamp() * 1000)
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                input_params TEXT NOT NULL DEFAULT '{}',
+                output_results TEXT NOT NULL DEFAULT '{}',
+                started_at INTEGER NOT NULL,
+                payload TEXT NOT NULL DEFAULT '{}'
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "triage-running",
+                "stream_alert_triage",
+                "running",
+                "{}",
+                json.dumps({"triage_results": [{"alert_name": "Mock 研判"}]}, ensure_ascii=False),
+                now_ms,
+                json.dumps({"sessionId": "session-1", "messageId": "message-1"}),
+            ),
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = soc_db
+    handlers.WORKFLOW_DB = workflow_db
+    handlers._activity_pruned_at = float("inf")
+
+    payload = handlers._get_activity({"bootstrap": "latest"})
+
+    assert "error" not in payload
+    assert payload["workflowEvents"][0]["alert"]["threatName"] == "Mock 研判"
+    assert payload["workflowEvents"][0]["sessionId"] == "session-1"
+
+
 def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path):
     tasks_db = tmp_path / "tasks.db"
     today_at_1100 = datetime.now().astimezone().replace(
@@ -329,9 +436,18 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
                 id TEXT PRIMARY KEY,
                 workflow_id TEXT NOT NULL,
                 status TEXT NOT NULL,
+                current_phase TEXT,
+                current_node_id TEXT,
+                current_node_type TEXT,
+                current_step_index INTEGER,
+                step_count INTEGER NOT NULL DEFAULT 0,
+                input_params TEXT NOT NULL DEFAULT '{}',
+                output_results TEXT NOT NULL DEFAULT '{}',
+                error_message TEXT,
                 started_at INTEGER NOT NULL,
                 finished_at INTEGER,
-                updated_at INTEGER
+                updated_at INTEGER,
+                payload TEXT NOT NULL DEFAULT '{}'
             )
             """
         )
@@ -352,21 +468,96 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
             [
                 ("custom_workflow", 2, 1, 1, 1784775000000),
                 ("stream_alert_denoise", 10, 9, 1, today_ms),
+                ("stream_alert_triage", 1, 0, 0, yesterday_ms + 5000),
                 ("e6d5581a-b105-4c75-a102-1d8e6c97e1c1", 1, 0, 0, 1784775700000),
             ],
         )
         conn.executemany(
-            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?)",
+            """
+            INSERT INTO workflow_executions (
+                id, workflow_id, status, current_phase, current_node_id, current_node_type,
+                current_step_index, step_count, input_params, output_results, error_message,
+                started_at, finished_at, updated_at, payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
             [
-                ("wf-1", "custom_workflow", "error", yesterday_ms, yesterday_ms + 1000, yesterday_ms + 1000),
-                ("wf-2", "stream_alert_denoise", "success", today_ms, today_ms + 1000, today_ms + 1000),
+                (
+                    "wf-1",
+                    "custom_workflow",
+                    "error",
+                    "error",
+                    "node-1",
+                    "python",
+                    1,
+                    1,
+                    "{}",
+                    "{}",
+                    "boom",
+                    yesterday_ms,
+                    yesterday_ms + 1000,
+                    yesterday_ms + 1000,
+                    "{}",
+                ),
+                (
+                    "wf-2",
+                    "stream_alert_denoise",
+                    "success",
+                    "success",
+                    "dedup",
+                    "python",
+                    1,
+                    1,
+                    json.dumps({"alerts": [{"threat_name": "SQL注入攻击"}]}),
+                    json.dumps({"unique_alerts": [{"threat_name": "SQL注入攻击"}]}),
+                    None,
+                    today_ms,
+                    today_ms + 1000,
+                    today_ms + 1000,
+                    "{}",
+                ),
+                (
+                    "wf-triage",
+                    "stream_alert_triage",
+                    "running",
+                    "running",
+                    "concurrent_triage",
+                    "python",
+                    2,
+                    1,
+                    json.dumps({"input_date": yesterday_at_1100.date().isoformat()}),
+                    json.dumps(
+                        {
+                            "enriched_alerts_with_triage": [
+                                {
+                                    "threat_name": "远程命令执行攻击",
+                                    "report_title": "高危RCE研判",
+                                }
+                            ]
+                        },
+                        ensure_ascii=False,
+                    ),
+                    None,
+                    yesterday_ms + 5000,
+                    None,
+                    yesterday_ms + 6000,
+                    json.dumps({"sessionId": "session-triage-1", "messageId": "msg-triage-1"}),
+                ),
                 (
                     "wf-dynamic",
                     "e6d5581a-b105-4c75-a102-1d8e6c97e1c1",
                     "running",
+                    "running",
+                    "node-1",
+                    "python",
+                    1,
+                    0,
+                    "{}",
+                    "{}",
+                    None,
                     1784775700000,
                     None,
                     1784775700000,
+                    "{}",
                 ),
             ],
         )
@@ -420,23 +611,33 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     ]
     assert payload["scheduledExecutionCount"] == 3
     assert payload["scheduledTodayExecutionCount"] == 1
-    assert payload["workflowExecutionCount"] == 12
+    assert payload["workflowExecutionCount"] == 13
     assert payload["workflowTodayExecutionCount"] == 1
     assert [workflow["id"] for workflow in payload["workflows"]] == [
+        "stream_alert_triage",
         "stream_alert_denoise",
         "custom_workflow",
-        "stream_alert_triage",
     ]
     assert [workflow["name"] for workflow in payload["workflows"]] == [
+        "告警研判工作流",
         "告警降噪工作流",
         "自定义处置流",
-        "告警研判工作流",
     ]
-    assert payload["workflows"][0]["executionCount"] == 10
-    assert payload["workflows"][0]["todayExecutionCount"] == 1
-    assert payload["workflows"][0]["successCount"] == 9
-    assert payload["workflows"][0]["successRate"] == 0.9
-    assert payload["workflows"][0]["latestExecutionHash"] == "wf-2"
+    triage = payload["workflows"][0]
+    assert triage["latestExecutionHash"] == "wf-triage"
+    assert triage["latestAlertName"] == "远程命令执行攻击"
+    assert triage["progressLabel"] == "第 2/3 步"
+    assert triage["progressPercent"] == 0.6667
+    assert triage["sessionId"] == "session-triage-1"
+    assert triage["messageId"] == "msg-triage-1"
+    denoise = payload["workflows"][1]
+    assert denoise["executionCount"] == 10
+    assert denoise["todayExecutionCount"] == 1
+    assert denoise["successCount"] == 9
+    assert denoise["successRate"] == 0.9
+    assert denoise["latestExecutionHash"] == "wf-2"
+    assert denoise["latestAlertName"] == "SQL注入攻击"
+    assert denoise["progressLabel"] == "已完成"
 
 
 def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):

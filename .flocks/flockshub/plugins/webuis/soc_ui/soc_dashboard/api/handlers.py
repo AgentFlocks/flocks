@@ -38,6 +38,12 @@ SOC_PINNED_WORKFLOW_NAMES = {
     "stream_alert_denoise": "告警降噪工作流",
     "stream_alert_triage": "告警研判工作流",
 }
+TRIAGE_WORKFLOW_IDS = {
+    "stream_alert_triage",
+    "onesec_kafka_investigation",
+    "tdp_alert_triage",
+    "sec_alert_unified_ops",
+}
 WORKFLOW_DISPLAY_NAMES = {
     **SOC_PINNED_WORKFLOW_NAMES,
     "onesec_kafka_investigation": "OneSEC Kafka 告警研判工作流",
@@ -984,11 +990,27 @@ def _get_workflow_recent_events(
 ) -> list:
     if not WORKFLOW_DB.is_file():
         return []
-    query = (
-        "SELECT id, status, started_at, output_results, input_params "
-        "FROM workflow_executions WHERE workflow_id = ?"
-    )
+    workflow_stage = "triage" if workflow_name in TRIAGE_WORKFLOW_IDS else "denoise"
     query_params = [workflow_name]
+    try:
+        with sqlite3.connect(WORKFLOW_DB) as conn:
+            execution_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
+            }
+    except Exception:
+        return []
+    latest_select = ", ".join(
+        [
+            "id",
+            "status",
+            "started_at",
+            _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
+            _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
+            _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
+        ]
+    )
+    query = f"SELECT {latest_select} FROM workflow_executions WHERE workflow_id = ?"
     if start_time > 0 and end_time > 0:
         query += " AND started_at >= ? AND started_at <= ?"
         query_params.extend((int(start_time * 1000), int(end_time * 1000)))
@@ -996,31 +1018,59 @@ def _get_workflow_recent_events(
     query_params.append(max(1, min(_safe_int(limit), 10)))
     try:
         with sqlite3.connect(WORKFLOW_DB) as conn:
+            conn.row_factory = sqlite3.Row
             rows = conn.execute(query, query_params).fetchall()
     except Exception:
         return []
 
     events = []
-    for execution_id, status, started_at, output_text, input_text in rows:
+    for row in rows:
+        execution_id = row["id"]
+        status = row["status"]
+        started_at = row["started_at"]
+        output_text = row["output_results"]
+        input_text = row["input_params"]
+        payload_text = row["payload"]
         metrics = _workflow_execution_metrics(output_text, input_text)
         preview = metrics["preview"]
         raw_count = metrics["rawCount"]
         unique_count = metrics["uniqueCount"]
-        threat_name = str(
-            preview.get("threat_name")
-            or preview.get("_threat_type")
-            or preview.get("threat_type")
-            or f"降噪批次 · 原始 {raw_count} 条"
+        threat_name = ""
+        if workflow_stage == "triage":
+            threat_name = _workflow_latest_alert_name(workflow_name, output_text, input_text)
+        if not threat_name:
+            threat_name = str(
+                preview.get("threat_name")
+                or preview.get("_threat_type")
+                or preview.get("threat_type")
+                or f"降噪批次 · 原始 {raw_count} 条"
+            )
+        normalized_status = str(status or "").lower()
+        event_status = (
+            "completed"
+            if normalized_status in {"success", "completed"}
+            else "running"
+            if normalized_status in {"running", "queued", "pending"}
+            else "failed"
+        )
+        session_id, message_id = _workflow_link_context(
+            {
+                "payload": payload_text,
+                "input_params": input_text,
+            }
         )
         events.append(
             {
                 "eventId": f"workflow-execution:{execution_id}",
-                "stage": "denoise",
-                "status": "completed" if str(status).lower() == "success" else "failed",
+                "stage": workflow_stage,
+                "status": event_status,
                 "occurredAt": datetime.fromtimestamp(
                     _safe_int(started_at) / 1000
                 ).astimezone().isoformat(timespec="seconds"),
                 "triggerSource": "workflow_execution",
+                "workflowId": workflow_name,
+                "sessionId": session_id,
+                "messageId": message_id,
                 "sampleCount": max(unique_count, 1),
                 "alert": {
                     "id": str(preview.get("id") or execution_id),
@@ -1269,6 +1319,128 @@ def _workflow_config_name_map(conn):
     return names
 
 
+def _workflow_execution_column_expr(columns, column_name, fallback):
+    return column_name if column_name in columns else f"{fallback} AS {column_name}"
+
+
+def _workflow_node_count(workflow_id):
+    roots = [
+        Path.home() / ".flocks" / "plugins" / "workflows",
+        Path.home() / ".flocks" / "workspace" / "workflows",
+        Path(__file__).resolve().parents[4] / "workflows",
+    ]
+    for root in roots:
+        workflow_path = root / str(workflow_id) / "workflow.json"
+        if not workflow_path.is_file():
+            continue
+        try:
+            workflow_json = _safe_json_object(workflow_path.read_text(encoding="utf-8"))
+            nodes = workflow_json.get("nodes")
+            if isinstance(nodes, list):
+                return max(len(nodes), 0)
+        except Exception:
+            continue
+    return 0
+
+
+def _first_text(*values):
+    for value in values:
+        text = str(value or "").strip()
+        if text and text.lower() not in {"unknown", "none", "null", "--"}:
+            return text
+    return ""
+
+
+def _alert_name_from_record(record):
+    if not isinstance(record, dict):
+        return ""
+    return _first_text(
+        record.get("threat_name"),
+        record.get("_threat_type"),
+        record.get("threat_type"),
+        record.get("alert_name"),
+        record.get("name"),
+        record.get("report_title"),
+        record.get("title"),
+    )
+
+
+def _workflow_latest_alert_name(workflow_id, output_text="", input_text=""):
+    output = _safe_json_object(output_text)
+    inputs = _safe_json_object(input_text)
+    preview = _workflow_alert_preview(output) or _workflow_input_preview(inputs)
+    name = _alert_name_from_record(preview)
+    if name:
+        return name
+    for key in (
+        "enriched_alerts_with_triage",
+        "triage_results",
+        "unique_alerts",
+        "enriched_alerts",
+    ):
+        value = output.get(key)
+        if isinstance(value, dict):
+            value = value.get("preview")
+        if isinstance(value, list):
+            for item in value:
+                name = _alert_name_from_record(item)
+                if name:
+                    return name
+    name = _first_text(
+        output.get("top_report_title"),
+        output.get("report_title"),
+        output.get("title"),
+    )
+    if name:
+        return name
+    if workflow_id in TRIAGE_WORKFLOW_IDS:
+        input_date = _first_text(inputs.get("input_date"))
+        return f"研判批次 {input_date}" if input_date else "研判批次"
+    if workflow_id == "stream_alert_denoise":
+        return "降噪批次"
+    return ""
+
+
+def _workflow_progress(status, current_step_index, completed_steps, total_steps):
+    normalized = str(status or "").lower()
+    current = max(_safe_int(current_step_index), _safe_int(completed_steps), 0)
+    total = max(_safe_int(total_steps), current, 1)
+    if normalized in {"success", "completed"}:
+        return 1, "已完成"
+    if normalized in {"error", "failed", "timeout"}:
+        percent = _ratio(current or total, total)
+        return percent, f"失败于 {current or total}/{total} 步"
+    if normalized == "cancelled":
+        percent = _ratio(current or total, total)
+        return percent, f"已取消 {current or total}/{total} 步"
+    if normalized in {"running", "queued", "pending"}:
+        visible_current = current if current > 0 else 1
+        return max(_ratio(visible_current, total), 0.03), f"第 {visible_current}/{total} 步"
+    return 0, "待执行"
+
+
+def _workflow_link_context(latest):
+    payload = _safe_json_object(latest["payload"] if latest and "payload" in latest.keys() else "")
+    input_params = _safe_json_object(latest["input_params"] if latest and "input_params" in latest.keys() else "")
+    session_id = _first_text(
+        payload.get("sessionId"),
+        payload.get("sessionID"),
+        payload.get("session_id"),
+        input_params.get("sessionId"),
+        input_params.get("sessionID"),
+        input_params.get("session_id"),
+    )
+    message_id = _first_text(
+        payload.get("messageId"),
+        payload.get("messageID"),
+        payload.get("message_id"),
+        input_params.get("messageId"),
+        input_params.get("messageID"),
+        input_params.get("message_id"),
+    )
+    return session_id, message_id
+
+
 def _task_center_workflow_rows(limit=12):
     if not WORKFLOW_DB.is_file():
         return [], 0, 0
@@ -1316,6 +1488,30 @@ def _task_center_workflow_rows(limit=12):
             stats_success_expr = "success_count" if "success_count" in stats_columns else "0"
             stats_error_expr = "error_count" if "error_count" in stats_columns else "0"
             stats_updated_expr = "updated_at" if "updated_at" in stats_columns else "0"
+            execution_columns = (
+                {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
+                }
+                if _table_exists(conn, "workflow_executions")
+                else set()
+            )
+            latest_select = ", ".join(
+                [
+                    "id",
+                    "status",
+                    "started_at",
+                    _workflow_execution_column_expr(execution_columns, "finished_at", "NULL"),
+                    _workflow_execution_column_expr(execution_columns, "updated_at", "0"),
+                    _workflow_execution_column_expr(execution_columns, "current_phase", "''"),
+                    _workflow_execution_column_expr(execution_columns, "current_step_index", "0"),
+                    _workflow_execution_column_expr(execution_columns, "step_count", "0"),
+                    _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
+                    _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
+                    _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
+                    _workflow_execution_column_expr(execution_columns, "error_message", "''"),
+                ]
+            )
             workflows = []
             for workflow_id in workflow_ids:
                 workflow_name = names.get(workflow_id, workflow_id)
@@ -1342,7 +1538,7 @@ def _task_center_workflow_rows(limit=12):
                         (today_start_ms, tomorrow_start_ms, workflow_id),
                     ).fetchone()
                     latest = conn.execute(
-                        "SELECT id, status, started_at, finished_at, updated_at "
+                        f"SELECT {latest_select} "
                         "FROM workflow_executions WHERE workflow_id = ? "
                         "ORDER BY COALESCE(finished_at, updated_at, started_at, 0) DESC LIMIT 1",
                         (workflow_id,),
@@ -1367,6 +1563,28 @@ def _task_center_workflow_rows(limit=12):
                         or _safe_int(latest["updated_at"])
                         or _safe_int(latest["started_at"])
                     )
+                workflow_total_steps = _workflow_node_count(workflow_id)
+                latest_alert_name = ""
+                progress_percent = 0
+                progress_label = "待执行"
+                current_phase = ""
+                session_id = ""
+                message_id = ""
+                if latest:
+                    workflow_total_steps = max(workflow_total_steps, _safe_int(latest["step_count"]))
+                    latest_alert_name = _workflow_latest_alert_name(
+                        workflow_id,
+                        latest["output_results"],
+                        latest["input_params"],
+                    )
+                    progress_percent, progress_label = _workflow_progress(
+                        latest["status"],
+                        latest["current_step_index"],
+                        latest["step_count"],
+                        workflow_total_steps,
+                    )
+                    current_phase = str(latest["current_phase"] or "")
+                    session_id, message_id = _workflow_link_context(latest)
                 workflows.append(
                     {
                         "id": workflow_id,
@@ -1379,6 +1597,12 @@ def _task_center_workflow_rows(limit=12):
                         "lastStatus": latest["status"] if latest else "",
                         "lastRunAt": last_run_at,
                         "latestExecutionHash": str(latest["id"] if latest else ""),
+                        "latestAlertName": latest_alert_name,
+                        "progressPercent": progress_percent,
+                        "progressLabel": progress_label,
+                        "currentPhase": current_phase,
+                        "sessionId": session_id,
+                        "messageId": message_id,
                     }
                 )
             soc_order = {
@@ -1436,11 +1660,10 @@ def _get_activity(params):
         start_time,
         end_time,
     )
-    workflow_events = _get_workflow_recent_events(
-        "stream_alert_denoise",
-        start_time,
-        end_time,
-    )
+    workflow_events = [
+        *_get_workflow_recent_events("stream_alert_denoise", start_time, end_time),
+        *_get_workflow_recent_events("stream_alert_triage", start_time, end_time),
+    ]
     raw_cursor = str(params.get("cursor") or "").strip()
     bootstrap = str(params.get("bootstrap") or "").strip().lower() == "latest"
     limit = max(1, min(_safe_int(params.get("limit") or ACTIVITY_DEFAULT_LIMIT), ACTIVITY_MAX_LIMIT))
@@ -1462,6 +1685,18 @@ def _get_activity(params):
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
+            if not (
+                _table_exists(conn, DEFAULT_SQLITE_TABLE)
+                and _table_exists(conn, ACTIVITY_TABLE)
+            ):
+                return _activity_response(
+                    [],
+                    0,
+                    0,
+                    cursor_reset=cursor_reset,
+                    workflow_stats=workflow_stats,
+                    workflow_events=workflow_events,
+                )
             latest_row_id, latest_activity_id = _activity_latest_cursor(conn, settings)
 
             if bootstrap or cursor is None:

@@ -61,6 +61,7 @@
   "logout": "退出登录",
   "expandNav": "展开导航",
   "collapseNav": "收起导航",
+  "resizeNav": "调整导航宽度",
   "switchLanguage": "切换语言",
   "switchToDarkTheme": "切换到深色模式",
   "switchToLightTheme": "切换到浅色模式",

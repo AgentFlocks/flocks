@@ -90,6 +90,9 @@ const EVENT_RAIL_MIN_WIDTH = 280;
 const EVENT_RAIL_MAX_WIDTH = 560;
 const EVENT_RAIL_COMPACT_WIDTH = 292;
 const DEFAULT_TIME_RANGE = '7d';
+const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
+const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
+const CUSTOM_COMMAND_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
 const TIME_RANGE_OPTIONS = [
   { value: '15m', label: '最近15分钟' },
   { value: '2h', label: '最近2小时' },
@@ -114,6 +117,15 @@ const REFRESH_INTERVAL_MS = {
   '5m': 300000,
   '1h': 3600000,
 };
+
+function readCustomCommandTitle() {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(CUSTOM_COMMAND_TITLE_KEY)?.trim() || '';
+  } catch {
+    return '';
+  }
+}
 
 function defaultEventRailWidth() {
   if (typeof window === 'undefined') return EVENT_RAIL_DEFAULT_WIDTH;
@@ -178,6 +190,11 @@ function activityDuration(event) {
   return 30000;
 }
 
+function isRunningWorkflowEvent(event) {
+  return event?.triggerSource === 'workflow_execution'
+    && ['running', 'queued', 'pending'].includes(String(event?.status || '').toLowerCase());
+}
+
 function normalizeActivityBatch(raw) {
   const batch = { ...emptyActivityBatch(), ...(raw || {}) };
   for (const key of ['windowMs', 'receivedCount', 'duplicateCount', 'uniqueCount', 'clusterCount', 'triageUpdatedCount', 'sampledCount', 'suppressedCount', 'ratePerSecond']) {
@@ -229,8 +246,17 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
       ? { ...event, playbackMode: batch.mode, batch }
       : event;
     const lane = next[enriched.stage];
-    const known = [lane.current, lane.last, ...lane.queue].some((item) => item?.eventId === enriched.eventId);
-    if (!known) lane.queue.push(enriched);
+    if (lane.current?.eventId === enriched.eventId) {
+      lane.current = { ...lane.current, ...enriched, playbackStartedAt: lane.current.playbackStartedAt };
+      continue;
+    }
+    const queuedIndex = lane.queue.findIndex((item) => item?.eventId === enriched.eventId);
+    if (queuedIndex >= 0) {
+      lane.queue[queuedIndex] = { ...lane.queue[queuedIndex], ...enriched };
+      continue;
+    }
+    const knownLast = lane.last?.eventId === enriched.eventId;
+    if (!knownLast || isRunningWorkflowEvent(enriched)) lane.queue.push(enriched);
   }
   for (const kind of ['denoise', 'triage']) {
     const lane = next[kind];
@@ -1283,7 +1309,7 @@ function TimeRefreshPopover({ value, refreshValue, open, onToggle, onApply, onCl
   ]);
 }
 
-function CommandHeader({ timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
+function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
   const active = activity.denoise.current || activity.triage.current;
   const loadActive = activity.mode !== 'normal' && activity.batch?.receivedCount > 0;
   const status = activity.connection === 'error'
@@ -1295,7 +1321,7 @@ function CommandHeader({ timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, 
     h('div', { className: 'command-brand', key: 'brand' }, [
       h('div', { className: 'command-logo', key: 'logo' }, 'AI'),
       h('div', { key: 'copy' }, [
-        h('strong', { key: 'title' }, 'Flocks AI 智能告警态势中心'),
+        h('strong', { key: 'title', title }, title),
         h('span', { key: 'sub' }, '告警汇聚 · 智能降噪 · 自动研判 · 风险聚合'),
       ]),
     ]),
@@ -1766,6 +1792,34 @@ function taskCenterWorkflowName(item) {
   return name || id || '未命名工作流';
 }
 
+function taskCenterProgressValue(item) {
+  return Math.max(Math.min(Number(item?.progressPercent || 0), 1), 0);
+}
+
+function taskCenterProgressLabel(item) {
+  return String(item?.progressLabel || '').trim() || '待执行';
+}
+
+function openTaskCenterConversation(item) {
+  const sessionId = String(item?.sessionId || item?.sessionID || '').trim();
+  if (!sessionId || typeof window === 'undefined') return false;
+  const messageId = String(item?.messageId || item?.messageID || '').trim();
+  const params = new URLSearchParams({ session: sessionId });
+  if (messageId) params.set('focusMessage', messageId);
+  window.location.href = `/sessions?${params.toString()}`;
+  return true;
+}
+
+function openConversationFromEvent(event) {
+  const sessionId = String(event?.sessionId || event?.sessionID || '').trim();
+  if (!sessionId || typeof window === 'undefined') return false;
+  const messageId = String(event?.messageId || event?.messageID || '').trim();
+  const params = new URLSearchParams({ session: sessionId });
+  if (messageId) params.set('focusMessage', messageId);
+  window.location.href = `/sessions?${params.toString()}`;
+  return true;
+}
+
 function TaskCenterSummary({ taskCenter }) {
   const scheduledTasks = taskCenter.scheduledTasks || [];
   const workflows = taskCenter.workflows || [];
@@ -1788,12 +1842,16 @@ function TaskCenterSummary({ taskCenter }) {
 
 function TaskCenterItem({ item, kind }) {
   const successRate = Math.max(Math.min(Number(item.successRate || 0), 1), 0);
+  const progressValue = taskCenterProgressValue(item);
+  const progressLabel = taskCenterProgressLabel(item);
   const active = Number(item.activeCount || 0) > 0;
   const status = taskCenterStatusLabel(item.lastStatus);
   const statusClass = String(item.lastStatus || '').toLowerCase();
   const latestTime = taskCenterTimeLabel(item.lastRunAt);
   const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
   const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
+  const alertName = String(item.latestAlertName || '').trim();
+  const hasConversation = kind === 'workflow' && Boolean(String(item.sessionId || item.sessionID || '').trim());
   const sub = kind === 'scheduled'
     ? item.nextRunAt
       ? `下次 ${taskCenterTimeLabel(item.nextRunAt)}`
@@ -1803,7 +1861,7 @@ function TaskCenterItem({ item, kind }) {
     ? [
         h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'latest' }, ['最近 ', h('b', { key: 'value' }, latestTime)]),
+        h('span', { key: 'progress' }, ['进度 ', h('b', { key: 'value' }, progressLabel)]),
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ]
     : [
@@ -1812,18 +1870,49 @@ function TaskCenterItem({ item, kind }) {
         h('span', { key: 'success' }, ['成功 ', h(AnimatedNumber, { tag: 'b', value: item.successCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ];
-  return h('article', { className: cx('task-center-item', active && 'active') }, [
+  const handleOpen = () => {
+    if (hasConversation) openTaskCenterConversation(item);
+  };
+  const handleKeyDown = (event) => {
+    if (!hasConversation) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openTaskCenterConversation(item);
+    }
+  };
+  return h('article', {
+    className: cx('task-center-item', active && 'active', hasConversation && 'clickable'),
+    role: hasConversation ? 'button' : undefined,
+    tabIndex: hasConversation ? 0 : undefined,
+    title: hasConversation ? '打开对应对话' : undefined,
+    onClick: handleOpen,
+    onKeyDown: handleKeyDown,
+  }, [
     h('div', { className: 'task-center-item-head', key: 'head' }, [
       h('strong', { title: item.name || item.id, key: 'name' }, itemName),
       h('span', { className: cx('task-center-status', active && 'active', statusClass), key: 'status' }, active ? '执行中' : status),
     ]),
     h('div', { className: 'task-center-item-sub', title: sub, key: 'sub' }, sub),
+    kind === 'workflow' ? h('div', {
+      className: cx('task-center-alert', alertName && 'has-alert'),
+      title: alertName || '暂无告警名称',
+      key: 'alert',
+    }, [
+      h('span', { key: 'label' }, '研判告警'),
+      h('b', { key: 'value' }, alertName || '暂无告警名称'),
+    ]) : null,
     kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
       h('span', { key: 'label' }, '执行哈希'),
       h('code', { key: 'value' }, latestExecutionHash),
+      h('span', { key: 'link-label' }, '更多信息'),
+      h('code', { className: cx('task-center-jump', hasConversation && 'enabled'), key: 'link' }, hasConversation ? '查看对话' : '暂无关联对话'),
     ]) : null,
     h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
-    h('div', { className: 'task-center-rate', style: { '--task-center-rate': successRate }, key: 'rateBar' }, [
+    h('div', {
+      className: cx('task-center-rate', kind === 'workflow' && 'progress-rate'),
+      style: { '--task-center-rate': kind === 'workflow' ? progressValue : successRate },
+      key: 'rateBar',
+    }, [
       h('i', { key: 'fill' }),
     ]),
   ]);
@@ -1929,13 +2018,31 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
         ? '处理中'
         : '等待处理';
       const detail = event?.triggerSource === 'workflow_execution'
-        ? event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
+        ? task.stage === 'triage'
+          ? task.state === 'processing' ? '研判工作流处理中' : '研判工作流待处理'
+          : event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
         : task.state === 'processing'
           ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
           : '等待 AI 处理';
+      const hasConversation = Boolean(String(event?.sessionId || event?.sessionID || '').trim());
+      const handleOpen = () => {
+        if (hasConversation) openConversationFromEvent(event);
+      };
+      const handleKeyDown = (keyboardEvent) => {
+        if (!hasConversation) return;
+        if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+          keyboardEvent.preventDefault();
+          openConversationFromEvent(event);
+        }
+      };
       return h('article', {
-        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`),
+        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasConversation && 'clickable'),
         key: task.key,
+        role: hasConversation ? 'button' : undefined,
+        tabIndex: hasConversation ? 0 : undefined,
+        title: hasConversation ? '打开对应对话' : undefined,
+        onClick: handleOpen,
+        onKeyDown: handleKeyDown,
       }, [
         h('div', { className: 'event-rail-meta', key: 'meta' }, [
           h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
@@ -1944,7 +2051,7 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
         ]),
         h('strong', { title, key: 'title' }, title),
         h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)),
-        h('small', { key: 'result' }, detail),
+        h('small', { key: 'result' }, hasConversation ? `${detail} · 查看对话` : detail),
         task.state === 'processing' ? h(EventQueueProgress, { event, key: 'progress' }) : null,
       ]);
     }) : h('div', { className: 'event-rail-empty' }, '等待新的降噪或研判任务')),
@@ -2015,6 +2122,7 @@ export default function Page() {
   const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
   const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
   const [rightRailView, setRightRailView] = useState('aiTasks');
+  const [customCommandTitle, setCustomCommandTitle] = useState(readCustomCommandTitle);
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -2070,6 +2178,26 @@ export default function Page() {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, [clampEventRailWidth]);
+
+  useEffect(() => {
+    const refreshTitle = (event) => {
+      const nextTitle = event?.detail && typeof event.detail.title === 'string'
+        ? event.detail.title
+        : readCustomCommandTitle();
+      setCustomCommandTitle(nextTitle.trim());
+    };
+    const handleStorage = (event) => {
+      if (event.key === CUSTOM_COMMAND_TITLE_KEY) {
+        setCustomCommandTitle((event.newValue || '').trim());
+      }
+    };
+    window.addEventListener(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, refreshTitle);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, refreshTitle);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
 
   const loadStats = useCallback(async (filter, options = {}) => {
     if (options.skipIfBusy && statsPending.current > 0) return;
@@ -2220,6 +2348,12 @@ export default function Page() {
             : (payload.events || []);
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
+          for (const workflowEvent of workflowEvents) {
+            const hasConversation = Boolean(String(workflowEvent?.sessionId || workflowEvent?.sessionID || '').trim());
+            if (hasConversation) {
+              incomingEvents.push(workflowEvent);
+            }
+          }
           const rawCallCount = payload.workflowStats?.callCount;
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
@@ -2306,20 +2440,22 @@ export default function Page() {
   useEffect(() => {
     const event = activity.denoise.current;
     if (!event) return undefined;
+    if (isRunningWorkflowEvent(event)) return undefined;
     const id = window.setTimeout(() => {
       setActivity((previous) => completeActivity(previous, 'denoise', event));
     }, activityDuration(event));
     return () => window.clearTimeout(id);
-  }, [activity.denoise.current?.eventId]);
+  }, [activity.denoise.current?.eventId, activity.denoise.current?.status]);
 
   useEffect(() => {
     const event = activity.triage.current;
     if (!event) return undefined;
+    if (isRunningWorkflowEvent(event)) return undefined;
     const id = window.setTimeout(() => {
       setActivity((previous) => completeActivity(previous, 'triage', event));
     }, activityDuration(event));
     return () => window.clearTimeout(id);
-  }, [activity.triage.current?.eventId]);
+  }, [activity.triage.current?.eventId, activity.triage.current?.status]);
 
   useEffect(() => {
     if (!activity.batchUpdatedAt) return undefined;
@@ -2348,7 +2484,19 @@ export default function Page() {
     style: { '--event-rail-width': `${eventRailWidth}px` },
   }, [
     h('style', { key: 'style' }, CSS),
-    h(CommandHeader, { key: 'header', timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }),
+    h(CommandHeader, {
+      key: 'header',
+      title: customCommandTitle || DEFAULT_COMMAND_TITLE,
+      timeFilter,
+      refreshKey,
+      timeMenuOpen,
+      setTimeMenuOpen,
+      applyTimeRefresh,
+      stats,
+      loading,
+      refresh,
+      activity,
+    }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
     h('main', {
       className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
@@ -4729,6 +4877,16 @@ const CSS = `
   background: linear-gradient(90deg, rgba(43,231,255,.06), transparent 64%);
   animation: commandEventActive 1.8s ease-in-out infinite;
 }
+.task-center-item.clickable {
+  cursor: pointer;
+}
+.task-center-item.clickable:hover {
+  background: linear-gradient(90deg, rgba(43,231,255,.085), rgba(43,231,255,.025) 58%, transparent);
+}
+.task-center-item.clickable:focus-visible {
+  outline: 1px solid rgba(85,232,255,.68);
+  outline-offset: -2px;
+}
 .task-center-item.active:after {
   background: #46e4af;
   box-shadow: 0 0 10px rgba(70,228,175,.78);
@@ -4775,6 +4933,30 @@ const CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.task-center-alert {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #74827d;
+  font-size: 10px;
+}
+.task-center-alert span {
+  white-space: nowrap;
+}
+.task-center-alert b {
+  min-width: 0;
+  overflow: hidden;
+  color: #dce1df;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-alert.has-alert b {
+  color: #f0f6f4;
+}
 .task-center-hash {
   position: relative;
   display: grid;
@@ -4813,6 +4995,13 @@ const CSS = `
   text-overflow: ellipsis;
   white-space: nowrap;
   user-select: text;
+}
+.task-center-hash .task-center-jump {
+  color: #7b8581;
+  user-select: none;
+}
+.task-center-hash .task-center-jump.enabled {
+  color: #57e1b5;
 }
 .task-center-stats {
   display: grid;
@@ -4853,6 +5042,9 @@ const CSS = `
   transform: scaleX(var(--task-center-rate, 0));
   transform-origin: left center;
   transition: transform .5s ease;
+}
+.task-center-rate.progress-rate {
+  background: rgba(43,231,255,.12);
 }
 .task-center-expand {
   width: 100%;
@@ -4911,6 +5103,16 @@ const CSS = `
 .event-rail-item.kind-triage:after { background: #9b8cff; box-shadow: 0 0 9px rgba(155,140,255,.75); }
 .event-rail-item.state-processing {
   background: linear-gradient(90deg, rgba(35,214,157,.07), transparent 72%);
+}
+.event-rail-item.clickable {
+  cursor: pointer;
+}
+.event-rail-item.clickable:hover {
+  background: linear-gradient(90deg, rgba(155,140,255,.12), rgba(43,231,255,.04) 60%, transparent);
+}
+.event-rail-item.clickable:focus-visible {
+  outline: 1px solid rgba(155,140,255,.72);
+  outline-offset: -2px;
 }
 .event-rail-meta { display: flex; align-items: center; width: 100%; gap: 7px; }
 .event-rail-meta time { margin-left: auto; color: #646d69; font-size: 10px; }

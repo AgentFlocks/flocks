@@ -143,6 +143,10 @@ export interface SessionChatProps {
   initialDisplayText?: string | null;
   /** Called immediately after initialMessage has been consumed (sent) */
   onInitialMessageConsumed?: () => void;
+  /** Scroll to this existing message after messages load. */
+  focusMessageId?: string | null;
+  /** Called after focusMessageId is consumed, even if no matching message exists. */
+  onFocusMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
   /** Model override to include in prompt_async requests */
@@ -1450,6 +1454,8 @@ export default function SessionChat({
   onCreateAndSend,
   onCreateNewSession,
   onInitialMessageConsumed,
+  focusMessageId,
+  onFocusMessageConsumed,
   supportsVision,
   toolbarSlot,
   composerTextareaMinHeight,
@@ -1598,6 +1604,7 @@ export default function SessionChat({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const focusedMessageRef = useRef('');
   const isAtBottomRef = useRef(true);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1697,6 +1704,25 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+
+  useEffect(() => {
+    const targetId = String(focusMessageId || '').trim();
+    if (!targetId || focusedMessageRef.current === targetId) return;
+    if (loading) return;
+    focusedMessageRef.current = targetId;
+    const target = messagesContentRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(targetId)}"]`,
+    );
+    if (target) {
+      target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+      target.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+      window.setTimeout(() => {
+        target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+      }, 1800);
+    }
+    onFocusMessageConsumed?.();
+  }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
+
   useEffect(() => { loadOlderMessagesRef.current = loadOlder; }, [loadOlder]);
   useEffect(() => { hasMoreMessagesRef.current = hasMoreMessages; }, [hasMoreMessages]);
   useEffect(() => { loadingOlderMessagesRef.current = loadingOlder; }, [loadingOlder]);
@@ -3740,8 +3766,8 @@ function ChatMessageTimelineInner({
   return (
     <>
       {items.map(({ message, isActive }) => (
-        <ChatMessageBubble
-          key={message.id}
+        <div key={message.id} data-message-id={message.id} className="rounded-md transition-shadow duration-300">
+          <ChatMessageBubble
           message={message}
           isActive={isActive}
           pendingQuestions={pendingQuestions}
@@ -3766,7 +3792,8 @@ function ChatMessageTimelineInner({
           onEditSave={onEditSave}
           onEditSend={onEditSend}
           onRegenerate={onRegenerate}
-        />
+          />
+        </div>
       ))}
     </>
   );

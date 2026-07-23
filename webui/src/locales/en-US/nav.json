@@ -61,6 +61,7 @@
   "logout": "Log out",
   "expandNav": "Expand navigation",
   "collapseNav": "Collapse navigation",
+  "resizeNav": "Resize navigation",
   "switchLanguage": "Switch Language",
   "switchToDarkTheme": "Switch to dark mode",
   "switchToLightTheme": "Switch to light mode",

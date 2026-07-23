@@ -114,6 +114,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     welcomeContent,
     initialMessage,
     initialDisplayText,
+    focusMessageId,
     onCreateAndSend,
     onSSEEvent,
     agentName,
@@ -129,6 +130,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
     initialMessage?: string | null;
     initialDisplayText?: string | null;
+    focusMessageId?: string | null;
     model?: { providerID: string; modelID: string } | null;
     hideInput?: boolean;
     display?: {
@@ -161,6 +163,7 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-hide-input={String(Boolean(hideInput))}
         data-initial-message={initialMessage ?? ''}
         data-initial-display={initialDisplayText ?? ''}
+        data-focus-message={focusMessageId ?? ''}
       >
         {sessionId ?? 'no-session'}
         {toolbarSlot}
@@ -1225,6 +1228,15 @@ describe('SessionPage session actions menu', () => {
       'data-initial-display',
       '@@flocks-instruction:创建 SOC 自定义页面',
     );
+  });
+
+  it('passes URL focusMessage to chat without treating it as an initial message', async () => {
+    renderSessionPage('/sessions?session=session-1&focusMessage=message-42');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-focus-message', 'message-42');
+    });
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
   });
 
   it('starts SOC alert operations setup when the component is already installed', async () => {
