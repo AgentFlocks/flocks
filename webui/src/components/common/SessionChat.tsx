@@ -5199,8 +5199,8 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
 
   // Keep the delegate fallback narrow: many MCP tools also carry a generic
   // `category` field (for example wecom_mcp category="doc").
-  if (shouldRenderDelegateTaskCard(part) && !processStep) {
-    return <DelegateTaskCard part={part} />;
+  if (shouldRenderDelegateTaskCard(part)) {
+    return <DelegateTaskCard part={part} processStep={processStep} />;
   }
 
   const state: Partial<ToolState> = part.state || {};

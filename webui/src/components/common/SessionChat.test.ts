@@ -2589,6 +2589,31 @@ describe('buildTodoSummary', () => {
   });
 });
 
+describe('ChatToolPart delegate rendering', () => {
+  it('keeps the specialized delegate view inside a process timeline', () => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: 'delegate-process-step',
+          type: 'tool',
+          tool: 'delegate_task',
+          state: {
+            status: 'running',
+            input: {
+              subagent_type: 'explore',
+              description: '排查会话页面',
+            },
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getByTestId('chat-process-delegate-step')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-process-tool-step')).not.toBeInTheDocument();
+  });
+});
+
 describe('ChatToolPart todo rendering', () => {
   it('renders todo progress and stages without object-object summaries', () => {
     const { container } = render(
