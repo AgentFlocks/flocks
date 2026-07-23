@@ -85,6 +85,10 @@ const EVENT_RAIL_TASK_LIMIT = 10;
 const ACTIVITY_POLL_MS = 3000;
 const ACTIVITY_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 const ACTIVITY_SEEN_KEY = 'soc-dashboard-seen-activity-v1';
+const EVENT_RAIL_DEFAULT_WIDTH = 330;
+const EVENT_RAIL_MIN_WIDTH = 280;
+const EVENT_RAIL_MAX_WIDTH = 560;
+const EVENT_RAIL_COMPACT_WIDTH = 292;
 const DEFAULT_TIME_RANGE = '7d';
 const TIME_RANGE_OPTIONS = [
   { value: '15m', label: '最近15分钟' },
@@ -110,6 +114,13 @@ const REFRESH_INTERVAL_MS = {
   '5m': 300000,
   '1h': 3600000,
 };
+
+function defaultEventRailWidth() {
+  if (typeof window === 'undefined') return EVENT_RAIL_DEFAULT_WIDTH;
+  if (window.innerWidth <= 1120) return EVENT_RAIL_MIN_WIDTH;
+  if (window.innerWidth <= 1360) return EVENT_RAIL_COMPACT_WIDTH;
+  return EVENT_RAIL_DEFAULT_WIDTH;
+}
 
 function emptyActivityBatch() {
   return {
@@ -1741,6 +1752,11 @@ function taskCenterHashLabel(value) {
   return `${text.slice(0, 6)}...${text.slice(-4)}`;
 }
 
+function taskCenterHashValue(value) {
+  const text = String(value || '').trim();
+  return text || '--';
+}
+
 function taskCenterWorkflowName(item) {
   const name = String(item?.name || item?.id || '').trim();
   const id = String(item?.id || '').trim();
@@ -1776,6 +1792,7 @@ function TaskCenterItem({ item, kind }) {
   const status = taskCenterStatusLabel(item.lastStatus);
   const statusClass = String(item.lastStatus || '').toLowerCase();
   const latestTime = taskCenterTimeLabel(item.lastRunAt);
+  const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
   const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
   const sub = kind === 'scheduled'
     ? item.nextRunAt
@@ -1801,9 +1818,9 @@ function TaskCenterItem({ item, kind }) {
       h('span', { className: cx('task-center-status', active && 'active', statusClass), key: 'status' }, active ? '执行中' : status),
     ]),
     h('div', { className: 'task-center-item-sub', title: sub, key: 'sub' }, sub),
-    kind === 'workflow' ? h('div', { className: 'task-center-hash', title: item.latestExecutionHash || '', key: 'hash' }, [
+    kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
       h('span', { key: 'label' }, '执行哈希'),
-      h('code', { key: 'value' }, taskCenterHashLabel(item.latestExecutionHash)),
+      h('code', { key: 'value' }, latestExecutionHash),
     ]) : null,
     h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
     h('div', { className: 'task-center-rate', style: { '--task-center-rate': successRate }, key: 'rateBar' }, [
@@ -1812,18 +1829,27 @@ function TaskCenterItem({ item, kind }) {
   ]);
 }
 
-function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onToggle }) {
+function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onToggle, collapsed, onCollapseToggle }) {
   const hasOverflow = items.length > 3;
   const visibleItems = expanded || !hasOverflow ? items : items.slice(0, 3);
   return h('section', { className: 'task-center-section' }, [
     h('div', { className: 'task-center-section-title', key: 'title' }, [
-      h('strong', { key: 'label' }, title),
-      h('span', { key: 'count' }, expanded || !hasOverflow ? `${count} 项` : `显示 3/${count}`),
+      h('button', {
+        className: 'task-center-section-toggle',
+        type: 'button',
+        'aria-expanded': !collapsed,
+        onClick: onCollapseToggle,
+        key: 'toggle',
+      }, [
+        h('i', { key: 'chevron' }, collapsed ? '›' : '⌄'),
+        h('strong', { key: 'label' }, title),
+      ]),
+      h('span', { key: 'count' }, collapsed ? `${count} 项` : expanded || !hasOverflow ? `${count} 项` : `显示 3/${count}`),
     ]),
-    h('div', { className: 'task-center-section-list', key: 'list' }, visibleItems.length
+    collapsed ? null : h('div', { className: 'task-center-section-list', key: 'list' }, visibleItems.length
       ? visibleItems.map((item) => h(TaskCenterItem, { item, kind, key: `${kind}-${item.id}` }))
       : h('div', { className: 'event-rail-empty' }, emptyText)),
-    hasOverflow ? h('button', {
+    !collapsed && hasOverflow ? h('button', {
       className: 'task-center-expand',
       type: 'button',
       onClick: onToggle,
@@ -1836,6 +1862,8 @@ function CommandTaskCenterPanel({ taskCenter }) {
   const { useState } = getReact();
   const [scheduledExpanded, setScheduledExpanded] = useState(false);
   const [workflowExpanded, setWorkflowExpanded] = useState(false);
+  const [scheduledCollapsed, setScheduledCollapsed] = useState(false);
+  const [workflowCollapsed, setWorkflowCollapsed] = useState(false);
   const scheduledTasks = taskCenter.scheduledTasks || [];
   const workflows = taskCenter.workflows || [];
   return h('div', { className: 'task-center-panel', key: 'taskCenterPanel' }, [
@@ -1852,6 +1880,8 @@ function CommandTaskCenterPanel({ taskCenter }) {
       emptyText: '暂无定时任务执行记录',
       expanded: scheduledExpanded,
       onToggle: () => setScheduledExpanded((current) => !current),
+      collapsed: scheduledCollapsed,
+      onCollapseToggle: () => setScheduledCollapsed((current) => !current),
       key: 'scheduled',
     }),
     h(TaskCenterSection, {
@@ -1862,6 +1892,8 @@ function CommandTaskCenterPanel({ taskCenter }) {
       emptyText: '暂无工作流执行记录',
       expanded: workflowExpanded,
       onToggle: () => setWorkflowExpanded((current) => !current),
+      collapsed: workflowCollapsed,
+      onCollapseToggle: () => setWorkflowCollapsed((current) => !current),
       key: 'workflows',
     }),
   ]);
@@ -1919,7 +1951,7 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
   ];
 }
 
-function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange, collapsed, onToggle }) {
+function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
   const tasks = buildEventQueueTasks(activity, timeFilter);
   const queueCount = tasks.filter((task) => task.state !== 'completed').length;
   const taskCenterCount = Number(taskCenter.sessionCount || 0);
@@ -1950,6 +1982,19 @@ function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange
       : h(CommandAiTaskPanel, { activity, timeFilter, key: 'aiTaskContent' }),
   ];
   return h('aside', { className: cx('command-event-rail', collapsed && 'collapsed') }, [
+    collapsed ? null : h('div', {
+      className: 'event-rail-resize',
+      role: 'separator',
+      tabIndex: 0,
+      'aria-label': '调整任务面板宽度',
+      'aria-orientation': 'vertical',
+      'aria-valuemin': EVENT_RAIL_MIN_WIDTH,
+      'aria-valuemax': EVENT_RAIL_MAX_WIDTH,
+      'aria-valuenow': railWidth,
+      onPointerDown: onResizeStart,
+      onKeyDown: onResizeKeyDown,
+      key: 'resize',
+    }),
     h('button', {
       className: 'event-rail-toggle',
       type: 'button',
@@ -1957,7 +2002,7 @@ function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange
       'aria-label': collapsed ? '展开任务面板' : '向右折叠任务面板',
       onClick: onToggle,
       key: 'toggle',
-    }, collapsed ? h('span', { key: 'label' }, ['任', '务', '面', '板'].map((text) => h('i', { key: text }, text))) : '›'),
+    }, collapsed ? '展开' : '收起'),
     ...content,
   ]);
 }
@@ -1968,6 +2013,7 @@ export default function Page() {
   const [refreshKey, setRefreshKey] = useState('off');
   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
   const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
+  const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
   const [rightRailView, setRightRailView] = useState('aiTasks');
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
@@ -1978,6 +2024,52 @@ export default function Page() {
   const workflowProgressByFilter = useRef(new Map());
   const statsRequestId = useRef(0);
   const statsPending = useRef(0);
+
+  const clampEventRailWidth = useCallback((value) => {
+    const viewportLimit = typeof window === 'undefined'
+      ? EVENT_RAIL_MAX_WIDTH
+      : Math.max(EVENT_RAIL_MIN_WIDTH, Math.min(EVENT_RAIL_MAX_WIDTH, window.innerWidth - 760));
+    return Math.max(EVENT_RAIL_MIN_WIDTH, Math.min(viewportLimit, Math.round(value)));
+  }, []);
+
+  const startEventRailResize = useCallback((event) => {
+    if (eventRailCollapsed) return;
+    const startX = event.clientX;
+    const startWidth = eventRailWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const move = (moveEvent) => {
+      setEventRailWidth(clampEventRailWidth(startWidth + startX - moveEvent.clientX));
+    };
+    const stop = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    event.preventDefault();
+  }, [clampEventRailWidth, eventRailCollapsed, eventRailWidth]);
+
+  const adjustEventRailWidth = useCallback((event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const delta = event.shiftKey ? 48 : 16;
+    setEventRailWidth((current) => clampEventRailWidth(current + (event.key === 'ArrowLeft' ? delta : -delta)));
+    event.preventDefault();
+  }, [clampEventRailWidth]);
+
+  useEffect(() => {
+    const handleResize = () => setEventRailWidth((current) => clampEventRailWidth(current));
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [clampEventRailWidth]);
 
   const loadStats = useCallback(async (filter, options = {}) => {
     if (options.skipIfBusy && statsPending.current > 0) return;
@@ -2253,11 +2345,15 @@ export default function Page() {
   return h('div', {
     className: cx('adtd-root command-root', activityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
     'data-animations': 'on',
+    style: { '--event-rail-width': `${eventRailWidth}px` },
   }, [
     h('style', { key: 'style' }, CSS),
     h(CommandHeader, { key: 'header', timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
-    h('main', { className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'), key: 'main' }, [
+    h('main', {
+      className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
+      key: 'main',
+    }, [
       h('div', { className: 'command-main', key: 'workspace' }, [
         h(CommandGraph, { key: 'graph', stats, activity }),
         h(CommandMetrics, { key: 'metrics', stats }),
@@ -2271,6 +2367,9 @@ export default function Page() {
         onViewChange: setRightRailView,
         collapsed: eventRailCollapsed,
         onToggle: () => setEventRailCollapsed((current) => !current),
+        railWidth: eventRailWidth,
+        onResizeStart: startEventRailResize,
+        onResizeKeyDown: adjustEventRailWidth,
       }),
     ]),
   ]);
@@ -3609,7 +3708,7 @@ const CSS = `
 .command-root:before {
   content: "";
   position: absolute;
-  inset: 68px 330px 142px 0;
+  inset: 68px var(--event-rail-width, 330px) 142px 0;
   pointer-events: none;
   opacity: .16;
   background-image:
@@ -3813,7 +3912,7 @@ const CSS = `
   position: relative;
   z-index: 2;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 330px);
   height: calc(100vh - 68px);
   min-height: 652px;
   transition: grid-template-columns .24s ease;
@@ -4359,56 +4458,86 @@ const CSS = `
   background: transparent;
   overflow: visible;
 }
+.event-rail-resize {
+  position: absolute;
+  z-index: 14;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 10px;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+.event-rail-resize:before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(43,231,255,.16);
+  opacity: 0;
+  transition: opacity .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.event-rail-resize:hover:before,
+.event-rail-resize:focus-visible:before {
+  background: rgba(43,231,255,.58);
+  box-shadow: 0 0 12px rgba(43,231,255,.32);
+  opacity: 1;
+}
 .event-rail-toggle {
   position: absolute;
   z-index: 12;
   top: 50%;
-  left: -14px;
-  width: 28px;
-  height: 44px;
-  border: 0;
-  color: #6ee8ff;
-  background: transparent;
+  left: -25px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 64px;
+  border: 1px solid rgba(43,231,255,.34);
+  border-right: 0;
+  border-radius: 7px 0 0 7px;
+  color: #8df0ff;
+  background: linear-gradient(180deg, rgba(8,34,53,.96), rgba(5,22,38,.96));
   transform: translateY(-50%);
-  opacity: .72;
+  opacity: .9;
   padding: 0;
-  font-size: 28px;
-  line-height: 1;
-  text-shadow: 0 0 9px rgba(43,231,255,.48);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.15;
+  text-orientation: upright;
+  writing-mode: vertical-rl;
+  box-shadow: -4px 0 14px rgba(0,0,0,.28), 0 0 12px rgba(43,231,255,.1);
   cursor: pointer;
-  transition: color .16s ease, opacity .16s ease, transform .16s ease;
+  transition: border-color .1s ease, color .1s ease, background .1s ease, box-shadow .1s ease, transform .1s ease;
 }
-.event-rail-toggle:hover {
+.event-rail-toggle:hover,
+.event-rail-toggle:focus-visible {
+  border-color: rgba(70,240,255,.72);
   color: #fff;
-  opacity: 1;
-  transform: translate(2px, -50%);
+  background: rgba(7,39,62,.98);
+  box-shadow: -5px 0 16px rgba(0,0,0,.32), 0 0 16px rgba(43,231,255,.24);
+  outline: none;
+  transform: translate(-1px, -50%);
+}
+.event-rail-toggle:active {
+  transform: translate(0, -50%) scale(.98);
 }
 .command-event-rail.collapsed .event-rail-toggle {
-  left: -40px;
-  width: 40px;
-  height: 104px;
-  border-radius: 12px 0 0 12px;
-  color: #f4f7f9;
-  background: rgba(65, 73, 82, .96);
-  box-shadow: -5px 0 16px rgba(0,0,0,.22);
-  opacity: .96;
-  text-shadow: none;
+  left: -26px;
+  width: 26px;
+  height: 64px;
+  color: #dffcff;
+  background: linear-gradient(180deg, rgba(8,34,53,.96), rgba(5,22,38,.96));
 }
-.command-event-rail.collapsed .event-rail-toggle:hover {
+.command-event-rail.collapsed .event-rail-toggle:hover,
+.command-event-rail.collapsed .event-rail-toggle:focus-visible {
   color: #fff;
-  background: rgba(78, 88, 98, .98);
-  transform: translate(-2px, -50%);
-}
-.command-event-rail.collapsed .event-rail-toggle span {
-  display: grid;
-  place-items: center;
-  gap: 2px;
-}
-.command-event-rail.collapsed .event-rail-toggle i {
-  font-style: normal;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.12;
+  background: rgba(11,52,78,.98);
+  transform: translate(-1px, -50%);
 }
 .event-rail-head {
   display: flex;
@@ -4540,7 +4669,31 @@ const CSS = `
   border-bottom: 1px solid rgba(43,231,255,.12);
   margin-bottom: 3px;
 }
-.task-center-section-title strong { color: #dce1df; font-size: 12px; }
+.task-center-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  border: 0;
+  color: #dce1df;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.task-center-section-toggle:hover,
+.task-center-section-toggle:focus-visible { color: #66e6d6; outline: none; }
+.task-center-section-toggle i {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  color: #53e9c4;
+  font-style: normal;
+  font-size: 15px;
+  line-height: 1;
+}
+.task-center-section-title strong { color: currentColor; font-size: 12px; }
 .task-center-section-title span { color: #66716d; font-size: 10px; }
 .task-center-section-list { display: grid; gap: 0; }
 .task-center-item {
@@ -4627,13 +4780,13 @@ const CSS = `
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);
   align-items: center;
-  gap: 7px;
+  gap: 6px;
   min-width: 0;
   overflow: hidden;
   border: 1px solid rgba(43,231,255,.16);
   border-radius: 5px;
   background: rgba(4,22,36,.64);
-  padding: 5px 7px;
+  padding: 5px 6px;
 }
 .task-center-hash:after {
   content: "";
@@ -4648,15 +4801,18 @@ const CSS = `
 .task-center-hash span {
   color: #66716d;
   font-size: 9px;
+  line-height: 1.2;
   white-space: nowrap;
 }
 .task-center-hash code {
+  display: block;
   min-width: 0;
   overflow: hidden;
   color: #77e8ff;
   font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
   text-overflow: ellipsis;
   white-space: nowrap;
+  user-select: text;
 }
 .task-center-stats {
   display: grid;
@@ -4844,8 +5000,8 @@ const CSS = `
 @keyframes laneResult { to { opacity: 1; } }
 @media (max-width: 1360px) {
   .command-header { grid-template-columns: minmax(330px, 1fr) auto minmax(500px, 1fr); gap: 12px; padding: 0 14px; }
-  .command-shell { grid-template-columns: minmax(0, 1fr) 292px; }
-  .command-root:before { right: 292px; }
+  .command-shell { grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 292px); }
+  .command-root:before { right: var(--event-rail-width, 292px); }
   .command-core { width: 288px; height: 288px; min-width: 288px; min-height: 288px; }
   .command-time-trigger { max-width: 320px; }
   .command-clock { min-width: 92px; }
@@ -4856,7 +5012,7 @@ const CSS = `
   .command-root { padding: 0; }
   .command-header { grid-template-columns: 330px 1fr; }
   .command-live { display: none; }
-  .command-shell { grid-template-columns: minmax(850px, 1fr) 280px; }
+  .command-shell { grid-template-columns: minmax(850px, 1fr) var(--event-rail-width, 280px); }
   .command-core { width: 270px; height: 270px; min-width: 270px; min-height: 270px; }
   .agent-badge { min-width: 96px; padding: 7px 8px; }
   .command-lanes { right: 12%; left: 12%; }
