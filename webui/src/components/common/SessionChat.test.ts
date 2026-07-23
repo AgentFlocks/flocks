@@ -58,7 +58,8 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.sending': '发送中...',
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
-  'chat.process.title': '过程（{{count}} 项）',
+  'chat.process.title': '查看 {{count}} 个步骤',
+  'chat.process.deepThinking': '深度思考',
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
   'chat.process.textCount': '{{count}} 段中间回复',
@@ -91,6 +92,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.tool.running': '执行中',
   'chat.tool.completed': '已完成',
   'chat.tool.error': '失败',
+  'chat.tool.todoUpdated': '已更新待办',
   'chat.tool.inputParams': '输入参数',
   'chat.tool.outputResult': '输出结果',
   'chat.tool.todoStages': 'Todo 阶段',
@@ -1592,14 +1594,17 @@ describe('SessionChat intermediate process collapse', () => {
 
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
-    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
-    expect(screen.getByText('1 段思考 · 1 次工具调用')).toBeInTheDocument();
+    expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(processGroup.className).not.toContain('rounded-lg');
+    expect(processGroup.closest('[data-process-output="true"]')?.className).not.toContain('bg-white');
     expect(screen.getByText('已读取当前 workflow.md。')).toBeInTheDocument();
 
-    await user.click(screen.getByText('过程（2 项）'));
+    await user.click(screen.getByText('查看 2 个步骤'));
 
     expect(processGroup.open).toBe(true);
-    expect(screen.getByText('read')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
+    expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('已完成');
   });
 
   it('opens process groups while an assistant message is active and collapses after completion', () => {
@@ -1731,8 +1736,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
     expect(processGroup.open).toBe(false);
-    expect(screen.getByText('过程（5 项）')).toBeInTheDocument();
-    expect(screen.getByText('2 段思考 · 2 次工具调用 · 1 段中间回复')).toBeInTheDocument();
+    expect(screen.getByText('查看 5 个步骤')).toBeInTheDocument();
     expect(screen.getByText('最终结果已生成。')).toBeVisible();
   });
 
@@ -1798,7 +1802,7 @@ describe('SessionChat intermediate process collapse', () => {
     }));
 
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
-    await user.click(screen.getByText('过程（2 项）'));
+    await user.click(screen.getByText('查看 2 个步骤'));
     expect(processGroup.open).toBe(true);
 
     useSessionMessagesMock.mockReturnValue({
@@ -1817,10 +1821,10 @@ describe('SessionChat intermediate process collapse', () => {
       display: { collapseIntermediateSteps: true },
     }));
 
-    expect(screen.getByText('过程（3 项）')).toBeInTheDocument();
+    expect(screen.getByText('查看 3 个步骤')).toBeInTheDocument();
     expect(screen.getByTestId('chat-process-group')).toBe(processGroup);
     expect(processGroup.open).toBe(true);
-    expect(screen.getByText('write')).toBeVisible();
+    expect(screen.getAllByTestId('chat-process-tool-step')).toHaveLength(2);
   });
 
   it('restores a user-opened process group after switching away from a keyed session chat', async () => {
@@ -1885,7 +1889,7 @@ describe('SessionChat intermediate process collapse', () => {
     });
     const { rerender } = render(renderKeyedChat('sess-1'));
 
-    await user.click(screen.getByText('过程（2 项）'));
+    await user.click(screen.getByText('查看 2 个步骤'));
     expect(screen.getByTestId('chat-process-group')).toHaveProperty('open', true);
 
     rerender(renderKeyedChat('sess-2'));
@@ -1895,7 +1899,7 @@ describe('SessionChat intermediate process collapse', () => {
 
     const restoredProcessGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(restoredProcessGroup.open).toBe(true);
-    expect(screen.getByText('read')).toBeVisible();
+    expect(screen.getByTestId('chat-process-tool-step').querySelector('summary')).toBeVisible();
   });
 
   it('keeps pending questions visible and folds answered questions into the process group', async () => {
@@ -1983,7 +1987,7 @@ describe('SessionChat intermediate process collapse', () => {
 
     expect(screen.getByText('需要你的回答')).toBeVisible();
     expect(screen.getByText('选择范围')).toBeVisible();
-    expect(screen.getByText('过程（1 项）')).toBeInTheDocument();
+    expect(screen.getByText('查看 1 个步骤')).toBeInTheDocument();
 
     pendingQuestionsHookMock.pendingQuestions = {};
     useSessionMessagesMock.mockReturnValue({
@@ -2003,26 +2007,24 @@ describe('SessionChat intermediate process collapse', () => {
     }));
 
     expect(screen.queryByText('需要你的回答')).not.toBeInTheDocument();
-    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
-    expect(screen.getByText('1 段思考 · 1 次工具调用')).toBeInTheDocument();
-    expect(screen.queryByText('question')).not.toBeVisible();
+    expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByText('已完成')).not.toBeVisible();
     expect(screen.queryByText('输入参数')).not.toBeInTheDocument();
     expect(screen.queryByText('输出结果')).not.toBeInTheDocument();
 
-    await user.click(screen.getByText('过程（2 项）'));
+    await user.click(screen.getByText('查看 2 个步骤'));
 
-    expect(screen.getByText('question')).toBeVisible();
     expect(screen.getByText('已完成')).toBeVisible();
     expect(screen.getByText('问题')).not.toBeVisible();
 
-    await user.click(screen.getByText('question'));
+    await user.click(screen.getByText('已完成'));
 
     expect(screen.getByText('问题')).toBeVisible();
     expect(screen.getByText('回答')).toBeVisible();
     expect(screen.getAllByText('测试范围').length).toBeGreaterThan(0);
     expect(screen.getByText('是')).toBeVisible();
 
-    await user.click(screen.getByText('过程（2 项）'));
+    await user.click(screen.getByText('查看 2 个步骤'));
 
     useSessionMessagesMock.mockReturnValue({
       messages: [makeQuestionMessage('completed', true)],
@@ -2041,8 +2043,8 @@ describe('SessionChat intermediate process collapse', () => {
     }));
 
     expect(screen.getByText('已按你的选择继续处理。')).toBeVisible();
-    expect(screen.getByText('过程（2 项）')).toBeInTheDocument();
-    expect(screen.getByText('question')).not.toBeVisible();
+    expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByText('已完成')).not.toBeVisible();
   });
 
   it('renders collapsed process groups inside the full compact assistant column', () => {
@@ -2142,7 +2144,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(true);
 
-    await user.click(screen.getByText('过程（2 项）'));
+    await user.click(screen.getByText('查看 2 个步骤'));
 
     expect(processGroup.open).toBe(false);
   });
@@ -2239,8 +2241,7 @@ describe('SessionChat intermediate process collapse', () => {
     }));
 
     expect(screen.getAllByTestId('chat-process-group')).toHaveLength(1);
-    expect(screen.getByText('过程（4 项）')).toBeInTheDocument();
-    expect(screen.getByText('2 段思考 · 2 次工具调用')).toBeInTheDocument();
+    expect(screen.getByText('查看 4 个步骤')).toBeInTheDocument();
   });
 
   it('keeps the compact compaction bubble at the full assistant column width', async () => {

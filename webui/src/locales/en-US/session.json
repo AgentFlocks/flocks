@@ -146,7 +146,8 @@
     "thinking": "Thinking...",
     "streaming": "Streaming...",
     "process": {
-      "title": "Process ({{count}})",
+      "title": "View {{count}} steps",
+      "deepThinking": "Deep thinking",
       "reasoningCount": "{{count}} reasoning",
       "toolCount": "{{count}} tool calls",
       "textCount": "{{count}} intermediate replies"
@@ -232,6 +233,7 @@
       "running": "Running",
       "completed": "Completed",
       "error": "Failed",
+      "todoUpdated": "Todos updated",
       "inputParams": "Input Parameters",
       "outputResult": "Output Result",
       "todoStages": "Todo stages",

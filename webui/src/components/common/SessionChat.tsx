@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -3978,14 +3978,14 @@ function ProcessGroupDetails({
     <details
       open={effectiveOpen}
       data-testid="chat-process-group"
-      className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+      className="group/process mt-2 w-full first:mt-0 text-[#6f757c] dark:text-zinc-400"
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50"
+        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-semibold transition-colors hover:text-zinc-900 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden"
       >
         {summary}
-        <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
+        <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
       </summary>
       {children}
     </details>
@@ -4056,13 +4056,22 @@ function ChatMessageBubbleInner({
   const editableRawText = latestEditablePart?.text || '';
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
+  const hasProcessOutput = collapseIntermediateSteps && !isUser && parts.some((part) => {
+    if (part.type === 'reasoning' || part.type === 'thinking') {
+      return !!getRenderableThinkingText(part);
+    }
+    if (part.type !== 'tool') return false;
+    return !(part.callID && pendingQuestions?.[part.callID]);
+  });
   const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
     ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0]))
     : null;
 
   const bubbleClass = instructionDisplayLabel
     ? getInstructionDisplayBubbleClassName(compact)
-    : getMessageBubbleClassName({ compact, isUser, isEditing });
+    : hasProcessOutput
+      ? 'w-full max-w-full min-w-0 break-words text-sm text-zinc-700 dark:text-zinc-200'
+      : getMessageBubbleClassName({ compact, isUser, isEditing });
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
@@ -4089,7 +4098,11 @@ function ChatMessageBubbleInner({
 
   const headerHeight = compact ? 'h-7' : 'h-8';
   const bubble = (
-    <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
+    <div
+      className={`${bubbleClass} relative`}
+      data-process-output={hasProcessOutput ? 'true' : undefined}
+      style={{ overflowWrap: 'anywhere' }}
+    >
 
       {/* Empty / loading state */}
       {(parts.length === 0 || shouldRenderAssistantErrorState) && (
@@ -4160,14 +4173,14 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
-          const renderPart = (part: MessagePart, i: number, isVisible = true) => (
+          const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
             // own `mt-2 first:mt-0`, but since every part lives in its own
             // wrapper div, `first:` always matched and the gap collapsed
             // to zero between, e.g., a tool card and the next thinking
             // block, making them look glued together.
-            <div key={part.id || i} className="mt-2 first:mt-0">
+            <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
               {/* Text */}
               {part.type === 'text' && (() => {
                 const rawText = part.text || '';
@@ -4194,10 +4207,19 @@ function ChatMessageBubbleInner({
                         <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
                       </div>
                     )}
-                    <StreamingMarkdown
-                      content={displayText}
-                      isStreaming={isActive && !isUser}
-                    />
+                    {processStep ? (
+                      <div className="mb-[9px] ml-2 mt-[3px] border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-[13px] leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                        <StreamingMarkdown
+                          content={displayText}
+                          isStreaming={isActive && !isUser}
+                        />
+                      </div>
+                    ) : (
+                      <StreamingMarkdown
+                        content={displayText}
+                        isStreaming={isActive && !isUser}
+                      />
+                    )}
                   </>
                 );
               })()}
@@ -4213,6 +4235,7 @@ function ChatMessageBubbleInner({
                   onReject={onQuestionReject && part.callID
                     ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
                     : undefined}
+                  processStep={processStep}
                 />
               )}
 
@@ -4223,6 +4246,37 @@ function ChatMessageBubbleInner({
                 const partKey = part.id || `reasoning-${i}`;
                 const isThinking = part === activeTailPart;
                 const isExpanded = isThinking || getPartExpanded(partKey);
+                if (processStep) {
+                  return (
+                    <div data-testid="chat-process-reasoning-step">
+                      <button
+                        type="button"
+                        aria-expanded={isExpanded}
+                        onClick={() => togglePart(partKey)}
+                        disabled={isThinking}
+                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200"
+                      >
+                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
+                          {isThinking ? (
+                            <Loader2 className="h-[15px] w-[15px] animate-spin" />
+                          ) : (
+                            <Brain className="h-[15px] w-[15px]" />
+                          )}
+                        </span>
+                        <span className="min-w-0">{t('chat.process.deepThinking')}</span>
+                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      {isExpanded && isVisible && (
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-[13px] leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                          <StreamingReasoningText
+                            content={thinkingText}
+                            isStreaming={isThinking}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
                 return (
                   // Vertical spacing is provided by the parent part wrapper
                   // (see `otherParts.map` above); keep this container neutral
@@ -4269,14 +4323,6 @@ function ChatMessageBubbleInner({
             </div>
           );
           const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
-            const reasoningCount = group.filter(({ part }) => part.type === 'reasoning' || part.type === 'thinking').length;
-            const toolCount = group.filter(({ part }) => part.type === 'tool').length;
-            const textCount = group.filter(({ part }) => part.type === 'text').length;
-            const summary = [
-              reasoningCount > 0 ? t('chat.process.reasoningCount', { count: reasoningCount }) : '',
-              toolCount > 0 ? t('chat.process.toolCount', { count: toolCount }) : '',
-              textCount > 0 ? t('chat.process.textCount', { count: textCount }) : '',
-            ].filter(Boolean).join(' · ');
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
             const hasStoredOpenState = !!processGroupOpenState
@@ -4292,20 +4338,17 @@ function ChatMessageBubbleInner({
                 onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
                 summary={(
                   <>
-                    <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
-                    <span className="flex-shrink-0 font-semibold text-zinc-700">
+                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
+                      <Eye className="h-4 w-4" />
+                    </span>
+                    <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
                     </span>
-                    {summary && (
-                      <span className="min-w-0 truncate text-zinc-500">
-                        {summary}
-                      </span>
-                    )}
                   </>
                 )}
               >
-                <div className="border-t border-zinc-200/70 px-2.5 py-2">
-                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen))}
+                <div data-testid="chat-process-timeline" className="mt-3 grid gap-1 pl-1">
+                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen, true))}
                 </div>
               </ProcessGroupDetails>
             );
@@ -4797,12 +4840,14 @@ function ChatQuestionResult({
   statusLabel,
   statusIcon,
   statusIconColor,
+  processStep = false,
   t,
 }: {
   state: Partial<ToolState>;
   statusLabel: string;
   statusIcon: React.ReactNode;
   statusIconColor: string;
+  processStep?: boolean;
   t: TodoTranslator;
 }) {
   const questions = readQuestionItems(state.input?.questions);
@@ -4828,6 +4873,67 @@ function ChatQuestionResult({
     ? 'bg-red-50 text-red-500'
     : 'bg-zinc-100 text-zinc-500';
   const firstQuestion = questions[0]?.header || questions[0]?.question || '';
+  const questionDetails = questions.map((question, index) => {
+    const answers = normalizeQuestionAnswer(rawAnswers[index]);
+    const displayAnswers = answers.length > 0
+      ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
+      : [t('chat.questionResult.unanswered')];
+    return (
+      <div
+        key={`${question.question}-${index}`}
+        className={`space-y-2 py-2 last:pb-0 ${processStep ? 'first:pt-0' : 'first:pt-2'}`}
+      >
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
+            {t('chat.questionResult.questionLabel')}
+          </span>
+          <div className="min-w-0">
+            {question.header && (
+              <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
+            )}
+            <div className="text-xs leading-5 text-zinc-700 dark:text-zinc-300">{question.question}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
+            {t('chat.questionResult.answerLabel')}
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-1.5">
+            {displayAnswers.map((answer, answerIndex) => (
+              <span
+                key={`${answer}-${answerIndex}`}
+                className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
+              >
+                {answer}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  });
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
+            {statusIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{displayStatus}</span>
+          {firstQuestion && (
+            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {firstQuestion}
+            </span>
+          )}
+          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {questionDetails}
+        </div>
+      </details>
+    );
+  }
 
   return (
     <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
@@ -4851,45 +4957,7 @@ function ChatQuestionResult({
         </div>
       </summary>
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {questions.map((question, index) => {
-          const answers = normalizeQuestionAnswer(rawAnswers[index]);
-          const displayAnswers = answers.length > 0
-            ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
-            : [t('chat.questionResult.unanswered')];
-          return (
-            <div
-              key={`${question.question}-${index}`}
-              className="space-y-2 py-2 first:pt-2 last:pb-0"
-            >
-              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-                <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
-                  {t('chat.questionResult.questionLabel')}
-                </span>
-                <div className="min-w-0">
-                  {question.header && (
-                    <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
-                  )}
-                  <div className="text-xs leading-5 text-zinc-700">{question.question}</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-                <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
-                  {t('chat.questionResult.answerLabel')}
-                </span>
-                <div className="flex min-w-0 flex-wrap gap-1.5">
-                  {displayAnswers.map((answer, answerIndex) => (
-                    <span
-                      key={`${answer}-${answerIndex}`}
-                      className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
-                    >
-                      {answer}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        {questionDetails}
       </div>
     </details>
   );
@@ -5122,15 +5190,16 @@ export interface ChatToolPartProps {
   pendingQuestion?: PendingQuestion;
   onAnswer?: (answers: string[][]) => Promise<void>;
   onReject?: () => Promise<void>;
+  processStep?: boolean;
 }
 
-export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: ChatToolPartProps) {
+export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, processStep = false }: ChatToolPartProps) {
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
   // Keep the delegate fallback narrow: many MCP tools also carry a generic
   // `category` field (for example wecom_mcp category="doc").
-  if (shouldRenderDelegateTaskCard(part)) {
+  if (shouldRenderDelegateTaskCard(part) && !processStep) {
     return <DelegateTaskCard part={part} />;
   }
 
@@ -5195,6 +5264,15 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
+  const processStepLabel = isTodoTool ? t('chat.tool.todoUpdated') : config.label;
+  const processStepDetail = workflowHeaderSummary
+    || displayTitle
+    || inputSummary
+    || toolName.replace(/_/g, ' ');
+  const processStepIcon = isTodoTool
+    ? <ListTree className="h-[15px] w-[15px]" />
+    : config.icon;
+  const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
     ? 'text-[11px] font-medium text-zinc-500'
     : `text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
@@ -5220,8 +5298,100 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         statusLabel={config.label}
         statusIcon={config.icon}
         statusIconColor={config.iconColor}
+        processStep={processStep}
         t={t}
       />
+    );
+  }
+
+  const toolDetails = (
+    <>
+      {isTodoTool && todoEntries.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
+            <span>{t('chat.tool.todoStages')}</span>
+            <span className="font-normal text-zinc-400">{todoEntries.length}</span>
+          </div>
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+            {todoEntries.map((todo, index) => (
+              <div
+                key={todo.id || index}
+                className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
+              >
+                <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                  {todoStatusIcon(todo.status)}
+                </span>
+                <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
+                  {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
+                </span>
+                <span
+                  className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
+                >
+                  {todoStatusLabel(todo.status, t)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isBashTool && (
+        <ChatBashPayload state={state} t={t} />
+      )}
+
+      {showGenericToolPayload && state.input && (
+        <details>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.inputParams')}
+          </summary>
+          <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
+            {JSON.stringify(state.input, null, 2)}
+          </pre>
+        </details>
+      )}
+
+      {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
+        <details open>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.outputResult')}
+          </summary>
+          <pre className="max-h-48 overflow-x-auto overflow-y-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400">
+            {formatToolPayload(state.output)}
+          </pre>
+        </details>
+      )}
+
+      {status === 'error' && state.error && (
+        <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+          {state.error}
+        </div>
+      )}
+
+      {state.time?.start && state.time?.end && (
+        <div className="text-right text-[10px] text-zinc-400">
+          {((state.time.end - state.time.start) / 1000).toFixed(2)}s
+        </div>
+      )}
+    </>
+  );
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-[13px] font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
+            {processStepIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
+          <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+            {processStepDetail}
+          </span>
+          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {toolDetails}
+        </div>
+      </details>
     );
   }
 
@@ -5267,73 +5437,8 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         </div>
       </summary>
 
-      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {isTodoTool && todoEntries.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
-              <span>{t('chat.tool.todoStages')}</span>
-              <span className="font-normal text-zinc-400">{todoEntries.length}</span>
-            </div>
-            <div className="divide-y divide-zinc-100">
-              {todoEntries.map((todo, index) => (
-                <div
-                  key={todo.id || index}
-                  className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
-                >
-                  <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                    {todoStatusIcon(todo.status)}
-                  </span>
-                  <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
-                    {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
-                  </span>
-                  <span
-                    className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
-                  >
-                    {todoStatusLabel(todo.status, t)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {isBashTool && (
-          <ChatBashPayload state={state} t={t} />
-        )}
-
-        {showGenericToolPayload && state.input && (
-          <details>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
-              {t('chat.tool.inputParams')}
-            </summary>
-            <pre className="p-2 bg-zinc-950 text-zinc-300 rounded-md text-[11px] overflow-x-auto font-mono leading-relaxed">
-              {JSON.stringify(state.input, null, 2)}
-            </pre>
-          </details>
-        )}
-
-        {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
-          <details open>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
-              {t('chat.tool.outputResult')}
-            </summary>
-            <pre className="p-2 bg-zinc-950 text-green-400 rounded-md text-[11px] overflow-x-auto max-h-48 overflow-y-auto font-mono leading-relaxed">
-              {formatToolPayload(state.output)}
-            </pre>
-          </details>
-        )}
-
-        {status === 'error' && state.error && (
-          <div className="px-2.5 py-1.5 bg-red-50 border border-red-100 rounded-md text-[11px] text-red-600">
-            {state.error}
-          </div>
-        )}
-
-        {state.time?.start && state.time?.end && (
-          <div className="text-zinc-400 text-right text-[10px]">
-            {((state.time.end - state.time.start) / 1000).toFixed(2)}s
-          </div>
-        )}
+      <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
+        {toolDetails}
       </div>
     </details>
   );

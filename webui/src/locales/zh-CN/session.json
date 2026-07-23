@@ -146,7 +146,8 @@
     "thinking": "思考中...",
     "streaming": "继续输出中...",
     "process": {
-      "title": "过程（{{count}} 项）",
+      "title": "查看 {{count}} 个步骤",
+      "deepThinking": "深度思考",
       "reasoningCount": "{{count}} 段思考",
       "toolCount": "{{count}} 次工具调用",
       "textCount": "{{count}} 段中间回复"
@@ -232,6 +233,7 @@
       "running": "执行中",
       "completed": "已完成",
       "error": "失败",
+      "todoUpdated": "已更新待办",
       "inputParams": "输入参数",
       "outputResult": "输出结果",
       "todoStages": "Todo 阶段",
