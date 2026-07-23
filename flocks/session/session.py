@@ -216,7 +216,16 @@ class Session:
 
     @classmethod
     def inherited_model_kwargs(cls, session: Optional[SessionInfo]) -> Dict[str, Any]:
-        """Return pinned model kwargs that should propagate to a child session."""
+        """Return model preference kwargs that should propagate to a new session."""
+        if (
+            session
+            and is_model_auto_session_category(getattr(session, "category", "user"))
+            and getattr(session, "model_auto", False)
+        ):
+            return {
+                "model_auto": True,
+                "model_pinned": False,
+            }
         if not cls.has_pinned_model(session):
             return {}
         return {

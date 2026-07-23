@@ -343,6 +343,62 @@ class TestParseSlashCommand:
 
 class TestFeishuNativeCommands:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("category", "model_auto", "expected"),
+        [
+            ("user", True, True),
+            ("user", False, False),
+            ("task", True, False),
+        ],
+    )
+    async def test_im_loop_uses_supported_persisted_auto_mode(
+        self,
+        monkeypatch,
+        category,
+        model_auto,
+        expected,
+    ):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        binding = SessionBinding(
+            channel_id="slack",
+            account_id="T1",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_1",
+                    category=category,
+                    model_auto=model_auto,
+                )
+            ),
+        )
+        run_mock = AsyncMock(return_value=SimpleNamespace(last_message=None))
+        monkeypatch.setattr(
+            "flocks.session.session_loop.SessionLoop.run",
+            run_mock,
+        )
+
+        loop_callbacks = SimpleNamespace()
+        await InboundDispatcher._run_session_loop(binding, loop_callbacks)
+
+        run_mock.assert_awaited_once_with(
+            session_id="session_1",
+            agent_name="rex",
+            callbacks=loop_callbacks,
+            auto_failover=expected,
+        )
+
+    @pytest.mark.asyncio
     async def test_status_command_reports_session_state(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.channel.inbound.session_binding import SessionBinding
@@ -599,6 +655,90 @@ class TestFeishuNativeCommands:
         update_mock.assert_awaited_once()
         assert update_mock.await_args.args == ("channel", "session_old")
         assert update_mock.await_args.kwargs["status"] == "archived"
+
+    @pytest.mark.asyncio
+    async def test_new_command_inherits_auto_model_mode(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="wecom",
+                account_id="default",
+                chat_id="room_1",
+                chat_type=ChatType.DIRECT,
+                thread_id=None,
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/new",
+            mention_text="/new",
+        )
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    category="user",
+                    model_auto=True,
+                    model_pinned=False,
+                    provider=None,
+                    model=None,
+                )
+            ),
+        )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(id="session_new", agent="rex")
+        )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
+        monkeypatch.setattr(
+            "flocks.session.session.Session.update",
+            AsyncMock(return_value=None),
+        )
+
+        await dispatcher._handle_session_command(
+            binding=binding,
+            msg=msg,
+            callbacks=dispatcher._build_callbacks(binding, msg),
+            scope_override=None,
+            channel_config=ChannelConfig(enabled=True),
+        )
+
+        create_kwargs = create_mock.await_args.kwargs
+        assert create_kwargs["model_auto"] is True
+        assert create_kwargs["model_pinned"] is False
+        assert "provider" not in create_kwargs
+        assert "model" not in create_kwargs
 
     @pytest.mark.asyncio
     async def test_new_command_with_args_sends_args_to_new_session(self, monkeypatch):
