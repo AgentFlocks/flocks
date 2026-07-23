@@ -221,6 +221,7 @@ def test_resolve_model_does_not_infer_interleaved_for_non_reasoning_model(monkey
     [
         ("openai-compatible", "qwen3-235b-a22b-thinking", "https://api.example.com/v1", "reasoning_content"),
         ("openai-compatible", "kimi-k2-thinking-turbo", "https://api.example.com/v1", "reasoning_content"),
+        ("openai-compatible", "kimi-k3", "https://api.example.com/v1", "reasoning_content"),
         ("openai-compatible", "deepseek-v4-pro", "https://api.deepseek.com/v1", "reasoning_content"),
         ("openai-compatible", "glm-4.7", "https://api.example.com/v1", "reasoning_content"),
         ("openai-compatible", "minimax-m3", "https://api.example.com/v1", "reasoning_details"),

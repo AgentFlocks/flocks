@@ -183,6 +183,38 @@ class TestOpenAICompatibleProviderTemperature:
 
         assert create.await_count == 1
 
+    @pytest.mark.asyncio
+    async def test_stream_logs_effective_kimi_k3_thinking_state(self):
+        provider, create = _build_provider_with_client()
+        provider.log = MagicMock()
+        create.return_value = _stream_from_chunks(
+            SimpleNamespace(
+                choices=[
+                    SimpleNamespace(
+                        delta=SimpleNamespace(content="ok", tool_calls=None),
+                        finish_reason="stop",
+                    )
+                ],
+                usage=None,
+            )
+        )
+
+        _ = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k3",
+                [ChatMessage(role="user", content="hello")],
+                extra_body={"reasoning_effort": "max"},
+            )
+        ]
+
+        request_logs = [
+            call.args
+            for call in provider.log.info.call_args_list
+            if call.args[0] == "openai_compatible.stream.request"
+        ]
+        assert request_logs[0][1]["thinking_enabled"] is True
+
 
 class TestOpenAICompatibleProviderMiniMaxFallback:
     def test_is_minimax_empty_response_target_matches_all_minimax_aliases(self):

@@ -41,7 +41,7 @@ These tests verify four properties of the new path:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import pytest
 
@@ -87,7 +87,7 @@ def _iter_interleaved_catalog_entries() -> Iterator[Tuple[str, str]]:
 def _expected_generic_chat_extra_body(
     provider_id: str,
     model_id: str,
-) -> Dict[str, Any]:
+) -> Optional[Dict[str, Any]]:
     """Return the expected OpenAI-compatible thinking control payload."""
     provider_lower = provider_id.lower()
     model_lower = model_id.lower()
@@ -98,6 +98,10 @@ def _expected_generic_chat_extra_body(
         return GLM_THINKING_EXTRA_BODY
     if "mimo" in model_lower:
         return MIMO_THINKING_EXTRA_BODY
+    if "kimi-k3" in model_lower:
+        return {"reasoning_effort": "max"}
+    if "kimi-k2.7" in model_lower:
+        return None
     if "kimi" in model_lower:
         return KIMI_THINKING_EXTRA_BODY
     if "minimax" in model_lower or provider_lower == "minimax":
@@ -147,12 +151,14 @@ class TestCatalogInterleavedCoverage:
         has_reasoning_effort = bool(options.get("reasoningEffort"))
         has_thinking_config = bool(options.get("thinkingConfig"))
         has_thinking_level = bool(options.get("thinkingLevel"))
+        is_forced_kimi_k27 = "kimi-k2.7" in model_id.lower()
         assert (
             has_extra_body
             or has_thinking
             or has_reasoning_effort
             or has_thinking_config
             or has_thinking_level
+            or is_forced_kimi_k27
         ), (
             f"{provider_id}/{model_id} declares interleaved in catalog but "
             f"build_provider_options emitted no thinking field. "
@@ -437,6 +443,8 @@ class TestDispatchShape:
             ("qwen3-7b-uncatalogued", {"enable_thinking": True}),
             ("glm-5-uncatalogued", GLM_THINKING_EXTRA_BODY),
             ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k2.7-code-uncatalogued", None),
+            ("kimi-k3-uncatalogued", {"reasoning_effort": "max"}),
             ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
             ("minimax-m4-uncatalogued", {"reasoning_split": True}),
             ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),
@@ -445,7 +453,7 @@ class TestDispatchShape:
     def test_series_token_fallback_emits_expected_extra_body(
         self,
         model_id: str,
-        expected_extra_body: Dict[str, Any],
+        expected_extra_body: Optional[Dict[str, Any]],
     ) -> None:
         """Models matching a known series token in
         ``infer_interleaved_capability`` get the expected extra_body on the wire

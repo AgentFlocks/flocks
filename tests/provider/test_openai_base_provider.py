@@ -624,6 +624,53 @@ class TestOpenAIBaseProviderTemperature:
             "assistant": 1,
         }
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model_id", "extra_body"),
+        [
+            ("kimi-k2.6", {"thinking": {"type": "enabled"}}),
+            ("kimi-k2.7-code", {}),
+            ("kimi-k3", {"reasoning_effort": "max"}),
+        ],
+    )
+    async def test_chat_logs_effective_extra_body_thinking_state(
+        self,
+        model_id,
+        extra_body,
+    ):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+        info = Mock()
+
+        from flocks.provider.provider import ChatMessage
+
+        with patch.object(openai_base_module, "log", Mock(info=info)):
+            await provider.chat(
+                model_id,
+                [ChatMessage(role="user", content="hello")],
+                extra_body=extra_body,
+            )
+
+        _event, payload = info.call_args.args
+        assert payload["thinking_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_kimi_k3_uses_max_completion_tokens(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "kimi-k3",
+            [ChatMessage(role="user", content="hello")],
+            max_tokens=131072,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 131072
+        assert "max_tokens" not in kwargs
+
 
 class TestExtractReasoningContent:
     """Regression: some proxies send stream chunks with ``delta is None``."""
