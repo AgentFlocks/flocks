@@ -58,6 +58,115 @@ class TestBuildProviderOptions:
 
         assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
 
+    def test_moonshot_kimi_k27_forces_official_thinking_payload(self):
+        options = provider_options.build_provider_options(
+            "moonshot",
+            "kimi-k2.7-code",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
+
+    def test_moonshot_kimi_k3_uses_default_reasoning_effort(self):
+        options = provider_options.build_provider_options(
+            "moonshot",
+            "kimi-k3",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "max"}
+
+    def test_kimi_k27_forces_thinking_even_when_toggle_is_disabled(self):
+        options = provider_options.build_provider_options(
+            "threatbook-cn-llm",
+            "kimi-k2.7-code",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == KIMI_THINKING_EXTRA_BODY
+
+    def test_kimi_k27_overrides_configured_disabled_thinking(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args: {
+                "thinking": {"type": "disabled"},
+                "custom_option": True,
+            },
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k2.7-code",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {
+            "thinking": {"type": "enabled"},
+            "custom_option": True,
+        }
+
+    def test_kimi_k3_uses_reasoning_effort_instead_of_thinking(self):
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k3",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "max"}
+        assert "thinking" not in options["extra_body"]
+
+    def test_kimi_k3_respects_supported_reasoning_effort(self):
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k3",
+            reasoning_effort="low",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "low"}
+
+    def test_kimi_k3_preserves_configured_extra_body_reasoning_effort(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args: {"reasoning_effort": "high"},
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k3",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "high"}
+
+    def test_kimi_k3_explicit_reasoning_effort_overrides_configured_default(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args: {"reasoning_effort": "high"},
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k3",
+            reasoning_effort="low",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "low"}
+
     def test_openai_compatible_qwen_models_enable_thinking_by_default(self, monkeypatch):
         monkeypatch.setattr(
             provider_options,

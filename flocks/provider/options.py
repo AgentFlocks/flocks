@@ -27,6 +27,8 @@ log = Log.create(service="provider.options")
 # ---------------------------------------------------------------------------
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
+DEFAULT_KIMI_K3_REASONING_EFFORT = "max"
+KIMI_K3_REASONING_EFFORTS = frozenset({"low", "high", "max"})
 
 _GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS = {
     "reasoning_content": "enable_thinking",
@@ -64,6 +66,26 @@ def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool
         return _coerce_optional_bool(default_parameters.get("enable_thinking"))
     except Exception as exc:
         log.debug("options.reasoning_setting_lookup_failed", {
+            "provider_id": provider_id,
+            "model_id": model_id,
+            "error": str(exc),
+        })
+        return None
+
+
+def _resolve_reasoning_effort(provider_id: str, model_id: str) -> Optional[str]:
+    """Read a model-level reasoning effort from flocks.json."""
+    try:
+        from flocks.provider.model_manager import get_model_manager
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if not setting:
+            return None
+
+        value = (setting.default_parameters or {}).get("reasoning_effort")
+        return value.strip().lower() if isinstance(value, str) else None
+    except Exception as exc:
+        log.debug("options.reasoning_effort_setting_lookup_failed", {
             "provider_id": provider_id,
             "model_id": model_id,
             "error": str(exc),
@@ -201,11 +223,26 @@ def _build_generic_chat_extra_body(
     model_id: str,
     interleaved_capability: Optional[Dict[str, Any]],
     reasoning_enabled: Optional[bool],
+    reasoning_effort: Optional[str],
 ) -> Optional[Dict[str, Any]]:
     """Build OpenAI-compatible reasoning params for the active replay field."""
     provider_lower = provider_id.lower()
     model_lower = model_id.lower()
     enabled = reasoning_enabled is not False
+
+    if "kimi-k3" in model_lower:
+        effort = reasoning_effort or DEFAULT_KIMI_K3_REASONING_EFFORT
+        if effort not in KIMI_K3_REASONING_EFFORTS:
+            log.warning(
+                "options.kimi_k3.invalid_reasoning_effort",
+                {
+                    "model_id": model_id,
+                    "reasoning_effort": effort,
+                    "fallback": DEFAULT_KIMI_K3_REASONING_EFFORT,
+                },
+            )
+            effort = DEFAULT_KIMI_K3_REASONING_EFFORT
+        return {"reasoning_effort": effort}
 
     if "deepseek" in model_lower or provider_lower == "deepseek":
         return {
@@ -234,6 +271,11 @@ def _build_generic_chat_extra_body(
             )
         }
 
+    if "kimi-k2.7" in model_lower:
+        # K2.7 cannot disable thinking. Send the enabled form explicitly
+        # because OpenAI-compatible gateways may not apply Moonshot's default.
+        return {"thinking": {"type": "enabled"}}
+
     if "kimi" in model_lower:
         return {
             "thinking": (
@@ -260,6 +302,7 @@ def build_provider_options(
     model_id: str,
     *,
     reasoning_enabled: Optional[bool] = None,
+    reasoning_effort: Optional[str] = None,
     thinking_budget: int = DEFAULT_THINKING_BUDGET,
     resolve_max_tokens: bool = True,
 ) -> Dict[str, Any]:
@@ -273,6 +316,8 @@ def build_provider_options(
         The model being called (e.g. ``"claude-sonnet-4"``).
     thinking_budget:
         Token budget for extended-thinking / reasoning where applicable.
+    reasoning_effort:
+        Kimi K3 reasoning effort (``low``, ``high``, or ``max``).
     resolve_max_tokens:
         If *True*, fall back to the model's configured ``max_tokens`` when
         no provider-specific logic has already set it.
@@ -285,10 +330,16 @@ def build_provider_options(
     model_lower = model_id.lower()
     interleaved_capability = _resolve_interleaved_capability(provider_id, model_id)
     reasoning_transport = _resolve_reasoning_transport(provider_id, model_id)
+    reasoning_effort_explicit = isinstance(reasoning_effort, str)
     reasoning_enabled = (
         _coerce_optional_bool(reasoning_enabled)
         if reasoning_enabled is not None
         else _resolve_reasoning_enabled(provider_id, model_id)
+    )
+    reasoning_effort = (
+        reasoning_effort.strip().lower()
+        if isinstance(reasoning_effort, str)
+        else _resolve_reasoning_effort(provider_id, model_id)
     )
     configured_extra_body = _resolve_default_extra_body(provider_id, model_id)
     interleaved_enabled = interleaved_capability is not None
@@ -348,13 +399,37 @@ def build_provider_options(
         configured_extra_body
         or interleaved_enabled
         or reasoning_enabled is True
+        or "kimi-k2.7" in model_lower
+        or "kimi-k3" in model_lower
     ):
-        extra_body = configured_extra_body or _build_generic_chat_extra_body(
+        automatic_extra_body = _build_generic_chat_extra_body(
             provider_id,
             model_id,
             interleaved_capability,
             reasoning_enabled,
+            reasoning_effort,
         )
+        extra_body = dict(configured_extra_body or automatic_extra_body or {})
+        if "kimi-k3" in model_lower:
+            # K3 is always a reasoning model and uses the top-level
+            # reasoning_effort field instead of the K2.x thinking object.
+            extra_body.pop("thinking", None)
+            if reasoning_effort_explicit:
+                extra_body["reasoning_effort"] = (automatic_extra_body or {}).get(
+                    "reasoning_effort",
+                    DEFAULT_KIMI_K3_REASONING_EFFORT,
+                )
+            else:
+                configured_effort = extra_body.get("reasoning_effort")
+                if configured_effort not in KIMI_K3_REASONING_EFFORTS:
+                    extra_body["reasoning_effort"] = (automatic_extra_body or {}).get(
+                        "reasoning_effort",
+                        DEFAULT_KIMI_K3_REASONING_EFFORT,
+                    )
+        elif "kimi-k2.7" in model_lower:
+            # K2.7 rejects disabled thinking. Normalize configured values so
+            # direct and gateway-backed endpoints always request reasoning.
+            extra_body["thinking"] = {"type": "enabled"}
         if extra_body:
             options["extra_body"] = extra_body
             log.debug("options.thinking_params.resolved", {

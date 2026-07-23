@@ -98,6 +98,10 @@ def _expected_generic_chat_extra_body(
         return GLM_THINKING_EXTRA_BODY
     if "mimo" in model_lower:
         return MIMO_THINKING_EXTRA_BODY
+    if "kimi-k3" in model_lower:
+        return {"reasoning_effort": "max"}
+    if "kimi-k2.7" in model_lower:
+        return KIMI_THINKING_EXTRA_BODY
     if "kimi" in model_lower:
         return KIMI_THINKING_EXTRA_BODY
     if "minimax" in model_lower or provider_lower == "minimax":
@@ -437,6 +441,8 @@ class TestDispatchShape:
             ("qwen3-7b-uncatalogued", {"enable_thinking": True}),
             ("glm-5-uncatalogued", GLM_THINKING_EXTRA_BODY),
             ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k2.7-code-uncatalogued", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k3-uncatalogued", {"reasoning_effort": "max"}),
             ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
             ("minimax-m4-uncatalogued", {"reasoning_split": True}),
             ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),

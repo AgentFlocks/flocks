@@ -390,6 +390,34 @@ def apply_openai_token_limit(
         params["max_tokens"] = max_tokens
 
 
+def _is_effective_thinking_enabled(
+    model_id: str,
+    thinking: Any,
+    extra_body: Dict[str, Any],
+) -> bool:
+    """Return the effective reasoning state represented by a request."""
+    model_lower = model_id.lower()
+    if "kimi-k2.7" in model_lower or "kimi-k3" in model_lower:
+        return True
+
+    if isinstance(thinking, dict):
+        return thinking.get("type") != "disabled"
+    if thinking:
+        return True
+
+    extra_thinking = extra_body.get("thinking")
+    if isinstance(extra_thinking, dict):
+        return extra_thinking.get("type") != "disabled"
+    if extra_thinking:
+        return True
+
+    if extra_body.get("reasoning_effort") is not None:
+        return True
+    if extra_body.get("reasoning_split") is True:
+        return True
+    return extra_body.get("enable_thinking") is True
+
+
 async def create_chat_completion_with_fallbacks(
     create_call,
     params: Dict[str, Any],
@@ -934,7 +962,9 @@ class OpenAIBaseProvider(BaseProvider):
         apply_openai_token_limit(
             params,
             max_tokens,
-            prefer_completion_tokens=self.PREFER_MAX_COMPLETION_TOKENS,
+            prefer_completion_tokens=(
+                self.PREFER_MAX_COMPLETION_TOKENS or "kimi-k3" in model_id.lower()
+            ),
             completion_tokens_explicit=max_completion_tokens_explicit,
         )
         if kwargs.get("tools"):
@@ -945,7 +975,11 @@ class OpenAIBaseProvider(BaseProvider):
         # these request logs are emitted for every model call in long sessions.
         log.info("openai_base.chat.request", {
             "model": model_id,
-            "thinking_enabled": bool(thinking),
+            "thinking_enabled": _is_effective_thinking_enabled(
+                model_id,
+                thinking,
+                extra_body,
+            ),
             "has_extra_body": "extra_body" in params,
             "has_tools": bool(kwargs.get("tools")),
             "max_tokens": max_tokens,
@@ -1021,7 +1055,9 @@ class OpenAIBaseProvider(BaseProvider):
         apply_openai_token_limit(
             params,
             max_tokens,
-            prefer_completion_tokens=self.PREFER_MAX_COMPLETION_TOKENS,
+            prefer_completion_tokens=(
+                self.PREFER_MAX_COMPLETION_TOKENS or "kimi-k3" in model_id.lower()
+            ),
             completion_tokens_explicit=max_completion_tokens_explicit,
         )
         if kwargs.get("tools"):
@@ -1031,7 +1067,11 @@ class OpenAIBaseProvider(BaseProvider):
         # without repeating the full message history on every turn.
         log.info("openai_base.stream.request", {
             "model": model_id,
-            "thinking_enabled": bool(thinking),
+            "thinking_enabled": _is_effective_thinking_enabled(
+                model_id,
+                thinking,
+                extra_body,
+            ),
             "has_extra_body": "extra_body" in params,
             "has_tools": bool(kwargs.get("tools")),
             "max_tokens": max_tokens,
