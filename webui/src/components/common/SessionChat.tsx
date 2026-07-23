@@ -119,6 +119,8 @@ export interface SessionChatDisplay {
   compact?: boolean;
   /** Let embedded chats use the full available message width. */
   fullWidth?: boolean;
+  /** Use the quieter, centered canvas treatment for the session-management page. */
+  pageCanvas?: boolean;
   /** Show copy action on assistant messages */
   showActions?: boolean;
   /** Show timestamp below each message */
@@ -1476,6 +1478,7 @@ export default function SessionChat({
   const toast = useToast();
   const compact = display?.compact ?? true;
   const fullWidth = display?.fullWidth ?? false;
+  const pageCanvas = display?.pageCanvas ?? false;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
   const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
@@ -3154,11 +3157,17 @@ export default function SessionChat({
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
     ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
-    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
+    : pageCanvas
+      ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
+      : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
 
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
-    : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
+    : fullWidth
+      ? 'space-y-5 w-full px-5'
+      : pageCanvas
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
     : null;
@@ -3365,8 +3374,26 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'} dark:bg-zinc-950`}>
-          <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}`}>
+        <div
+          className={`flex-shrink-0 ${
+            compact
+              ? 'bg-white px-4 py-3 dark:bg-zinc-950'
+              : pageCanvas
+                ? 'bg-transparent px-7 pb-6 pt-2'
+                : 'bg-white py-4 dark:bg-zinc-950'
+          }`}
+        >
+          <div
+            className={`relative min-w-0 ${
+              !compact
+                ? fullWidth
+                  ? 'w-full px-5'
+                  : pageCanvas
+                    ? 'mx-auto w-full max-w-[760px]'
+                    : 'w-[min(76%,64rem)] mx-auto px-6'
+                : ''
+            }`}
+          >
             {conversationBottomSlot && (
               <div className="mb-2 min-w-0">
                 {typeof conversationBottomSlot === 'function'
@@ -3440,14 +3467,16 @@ export default function SessionChat({
               onDragOver={handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
-              className={`rounded-2xl border transition-all ${
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
                     ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
                       ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
-                      : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
+                      : pageCanvas && !compact
+                        ? 'border-black/[0.07] bg-[#fafaf8] hover:border-black/[0.11] focus-within:border-black/[0.11] focus-within:bg-[#fdfdfc] focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.08] dark:bg-[#303842] dark:hover:border-white/[0.13] dark:focus-within:border-white/[0.14] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
                 {/* Node reference chip */}

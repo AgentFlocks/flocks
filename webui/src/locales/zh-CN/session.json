@@ -1,4 +1,7 @@
 {
+  "managementTitle": "会话管理",
+  "sessionCount": "{{count}} 个会话",
+  "clearSearch": "清空搜索",
   "newSession": "新建会话",
   "noSessions": "暂无会话",
   "selectSession": "选择一个会话",

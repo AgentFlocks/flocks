@@ -1,4 +1,7 @@
 {
+  "managementTitle": "Session management",
+  "sessionCount": "{{count}} sessions",
+  "clearSearch": "Clear search",
   "newSession": "New Session",
   "noSessions": "No sessions yet",
   "selectSession": "Select a session",

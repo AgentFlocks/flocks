@@ -4,7 +4,7 @@ import {
   ChevronDown, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
+  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -822,47 +822,86 @@ export default function SessionPage() {
   }
 
   return (
-    <div className="h-full w-full flex overflow-hidden bg-gray-50 dark:bg-zinc-950">
+    <div className="flex h-full w-full overflow-hidden bg-[#f4f4f2] text-[#202328] dark:bg-[#252c35] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`bg-white border-r border-gray-100 flex flex-col transition-all duration-300 flex-shrink-0 h-full overflow-hidden dark:border-zinc-800 dark:bg-zinc-950 ${
-          sidebarCollapsed ? 'w-0' : 'w-64'
+        className={`flex h-[calc(100%_-_1.5rem)] flex-shrink-0 flex-col overflow-hidden rounded-2xl border bg-[#f8f8f6] shadow-[0_3px_12px_rgba(22,27,34,0.045)] transition-[width,margin,opacity] duration-200 dark:border-white/[0.08] dark:bg-[#303842] dark:shadow-[0_8px_24px_rgba(15,18,22,0.16)] ${
+          sidebarCollapsed
+            ? 'my-3 w-0 border-transparent opacity-0'
+            : 'm-3 w-[282px] border-black/[0.07] opacity-100'
         }`}
+        aria-label={t('managementTitle')}
       >
-        {/* Header：始终显示新建 + 搜索 */}
-        <div className="px-3 pt-3 pb-2 flex-shrink-0 space-y-2">
-          <div className="relative">
-            {creating
-              ? <Loader2 className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-gray-400 pointer-events-none" />
-              : <Plus className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />}
-            <button
-              onClick={handleCreateSession}
-              disabled={creating}
-              className="w-full pl-8 pr-3 py-2 text-left bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-800"
-            >
-              {t('newSession')}
-            </button>
+        {/* Header：始终显示标题、新建与搜索 */}
+        <div className="flex-shrink-0 px-3 pb-2 pt-3.5">
+          <div className="mb-2 flex h-8 items-center justify-between px-1">
+            <div className="min-w-0">
+              <strong className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
+                {t('managementTitle')}
+              </strong>
+              <span className="ml-2 text-[11px] text-[#7b8087] dark:text-[#9aa7b4]">
+                {t('sessionCount', { count: sessions.length })}
+              </span>
+            </div>
+            {!selectMode && sessions.length > 0 && (
+              <button
+                type="button"
+                onClick={handleEnterSelectMode}
+                className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                title={t('selectMode')}
+                aria-label={t('selectMode')}
+              >
+                <MoreHorizontal className="h-4 w-4" />
+              </button>
+            )}
           </div>
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={t('filterConversations', 'Filter conversations...')}
-              className="w-full pl-8 pr-3 py-1.5 text-sm bg-gray-100 rounded-lg border-0 outline-none focus:bg-gray-200 transition-colors placeholder:text-gray-400 text-gray-700 dark:bg-zinc-900 dark:text-zinc-200 dark:placeholder:text-zinc-600 dark:focus:bg-zinc-800"
-            />
+
+          <div className="space-y-0.5">
+            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+              {creating
+                ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[#7b8087]" />
+                : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+              <button
+                onClick={handleCreateSession}
+                disabled={creating}
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
+              >
+                {t('newSession')}
+              </button>
+            </div>
+
+            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-[15px] w-[15px] -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={t('filterConversations', 'Filter conversations...')}
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-1.5 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-md text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                  title={t('clearSearch')}
+                  aria-label={t('clearSearch')}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Session list */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide pb-2">
+        <div className="scrollbar-hide min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-[18px] pt-1.5">
           {sessions.length === 0 ? (
-            <div className="text-center py-10 px-4 text-gray-400">
-              <MessageSquare className="w-10 h-10 mx-auto mb-2 opacity-40" />
+            <div className="px-4 py-10 text-center text-[#858a91] dark:text-[#9aa7b4]">
+              <MessageSquare className="mx-auto mb-2 h-9 w-9 opacity-35" />
               <p className="text-sm">{t('noSessions')}</p>
             </div>
           ) : groupedSessions.length === 0 ? (
-            <div className="text-center py-8 px-4 text-gray-400">
+            <div className="px-4 py-8 text-center text-sm text-[#858a91] dark:text-[#9aa7b4]">
               <p className="text-sm">{t('noResults', 'No conversations found')}</p>
             </div>
           ) : (
@@ -876,24 +915,24 @@ export default function SessionPage() {
               const hiddenCount = items.length - visibleItems.length;
 
               return (
-              <div key={key}>
-                <div className="px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
+              <div key={key} className="mt-3 first:mt-0">
+                <div className="flex h-7 select-none items-center px-2 text-[11px] font-semibold uppercase tracking-[0.02em] text-[#8a8e94] dark:text-[#8f9ba8]">
                   {t(labelKey, labelKey)}
                 </div>
                 {visibleItems.map((session) => (
                   <div
                     key={session.id}
                     onClick={() => selectMode ? handleToggleCheck(session.id) : setSelectedSessionId(session.id)}
-                    className={`group relative mx-2 mb-1 px-3 py-2.5 rounded-xl border cursor-pointer transition-all duration-150 ${
+                    className={`group relative mb-0.5 min-h-[34px] cursor-pointer rounded-lg border px-2.5 py-1 transition-colors duration-100 ${
                       !selectMode && selectedSessionId === session.id
-                        ? 'bg-gray-100 border-gray-300 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+                        ? 'border-transparent bg-[#ececea] text-[#202328] dark:bg-[#3a434e] dark:text-white'
                         : selectMode && checkedIds.has(session.id)
-                        ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-                        : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+                        ? 'border-blue-200 bg-blue-50 text-[#202328] dark:border-blue-400/40 dark:bg-blue-500/10 dark:text-white'
+                        : 'border-transparent text-[#5b6067] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white'
                     }`}
                   >
                     {/* Title row */}
-                    <div className="flex items-center gap-1.5 min-w-0 pr-7">
+                    <div className="flex min-w-0 items-center gap-1.5 pr-6">
                       {selectMode && (
                         <input
                           type="checkbox"
@@ -926,31 +965,32 @@ export default function SessionPage() {
                           }}
                           placeholder={t('renamePlaceholder')}
                           disabled={renameSubmitting}
-                          className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+                          className="h-6 w-full min-w-0 rounded-md border border-blue-300 bg-white px-1.5 text-[13px] text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-[#252c35] dark:text-white"
                           aria-label={t('rename')}
                           data-session-rename-input
                         />
                       ) : (
-                        <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+                        <h3 className={`flex min-w-0 flex-1 items-center gap-1.5 truncate text-[13px] ${
+                          selectedSessionId === session.id ? 'font-medium' : 'font-normal'
+                        }`}>
                           <span className="truncate">{session.title}</span>
                           {session.isShared && (
-                            <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+                            <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
                               {t('sharedTag')}
                             </span>
                           )}
                         </h3>
                       )}
+                      {session.time?.updated && renamingSessionId !== session.id && (
+                        <time className="ml-1 shrink-0 text-[11px] font-normal tabular-nums text-[#858a91] transition-opacity group-hover:opacity-0 dark:text-[#8f9ba8]">
+                          {formatSessionDate(session.time.updated)}
+                        </time>
+                      )}
                     </div>
-                    {/* Timestamp row */}
-                    {session.time?.updated && renamingSessionId !== session.id && (
-                      <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
-                        {formatSessionDate(session.time.updated)}
-                      </p>
-                    )}
 
                     {/* Three-dot menu trigger */}
                     {!selectMode && (
-                      <div className="absolute right-1.5 top-2" data-session-actions>
+                      <div className="absolute right-1 top-1/2 -translate-y-1/2" data-session-actions>
                         <button
                           onClick={(e) => {
                             e.stopPropagation();
@@ -966,11 +1006,13 @@ export default function SessionPage() {
                           title={t('moreActions')}
                           aria-label={t('moreActions')}
                           aria-expanded={openMenuSessionId === session.id}
-                          className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
-                            openMenuSessionId === session.id ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+                          className={`grid h-6 w-6 place-items-center rounded-lg text-[#989ca1] transition-all hover:bg-white/80 hover:text-[#202328] dark:text-[#8f9ba8] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                            openMenuSessionId === session.id || selectedSessionId === session.id
+                              ? 'bg-white/80 text-[#202328] opacity-100 dark:bg-white/[0.08] dark:text-white'
+                              : 'opacity-0 group-hover:opacity-100'
                           }`}
                         >
-                          <MoreHorizontal className="w-3.5 h-3.5" />
+                          <MoreHorizontal className="h-[15px] w-[15px]" />
                         </button>
                       </div>
                     )}
@@ -980,7 +1022,7 @@ export default function SessionPage() {
                 {!isSearching && hiddenCount > 0 && (
                   <button
                     onClick={() => toggleGroupExpand(key)}
-                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
+                    className="mx-1 mb-0.5 flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                   >
                     <ChevronDown className="w-3 h-3" />
                     <span>{t('showMore', { count: hiddenCount })}</span>
@@ -989,7 +1031,7 @@ export default function SessionPage() {
                 {!isSearching && isExpanded && items.length > (GROUP_DEFAULT_LIMIT[key] ?? 5) && (
                   <button
                     onClick={() => toggleGroupExpand(key)}
-                    className="mx-4 mb-1 flex items-center gap-1 text-xs text-gray-400 hover:text-gray-600 transition-colors py-1"
+                    className="mx-1 mb-0.5 flex h-7 items-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                   >
                     <ChevronDown className="w-3 h-3 rotate-180" />
                     <span>{t('showLess', 'Show less')}</span>
@@ -1000,11 +1042,11 @@ export default function SessionPage() {
             })
           )}
           {hasMoreSessions && (
-            <div className="px-4 py-3">
+            <div className="px-1 py-1">
               <button
                 onClick={() => void loadMoreSessions()}
                 disabled={loadingMoreSessions}
-                className="flex w-full items-center justify-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-2 text-xs font-medium text-gray-500 transition-colors hover:bg-gray-50 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:bg-zinc-900"
+                className="flex h-7 w-full items-center justify-center gap-1.5 rounded-lg border-0 bg-transparent px-3 text-[11px] font-medium text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
               >
                 {loadingMoreSessions ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5" />}
                 <span>{loadingMoreSessions ? t('loading') : t('loadMore', 'Load more')}</span>
@@ -1015,37 +1057,43 @@ export default function SessionPage() {
 
         {/* Bottom：批量操作栏 / 批量选择入口 */}
         {sessions.length > 0 && (
-          <div className="border-t border-gray-100 px-3 pt-3 pb-4 flex-shrink-0 dark:border-zinc-800">
+          <div className="flex min-h-11 flex-shrink-0 items-center justify-center border-t border-black/[0.07] px-3 dark:border-white/[0.08]">
             {selectMode ? (
               <div className="grid grid-cols-3 gap-1.5">
                 <button
                   onClick={handleSelectAll}
-                  className="flex items-center justify-center py-2 text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-blue-600 transition-colors hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10"
+                  title={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
+                  aria-label={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
                 >
-                  {checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
+                  <CheckSquare className="h-[15px] w-[15px]" />
                 </button>
                 <button
                   onClick={handleExitSelectMode}
-                  className="flex items-center justify-center py-2 text-sm text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-[#60656b] transition-colors hover:bg-black/[0.04] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06]"
+                  title={t('cancelSelect')}
+                  aria-label={t('cancelSelect')}
                 >
-                  {t('cancelSelect')}
+                  <X className="h-[15px] w-[15px]" />
                 </button>
                 <button
                   onClick={handleBatchDelete}
                   disabled={checkedIds.size === 0 || batchDeleting}
-                  className="flex items-center justify-center py-2 text-sm text-red-600 bg-red-50 hover:bg-red-100 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
+                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-red-600 transition-colors hover:bg-red-50 disabled:cursor-default disabled:opacity-35 dark:text-red-300 dark:hover:bg-red-500/10"
                   title={t('deleteSelected', { count: checkedIds.size })}
+                  aria-label={t('deleteSelected', { count: checkedIds.size })}
                 >
-                  {batchDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  {batchDeleting ? <Loader2 className="h-[15px] w-[15px] animate-spin" /> : <Trash2 className="h-[15px] w-[15px]" />}
                 </button>
               </div>
             ) : (
               <button
                 onClick={handleEnterSelectMode}
-                className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-colors"
+                className="grid h-[30px] w-[30px] place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                title={t('selectMode')}
+                aria-label={t('selectMode')}
               >
-                <CheckSquare className="w-3.5 h-3.5" />
-                <span>{t('selectMode')}</span>
+                <CheckSquare className="h-[15px] w-[15px]" />
               </button>
             )}
           </div>
@@ -1053,21 +1101,22 @@ export default function SessionPage() {
       </div>
 
       {/* ── Main area ── */}
-      <div className="flex-1 flex flex-col overflow-hidden h-full min-w-0">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#f4f4f2] dark:bg-[#252c35]">
         {/* Header */}
-        <div className="px-6 h-12 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative dark:border-zinc-800 dark:bg-zinc-950/95">
-          <div className="absolute left-4 top-1/2 -translate-y-1/2">
+        <div className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
+          <div className="shrink-0">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="p-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 shadow-sm hover:shadow-md transition-all duration-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:shadow-none"
+              className="grid h-[30px] w-[30px] place-items-center rounded-lg border-0 bg-transparent text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
               title={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
+              aria-label={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
             >
-              {sidebarCollapsed ? <PanelLeft className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}
+              {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </button>
           </div>
 
-          <div className="flex items-center gap-3 ml-14">
-            <h2 className="text-base font-semibold text-gray-900 dark:text-zinc-100">
+          <div className="flex min-w-0 items-center">
+            <h2 className="truncate text-[13px] font-semibold text-[#555a61] dark:text-[#c3ccd6]">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
@@ -1082,6 +1131,7 @@ export default function SessionPage() {
           hideInput={selectedSession?.canWrite === false}
           display={{
             compact: false,
+            pageCanvas: true,
             showActions: true,
             showTimestamp: true,
             collapseIntermediateSteps: true,
@@ -1091,6 +1141,7 @@ export default function SessionPage() {
           agentName={selectedAgent}
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
+          composerTextareaMinHeight={56}
           initialMessage={pendingInitialMessage}
           initialDisplayText={pendingInitialDisplayText}
           onInitialMessageConsumed={() => {
@@ -1354,14 +1405,14 @@ export default function SessionPage() {
         if (!session) return null;
         return (
           <div
-            className="fixed z-50 w-36 overflow-hidden rounded-lg border border-gray-200 bg-white py-1 shadow-lg dark:border-zinc-800 dark:bg-zinc-900"
+            className="fixed z-50 grid w-[132px] gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
             style={{ top: menuAnchor.top, right: menuAnchor.right }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
               <PencilLine className="w-3.5 h-3.5" />
               <span>{t('rename')}</span>
@@ -1369,7 +1420,7 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               disabled={downloadingSessionId === session.id}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
@@ -1377,16 +1428,16 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
               disabled={session.canWrite === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-gray-700 hover:bg-gray-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
-            <div className="mx-2.5 my-1 border-t border-gray-100 dark:border-zinc-800" />
+            <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
               disabled={session.canDelete === false}
-              className="flex w-full items-center gap-2 px-2.5 py-1.5 text-left text-sm text-red-600 hover:bg-red-50 transition-colors disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
             >
               <Trash2 className="w-3.5 h-3.5" />
               <span>{t('deleteAction')}</span>
@@ -1411,39 +1462,39 @@ function WelcomeScreen({
 }) {
   const { t } = useTranslation('session');
   return (
-    <div className="text-center max-w-2xl px-8">
-      <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center shadow-lg">
-        <Sparkles className="w-10 h-10 text-white" />
+    <div className="w-full max-w-[660px] px-9 text-center">
+      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
+        <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
       </div>
-      <h3 className="text-xl font-bold text-gray-900 mb-3 dark:text-zinc-50">{t('welcome.title')}</h3>
-      <p className="text-sm text-gray-600 mb-8 dark:text-zinc-400">{t('welcome.description')}</p>
+      <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
+      <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
 
-      <div className="flex flex-wrap gap-3 justify-center">
+      <div className="mt-6 flex flex-wrap justify-center gap-2.5">
         <button
           onClick={onAlertOperationsSetup}
           disabled={alertOperationsBusy}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-slate-400 hover:bg-slate-50 transition-all duration-200 shadow-sm hover:shadow-md disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-slate-500/70 dark:hover:bg-zinc-800 dark:hover:shadow-none"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-[#f8f8f6] px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-[#fafaf8] hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           {alertOperationsBusy ? (
-            <Loader2 className="w-5 h-5 animate-spin text-slate-600" />
+            <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
           ) : (
-            <Shield className="w-5 h-5 text-slate-600" />
+            <Shield className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
           )}
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.alertOperations')}</span>
+          <span>{t('welcome.alertOperations')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-orange-400 hover:bg-orange-50 transition-all duration-200 shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-orange-500/70 dark:hover:bg-orange-950/30 dark:hover:shadow-none"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-[#f8f8f6] px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-[#fafaf8] hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <Search className="w-5 h-5 text-orange-600" />
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.threatHunting')}</span>
+          <Search className="h-[18px] w-[18px] text-[#f4511e]" />
+          <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-amber-400 hover:bg-amber-50 transition-all duration-200 shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-amber-500/70 dark:hover:bg-amber-950/30 dark:hover:shadow-none"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-[#f8f8f6] px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-[#fafaf8] hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <AlertTriangle className="w-5 h-5 text-amber-600" />
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.incidentResponse')}</span>
+          <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
+          <span>{t('welcome.incidentResponse')}</span>
         </button>
       </div>
     </div>
