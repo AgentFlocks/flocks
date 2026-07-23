@@ -183,7 +183,7 @@ class TestCuratedCatalogModels:
         assert k3.pricing.output == 100.0
         assert k3.pricing.cache_read == 2.0
         assert k3.limits.context_window == 1048576
-        assert k3.limits.max_output_tokens == 1048576
+        assert k3.limits.max_output_tokens == 131072
 
         k27 = next(m for m in models if m.id == "kimi-k2.7-code")
         assert k27.capabilities.supports_vision is True

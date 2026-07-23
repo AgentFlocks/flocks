@@ -148,6 +148,25 @@ class TestBuildProviderOptions:
 
         assert options["extra_body"] == {"reasoning_effort": "high"}
 
+    def test_kimi_k3_explicit_reasoning_effort_overrides_configured_default(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args: {"reasoning_effort": "high"},
+        )
+
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k3",
+            reasoning_effort="low",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "low"}
+
     def test_openai_compatible_qwen_models_enable_thinking_by_default(self, monkeypatch):
         monkeypatch.setattr(
             provider_options,

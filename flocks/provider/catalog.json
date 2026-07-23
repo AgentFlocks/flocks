@@ -1246,7 +1246,7 @@
         },
         "limits": {
           "context_window": 1048576,
-          "max_output_tokens": 1048576
+          "max_output_tokens": 131072
         },
         "pricing": {
           "input": 20.0,

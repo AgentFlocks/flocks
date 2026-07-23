@@ -330,6 +330,7 @@ def build_provider_options(
     model_lower = model_id.lower()
     interleaved_capability = _resolve_interleaved_capability(provider_id, model_id)
     reasoning_transport = _resolve_reasoning_transport(provider_id, model_id)
+    reasoning_effort_explicit = isinstance(reasoning_effort, str)
     reasoning_enabled = (
         _coerce_optional_bool(reasoning_enabled)
         if reasoning_enabled is not None
@@ -413,12 +414,18 @@ def build_provider_options(
             # K3 is always a reasoning model and uses the top-level
             # reasoning_effort field instead of the K2.x thinking object.
             extra_body.pop("thinking", None)
-            configured_effort = extra_body.get("reasoning_effort")
-            if configured_effort not in KIMI_K3_REASONING_EFFORTS:
+            if reasoning_effort_explicit:
                 extra_body["reasoning_effort"] = (automatic_extra_body or {}).get(
                     "reasoning_effort",
                     DEFAULT_KIMI_K3_REASONING_EFFORT,
                 )
+            else:
+                configured_effort = extra_body.get("reasoning_effort")
+                if configured_effort not in KIMI_K3_REASONING_EFFORTS:
+                    extra_body["reasoning_effort"] = (automatic_extra_body or {}).get(
+                        "reasoning_effort",
+                        DEFAULT_KIMI_K3_REASONING_EFFORT,
+                    )
         elif "kimi-k2.7" in model_lower:
             # K2.7 rejects disabled thinking. Normalize configured values so
             # direct and gateway-backed endpoints always request reasoning.
