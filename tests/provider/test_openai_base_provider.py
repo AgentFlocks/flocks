@@ -704,6 +704,108 @@ async def _stream_from_chunks(*chunks):
         yield chunk
 
 
+class TestOpenAIBaseProviderStreamingToolCalls:
+    @pytest.mark.asyncio
+    async def test_chat_stream_emits_name_only_marker_before_complete_tool_input(self):
+        provider = MockProviderWithoutCatalog()
+        create = AsyncMock()
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = create
+
+        first_arguments = '{"filePath":"/tmp/report.md","content":"'
+        remaining_arguments = f'{"long content " * 500}"}}'
+        tool_start_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_write",
+                                function=SimpleNamespace(
+                                    name="write",
+                                    arguments=first_arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        tool_arguments_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id=None,
+                                function=SimpleNamespace(
+                                    name=None,
+                                    arguments=remaining_arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=None, tool_calls=None),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(
+            tool_start_chunk,
+            tool_arguments_chunk,
+            finish_chunk,
+        )
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.7-code",
+                [ChatMessage(role="user", content="write a long file")],
+                tools=[{"type": "function", "function": {"name": "write"}}],
+            )
+        ]
+
+        assert len(chunks) == 2
+        assert chunks[0].finish_reason is None
+        assert chunks[0].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {"name": "write", "arguments": ""},
+            }
+        ]
+        assert chunks[1].finish_reason == "tool_calls"
+        assert chunks[1].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "arguments": first_arguments + remaining_arguments,
+                },
+            }
+        ]
+
+
 class TestOpenAIBaseProviderStreamingUsage:
     @staticmethod
     def _build_provider_with_stream():

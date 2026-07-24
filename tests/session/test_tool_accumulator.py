@@ -108,18 +108,20 @@ class TestFeedChunkBasic:
 
 class TestFeedChunkIncremental:
     @pytest.mark.asyncio
-    async def test_partial_json_does_not_fire(self):
+    async def test_partial_json_emits_start_without_executing_tool(self):
         acc, proc = _make_accumulator()
         with patch("flocks.session.streaming.tool_accumulator.ToolRegistry") as mock_reg:
             mock_reg.get_schema.return_value = None
 
-            # Incomplete JSON - no closing brace
             await acc.feed_chunk(_make_chunk(
-                tc_id="call_inc", name="my_tool", arguments='{"command": "ls'
+                tc_id="call_inc", name="write", arguments='{"filePath": "/tmp/f", "content": "long'
             ))
 
-        # Incomplete JSON should not fire
-        assert proc.process_event.call_count == 0
+        events = [call.args[0] for call in proc.process_event.call_args_list]
+        assert len(events) == 1
+        assert isinstance(events[0], ToolInputStartEvent)
+        assert events[0].id == "call_inc"
+        assert events[0].tool_name == "write"
 
     @pytest.mark.asyncio
     async def test_incremental_chunks_complete_and_fire(self):
@@ -128,12 +130,46 @@ class TestFeedChunkIncremental:
             mock_reg.get_schema.return_value = None
 
             await acc.feed_chunk(_make_chunk(tc_id="call_inc2", name="tool_x", arguments='{"key":'))
-            assert proc.process_event.call_count == 0
+            assert proc.process_event.call_count == 1
+            assert isinstance(proc.process_event.call_args_list[0].args[0], ToolInputStartEvent)
 
             await acc.feed_chunk(_make_chunk(tc_id="call_inc2", arguments='"value"}'))
 
-        event_types = [c.args[0].type for c in proc.process_event.call_args_list]
-        assert "tool-call" in event_types
+        events = [call.args[0] for call in proc.process_event.call_args_list]
+        assert [event.type for event in events] == ["tool-input-start", "tool-call"]
+        assert events[1].input == {"key": "value"}
+
+    @pytest.mark.asyncio
+    async def test_name_only_chunk_emits_start_before_arguments_arrive(self):
+        acc, proc = _make_accumulator()
+        with patch("flocks.session.streaming.tool_accumulator.ToolRegistry") as mock_reg:
+            mock_reg.get_schema.return_value = None
+
+            await acc.feed_chunk(_make_chunk(tc_id="call_name_first", name="edit"))
+
+        events = [call.args[0] for call in proc.process_event.call_args_list]
+        assert len(events) == 1
+        assert isinstance(events[0], ToolInputStartEvent)
+        assert events[0].tool_name == "edit"
+
+    @pytest.mark.asyncio
+    async def test_generated_id_stays_stable_when_provider_id_arrives_late(self):
+        acc, proc = _make_accumulator()
+        with patch("flocks.session.streaming.tool_accumulator.ToolRegistry") as mock_reg:
+            mock_reg.get_schema.return_value = None
+
+            await acc.feed_chunk(_make_chunk(index=3, name="write"))
+            start_event = proc.process_event.call_args_list[0].args[0]
+
+            await acc.feed_chunk(_make_chunk(
+                index=3,
+                tc_id="provider_call_id",
+                arguments='{"filePath": "/tmp/f", "content": "done"}',
+            ))
+
+        events = [call.args[0] for call in proc.process_event.call_args_list]
+        assert [event.type for event in events] == ["tool-input-start", "tool-call"]
+        assert events[1].tool_call_id == start_event.id
 
     @pytest.mark.asyncio
     async def test_completed_call_ignored_on_re_feed(self):

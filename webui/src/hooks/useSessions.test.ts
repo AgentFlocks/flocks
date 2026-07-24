@@ -1123,16 +1123,19 @@ describe('useSessions list loading', () => {
     await act(async () => {});
 
     expect(result.current.loading).toBe(false);
+    expect(result.current.refreshing).toBe(false);
     expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
 
     rerender({ search: 'triage' });
 
     expect(result.current.loading).toBe(false);
+    expect(result.current.refreshing).toBe(true);
     expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
 
     await act(async () => {
       resolveSearch([]);
     });
+    expect(result.current.refreshing).toBe(false);
   });
 
   it('loads and tracks pages independently for each project', async () => {

@@ -4,7 +4,15 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
+import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
+
+const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
+  current: null as null | {
+    onEvent: (event: { type: string; properties?: Record<string, unknown> }) => void;
+    onReconnect?: () => void;
+  },
+}));
 
 const {
   client,
@@ -64,6 +72,7 @@ const {
 vi.mock('@/api/client', () => ({
   __esModule: true,
   default: client,
+  getApiBase: () => '',
 }));
 
 vi.mock('@/api/session', () => ({
@@ -84,6 +93,18 @@ vi.mock('@/hooks/useAgents', () => ({
 
 vi.mock('@/hooks/useProviders', () => ({
   useProviders,
+}));
+
+vi.mock('@/hooks/useSSE', () => ({
+  useSSE: (options: typeof sessionStatusSSEOptionsRef.current) => {
+    sessionStatusSSEOptionsRef.current = options;
+    return {
+      status: 'connected',
+      retryCount: 0,
+      reconnect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
 }));
 
 vi.mock('@/api/provider', () => ({
@@ -205,6 +226,7 @@ vi.mock('@/utils/agentDisplay', () => ({
 
 vi.mock('@/utils/time', () => ({
   formatSessionDate: () => 'formatted-date',
+  formatRelativeTime: vi.fn(() => '17小时前'),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -288,6 +310,7 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     __resetChatModelResourcesForTesting();
+    sessionStatusSSEOptionsRef.current = null;
     localStorage.clear();
     sessionStorage.clear();
 
@@ -353,6 +376,32 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
+  it('keeps the workbench visible and shows a page refresh state while sessions load', () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: true,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    expect(screen.getByLabelText('managementTitle')).toBeInTheDocument();
+    expect(screen.getByTestId('workbench-refresh-status')).toHaveTextContent('refreshingWorkbench');
+    expect(screen.getByTestId('session-list-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    expect(screen.queryByText('loading-spinner')).not.toBeInTheDocument();
+    expect(screen.getByTestId('session-list-scroll')).toHaveClass(
+      'session-sidebar-scrollbar',
+      'overflow-y-auto',
+    );
+    expect(screen.getByTestId('session-list-scroll')).not.toHaveClass('scrollbar-hide');
+  });
+
   it('shows default sessions under tasks without a default project row', async () => {
     const user = userEvent.setup();
     renderSessionPage();
@@ -361,6 +410,13 @@ describe('SessionPage session actions menu', () => {
     const projectsHeading = screen.getByText('projectsSection');
     const tasksSection = tasksHeading.closest('section');
     const projectsSection = projectsHeading.closest('section');
+    const newSessionButton = screen.getByRole('button', { name: 'newSession' });
+    const searchInput = screen.getByPlaceholderText('filterConversations');
+    expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
+    expect(searchInput.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
+    expect(searchInput).toHaveClass('text-sm', 'font-medium');
+    expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
+    expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(tasksSection).not.toBeNull();
     expect(projectsSection).not.toBeNull();
     expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
@@ -370,13 +426,176 @@ describe('SessionPage session actions menu', () => {
       pageSize: 20,
     });
     expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    expect(screen.getByText('Original Session')).toBeInTheDocument();
+    const taskTitle = screen.getByText('Original Session').closest('h3');
+    expect(taskTitle).toHaveClass('text-sm', 'font-medium');
+    expect(taskTitle?.parentElement?.parentElement).toHaveClass('px-3');
 
-    await user.click(screen.getByRole('button', { name: 'toggleTasks' }));
+    const tasksToggle = screen.getByRole('button', { name: 'toggleTasks' });
+    expect(tasksToggle).toContainElement(tasksHeading);
+    expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
+    expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
+
+    await user.click(tasksToggle);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'selectTasks' }));
+    await user.click(tasksToggle);
     expect(screen.getByText('Original Session')).toBeInTheDocument();
+  });
+
+  it('keeps the workbench canvas, sidebar, selected row, and dark palette classes stable', async () => {
+    renderSessionPage('/sessions?session=session-1');
+
+    const workbenchSidebar = screen.getByLabelText('managementTitle');
+    const workbenchCanvas = workbenchSidebar.parentElement;
+    const mainCanvas = workbenchSidebar.nextElementSibling;
+    const sessionTitle = await within(workbenchSidebar).findByText('Original Session');
+    const selectedRow = sessionTitle.closest('div.group');
+
+    expect(workbenchCanvas).toHaveClass('bg-gray-50', 'dark:bg-[#252c35]');
+    expect(workbenchSidebar).toHaveClass('bg-white', 'dark:bg-[#303842]');
+    expect(mainCanvas).toHaveClass('bg-gray-50', 'dark:bg-[#252c35]');
+    await waitFor(() => {
+      expect(selectedRow).toHaveClass('bg-zinc-200/70', 'dark:bg-[#3a434e]');
+    });
+  });
+
+  it('shows and clears the sidebar running state from recovered and live session status', async () => {
+    useSessions.mockReturnValue({
+      sessions: [session, secondSession],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+    client.get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status'
+        ? {
+            [session.id]: { type: 'busy' },
+            [secondSession.id]: { type: 'busy' },
+          }
+        : [{
+            id: 'default',
+            worktree: '/tmp/project',
+            name: '默认',
+            isDefault: true,
+            pathStatus: 'available',
+            sessionCount: 2,
+          }],
+    }));
+
+    renderSessionPage();
+
+    const runningStatuses = await screen.findAllByRole('status', { name: 'chat.tool.running' });
+    expect(runningStatuses.map((status) => status.getAttribute('data-session-running')))
+      .toEqual(expect.arrayContaining([session.id, secondSession.id]));
+
+    act(() => {
+      sessionStatusSSEOptionsRef.current?.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: session.id,
+          status: { type: 'idle' },
+        },
+      });
+    });
+
+    expect(screen.getByRole('status', { name: 'chat.tool.running' }))
+      .toHaveAttribute('data-session-running', secondSession.id);
+
+    act(() => {
+      sessionStatusSSEOptionsRef.current?.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: session.id,
+          status: { type: 'retry' },
+        },
+      });
+    });
+
+    expect(screen.getAllByRole('status', { name: 'chat.tool.running' }))
+      .toHaveLength(2);
+  });
+
+  it('shows load more as text without an idle arrow', async () => {
+    useSessions.mockReturnValue({
+      sessions: [session],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+      hasMoreByProject: { tasks: true },
+      loadingMoreProjectIds: new Set(),
+      loadMore: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    const loadMoreButton = await screen.findByRole('button', { name: 'loadMore' });
+    expect(loadMoreButton.querySelector('svg')).toBeNull();
+  });
+
+  it('collapses loaded task pages and reopens cached tasks without another request', async () => {
+    const user = userEvent.setup();
+    const loadMore = vi.fn();
+    const loadedTasks = Array.from({ length: 8 }, (_, index) => ({
+      ...session,
+      id: `task-${index + 1}`,
+      slug: `task-${index + 1}`,
+      title: `Task ${index + 1}`,
+    }));
+    client.get.mockResolvedValue({
+      data: [
+        {
+          id: 'default',
+          worktree: '/tmp/project',
+          name: '默认',
+          isDefault: true,
+          pathStatus: 'available',
+          sessionCount: 8,
+        },
+        {
+          id: 'prj_labs',
+          worktree: '/tmp/labs',
+          name: 'Labs',
+          isDefault: false,
+          pathStatus: 'available',
+          sessionCount: 0,
+        },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: loadedTasks,
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+      hasMoreByProject: { tasks: false },
+      loadingMoreProjectIds: new Set(),
+      loadMore,
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('Task 8')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'collapseLoaded' }));
+
+    expect(screen.queryByText('Task 7')).not.toBeInTheDocument();
+    expect(screen.queryByText('Task 8')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'loadMore' }));
+
+    expect(screen.getByText('Task 7')).toBeInTheDocument();
+    expect(screen.getByText('Task 8')).toBeInTheDocument();
+    expect(loadMore).not.toHaveBeenCalled();
   });
 
   it('creates a new session from the tasks row', async () => {
@@ -404,6 +623,9 @@ describe('SessionPage session actions menu', () => {
     const firstRender = renderSessionPage();
 
     await screen.findByText('Labs');
+    const projectButton = screen.getByRole('button', { name: 'selectProject' });
+    expect(projectButton.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
+    expect(projectButton.parentElement).toHaveClass('px-3');
     await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
     expect(screen.queryByText('Labs')).not.toBeInTheDocument();
 
@@ -524,7 +746,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
   });
 
-  it('renders project sessions with the same card outline as task sessions', async () => {
+  it('renders project sessions with the compact conversation row treatment', async () => {
     client.get.mockResolvedValue({
       data: [
         { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
@@ -552,7 +774,7 @@ describe('SessionPage session actions menu', () => {
     const sessionTitle = await screen.findByText('Original Session');
     const sessionCard = sessionTitle.closest('[class*="cursor-pointer"]');
     expect(sessionCard).not.toBeNull();
-    expect(sessionCard).toHaveClass('border-gray-100');
+    expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-lg', 'border-transparent');
   });
 
   it('groups legacy sessions by the effective project returned by the backend', async () => {
@@ -622,7 +844,7 @@ describe('SessionPage session actions menu', () => {
 
     await waitFor(() => {
       expect(client.post).toHaveBeenCalledWith('/api/project', { name: 'Labs', worktree: '/tmp/labs' });
-      expect(screen.getByText('Labs')).toBeInTheDocument();
+      expect(within(screen.getByLabelText('managementTitle')).getByText('Labs')).toBeInTheDocument();
     });
   });
 
@@ -829,7 +1051,7 @@ describe('SessionPage session actions menu', () => {
     await user.type(folderInput, '/tmp/labs');
     await user.click(screen.getByRole('button', { name: 'save' }));
 
-    expect(await screen.findByText('Labs')).toBeInTheDocument();
+    expect(await within(screen.getByLabelText('managementTitle')).findByText('Labs')).toBeInTheDocument();
     expect(screen.getByText('noProjectSessions')).toBeInTheDocument();
   });
 
@@ -859,6 +1081,7 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
+    expect(projectRow?.firstElementChild).toHaveClass('text-sm');
     await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
     await user.click(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.renameAction' }));
     const input = screen.getByLabelText('projectDialog.nameLabel');
@@ -1070,11 +1293,49 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'moreActions' }));
 
     const menu = document.querySelector('[data-session-menu-portal]');
-    expect(menu).toHaveClass('min-w-28', 'rounded-md', 'p-1');
+    expect(menu).toHaveClass('w-[132px]', 'rounded-[10px]', 'p-1');
     expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'deleteAction' })).toBeInTheDocument();
+  });
+
+  it('shows a compact relative session timestamp and keeps the actions trigger background-free', async () => {
+    const user = userEvent.setup();
+
+    renderSessionPage();
+
+    const timestamp = await screen.findByText('17小时前');
+    const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
+
+    expect(timestamp).not.toHaveClass('group-hover:opacity-0');
+    expect(timestamp).toHaveClass('text-zinc-500');
+    expect(timestamp).toHaveAttribute('title', 'formatted-date');
+    expect(actionsTrigger).not.toHaveClass('hover:bg-white/80');
+
+    await user.click(actionsTrigger);
+
+    expect(actionsTrigger).not.toHaveClass('bg-white/80');
+  });
+
+  it('refreshes relative session timestamps every minute', () => {
+    vi.useFakeTimers();
+    let relativeTimeLabel = '17小时前';
+    vi.mocked(formatRelativeTime).mockImplementation(() => relativeTimeLabel);
+    try {
+      renderSessionPage();
+      expect(screen.getByText('17小时前')).toBeInTheDocument();
+
+      relativeTimeLabel = '18小时前';
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      expect(screen.getByText('18小时前')).toBeInTheDocument();
+    } finally {
+      vi.mocked(formatRelativeTime).mockImplementation(() => '17小时前');
+      vi.useRealTimers();
+    }
   });
 
   it('renames a session inline from the actions menu', async () => {
@@ -1506,7 +1767,9 @@ describe('SessionPage session actions menu', () => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
     });
     expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
-    expect(screen.getByText('loading-spinner')).toBeInTheDocument();
+    expect(screen.getByTestId('session-chat-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('workbench-refresh-status')).toHaveTextContent('restoringTask');
+    expect(screen.queryByText('loading-spinner')).not.toBeInTheDocument();
 
     await act(async () => {
       request.resolve(fetchedSession);
@@ -1622,7 +1885,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.queryByRole('button', { name: /Oracle/i })).not.toBeInTheDocument();
   });
 
-  it('resets the chat agent to Rex when creating a new session', async () => {
+  it('opens a blank new-session draft without creating and resets the agent to Rex', async () => {
     const user = userEvent.setup();
     useAgents.mockReturnValue({
       agents: [
@@ -1651,17 +1914,21 @@ describe('SessionPage session actions menu', () => {
       refetch: vi.fn(),
     });
 
-    renderSessionPage();
+    renderSessionPage('/sessions?session=session-1');
 
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    });
     await user.click(screen.getByRole('button', { name: /Rex/i }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
     expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
 
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
-    await waitFor(() => {
-      expect(addSession).toHaveBeenCalledWith(secondSession);
-    });
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+    expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveAttribute('aria-expanded', 'false');
+    expect(screen.queryByRole('menu', { name: 'projectPicker.title' })).not.toBeInTheDocument();
     expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
   });
 
@@ -2064,7 +2331,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('resets the selected model to the default when creating a new session', async () => {
+  it('resets the selected model to the default when starting a new session', async () => {
     const user = userEvent.setup();
     useSessions.mockReturnValue({
       sessions: [{
@@ -2100,8 +2367,38 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
     await waitFor(() => {
-      expect(addSession).toHaveBeenCalledWith(secondSession);
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-model', 'openai/gpt-4o');
+    });
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+  });
+
+  it('lets the user choose a project before the first message creates the session', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true },
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true },
+      ],
+    });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
+    });
+    await user.click(screen.getByRole('button', { name: 'newSession' }));
+
+    expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
+    await user.click(screen.getByRole('button', { name: 'projectPicker.title' }));
+    await user.click(screen.getByRole('menuitemradio', { name: 'Labs' }));
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+        projectID: 'prj_labs',
+      });
     });
   });
 

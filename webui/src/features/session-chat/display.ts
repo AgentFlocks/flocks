@@ -20,6 +20,8 @@ export interface SessionChatDisplay {
   compact?: boolean;
   /** Let embedded chats use the full available message width. */
   fullWidth?: boolean;
+  /** Use the quieter, centered canvas treatment for the session-management page. */
+  pageCanvas?: boolean;
   /** Show copy action on assistant messages */
   showActions?: boolean;
   /** Show timestamp below each message */
