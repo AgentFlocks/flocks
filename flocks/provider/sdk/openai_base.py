@@ -20,6 +20,7 @@ from flocks.provider.provider import (
     ModelInfo,
     StreamChunk,
 )
+from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_base")
@@ -396,8 +397,7 @@ def _is_effective_thinking_enabled(
     extra_body: Dict[str, Any],
 ) -> bool:
     """Return the effective reasoning state represented by a request."""
-    model_lower = model_id.lower()
-    if "kimi-k2.7" in model_lower or "kimi-k3" in model_lower:
+    if is_kimi_k27_code_model(model_id) or is_kimi_k3_model(model_id):
         return True
 
     if isinstance(thinking, dict):
@@ -963,7 +963,7 @@ class OpenAIBaseProvider(BaseProvider):
             params,
             max_tokens,
             prefer_completion_tokens=(
-                self.PREFER_MAX_COMPLETION_TOKENS or "kimi-k3" in model_id.lower()
+                self.PREFER_MAX_COMPLETION_TOKENS or is_kimi_k3_model(model_id)
             ),
             completion_tokens_explicit=max_completion_tokens_explicit,
         )
@@ -1056,7 +1056,7 @@ class OpenAIBaseProvider(BaseProvider):
             params,
             max_tokens,
             prefer_completion_tokens=(
-                self.PREFER_MAX_COMPLETION_TOKENS or "kimi-k3" in model_id.lower()
+                self.PREFER_MAX_COMPLETION_TOKENS or is_kimi_k3_model(model_id)
             ),
             completion_tokens_explicit=max_completion_tokens_explicit,
         )

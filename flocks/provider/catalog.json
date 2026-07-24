@@ -1281,6 +1281,32 @@
           "currency": "CNY"
         }
       },
+      "kimi-k2.7-code-highspeed": {
+        "name": "Kimi K2.7 Code HighSpeed",
+        "family": "kimi-k2.7-code",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "placeholder": " ",
+            "cross_provider_policy": "placeholder"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 262144,
+          "max_output_tokens": 32768
+        },
+        "pricing": {
+          "input": 13.0,
+          "output": 54.0,
+          "cache_read": 2.6,
+          "currency": "CNY"
+        }
+      },
       "kimi-k2.5": {
         "name": "Kimi K2.5",
         "family": "kimi-k2.5",

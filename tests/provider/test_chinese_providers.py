@@ -171,6 +171,7 @@ class TestCuratedCatalogModels:
         assert {m.id for m in models} == {
             "kimi-k3",
             "kimi-k2.7-code",
+            "kimi-k2.7-code-highspeed",
             "kimi-k2.5",
             "kimi-k2.6",
         }
@@ -194,6 +195,16 @@ class TestCuratedCatalogModels:
         assert k27.pricing.cache_read == 1.3
         assert k27.limits.context_window == 262144
         assert k27.limits.max_output_tokens == 32768
+
+        k27_highspeed = next(m for m in models if m.id == "kimi-k2.7-code-highspeed")
+        assert k27_highspeed.capabilities.supports_vision is True
+        assert k27_highspeed.capabilities.supports_reasoning is True
+        assert k27_highspeed.capabilities.interleaved["field"] == "reasoning_content"
+        assert k27_highspeed.pricing.input == 13.0
+        assert k27_highspeed.pricing.output == 54.0
+        assert k27_highspeed.pricing.cache_read == 2.6
+        assert k27_highspeed.limits.context_window == 262144
+        assert k27_highspeed.limits.max_output_tokens == 32768
 
         k26 = next(m for m in models if m.id == "kimi-k2.6")
         assert k26.capabilities.supports_vision is True

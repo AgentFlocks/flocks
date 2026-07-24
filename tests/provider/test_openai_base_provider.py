@@ -630,6 +630,7 @@ class TestOpenAIBaseProviderTemperature:
         [
             ("kimi-k2.6", {"thinking": {"type": "enabled"}}),
             ("kimi-k2.7-code", {"thinking": {"type": "enabled"}}),
+            ("kimi-k2.7-code-highspeed", {"thinking": {"type": "enabled"}}),
             ("kimi-k3", {"reasoning_effort": "max"}),
         ],
     )
