@@ -1,4 +1,5 @@
 import client from './client';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
 export interface SessionMessagePartPayload {
   id: string;
@@ -29,6 +30,7 @@ export interface QueuedPrompt {
   status: 'pending' | 'executing' | string;
   createdAt: number;
   updatedAt: number;
+  executionMode?: SessionExecutionMode;
 }
 
 export interface PromptQueueResponse {
@@ -221,6 +223,7 @@ export const sessionApi = {
     model?: Record<string, unknown>;
     variant?: string;
     displayText?: string;
+    executionMode?: SessionExecutionMode;
   }) => {
     const response = await client.post(`/api/session/${sessionId}/prompt_queue`, data);
     return response.data;

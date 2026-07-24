@@ -1,6 +1,7 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import client from '@/api/client';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
 export interface UseSessionChatOptions {
   title: string;
@@ -26,6 +27,7 @@ export interface CreateAndSendOptions {
   /** Override Auto mode for the new session created by this send. */
   modelAuto?: boolean;
   displayText?: string;
+  executionMode?: SessionExecutionMode;
 }
 
 export function useSessionChat({
@@ -128,6 +130,7 @@ export function useSessionChat({
       model,
       modelAuto: createModelAuto,
       displayText,
+      executionMode = 'build',
     }: CreateAndSendOptions): Promise<string> => {
       const resumedExistingSession = Boolean(sessionIdRef.current);
       const effectiveModelAuto = typeof createModelAuto === 'boolean'
@@ -148,6 +151,7 @@ export function useSessionChat({
       if (agent) payload.agent = agent;
       if (model) payload.model = model;
       if (displayText) payload.displayText = displayText;
+      payload.executionMode = executionMode;
       client.post(`/api/session/${sid}/prompt_async`, payload).catch(() => {});
       return sid;
     },

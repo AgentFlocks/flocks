@@ -41,6 +41,28 @@
   "loading": "加载中...",
   "noAgents": "暂无可用的Agent",
   "smartAssistant": "智能AI助手",
+  "executionMode": {
+    "title": "执行模式",
+    "hint": "控制 Rex 如何处理下一轮消息",
+    "options": {
+      "build": {
+        "label": "Build",
+        "description": "使用 Rex 的完整工具完成任务"
+      },
+      "ask": {
+        "label": "Ask",
+        "description": "只读取和回答，不执行修改"
+      },
+      "plan": {
+        "label": "Plan",
+        "description": "调研需求并输出可实施计划"
+      },
+      "goal": {
+        "label": "Goal",
+        "description": "启动持久目标，然后返回 Build"
+      }
+    }
+  },
   "agentPicker": {
     "title": "选择对话 Agent",
     "hint": "新会话首条默认由 Rex 处理；输入 @Agent 可路由单条消息",

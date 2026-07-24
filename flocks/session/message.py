@@ -21,6 +21,7 @@ from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.storage.storage import Storage
 from flocks.session.recorder import Recorder
+from flocks.session.execution_mode import SessionExecutionMode
 
 log = Log.create(service="message")
 
@@ -376,6 +377,10 @@ class UserMessageInfo(BaseModel):
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool availability")
     variant: Optional[str] = Field(None, description="Prompt variant")
     compacted: Optional[bool] = Field(None, description="Archived by compaction (soft-deleted)")
+    executionMode: SessionExecutionMode = Field(
+        SessionExecutionMode.BUILD,
+        description="Execution mode used for this user turn",
+    )
 
 
 class AssistantMessageInfo(BaseModel):
@@ -942,6 +947,11 @@ class Message:
             if not isinstance(model_raw, dict):
                 model_raw = {}
             normalized["agent"] = normalized.get("agent") or "rex"
+            normalized["executionMode"] = (
+                normalized.get("executionMode")
+                or normalized.get("execution_mode")
+                or SessionExecutionMode.BUILD.value
+            )
             normalized["model"] = {
                 "providerID": model_raw.get("providerID")
                 or normalized.get("providerID")

@@ -6,6 +6,7 @@ import {
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
   FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
+  Hammer, MessageCircleQuestion, ClipboardList, Target, Check,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -37,6 +38,15 @@ import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } 
 import { formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2, Session } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
+import {
+  DEFAULT_SESSION_EXECUTION_MODE,
+  promoteDraftExecutionMode,
+  readSessionExecutionMode,
+  resetDraftExecutionMode,
+  writeSessionExecutionMode,
+  type PersistentSessionExecutionMode,
+  type SessionExecutionMode,
+} from '@/utils/sessionExecutionMode';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -54,7 +64,21 @@ const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
+const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'ask', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+
+function ExecutionModeIcon({
+  mode,
+  className = 'h-3 w-3',
+}: {
+  mode: SessionExecutionMode;
+  className?: string;
+}) {
+  if (mode === 'ask') return <MessageCircleQuestion className={className} />;
+  if (mode === 'plan') return <ClipboardList className={className} />;
+  if (mode === 'goal') return <Target className={className} />;
+  return <Hammer className={className} />;
+}
 type ProjectSummary = {
   id: string;
   worktree: string;
@@ -339,6 +363,14 @@ export default function SessionPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
+  const [selectedExecutionMode, setSelectedExecutionMode] = useState<SessionExecutionMode>(
+    () => readSessionExecutionMode(null),
+  );
+  const [showExecutionModeOptions, setShowExecutionModeOptions] = useState(false);
+  const executionModeHandoffRef = useRef<{
+    sessionId: string;
+    mode: SessionExecutionMode;
+  } | null>(null);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
@@ -825,6 +857,16 @@ export default function SessionPage() {
   }, [selectedSession?.id, selectedSessionId]);
 
   useEffect(() => {
+    const handoff = executionModeHandoffRef.current;
+    if (selectedSessionId && handoff?.sessionId === selectedSessionId) {
+      executionModeHandoffRef.current = null;
+      setSelectedExecutionMode(handoff.mode);
+      return;
+    }
+    setSelectedExecutionMode(readSessionExecutionMode(selectedSessionId));
+  }, [selectedSessionId]);
+
+  useEffect(() => {
     if (!selectedSessionId) {
       setSelectedSessionFallback(null);
       return;
@@ -868,6 +910,25 @@ export default function SessionPage() {
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, [showAgentOptions]);
+
+  useEffect(() => {
+    if (!showExecutionModeOptions) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('[data-execution-mode-selector]')) {
+        setShowExecutionModeOptions(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowExecutionModeOptions(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showExecutionModeOptions]);
 
   useEffect(() => {
     if (!showModelOptions) return;
@@ -922,9 +983,9 @@ export default function SessionPage() {
   }, [chatModelOptions, loadingEnabledModels, selectedModelAuto, selectedModelKey]);
 
   useEffect(() => {
-    if (showAgentOptions || showModelOptions) return;
+    if (showAgentOptions || showExecutionModeOptions || showModelOptions) return;
     setSelectorTooltip(null);
-  }, [showAgentOptions, showModelOptions]);
+  }, [showAgentOptions, showExecutionModeOptions, showModelOptions]);
 
   useEffect(() => {
     if (!openMenuSessionId) return;
@@ -952,6 +1013,26 @@ export default function SessionPage() {
     setRenameValue('');
   }, [selectMode]);
 
+  const handleSelectExecutionMode = useCallback((mode: SessionExecutionMode) => {
+    setSelectedExecutionMode(mode);
+    setShowExecutionModeOptions(false);
+    if (mode !== 'goal') {
+      writeSessionExecutionMode(
+        selectedSessionId,
+        mode as PersistentSessionExecutionMode,
+      );
+    }
+  }, [selectedSessionId]);
+
+  const handleExecutionModeAccepted = useCallback((mode: SessionExecutionMode) => {
+    if (mode !== 'goal') return;
+    setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+    writeSessionExecutionMode(
+      selectedSessionId,
+      DEFAULT_SESSION_EXECUTION_MODE,
+    );
+  }, [selectedSessionId]);
+
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
@@ -974,6 +1055,17 @@ export default function SessionPage() {
         return next;
       });
       setSelectedAgent('rex');
+      executionModeHandoffRef.current = {
+        sessionId: response.data.id,
+        mode: DEFAULT_SESSION_EXECUTION_MODE,
+      };
+      resetDraftExecutionMode();
+      writeSessionExecutionMode(
+        response.data.id,
+        DEFAULT_SESSION_EXECUTION_MODE,
+      );
+      setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+      setShowExecutionModeOptions(false);
       setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(response.data.id);
     } catch (err: any) {
@@ -1032,8 +1124,10 @@ export default function SessionPage() {
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
+    executionModeOverride?: SessionExecutionMode,
   ) => {
     try {
+      const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
         title: 'New Session',
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
@@ -1044,6 +1138,22 @@ export default function SessionPage() {
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
+      executionModeHandoffRef.current = {
+        sessionId: newSessionId,
+        mode: effectiveExecutionMode,
+      };
+      if (effectiveExecutionMode === 'goal') {
+        writeSessionExecutionMode(
+          newSessionId,
+          DEFAULT_SESSION_EXECUTION_MODE,
+        );
+        resetDraftExecutionMode();
+      } else {
+        promoteDraftExecutionMode(
+          newSessionId,
+          effectiveExecutionMode as PersistentSessionExecutionMode,
+        );
+      }
       setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(newSessionId);
 
@@ -1054,13 +1164,30 @@ export default function SessionPage() {
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
       if (options?.displayText) payload.displayText = options.displayText;
-      client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
-        toast.error(t('chat.sendFailed', 'Send failed'), err.message);
-      });
+      payload.executionMode = effectiveExecutionMode;
+      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
+      if (effectiveExecutionMode === 'goal') {
+        setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+        writeSessionExecutionMode(
+          newSessionId,
+          DEFAULT_SESSION_EXECUTION_MODE,
+        );
+      }
     } catch (err: any) {
-      toast.error(t('createFailed'), err.message);
+      toast.error(t('chat.sendFailed', 'Send failed'), err.message);
+      throw err;
     }
-  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedModelAuto, selectedProjectIDForCreate, toast, t]);
+  }, [
+    addSession,
+    fetchProjects,
+    searchQuery,
+    selectedAgent,
+    selectedExecutionMode,
+    selectedModelAuto,
+    selectedProjectIDForCreate,
+    toast,
+    t,
+  ]);
 
   const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
@@ -2023,6 +2150,8 @@ export default function SessionPage() {
             processGroupsOpenWhileActive: true,
           }}
           agentName={selectedAgent}
+          executionMode={selectedExecutionMode}
+          onExecutionModeAccepted={handleExecutionModeAccepted}
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
           initialMessage={pendingInitialMessage}
@@ -2051,10 +2180,89 @@ export default function SessionPage() {
             />
           )}
           toolbarSlot={
-            <div className="relative" data-agent-selector>
+            <div className="flex min-w-0 items-center gap-0.5">
+              <div className="relative" data-execution-mode-selector>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExecutionModeOptions(!showExecutionModeOptions);
+                    setShowAgentOptions(false);
+                    setShowModelOptions(false);
+                  }}
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                  title={t(`executionMode.options.${selectedExecutionMode}.description`)}
+                  aria-label={t('executionMode.title')}
+                  aria-haspopup="menu"
+                  aria-expanded={showExecutionModeOptions}
+                >
+                  <ExecutionModeIcon mode={selectedExecutionMode} />
+                  <span className="font-medium">
+                    {t(`executionMode.options.${selectedExecutionMode}.label`)}
+                  </span>
+                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
+                </button>
+                {showExecutionModeOptions && (
+                  <div
+                    role="menu"
+                    aria-label={t('executionMode.title')}
+                    className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                  >
+                    <div className="border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
+                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
+                        {t('executionMode.title')}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+                        {t('executionMode.hint')}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5 p-1.5">
+                      {SESSION_EXECUTION_MODES.map((mode) => {
+                        const selected = selectedExecutionMode === mode;
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            onClick={() => handleSelectExecutionMode(mode)}
+                            className={`flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors ${
+                              selected
+                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <ExecutionModeIcon
+                              mode={mode}
+                              className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
+                                selected
+                                  ? 'text-zinc-700 dark:text-zinc-100'
+                                  : 'text-zinc-400 dark:text-zinc-500'
+                              }`}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-xs font-medium">
+                                {t(`executionMode.options.${mode}.label`)}
+                              </span>
+                              <span className="mt-0.5 block text-[10px] leading-4 text-zinc-400 dark:text-zinc-500">
+                                {t(`executionMode.options.${mode}.description`)}
+                              </span>
+                            </span>
+                            {selected && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+              <div className="relative" data-agent-selector>
               <button
                 type="button"
-                onClick={() => setShowAgentOptions(!showAgentOptions)}
+                onClick={() => {
+                  setShowAgentOptions(!showAgentOptions);
+                  setShowExecutionModeOptions(false);
+                  setShowModelOptions(false);
+                }}
                 className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
                 title={t('agentPicker.title')}
               >
@@ -2158,6 +2366,7 @@ export default function SessionPage() {
                   </div>
                 </div>
               )}
+              </div>
             </div>
           }
           centerToolbarSlot={
@@ -2167,6 +2376,8 @@ export default function SessionPage() {
                 onClick={() => {
                   if (!showModelOptions) updateModelMenuLeftOffset();
                   setShowModelOptions(!showModelOptions);
+                  setShowExecutionModeOptions(false);
+                  setShowAgentOptions(false);
                 }}
                 disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
                 className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"

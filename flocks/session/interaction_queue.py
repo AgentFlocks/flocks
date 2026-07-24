@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from flocks.session.execution_mode import SessionExecutionMode
 from flocks.utils.id import Identifier
 
 
@@ -35,6 +36,7 @@ class QueuedPrompt(BaseModel):
     mockReply: Optional[str] = None
     tools: Optional[Dict[str, bool]] = None
     system: Optional[str] = None
+    executionMode: SessionExecutionMode = SessionExecutionMode.BUILD
     status: str = "pending"
     createdAt: int = Field(default_factory=lambda: int(time.time() * 1000))
     updatedAt: int = Field(default_factory=lambda: int(time.time() * 1000))
@@ -69,6 +71,7 @@ class InteractionQueue:
         mock_reply: Optional[str] = None,
         tools: Optional[Dict[str, bool]] = None,
         system: Optional[str] = None,
+        execution_mode: SessionExecutionMode = SessionExecutionMode.BUILD,
     ) -> QueuedPrompt:
         async with cls._lock_for(session_id):
             queue = cls._queues.setdefault(session_id, [])
@@ -87,6 +90,7 @@ class InteractionQueue:
                 mockReply=mock_reply,
                 tools=dict(tools) if tools else None,
                 system=system,
+                executionMode=execution_mode,
             )
             queue.append(item)
             return item

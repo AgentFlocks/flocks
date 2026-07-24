@@ -870,6 +870,24 @@ class ToolRegistry:
                 message_id="default"
             )
 
+        execution_mode = ctx.extra.get("execution_mode")
+        if execution_mode:
+            from flocks.session.execution_mode import is_tool_allowed
+
+            if not is_tool_allowed(execution_mode, tool_name):
+                log.warn("tool.execute.execution_mode_denied", {
+                    "name": tool_name,
+                    "execution_mode": str(execution_mode),
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Tool {tool_name!r} is not available in "
+                        f"{str(execution_mode)!r} execution mode."
+                    ),
+                )
+
         log.info("tool.execute", {
             "name": tool_name,
             "params": list(kwargs.keys()),

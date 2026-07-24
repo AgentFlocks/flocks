@@ -71,6 +71,12 @@ from flocks.session.utils.file_extractor import (
     is_text_extractable_mime,
     extract_file_text,
 )
+from flocks.session.execution_mode import (
+    SessionExecutionMode,
+    execution_mode_prompt,
+    is_tool_allowed,
+    runtime_execution_mode,
+)
 
 
 log = Log.create(service="session.runner")
@@ -552,7 +558,30 @@ class SessionRunner:
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
-        return result.tool_infos, dict(result.metadata)
+        execution_mode = self._execution_mode_from_messages(messages)
+        tool_infos = [
+            tool_info
+            for tool_info in result.tool_infos
+            if is_tool_allowed(execution_mode, tool_info.name)
+        ]
+        metadata = dict(result.metadata)
+        metadata["executionMode"] = execution_mode.value
+        metadata["modeAllowedToolNames"] = sorted(
+            tool_info.name for tool_info in tool_infos
+        )
+        return tool_infos, metadata
+
+    @staticmethod
+    def _execution_mode_from_messages(
+        messages: Optional[List[MessageInfo]],
+    ) -> SessionExecutionMode:
+        for message in reversed(messages or []):
+            if getattr(message, "role", None) != MessageRole.USER:
+                continue
+            return runtime_execution_mode(
+                getattr(message, "executionMode", None)
+            )
+        return runtime_execution_mode(None)
 
     @staticmethod
     def _get_prompt_tool_names_from_schema(tools: List[Dict[str, Any]]) -> Tuple[str, ...]:
@@ -1265,6 +1294,10 @@ class SessionRunner:
     ) -> StepResult:
         """Process a single step in the loop with retry logic."""
         self._attempt_state = LlmAttemptState()
+        turn_execution_mode = runtime_execution_mode(
+            getattr(last_user, "executionMode", None)
+        )
+        self._turn_execution_mode = turn_execution_mode
         # Check for CLI callbacks (if running in CLI mode)
         # Only use CLI fallback if no callbacks were explicitly provided via constructor
         has_explicit_callbacks = any([
@@ -1401,6 +1434,7 @@ class SessionRunner:
             agent_prompt=getattr(agent, "prompt", None),
             provider_id=self.provider_id,
             model_id=self.model_id,
+            execution_mode_prompt=execution_mode_prompt(turn_execution_mode),
             prompt_tool_names=prompt_tool_names,
             tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
@@ -3020,6 +3054,13 @@ class SessionRunner:
             workspace_dir=self.session.directory,
             langfuse_generation=None,
             step_index=self._step,
+            execution_mode=runtime_execution_mode(
+                getattr(
+                    self,
+                    "_turn_execution_mode",
+                    SessionExecutionMode.BUILD,
+                )
+            ).value,
         )
         
         # Build provider options (thinking / reasoning / max_tokens)

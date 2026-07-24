@@ -1065,7 +1065,10 @@ describe('SessionChat composer controls', () => {
       });
       expect(clientPostMock).toHaveBeenCalledWith(
         '/api/session/sess-1/prompt_async',
-        { parts: [{ type: 'text', text: 'continue' }] },
+        expect.objectContaining({
+          executionMode: 'build',
+          parts: [{ type: 'text', text: 'continue' }],
+        }),
       );
     });
     expect(sessionApiUpdateMock.mock.invocationCallOrder[0]).toBeLessThan(
@@ -2441,6 +2444,8 @@ describe('SessionChat agent mentions', () => {
         [],
         'explore',
         undefined,
+        undefined,
+        'build',
       );
     });
   });
