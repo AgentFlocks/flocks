@@ -412,11 +412,11 @@ describe('SessionPage session actions menu', () => {
     const projectsSection = projectsHeading.closest('section');
     const newSessionButton = screen.getByRole('button', { name: 'newSession' });
     const searchInput = screen.getByPlaceholderText('filterConversations');
-    expect(newSessionButton.previousElementSibling).toHaveClass('h-3.5', 'w-3.5');
-    expect(searchInput.previousElementSibling).toHaveClass('h-3.5', 'w-3.5');
+    expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
+    expect(searchInput.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
     expect(searchInput).toHaveClass('text-sm', 'font-medium');
-    expect(tasksHeading.closest('div')).toHaveClass('text-xs', 'text-zinc-500');
-    expect(projectsHeading.closest('div')).toHaveClass('text-xs', 'text-zinc-500');
+    expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
+    expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(tasksSection).not.toBeNull();
     expect(projectsSection).not.toBeNull();
     expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
@@ -426,7 +426,9 @@ describe('SessionPage session actions menu', () => {
       pageSize: 20,
     });
     expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    expect(screen.getByText('Original Session').closest('h3')).toHaveClass('text-sm', 'font-medium');
+    const taskTitle = screen.getByText('Original Session').closest('h3');
+    expect(taskTitle).toHaveClass('text-sm', 'font-medium');
+    expect(taskTitle?.parentElement?.parentElement).toHaveClass('px-3');
 
     await user.click(screen.getByRole('button', { name: 'toggleTasks' }));
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
@@ -616,7 +618,9 @@ describe('SessionPage session actions menu', () => {
     const firstRender = renderSessionPage();
 
     await screen.findByText('Labs');
-    expect(screen.getByRole('button', { name: 'selectProject' }).querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
+    const projectButton = screen.getByRole('button', { name: 'selectProject' });
+    expect(projectButton.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
+    expect(projectButton.parentElement).toHaveClass('px-3');
     await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
     expect(screen.queryByText('Labs')).not.toBeInTheDocument();
 

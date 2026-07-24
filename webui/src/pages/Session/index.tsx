@@ -246,8 +246,8 @@ function SessionSidebarItemInner({
   return (
     <div
       onClick={() => onSelect(session.id)}
-      className={`group relative mb-0.5 min-h-[34px] cursor-pointer rounded-lg border px-2.5 py-1 transition-colors duration-100 ${
-        nested ? 'ml-[19px]' : ''
+      className={`group relative mb-0.5 min-h-[34px] cursor-pointer rounded-lg border px-3 py-1 transition-colors duration-100 ${
+        nested ? 'ml-5' : ''
       } ${
         !selectMode && selected
           ? 'border-transparent bg-zinc-200/70 text-[#202328] dark:bg-[#3a434e] dark:text-white'
@@ -1868,8 +1868,8 @@ export default function SessionPage() {
           <div className="space-y-0.5">
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
-                ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
-                : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+                ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
+                : <PencilLine className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
               <button
                 onClick={handleStartNewSession}
                 disabled={creating}
@@ -1880,7 +1880,7 @@ export default function SessionPage() {
             </div>
 
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -1955,7 +1955,7 @@ export default function SessionPage() {
                   return (
                     <div key={group.id} className="group/project relative">
                       <div
-                        className={`flex h-[34px] items-center gap-1 rounded-lg px-2 text-sm transition-colors ${
+                        className={`flex h-[34px] items-center gap-1 rounded-lg px-3 text-sm transition-colors ${
                           isSelectedProject
                             ? 'font-semibold text-[#202328] dark:text-white'
                             : 'font-medium text-[#474b51] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
