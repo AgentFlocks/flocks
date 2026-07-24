@@ -28,7 +28,10 @@ from flocks.session.session_loop import SessionLoop
 from flocks.agent.registry import is_delegatable
 from flocks.skill.skill import Skill
 from flocks.config.config import Config
-from flocks.tool.subagent_result import format_sync_subagent_result
+from flocks.tool.subagent_result import (
+    _extract_message_error,
+    format_sync_subagent_result,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.delegate_task")
@@ -121,6 +124,16 @@ async def _run_subagent_with_hooks(
                 "error": str(exc),
             })
     result_error = getattr(result, "error", None)
+    message_error = (
+        _extract_message_error(last_message)
+        if last_message is not None
+        else None
+    )
+    message_finish = (
+        getattr(last_message, "finish", None)
+        if last_message is not None
+        else None
+    )
     result_metadata = getattr(result, "metadata", None)
     interrupted = (
         isinstance(result_metadata, dict)
@@ -129,9 +142,18 @@ async def _run_subagent_with_hooks(
     if interrupted:
         status = "interrupted"
         stop_error = result_error or "Sub-agent execution was interrupted"
-    elif getattr(result, "action", None) == "error" or result_error:
+    elif (
+        getattr(result, "action", None) == "error"
+        or result_error
+        or message_error
+        or message_finish == "error"
+    ):
         status = "error"
-        stop_error = result_error
+        stop_error = (
+            result_error
+            or message_error
+            or "Sub-agent execution failed"
+        )
     else:
         status = "completed"
         stop_error = None

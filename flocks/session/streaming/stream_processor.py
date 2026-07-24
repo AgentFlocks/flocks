@@ -684,19 +684,13 @@ class StreamProcessor:
                 (hook_ctx.output.get("reason") if hook_ctx else "") or ""
             ).strip()
         except asyncio.CancelledError:
-            interrupted_result = ToolResult(
-                success=False,
-                error="Tool execution was interrupted",
-                metadata={"interrupted": True},
-            )
-            await self._run_tool_after_hook(
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
                 tool_name=tool_name,
                 tool_input=tool_input,
                 tool_call_id=tool_call_id,
-                result=interrupted_result,
-                status="interrupted",
                 tool_start_time=tool_start_time,
-                allow_result_override=False,
+                post_hook_fired=False,
             )
             raise
         except Exception as e:
@@ -988,81 +982,15 @@ class StreamProcessor:
                     log.error("stream.tool_end_callback.error", {"error": str(e)})
             
         except asyncio.CancelledError:
-            interrupt_msg = "Tool execution was interrupted"
-            log.info("stream.tool_call.cancelled", {
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-            })
-            if not post_hook_fired:
-                post_hook_fired = True
-                interrupted_result = ToolResult(
-                    success=False,
-                    error=interrupt_msg,
-                    metadata={"interrupted": True},
-                )
-                await self._run_tool_after_hook(
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    tool_call_id=tool_call_id,
-                    result=interrupted_result,
-                    status="interrupted",
-                    tool_start_time=tool_start_time,
-                    allow_result_override=False,
-                )
-            try:
-                if tool_span_ctx is not None:
-                    tool_span_ctx.end(
-                        output=interrupt_msg,
-                        metadata={"success": False},
-                        level="ERROR",
-                        status_message="tool_cancelled",
-                    )
-            except Exception as _span_err:
-                log.debug("stream.tool_span.cancel_end_failed", {"error": str(_span_err)})
-
-            tool_state.status = "error"
-            tool_state.error = interrupt_msg
-
-            try:
-                tool_end_time = int(datetime.now().timestamp() * 1000)
-                error_state = ToolStateError(
-                    status="error",
-                    input=tool_input,
-                    error=interrupt_msg,
-                    time={"start": tool_start_time if 'tool_start_time' in locals() else tool_end_time, "end": tool_end_time},
-                )
-
-                error_part = ToolPart(
-                    id=tool_state.part_id,
-                    sessionID=self.session_id,
-                    messageID=self.assistant_message.id,
-                    type="tool",
-                    callID=tool_call_id,
-                    tool=tool_name,
-                    state=error_state,
-                )
-                await Message.store_part(self.session_id, self.assistant_message.id, error_part)
-
-                if self.event_publish_callback:
-                    await self.event_publish_callback("message.part.updated", {
-                        "part": {
-                            "id": tool_state.part_id,
-                            "messageID": self.assistant_message.id,
-                            "sessionID": self.session_id,
-                            "type": "tool",
-                            "callID": tool_call_id,
-                            "tool": tool_name,
-                            "state": {
-                                "status": "error",
-                                "input": tool_input,
-                                "error": interrupt_msg,
-                                "time": {"start": tool_start_time if 'tool_start_time' in locals() else tool_end_time, "end": tool_end_time},
-                            }
-                        }
-                    })
-            except Exception as store_e:
-                log.error("stream.tool_call.cancelled_update_failed", {"error": str(store_e)})
-
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                post_hook_fired=post_hook_fired,
+                tool_span_ctx=tool_span_ctx,
+            )
             raise
         except Exception as e:
             log.error("stream.tool_call.error", {
@@ -1157,6 +1085,107 @@ class StreamProcessor:
                     await self.tool_end_callback(tool_name, error_result)
                 except Exception as e2:
                     log.error("stream.tool_end_callback.error", {"error": str(e2)})
+
+    async def _finalize_interrupted_tool_call(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_call_id: str,
+        tool_start_time: int,
+        post_hook_fired: bool,
+        tool_span_ctx: Optional[Any] = None,
+    ) -> None:
+        """Emit and persist the terminal state for an interrupted tool call."""
+        interrupt_msg = "Tool execution was interrupted"
+        log.info("stream.tool_call.cancelled", {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+        })
+        try:
+            if not post_hook_fired:
+                interrupted_result = ToolResult(
+                    success=False,
+                    error=interrupt_msg,
+                    metadata={"interrupted": True},
+                )
+                await self._run_tool_after_hook(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_call_id=tool_call_id,
+                    result=interrupted_result,
+                    status="interrupted",
+                    tool_start_time=tool_start_time,
+                    allow_result_override=False,
+                )
+        finally:
+            try:
+                if tool_span_ctx is not None:
+                    tool_span_ctx.end(
+                        output=interrupt_msg,
+                        metadata={"success": False},
+                        level="ERROR",
+                        status_message="tool_cancelled",
+                    )
+            except Exception as span_error:
+                log.debug(
+                    "stream.tool_span.cancel_end_failed",
+                    {"error": str(span_error)},
+                )
+
+            tool_state.status = "error"
+            tool_state.error = interrupt_msg
+            tool_end_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_input,
+                error=interrupt_msg,
+                time={"start": tool_start_time, "end": tool_end_time},
+            )
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=error_state,
+            )
+            try:
+                await Message.store_part(
+                    self.session_id,
+                    self.assistant_message.id,
+                    error_part,
+                )
+                if self.event_publish_callback:
+                    await self.event_publish_callback(
+                        "message.part.updated",
+                        {
+                            "part": {
+                                "id": tool_state.part_id,
+                                "messageID": self.assistant_message.id,
+                                "sessionID": self.session_id,
+                                "type": "tool",
+                                "callID": tool_call_id,
+                                "tool": tool_name,
+                                "state": {
+                                    "status": "error",
+                                    "input": tool_input,
+                                    "error": interrupt_msg,
+                                    "time": {
+                                        "start": tool_start_time,
+                                        "end": tool_end_time,
+                                    },
+                                },
+                            }
+                        },
+                    )
+            except Exception as store_error:
+                log.error(
+                    "stream.tool_call.cancelled_update_failed",
+                    {"error": str(store_error)},
+                )
 
     async def _run_tool_after_hook(
         self,

@@ -683,6 +683,51 @@ class TestToolCallExecution:
         assert post_hook.await_args.args[0]["status"] == "interrupted"
 
     @pytest.mark.asyncio
+    async def test_cancelled_tool_before_persists_interrupted_state(self):
+        proc = _make_processor()
+        store_part = AsyncMock()
+        post_hook = AsyncMock(return_value=HookContext(
+            stage=HookStage.TOOL_AFTER,
+            input={},
+        ))
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=store_part,
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=post_hook,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(),
+            ) as execute,
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_before_cancel", tool_name="bash")
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(ToolCallEvent(
+                    tool_call_id="tc_before_cancel",
+                    tool_name="bash",
+                    input={"command": "sleep 10"},
+                ))
+
+        execute.assert_not_awaited()
+        post_hook.assert_awaited_once()
+        assert post_hook.await_args.args[0]["status"] == "interrupted"
+        assert proc.tool_calls["tc_before_cancel"].status == "error"
+        final_part = store_part.await_args.args[2]
+        assert final_part.state.status == "error"
+        assert final_part.state.error == "Tool execution was interrupted"
+
+    @pytest.mark.asyncio
     async def test_tool_call_executes_tool(self):
         proc = _make_processor()
 

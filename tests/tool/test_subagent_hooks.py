@@ -119,6 +119,61 @@ async def test_subagent_stop_reports_child_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_subagent_stop_reports_persisted_message_error() -> None:
+    ctx = ToolContext(
+        session_id="ses_parent",
+        message_id="msg_parent",
+        agent="rex",
+    )
+    last_message = SimpleNamespace(
+        id="msg_child_error",
+        finish="error",
+        error={"message": "provider authentication failed"},
+    )
+    loop_result = SimpleNamespace(
+        action="stop",
+        error=None,
+        last_message=last_message,
+        metadata={},
+    )
+    stop_hook = AsyncMock()
+
+    with (
+        patch(
+            "flocks.tool.agent.delegate_task.SessionLoop.run",
+            AsyncMock(return_value=loop_result),
+        ),
+        patch(
+            "flocks.tool.agent.delegate_task.Message.get_text_content",
+            AsyncMock(return_value=""),
+        ),
+        patch(
+            "flocks.hooks.pipeline.HookPipeline.run_subagent_start",
+            AsyncMock(),
+        ),
+        patch(
+            "flocks.hooks.pipeline.HookPipeline.run_subagent_stop",
+            stop_hook,
+        ),
+    ):
+        await _run_subagent_with_hooks(
+            ctx=ctx,
+            child_session_id="ses_child",
+            child_agent="explore",
+            workspace="/tmp/project",
+            prompt="inspect hooks",
+            description="Inspect hooks",
+            resumed=False,
+        )
+
+    stop_hook.assert_awaited_once()
+    stop_payload = stop_hook.await_args.args[0]
+    assert stop_payload["status"] == "error"
+    assert stop_payload["summary"] == ""
+    assert stop_payload["error"] == "provider authentication failed"
+
+
+@pytest.mark.asyncio
 async def test_subagent_stop_reports_interruption() -> None:
     ctx = ToolContext(
         session_id="ses_parent",
