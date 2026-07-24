@@ -34,6 +34,7 @@ import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
+import { redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
@@ -820,27 +821,19 @@ export function getMessageBubbleClassName({
   isUser: boolean;
   isEditing: boolean;
 }): string {
-  if (compact) {
-    const widthClass = isUser
-      ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
-      : 'w-full max-w-full';
-
-    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
-      isUser
-        ? 'border border-black/[0.07] bg-[#fafaf8] text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none'
-        : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
-    }`;
+  if (!isUser) {
+    return 'w-full max-w-full min-w-0 bg-transparent py-1 text-sm text-[#34393e] break-words dark:text-zinc-100';
   }
 
-  const widthClass = isUser
-    ? (isEditing ? 'w-full' : 'w-auto')
-    : 'w-full';
+  if (compact) {
+    const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
-    isUser
-      ? 'border border-black/[0.07] bg-[#fafaf8] text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none'
-      : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
-  }`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-[#fafaf8] text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  }
+
+  const widthClass = isEditing ? 'w-full' : 'w-auto';
+
+  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm border border-black/[0.07] bg-[#fafaf8] text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -4018,7 +4011,7 @@ function ChatMessageBubbleInner({
   onEditSend,
   onRegenerate,
 }: ChatMessageBubbleProps) {
-  const { t } = useTranslation('session');
+  const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
@@ -4075,7 +4068,7 @@ function ChatMessageBubbleInner({
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-gray-400 transition-colors duration-150 hover:bg-white hover:text-gray-700 active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-500 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
@@ -4477,11 +4470,14 @@ function ChatMessageBubbleInner({
       )}
     </div>
   );
+  const footerTimestamp = showTimestamp && message.timestamp
+    ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    : null;
   const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
-    <div className="flex items-center justify-between mt-1.5">
-      {showTimestamp && message.timestamp
-        ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
-        : <span />}
+    <div className={`mt-1.5 flex items-center ${
+      isUser ? 'justify-between' : `justify-start${footerTimestamp ? ' gap-1.5' : ''}`
+    }`}>
+      {isUser && (footerTimestamp || <span />)}
       <div className={actionBarClass}>
         {isUser ? (
           <>
@@ -4529,6 +4525,7 @@ function ChatMessageBubbleInner({
           </>
         )}
       </div>
+      {!isUser && footerTimestamp}
     </div>
   ) : null;
 
@@ -4837,6 +4834,7 @@ function formatQuestionAnswerValue(question: QuestionItem, value: string, t: Tod
 
 function ChatQuestionResult({
   state,
+  actionLabel,
   statusLabel,
   statusIcon,
   statusIconColor,
@@ -4844,6 +4842,7 @@ function ChatQuestionResult({
   t,
 }: {
   state: Partial<ToolState>;
+  actionLabel: string;
   statusLabel: string;
   statusIcon: React.ReactNode;
   statusIconColor: string;
@@ -4920,7 +4919,7 @@ function ChatQuestionResult({
           <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
             {statusIcon}
           </span>
-          <span className="min-w-0 flex-shrink-0">{displayStatus}</span>
+          <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
           {firstQuestion && (
             <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
               {firstQuestion}
@@ -4941,7 +4940,7 @@ function ChatQuestionResult({
         <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">question</span>
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{actionLabel}</span>
             {firstQuestion && (
               <span className="text-[11px] text-zinc-400 truncate min-w-0">
                 {firstQuestion}
@@ -5245,44 +5244,54 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   };
   const config = statusConfig[status] ?? statusConfig.pending;
   const isBashTool = isBashToolName(toolName);
-  const isLoadSkillTool = toolName === 'skill_load' || toolName === 'load_skill';
   const todoEntries = toolName === 'todo'
     ? pickTodoEntries(state.metadata?.newTodos, state.metadata?.todos, state.input?.todos)
     : [];
   const showGenericToolPayload = toolName !== 'todo' && !isBashTool;
   const isTodoTool = toolName === 'todo';
+  const toolPresentation = resolveToolPresentation(toolName, state, t);
+  const hasToolInput = Boolean(state.input && Object.keys(state.input).length > 0);
+  const safeToolInput = hasToolInput
+    ? redactToolInput(state.input) as Record<string, unknown>
+    : undefined;
+  const showActionProgress = showGenericToolPayload
+    && !safeToolInput
+    && (status === 'pending' || status === 'running');
+  const actionProgressLabel = toolName === 'write'
+    ? t('chat.tool.progress.writingFile')
+    : toolName === 'edit' || toolName === 'apply_patch'
+      ? t('chat.tool.progress.editingFile')
+      : t('chat.tool.progress.working');
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
-  const inputSummary = state.input
+  const inputSummary = hasToolInput
     ? truncateToolDisplayText(
         toolName === 'todo'
           ? buildTodoSummary(state, t)
           : isBashTool
           ? buildBashHeaderSummary(state)
-          : buildToolInputSummary(state.input),
+          : buildToolInputSummary(safeToolInput || {}),
       )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
-  const toolDisplayName = isLoadSkillTool
-    ? t('chat.tool.loadSkill')
-    : toolName.replace(/_/g, ' ');
-  const loadSkillName = isLoadSkillTool
-    ? [state.input?.name, state.input?.skill_name]
-      .find((value): value is string => typeof value === 'string' && value.trim().length > 0)
-      ?.trim()
-    : undefined;
+  const semanticDetail = truncateToolDisplayText(toolPresentation.detail);
+  const toolDisplayName = toolPresentation.label;
   const processStepLabel = isTodoTool
     ? t('chat.tool.todoUpdated')
-    : isLoadSkillTool
+    : toolPresentation.known
       ? toolDisplayName
       : config.label;
   const processStepDetail = workflowHeaderSummary
-    || loadSkillName
+    || semanticDetail
     || displayTitle
     || inputSummary
-    || toolDisplayName;
+    || (toolPresentation.known ? '' : toolDisplayName);
+  const cardHeaderDetail = workflowHeaderSummary
+    || semanticDetail
+    || inputSummary
+    || displayTitle;
   const processStepIcon = isTodoTool
     ? <ListTree className="h-[15px] w-[15px]" />
     : config.icon;
@@ -5309,6 +5318,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
     return (
       <ChatQuestionResult
         state={state}
+        actionLabel={toolDisplayName}
         statusLabel={config.label}
         statusIcon={config.icon}
         statusIconColor={config.iconColor}
@@ -5353,13 +5363,27 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
         <ChatBashPayload state={state} t={t} />
       )}
 
-      {showGenericToolPayload && state.input && (
+      {showActionProgress && (
+        <div
+          data-testid="chat-tool-action-progress"
+          className="flex min-h-6 items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500"
+        >
+          <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
+          </span>
+          <span>{actionProgressLabel}</span>
+        </div>
+      )}
+
+      {showGenericToolPayload && safeToolInput && (
         <details>
           <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
             {t('chat.tool.inputParams')}
           </summary>
           <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
-            {JSON.stringify(state.input, null, 2)}
+            {JSON.stringify(safeToolInput, null, 2)}
           </pre>
         </details>
       )}
@@ -5397,9 +5421,11 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
             {processStepIcon}
           </span>
           <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
-          <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
-            {processStepDetail}
-          </span>
+          {processStepDetail && (
+            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {processStepDetail}
+            </span>
+          )}
           <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
         </summary>
         <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
@@ -5419,27 +5445,14 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
             <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
-            {workflowHeaderSummary ? (
-              <span className="text-[11px] text-emerald-700 truncate min-w-0">
-                {workflowHeaderSummary}
+            {cardHeaderDetail && (
+              <span
+                className={`text-[11px] truncate min-w-0 ${
+                  workflowHeaderSummary ? 'text-emerald-700' : 'text-zinc-400'
+                }`}
+              >
+                {cardHeaderDetail}
               </span>
-            ) : (
-              <>
-                {inputSummary && (
-                  <span
-                    className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
-                  >
-                    {inputSummary}
-                  </span>
-                )}
-                {displayTitle && !inputSummary && (
-                  <span
-                    className="text-[11px] text-zinc-400 truncate min-w-0"
-                  >
-                    {displayTitle}
-                  </span>
-                )}
-              </>
             )}
           </div>
         </div>

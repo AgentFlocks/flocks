@@ -1048,6 +1048,7 @@ class OpenAIBaseProvider(BaseProvider):
             log_prefix="openai_base",
         )
         tool_calls: Dict[int, Dict[str, Any]] = {}
+        started_tool_inputs: set[int] = set()
         emitted_substantive_chunk = False
         stream_usage: Optional[Dict[str, int]] = None
         usage_emitted = False
@@ -1131,6 +1132,7 @@ class OpenAIBaseProvider(BaseProvider):
                 delta_tcs = getattr(delta, "tool_calls", None)
                 if delta_tcs:
                     emitted_substantive_chunk = True
+                    tool_input_markers: List[Dict[str, Any]] = []
                     for tc in delta_tcs:
                         idx = tc.index
                         if idx not in tool_calls:
@@ -1148,6 +1150,28 @@ class OpenAIBaseProvider(BaseProvider):
                                 tool_calls[idx]["function"]["arguments"] += (
                                     tc.function.arguments
                                 )
+                        accumulated_name = tool_calls[idx]["function"]["name"]
+                        if accumulated_name and idx not in started_tool_inputs:
+                            tool_input_markers.append({
+                                "index": idx,
+                                "id": tool_calls[idx]["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": accumulated_name,
+                                    "arguments": "",
+                                },
+                            })
+                            started_tool_inputs.add(idx)
+
+                    # Surface the tool as soon as its name is known, but keep
+                    # partial JSON private. The terminal chunk below publishes
+                    # the complete input once the model finishes generating it.
+                    if tool_input_markers:
+                        yield StreamChunk(
+                            delta="",
+                            finish_reason=None,
+                            tool_calls=tool_input_markers,
+                        )
 
             if choice.finish_reason:
                 # Flush any remaining buffered content from the think-tag extractor
@@ -1173,7 +1197,10 @@ class OpenAIBaseProvider(BaseProvider):
                         yield StreamChunk(delta=seg_text, finish_reason=None)
 
                 if tool_calls:
-                    sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
+                    sorted_calls = [
+                        {"index": i, **tool_calls[i]}
+                        for i in sorted(tool_calls.keys())
+                    ]
                     tool_calls.clear()
                     # Preserve real finish_reason (e.g. "length" when max_tokens
                     # hit) so the runner can detect truncated tool arguments.

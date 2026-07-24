@@ -8,12 +8,11 @@ import {
   FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import i18n from '@/i18n';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
-import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import { useSSE } from '@/hooks/useSSE';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
   createSuiteInstallProgressState,
@@ -30,11 +29,11 @@ import {
   useEnabledChatModelDefinitions,
   useResolvedDefaultModel,
 } from '@/hooks/useChatModelResources';
-import client from '@/api/client';
+import client, { getApiBase } from '@/api/client';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
-import { formatSessionDate } from '@/utils/time';
+import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import type { ModelDefinitionV2, Session } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -91,6 +90,26 @@ type FolderBrowserResponse = {
 };
 const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
 const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
+
+function readSessionStatusType(status: unknown): string | undefined {
+  if (typeof status === 'string') return status;
+  if (!status || typeof status !== 'object' || !('type' in status)) return undefined;
+  return typeof status.type === 'string' ? status.type : undefined;
+}
+
+function isRunningSessionStatus(status: unknown): boolean {
+  const statusType = readSessionStatusType(status);
+  return statusType === 'busy' || statusType === 'compacting' || statusType === 'retry';
+}
+
+function readRunningSessionIds(statuses: unknown): Set<string> {
+  if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) return new Set();
+  return new Set(
+    Object.entries(statuses)
+      .filter(([, status]) => isRunningSessionStatus(status))
+      .map(([sessionId]) => sessionId),
+  );
+}
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -187,9 +206,11 @@ interface SessionSidebarItemProps {
   selectMode: boolean;
   checked: boolean;
   menuOpen: boolean;
+  running: boolean;
   renaming: boolean;
   renameValue: string;
   renameSubmitting: boolean;
+  language: string;
   t: (key: string, options?: Record<string, unknown>) => string;
   renameInputRef: RefObject<HTMLInputElement | null>;
   onSelect: (sessionId: string) => void;
@@ -207,9 +228,11 @@ function SessionSidebarItemInner({
   selectMode,
   checked,
   menuOpen,
+  running,
   renaming,
   renameValue,
   renameSubmitting,
+  language,
   t,
   renameInputRef,
   onSelect,
@@ -282,13 +305,32 @@ function SessionSidebarItemInner({
           </h3>
         )}
         {session.time?.updated && !renaming && (
-          <time className="ml-1 shrink-0 text-[11px] font-normal tabular-nums text-[#858a91] transition-opacity group-hover:opacity-0 dark:text-[#8f9ba8]">
-            {formatSessionDate(session.time.updated)}
+          <time
+            dateTime={new Date(session.time.updated).toISOString()}
+            title={formatSessionDate(session.time.updated)}
+            className="ml-1 shrink-0 whitespace-nowrap text-[11px] font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]"
+          >
+            {formatRelativeTime(session.time.updated, language)}
           </time>
         )}
       </div>
       {!selectMode && (
-        <div className="absolute right-1 top-1/2 -translate-y-1/2" data-session-actions>
+        <div className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2" data-session-actions>
+          {running && (
+            <span
+              role="status"
+              aria-label={t('chat.tool.running')}
+              title={t('chat.tool.running')}
+              data-session-running={session.id}
+              className={`pointer-events-none absolute inset-0 grid place-items-center text-[#5f8fcb] transition-opacity dark:text-[#8ab4e8] ${
+                menuOpen
+                  ? 'opacity-0'
+                  : 'opacity-100 group-hover:opacity-0 group-focus-within:opacity-0'
+              }`}
+            >
+              <Loader2 className="h-[14px] w-[14px] animate-spin" />
+            </span>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -297,9 +339,9 @@ function SessionSidebarItemInner({
             title={t('moreActions')}
             aria-label={t('moreActions')}
             aria-expanded={menuOpen}
-            className={`grid h-6 w-6 place-items-center rounded-lg text-[#989ca1] transition-all hover:bg-white/80 hover:text-[#202328] dark:text-[#8f9ba8] dark:hover:bg-white/[0.08] dark:hover:text-white ${
-              menuOpen || selected
-                ? 'bg-white/80 text-[#202328] opacity-100 dark:bg-white/[0.08] dark:text-white'
+            className={`absolute inset-0 grid h-6 w-6 place-items-center rounded-lg text-[#989ca1] transition-[color,opacity,background-color] hover:bg-white hover:text-[#202328] dark:text-[#8f9ba8] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+              menuOpen || (selected && !running)
+                ? 'text-[#202328] opacity-100 dark:text-white'
                 : 'opacity-0 group-hover:opacity-100'
             }`}
           >
@@ -322,11 +364,92 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.selectMode === next.selectMode &&
   prev.checked === next.checked &&
   prev.menuOpen === next.menuOpen &&
+  prev.running === next.running &&
   prev.renaming === next.renaming &&
   prev.renameValue === next.renameValue &&
   prev.renameSubmitting === next.renameSubmitting &&
+  prev.language === next.language &&
   prev.t === next.t
 ));
+
+function WorkbenchRefreshStatus({ label }: { label: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="workbench-refresh-status"
+      className="ml-auto flex min-w-0 items-center gap-2 rounded-full border border-black/[0.06] bg-white/55 px-2.5 py-1 text-[11px] font-medium text-[#737980] shadow-[0_1px_2px_rgba(22,27,34,0.03)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#aeb8c3]"
+    >
+      <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#4f92e8]" />
+      <span className="truncate">{label}</span>
+      <span className="h-px w-8 shrink-0 overflow-hidden rounded-full bg-[#d9e5f4] dark:bg-[#46515e]">
+        <span className="block h-full w-1/2 animate-pulse rounded-full bg-[#4f92e8]" />
+      </span>
+    </div>
+  );
+}
+
+function SessionListSkeleton() {
+  return (
+    <div
+      data-testid="session-list-skeleton"
+      aria-hidden="true"
+      className="animate-pulse px-2 pt-1"
+    >
+      <div className="mb-2 h-3 w-16 rounded-full bg-black/[0.07] dark:bg-white/[0.08]" />
+      <div className="space-y-1.5">
+        {[72, 88, 64].map((width, index) => (
+          <div
+            key={`${width}-${index}`}
+            className="flex h-[34px] items-center gap-2 rounded-lg px-2"
+          >
+            <div className="h-3.5 w-3.5 shrink-0 rounded bg-black/[0.06] dark:bg-white/[0.07]" />
+            <div
+              className="h-3 rounded-full bg-black/[0.06] dark:bg-white/[0.07]"
+              style={{ width: `${width}%` }}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mb-2 mt-5 h-3 w-12 rounded-full bg-black/[0.07] dark:bg-white/[0.08]" />
+      <div className="space-y-1.5">
+        {[82, 68, 76, 58].map((width, index) => (
+          <div
+            key={`${width}-${index}`}
+            className="flex h-[34px] items-center gap-2 rounded-lg px-2"
+          >
+            <div className="h-3.5 w-3.5 shrink-0 rounded-full bg-black/[0.06] dark:bg-white/[0.07]" />
+            <div
+              className="h-3 rounded-full bg-black/[0.06] dark:bg-white/[0.07]"
+              style={{ width: `${width}%` }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SessionChatSkeleton() {
+  return (
+    <div
+      data-testid="session-chat-skeleton"
+      aria-hidden="true"
+      className="flex min-h-0 flex-1 justify-center overflow-hidden px-7 py-6"
+    >
+      <div className="w-full max-w-[760px] animate-pulse space-y-7">
+        <div className="ml-auto h-16 w-[42%] rounded-2xl bg-black/[0.045] dark:bg-white/[0.055]" />
+        <div className="space-y-3">
+          <div className="h-3 w-24 rounded-full bg-black/[0.06] dark:bg-white/[0.07]" />
+          <div className="h-4 w-[86%] rounded-full bg-black/[0.055] dark:bg-white/[0.065]" />
+          <div className="h-4 w-[68%] rounded-full bg-black/[0.045] dark:bg-white/[0.055]" />
+          <div className="h-20 w-full rounded-2xl bg-black/[0.035] dark:bg-white/[0.045]" />
+        </div>
+        <div className="ml-auto h-12 w-[34%] rounded-2xl bg-black/[0.04] dark:bg-white/[0.05]" />
+      </div>
+    </div>
+  );
+}
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
@@ -347,6 +470,7 @@ export default function SessionPage() {
   const modelSelectorRef = useRef<HTMLDivElement>(null);
   const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [creating, setCreating] = useState(false);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
@@ -355,6 +479,7 @@ export default function SessionPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [refreshingProjects, setRefreshingProjects] = useState(true);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => {
     try {
@@ -364,6 +489,7 @@ export default function SessionPage() {
       return new Set();
     }
   });
+  const [collapsedLoadedSessionGroupIds, setCollapsedLoadedSessionGroupIds] = useState<Set<string>>(new Set());
   const [projectsSectionCollapsed, setProjectsSectionCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(projectsSectionCollapsedStorageKey) === 'true';
@@ -408,6 +534,7 @@ export default function SessionPage() {
   const folderBrowserRequestIdRef = useRef(0);
   const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
 
@@ -415,9 +542,13 @@ export default function SessionPage() {
     () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
     [projects],
   );
+  const sessionListPageSize = projects.length >= 1
+    ? MULTI_PROJECT_SESSION_PAGE_SIZE
+    : SINGLE_PROJECT_SESSION_PAGE_SIZE;
   const {
     sessions,
     loading: loadingSessions,
+    refreshing: refreshingSessions = loadingSessions,
     refetch: refetchSessions,
     updateSessionTitle,
     removeSession,
@@ -428,9 +559,7 @@ export default function SessionPage() {
     loadMore: loadMoreSessions,
   } = useSessions(searchQuery, {
     projectIds: sessionProjectIds,
-    pageSize: projects.length >= 1
-      ? MULTI_PROJECT_SESSION_PAGE_SIZE
-      : SINGLE_PROJECT_SESSION_PAGE_SIZE,
+    pageSize: sessionListPageSize,
   });
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
@@ -583,6 +712,15 @@ export default function SessionPage() {
     });
   }, []);
 
+  const setLoadedSessionGroupCollapsed = useCallback((groupId: string, collapsed: boolean) => {
+    setCollapsedLoadedSessionGroupIds((current) => {
+      const next = new Set(current);
+      if (collapsed) next.add(groupId);
+      else next.delete(groupId);
+      return next;
+    });
+  }, []);
+
   useEffect(() => {
     try {
       window.localStorage.setItem(
@@ -665,7 +803,14 @@ export default function SessionPage() {
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
   const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
-  const hasMoreTaskSessions = hasMoreByProject[TASK_SESSION_GROUP_ID] ?? false;
+  const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
+  const visibleTaskSessions = taskSessionsCollapsedToFirstPage
+    ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
+    : taskSessionGroup.sessions;
+  const hasMoreRemoteTaskSessions = hasMoreByProject[TASK_SESSION_GROUP_ID] ?? false;
+  const canShowMoreTaskSessions = taskSessionsCollapsedToFirstPage || hasMoreRemoteTaskSessions;
+  const canCollapseTaskSessions = !taskSessionsCollapsedToFirstPage
+    && taskSessionGroup.sessions.length > sessionListPageSize;
 
   const selectedProjectIDForCreate = selectedProjectId && selectedProjectId !== TASK_SESSION_GROUP_ID
     ? selectedProjectId
@@ -716,22 +861,29 @@ export default function SessionPage() {
 
   const fetchProjects = useCallback(async (ensureProject?: ProjectSummary, query = '') => {
     const requestSeq = ++projectListRequestSeqRef.current;
-    const listResult = await client.get('/api/project', {
-      params: { search: query.trim() || undefined },
-    });
-    if (requestSeq !== projectListRequestSeqRef.current) return;
-    const nextProjects = Array.isArray(listResult.data)
-      ? listResult.data.filter((project: ProjectSummary) => (
-        project.id !== TASK_SESSION_GROUP_ID && !project.isDefault
-      ))
-      : [];
-    setProjects((currentProjects) => {
-      if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
-        return nextProjects;
+    setRefreshingProjects(true);
+    try {
+      const listResult = await client.get('/api/project', {
+        params: { search: query.trim() || undefined },
+      });
+      if (requestSeq !== projectListRequestSeqRef.current) return;
+      const nextProjects = Array.isArray(listResult.data)
+        ? listResult.data.filter((project: ProjectSummary) => (
+          project.id !== TASK_SESSION_GROUP_ID && !project.isDefault
+        ))
+        : [];
+      setProjects((currentProjects) => {
+        if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
+          return nextProjects;
+        }
+        const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
+        return [{ ...currentProject, ...ensureProject }, ...nextProjects];
+      });
+    } finally {
+      if (requestSeq === projectListRequestSeqRef.current) {
+        setRefreshingProjects(false);
       }
-      const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
-      return [{ ...currentProject, ...ensureProject }, ...nextProjects];
-    });
+    }
   }, []);
 
   const scheduleSessionListRefetch = useCallback(() => {
@@ -777,6 +929,48 @@ export default function SessionPage() {
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
   }, [fetchProjects, searchQuery]);
+
+  const setSessionRunning = useCallback((sessionId: string, running: boolean) => {
+    setRunningSessionIds((current) => {
+      if (current.has(sessionId) === running) return current;
+      const next = new Set(current);
+      if (running) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
+  const handleSessionStatusEvent = useCallback((event: SSEChatEvent) => {
+    if (event.type !== 'session.status') return;
+    const sessionId = event.properties?.sessionID;
+    if (typeof sessionId !== 'string') return;
+    sessionStatusEventVersionRef.current += 1;
+    setSessionRunning(sessionId, isRunningSessionStatus(event.properties?.status));
+  }, [setSessionRunning]);
+
+  const refreshRunningSessionIds = useCallback(async () => {
+    const eventVersion = sessionStatusEventVersionRef.current;
+    try {
+      const response = await client.get('/api/session/status');
+      if (sessionStatusEventVersionRef.current !== eventVersion) return;
+      setRunningSessionIds(readRunningSessionIds(response.data));
+    } catch {
+      // The sidebar status is progressive enhancement; chat remains usable
+      // when status recovery is temporarily unavailable.
+    }
+  }, []);
+
+  useSSE({
+    url: `${getApiBase()}/api/event`,
+    onEvent: handleSessionStatusEvent,
+    onReconnect: refreshRunningSessionIds,
+    enabled: true,
+    reconnect: { enabled: true, maxRetries: 5, initialDelay: 1000, maxDelay: 10000 },
+  });
+
+  useEffect(() => {
+    void refreshRunningSessionIds();
+  }, [refreshRunningSessionIds]);
 
   useEffect(() => {
     if (!openProjectMenuId) return;
@@ -1633,13 +1827,11 @@ export default function SessionPage() {
     </div>
   );
 
-  if (loadingSessions) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <LoadingSpinner delayMs={180} />
-      </div>
-    );
-  }
+  const workbenchRefreshing = refreshingSessions || refreshingProjects || resolvingSelectedSession;
+  const workbenchRefreshLabel = resolvingSelectedSession
+    ? t('restoringTask')
+    : t('refreshingWorkbench');
+  const showSessionListSkeleton = loadingSessions && sessions.length === 0;
 
   return (
     <div className="flex h-full w-full overflow-hidden bg-[#f4f4f2] text-[#202328] dark:bg-[#252c35] dark:text-[#d7dee8]">
@@ -1714,7 +1906,13 @@ export default function SessionPage() {
         </div>
 
         {/* Session list */}
-        <div className="scrollbar-hide min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-[18px] pt-1.5">
+        <div
+          data-testid="session-list-scroll"
+          className="session-sidebar-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-[18px] pt-1.5"
+        >
+          {showSessionListSkeleton ? (
+            <SessionListSkeleton />
+          ) : (
           <div>
             <section className="group/projects-section">
                 <div className="flex h-7 select-none items-center gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-[0.02em] text-[#8a8e94] dark:text-[#8f9ba8]">
@@ -1744,10 +1942,18 @@ export default function SessionPage() {
                 {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
                   const isSelectedProject = selectedProjectId === group.id;
-                  const hasMoreProjectSessions = (
+                  const sessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(group.id);
+                  const visibleProjectSessions = sessionsCollapsedToFirstPage
+                    ? group.sessions.slice(0, sessionListPageSize)
+                    : group.sessions;
+                  const hasMoreRemoteProjectSessions = (
                     group.sessions.length < group.sessionCount
                     || hasMoreByProject[group.id]
                   );
+                  const canShowMoreProjectSessions = sessionsCollapsedToFirstPage
+                    || hasMoreRemoteProjectSessions;
+                  const canCollapseProjectSessions = !sessionsCollapsedToFirstPage
+                    && group.sessions.length > sessionListPageSize;
                   const persistedProject = projects.find((project) => project.id === group.id);
                   return (
                     <div key={group.id} className="group/project relative">
@@ -1877,7 +2083,7 @@ export default function SessionPage() {
                       {!collapsed && (
                         <div className="mb-1 mt-0.5">
                           {group.sessions.length > 0 ? (
-                            group.sessions.map((session) => (
+                            visibleProjectSessions.map((session) => (
                               <SessionSidebarItem
                                 key={session.id}
                                 session={session}
@@ -1886,9 +2092,11 @@ export default function SessionPage() {
                                 selectMode={selectMode}
                                 checked={checkedIds.has(session.id)}
                                 menuOpen={openMenuSessionId === session.id}
+                                running={runningSessionIds.has(session.id)}
                                 renaming={renamingSessionId === session.id}
                                 renameValue={renameValue}
                                 renameSubmitting={renameSubmitting}
+                                language={i18n.language}
                                 t={t}
                                 renameInputRef={renameInputRef}
                                 onSelect={handleSelectSessionRow}
@@ -1904,19 +2112,36 @@ export default function SessionPage() {
                               {t('noProjectSessions')}
                             </div>
                           )}
-                          {hasMoreProjectSessions && (
-                            <div className="ml-[19px] py-0.5">
+                          {(canShowMoreProjectSessions || canCollapseProjectSessions) && (
+                            <div className="ml-[19px] flex h-7 items-center justify-center gap-2 py-0.5">
+                              {canShowMoreProjectSessions && (
                               <button
                                 type="button"
-                                onClick={() => void loadMoreSessions(group.id)}
+                                onClick={() => {
+                                  if (sessionsCollapsedToFirstPage) {
+                                    setLoadedSessionGroupCollapsed(group.id, false);
+                                    return;
+                                  }
+                                  void loadMoreSessions(group.id);
+                                }}
                                 disabled={loadingMoreProjectIds.has(group.id)}
-                                className="flex h-7 w-full items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                                className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                               >
-                                {loadingMoreProjectIds.has(group.id)
-                                  ? <Loader2 className="h-3 w-3 animate-spin" />
-                                  : <ChevronDown className="h-3 w-3" />}
-                                {t('loadMore', 'Load more')}
+                                {loadingMoreProjectIds.has(group.id) && (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                )}
+                                {t('loadMore')}
                               </button>
+                              )}
+                              {canCollapseProjectSessions && (
+                                <button
+                                  type="button"
+                                  onClick={() => setLoadedSessionGroupCollapsed(group.id, true)}
+                                  className="flex h-7 items-center justify-center rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                                >
+                                  {t('collapseLoaded')}
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1975,7 +2200,7 @@ export default function SessionPage() {
                   </div>
                   {!taskGroupCollapsed && (
                     <div className="mt-0.5">
-                      {taskSessionGroup.sessions.map((session) => (
+                      {visibleTaskSessions.map((session) => (
                         <SessionSidebarItem
                           key={session.id}
                           session={session}
@@ -1983,9 +2208,11 @@ export default function SessionPage() {
                           selectMode={selectMode}
                           checked={checkedIds.has(session.id)}
                           menuOpen={openMenuSessionId === session.id}
+                          running={runningSessionIds.has(session.id)}
                           renaming={renamingSessionId === session.id}
                           renameValue={renameValue}
                           renameSubmitting={renameSubmitting}
+                          language={i18n.language}
                           t={t}
                           renameInputRef={renameInputRef}
                           onSelect={handleSelectSessionRow}
@@ -1996,19 +2223,36 @@ export default function SessionPage() {
                           onToggleMenu={handleToggleSessionMenu}
                         />
                       ))}
-                      {hasMoreTaskSessions && (
-                        <div className="py-0.5">
+                      {(canShowMoreTaskSessions || canCollapseTaskSessions) && (
+                        <div className="flex h-7 items-center justify-center gap-2 py-0.5">
+                          {canShowMoreTaskSessions && (
                           <button
                             type="button"
-                            onClick={() => void loadMoreSessions(taskSessionGroup.id)}
+                            onClick={() => {
+                              if (taskSessionsCollapsedToFirstPage) {
+                                setLoadedSessionGroupCollapsed(taskSessionGroup.id, false);
+                                return;
+                              }
+                              void loadMoreSessions(taskSessionGroup.id);
+                            }}
                             disabled={loadingMoreProjectIds.has(taskSessionGroup.id)}
-                            className="flex h-7 w-full items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                            className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                           >
-                            {loadingMoreProjectIds.has(taskSessionGroup.id)
-                              ? <Loader2 className="h-3 w-3 animate-spin" />
-                              : <ChevronDown className="h-3 w-3" />}
-                            {t('loadMore', 'Load more')}
+                            {loadingMoreProjectIds.has(taskSessionGroup.id) && (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            )}
+                            {t('loadMore')}
                           </button>
+                          )}
+                          {canCollapseTaskSessions && (
+                            <button
+                              type="button"
+                              onClick={() => setLoadedSessionGroupCollapsed(taskSessionGroup.id, true)}
+                              className="flex h-7 items-center justify-center rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                            >
+                              {t('collapseLoaded')}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -2016,6 +2260,7 @@ export default function SessionPage() {
                 </section>
               )}
           </div>
+          )}
         </div>
 
         {/* Bottom：批量操作栏 / 批量选择入口 */}
@@ -2084,13 +2329,14 @@ export default function SessionPage() {
             </h2>
           </div>
 
+          {workbenchRefreshing && (
+            <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
+          )}
         </div>
 
         {/* Chat — powered by unified SessionChat */}
         {resolvingSelectedSession ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center">
-            <LoadingSpinner delayMs={180} />
-          </div>
+          <SessionChatSkeleton />
         ) : (
           <SessionChat
             key={activeChatSessionId ?? 'empty-session'}

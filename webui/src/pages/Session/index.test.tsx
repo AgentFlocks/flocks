@@ -6,6 +6,13 @@ import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
 import SessionPage from './index';
 
+const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
+  current: null as null | {
+    onEvent: (event: { type: string; properties?: Record<string, unknown> }) => void;
+    onReconnect?: () => void;
+  },
+}));
+
 const {
   client,
   sessionApi,
@@ -64,6 +71,7 @@ const {
 vi.mock('@/api/client', () => ({
   __esModule: true,
   default: client,
+  getApiBase: () => '',
 }));
 
 vi.mock('@/api/session', () => ({
@@ -84,6 +92,18 @@ vi.mock('@/hooks/useAgents', () => ({
 
 vi.mock('@/hooks/useProviders', () => ({
   useProviders,
+}));
+
+vi.mock('@/hooks/useSSE', () => ({
+  useSSE: (options: typeof sessionStatusSSEOptionsRef.current) => {
+    sessionStatusSSEOptionsRef.current = options;
+    return {
+      status: 'connected',
+      retryCount: 0,
+      reconnect: vi.fn(),
+      disconnect: vi.fn(),
+    };
+  },
 }));
 
 vi.mock('@/api/provider', () => ({
@@ -205,6 +225,7 @@ vi.mock('@/utils/agentDisplay', () => ({
 
 vi.mock('@/utils/time', () => ({
   formatSessionDate: () => 'formatted-date',
+  formatRelativeTime: () => '17小时前',
 }));
 
 vi.mock('react-i18next', () => ({
@@ -288,6 +309,7 @@ describe('SessionPage session actions menu', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     __resetChatModelResourcesForTesting();
+    sessionStatusSSEOptionsRef.current = null;
     localStorage.clear();
     sessionStorage.clear();
 
@@ -353,6 +375,32 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
+  it('keeps the workbench visible and shows a page refresh state while sessions load', () => {
+    useSessions.mockReturnValue({
+      sessions: [],
+      loading: true,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    expect(screen.getByLabelText('managementTitle')).toBeInTheDocument();
+    expect(screen.getByTestId('workbench-refresh-status')).toHaveTextContent('refreshingWorkbench');
+    expect(screen.getByTestId('session-list-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('session-chat')).toHaveTextContent('no-session');
+    expect(screen.queryByText('loading-spinner')).not.toBeInTheDocument();
+    expect(screen.getByTestId('session-list-scroll')).toHaveClass(
+      'session-sidebar-scrollbar',
+      'overflow-y-auto',
+    );
+    expect(screen.getByTestId('session-list-scroll')).not.toHaveClass('scrollbar-hide');
+  });
+
   it('shows default sessions under tasks without a default project row', async () => {
     const user = userEvent.setup();
     renderSessionPage();
@@ -377,6 +425,130 @@ describe('SessionPage session actions menu', () => {
 
     await user.click(screen.getByRole('button', { name: 'selectTasks' }));
     expect(screen.getByText('Original Session')).toBeInTheDocument();
+  });
+
+  it('shows and clears the sidebar running state from recovered and live session status', async () => {
+    client.get.mockImplementation((url: string) => Promise.resolve({
+      data: url === '/api/session/status'
+        ? { [session.id]: { type: 'busy' } }
+        : [{
+            id: 'default',
+            worktree: '/tmp/project',
+            name: '默认',
+            isDefault: true,
+            pathStatus: 'available',
+            sessionCount: 1,
+          }],
+    }));
+
+    renderSessionPage();
+
+    const runningStatus = await screen.findByRole('status', { name: 'chat.tool.running' });
+    expect(runningStatus).toHaveAttribute('data-session-running', session.id);
+
+    act(() => {
+      sessionStatusSSEOptionsRef.current?.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: session.id,
+          status: { type: 'idle' },
+        },
+      });
+    });
+
+    expect(screen.queryByRole('status', { name: 'chat.tool.running' })).not.toBeInTheDocument();
+
+    act(() => {
+      sessionStatusSSEOptionsRef.current?.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: session.id,
+          status: { type: 'retry' },
+        },
+      });
+    });
+
+    expect(screen.getByRole('status', { name: 'chat.tool.running' }))
+      .toHaveAttribute('data-session-running', session.id);
+  });
+
+  it('shows load more as text without an idle arrow', async () => {
+    useSessions.mockReturnValue({
+      sessions: [session],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+      hasMoreByProject: { tasks: true },
+      loadingMoreProjectIds: new Set(),
+      loadMore: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    const loadMoreButton = await screen.findByRole('button', { name: 'loadMore' });
+    expect(loadMoreButton.querySelector('svg')).toBeNull();
+  });
+
+  it('collapses loaded task pages and reopens cached tasks without another request', async () => {
+    const user = userEvent.setup();
+    const loadMore = vi.fn();
+    const loadedTasks = Array.from({ length: 8 }, (_, index) => ({
+      ...session,
+      id: `task-${index + 1}`,
+      slug: `task-${index + 1}`,
+      title: `Task ${index + 1}`,
+    }));
+    client.get.mockResolvedValue({
+      data: [
+        {
+          id: 'default',
+          worktree: '/tmp/project',
+          name: '默认',
+          isDefault: true,
+          pathStatus: 'available',
+          sessionCount: 8,
+        },
+        {
+          id: 'prj_labs',
+          worktree: '/tmp/labs',
+          name: 'Labs',
+          isDefault: false,
+          pathStatus: 'available',
+          sessionCount: 0,
+        },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: loadedTasks,
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+      hasMoreByProject: { tasks: false },
+      loadingMoreProjectIds: new Set(),
+      loadMore,
+    });
+
+    renderSessionPage();
+
+    expect(await screen.findByText('Task 8')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'collapseLoaded' }));
+
+    expect(screen.queryByText('Task 7')).not.toBeInTheDocument();
+    expect(screen.queryByText('Task 8')).not.toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: 'loadMore' }));
+
+    expect(screen.getByText('Task 7')).toBeInTheDocument();
+    expect(screen.getByText('Task 8')).toBeInTheDocument();
+    expect(loadMore).not.toHaveBeenCalled();
   });
 
   it('creates a new session from the tasks row', async () => {
@@ -1078,6 +1250,23 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByRole('button', { name: 'deleteAction' })).toBeInTheDocument();
   });
 
+  it('shows a compact relative session timestamp and keeps the actions trigger background-free', async () => {
+    const user = userEvent.setup();
+
+    renderSessionPage();
+
+    const timestamp = await screen.findByText('17小时前');
+    const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
+
+    expect(timestamp).not.toHaveClass('group-hover:opacity-0');
+    expect(timestamp).toHaveAttribute('title', 'formatted-date');
+    expect(actionsTrigger).not.toHaveClass('hover:bg-white/80');
+
+    await user.click(actionsTrigger);
+
+    expect(actionsTrigger).not.toHaveClass('bg-white/80');
+  });
+
   it('renames a session inline from the actions menu', async () => {
     const user = userEvent.setup();
 
@@ -1507,7 +1696,9 @@ describe('SessionPage session actions menu', () => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
     });
     expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
-    expect(screen.getByText('loading-spinner')).toBeInTheDocument();
+    expect(screen.getByTestId('session-chat-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('workbench-refresh-status')).toHaveTextContent('restoringTask');
+    expect(screen.queryByText('loading-spinner')).not.toBeInTheDocument();
 
     await act(async () => {
       request.resolve(fetchedSession);

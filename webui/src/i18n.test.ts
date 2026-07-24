@@ -26,6 +26,8 @@ describe('i18n lazy namespaces', () => {
     expect(zhNav.workspace).toBe('文件目录');
     expect(zhHome.quickActions.sessions.title).toBe('工作台');
     expect(zhSession.managementTitle).toBe('工作台');
+    expect(zhSession.sessionCount).toBe('{{count}} 个任务');
+    expect(zhSession.collapseLoaded).toBe('收起');
     expect(zhSession.newSession).toBe('新建任务');
     expect(zhSession.createSession).toBe('新建任务');
     expect(zhSession.createSessionInProject).toBe('在项目 {{project}} 中新建任务');
@@ -37,6 +39,8 @@ describe('i18n lazy namespaces', () => {
     expect(enNav.workspace).toBe('File Directory');
     expect(enHome.quickActions.sessions.title).toBe('Workbench');
     expect(enSession.managementTitle).toBe('Workbench');
+    expect(enSession.sessionCount).toBe('{{count}} tasks');
+    expect(enSession.collapseLoaded).toBe('Show less');
     expect(enSession.newSession).toBe('New Task');
     expect(enSession.createSession).toBe('New Task');
     expect(enSession.createSessionInProject).toBe('New task in project {{project}}');

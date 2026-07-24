@@ -43,12 +43,17 @@ class ToolCallAccumulator:
     async def feed_chunk(self, tc: dict[str, Any]) -> None:
         """Process a single tool-call chunk from the provider stream."""
         tc_index = tc.get("index", 0)
-        tc_id = tc.get("id")
+        provider_tc_id = tc.get("id")
 
-        if tc_id:
-            self._index_to_id[tc_index] = tc_id
-        elif tc_index in self._index_to_id:
+        # Keep one stable internal id for the lifetime of a streamed tool call.
+        # Some providers reveal the tool name before their call id; replacing a
+        # generated id later would disconnect the already-published pending UI
+        # part from the eventual ToolCallEvent.
+        if tc_index in self._index_to_id:
             tc_id = self._index_to_id[tc_index]
+        elif provider_tc_id:
+            tc_id = provider_tc_id
+            self._index_to_id[tc_index] = tc_id
         else:
             tc_id = Identifier.create("call")
             self._index_to_id[tc_index] = tc_id
@@ -79,6 +84,17 @@ class ToolCallAccumulator:
 
         accumulated = self._accumulator[tc_id]["arguments_str"]
         final_name = self._accumulator[tc_id]["name"]
+
+        # Publish the tool step as soon as its name is known. Parameters can be
+        # large (especially write/edit content), so waiting for valid JSON here
+        # would hide the tool until input generation — and often execution —
+        # was nearly complete.
+        if final_name and not self._accumulator[tc_id].get("input_started"):
+            await self._processor.process_event(
+                ToolInputStartEvent(id=tc_id, tool_name=final_name)
+            )
+            self._accumulator[tc_id]["input_started"] = True
+
         if accumulated and final_name:
             arguments, ok = _parse_json_robust(accumulated)
             if ok:
@@ -88,12 +104,6 @@ class ToolCallAccumulator:
                     if missing:
                         self._accumulator[tc_id]["awaiting_required"] = True
                         return
-
-                if not self._accumulator[tc_id].get("input_started") and final_name:
-                    await self._processor.process_event(
-                        ToolInputStartEvent(id=tc_id, tool_name=final_name)
-                    )
-                    self._accumulator[tc_id]["input_started"] = True
 
                 if final_name:
                     await self._processor.process_event(

@@ -93,8 +93,18 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.tool.completed': '已完成',
   'chat.tool.error': '失败',
   'chat.tool.loadSkill': '加载技能',
+  'chat.tool.actions.readFile': '读取文件',
+  'chat.tool.actions.writeFile': '写入文件',
+  'chat.tool.actions.editFile': '编辑文件',
+  'chat.tool.actions.executeCommand': '执行命令',
+  'chat.tool.actions.askQuestion': '向用户提问',
+  'chat.tool.actions.installSkill': '安装技能',
+  'chat.tool.actions.addProvider': '添加模型服务',
   'chat.tool.todoUpdated': '已更新待办',
   'chat.tool.inputParams': '输入参数',
+  'chat.tool.progress.writingFile': '正在写入文件…',
+  'chat.tool.progress.editingFile': '正在编辑文件…',
+  'chat.tool.progress.working': '正在执行此操作…',
   'chat.tool.outputResult': '输出结果',
   'chat.tool.todoStages': 'Todo 阶段',
   'chat.tool.todoStatus.pending': '待办',
@@ -573,6 +583,21 @@ describe('getMessageBubbleClassName', () => {
 
     expect(className).toContain('w-full');
     expect(className).toContain('max-w-full');
+  });
+
+  it.each([false, true])('keeps assistant replies in the transparent content flow when compact=%s', (compact) => {
+    const className = getMessageBubbleClassName({
+      compact,
+      isUser: false,
+      isEditing: false,
+    });
+
+    expect(className).toContain('bg-transparent');
+    expect(className).not.toContain('bg-white');
+    expect(className).not.toContain('border-zinc-200/90');
+    expect(className).not.toContain('shadow-sm');
+    expect(className).not.toContain('rounded-[20px]');
+    expect(className).not.toContain('rounded-[24px]');
   });
 
   it('keeps compact user bubbles content-sized when not editing', () => {
@@ -1620,7 +1645,7 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
     expect(screen.getByTestId('chat-process-reasoning-step').querySelector('button')).toHaveClass('text-sm');
-    expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('已完成');
+    expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
   });
 
   it('opens process groups while an assistant message is active and collapses after completion', () => {
@@ -2024,16 +2049,16 @@ describe('SessionChat intermediate process collapse', () => {
 
     expect(screen.queryByText('需要你的回答')).not.toBeInTheDocument();
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
-    expect(screen.getByText('已完成')).not.toBeVisible();
+    expect(screen.getByText('向用户提问')).not.toBeVisible();
     expect(screen.queryByText('输入参数')).not.toBeInTheDocument();
     expect(screen.queryByText('输出结果')).not.toBeInTheDocument();
 
     await user.click(screen.getByText('查看 2 个步骤'));
 
-    expect(screen.getByText('已完成')).toBeVisible();
+    expect(screen.getByText('向用户提问')).toBeVisible();
     expect(screen.getByText('问题')).not.toBeVisible();
 
-    await user.click(screen.getByText('已完成'));
+    await user.click(screen.getByText('向用户提问'));
 
     expect(screen.getByText('问题')).toBeVisible();
     expect(screen.getByText('回答')).toBeVisible();
@@ -2060,7 +2085,7 @@ describe('SessionChat intermediate process collapse', () => {
 
     expect(screen.getByText('已按你的选择继续处理。')).toBeVisible();
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
-    expect(screen.getByText('已完成')).not.toBeVisible();
+    expect(screen.getByText('向用户提问')).not.toBeVisible();
   });
 
   it('renders collapsed process groups inside the full compact assistant column', () => {
@@ -2664,6 +2689,159 @@ describe('ChatToolPart load skill rendering', () => {
   });
 });
 
+describe('ChatToolPart semantic tool presentation', () => {
+  it('shows the tool immediately and fills in parameters when they arrive', () => {
+    const initialPart = {
+      id: 'streaming-write-part',
+      type: 'tool',
+      tool: 'write',
+      state: {
+        status: 'pending',
+        input: {},
+      },
+    } as any;
+    const { rerender } = render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: initialPart,
+      }),
+    );
+
+    let summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('写入文件');
+    expect(summary).not.toHaveTextContent('filePath');
+    expect(screen.queryByText('输入参数')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-tool-action-progress')).toHaveTextContent(
+      '正在写入文件…',
+    );
+
+    rerender(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          ...initialPart,
+          state: {
+            status: 'running',
+            input: {
+              filePath: '/repo/report.md',
+              content: '# Report',
+            },
+          },
+        },
+      }),
+    );
+
+    summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('写入文件');
+    expect(summary).toHaveTextContent('/repo/report.md');
+    expect(screen.getByText('输入参数')).toBeInTheDocument();
+    expect(screen.queryByTestId('chat-tool-action-progress')).not.toBeInTheDocument();
+  });
+
+  it.each(['edit', 'apply_patch'])('describes a pending %s tool as editing the file', (tool) => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: `streaming-${tool}-part`,
+          type: 'tool',
+          tool,
+          state: {
+            status: 'pending',
+            input: {},
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getByTestId('chat-tool-action-progress')).toHaveTextContent(
+      '正在编辑文件…',
+    );
+  });
+
+  it('shows a localized action and concise target in the process timeline', () => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: 'read-file-part',
+          type: 'tool',
+          tool: 'read',
+          state: {
+            status: 'completed',
+            input: {
+              filePath: '/repo/webui/src/components/common/SessionChat.tsx',
+              offset: 5200,
+              limit: 200,
+            },
+          },
+        } as any,
+      }),
+    );
+
+    const summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('读取文件');
+    expect(summary).toHaveTextContent('/repo/webui/src/components/common/SessionChat.tsx · 5200');
+    expect(summary).not.toHaveTextContent('已完成');
+    expect(summary).not.toHaveTextContent('filePath=');
+  });
+
+  it('uses a subcommand-specific action for skill management', () => {
+    render(
+      React.createElement(ChatToolPart, {
+        processStep: true,
+        part: {
+          id: 'install-skill-part',
+          type: 'tool',
+          tool: 'flocks_skills',
+          state: {
+            status: 'running',
+            input: {
+              subcommand: 'install',
+              args: 'agent-builder',
+            },
+          },
+        } as any,
+      }),
+    );
+
+    const summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
+    expect(summary).toHaveTextContent('安装技能');
+    expect(summary).toHaveTextContent('agent-builder');
+    expect(summary).not.toHaveTextContent('执行中');
+  });
+
+  it('redacts sensitive fields in expanded input parameters', () => {
+    const { container } = render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'add-provider-part',
+          type: 'tool',
+          tool: 'add_provider',
+          state: {
+            status: 'completed',
+            input: {
+              name: 'Internal LLM',
+              api_key: 'super-secret-key',
+              config: {
+                password: 'super-secret-password',
+                base_url: 'https://models.example.com/v1',
+              },
+            },
+          },
+        } as any,
+      }),
+    );
+
+    expect(container.textContent).toContain('添加模型服务');
+    const payload = container.querySelector('pre')?.textContent || '';
+    expect(payload).toContain('••••••');
+    expect(payload).toContain('https://models.example.com/v1');
+    expect(payload).not.toContain('super-secret-key');
+    expect(payload).not.toContain('super-secret-password');
+  });
+});
+
 describe('ChatMessageBubble session typography', () => {
   it('uses the outer navigation font size for the agent label', () => {
     render(React.createElement(ChatMessageBubble, {
@@ -2679,6 +2857,68 @@ describe('ChatMessageBubble session typography', () => {
     }));
 
     expect(screen.getByText('Rex')).toHaveClass('text-sm');
+  });
+});
+
+describe('ChatMessageBubble footer layout', () => {
+  it('places assistant actions immediately before the timestamp', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-footer',
+        role: 'assistant',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'assistant-text',
+          type: 'text',
+          text: '任务已完成。',
+        } as any],
+      }),
+      compact: false,
+      showActions: true,
+      showTimestamp: true,
+    }));
+
+    const regenerateButton = screen.getByRole('button', { name: 'chat.regenerate' });
+    const actionGroup = regenerateButton.parentElement;
+    const footer = actionGroup?.parentElement;
+
+    expect(footer).toHaveClass('justify-start', 'gap-1.5');
+    expect(footer?.children[0]).toBe(actionGroup);
+    expect(footer?.children[1]).toHaveClass('text-[11px]');
+    expect(regenerateButton).toHaveClass(
+      'border-transparent',
+      'bg-transparent',
+      'hover:bg-white',
+      'active:bg-white',
+      'focus-visible:bg-white',
+    );
+    expect(regenerateButton).not.toHaveClass('border-gray-200/80', 'bg-white/80');
+  });
+
+  it('keeps the user timestamp before the action group', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'user-footer',
+        role: 'user',
+        timestamp: Date.now(),
+        parts: [{
+          id: 'user-text',
+          type: 'text',
+          text: '继续处理。',
+        } as any],
+      }),
+      compact: false,
+      showActions: true,
+      showTimestamp: true,
+    }));
+
+    const copyButton = screen.getByRole('button', { name: 'chat.copy' });
+    const actionGroup = copyButton.parentElement;
+    const footer = actionGroup?.parentElement;
+
+    expect(footer).toHaveClass('justify-between');
+    expect(footer?.children[0]).toHaveClass('text-[11px]');
+    expect(footer?.children[1]).toBe(actionGroup);
   });
 });
 
@@ -2756,7 +2996,7 @@ describe('ChatToolPart bash rendering', () => {
     );
 
     const text = container.textContent || '';
-    expect(text).toContain('bash');
+    expect(text).toContain('执行命令');
     expect(text).toContain('运行会话组件测试');
     expect(text).toContain('npm run test:run -- SessionChat.test.ts');
     expect(text).toContain('命令');
