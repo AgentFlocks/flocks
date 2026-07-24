@@ -272,6 +272,7 @@ beforeEach(() => {
     updateMessage: vi.fn(),
     updateMessagePart: vi.fn(),
     removeMessage: vi.fn(),
+    clearMessages: vi.fn(),
     replaceMessageText: vi.fn(),
     truncateAfterMessage: vi.fn(),
   });
@@ -669,7 +670,139 @@ describe('getMessageGroupClassName', () => {
   });
 });
 
+describe('SessionChat embedded full layout', () => {
+  it('reserves horizontal space for avatars in full-width panels', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-contained-avatar',
+          role: 'assistant',
+          parts: [{ id: 'text-1', type: 'text', text: 'Task complete.' } as any],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    const { container } = render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      hideInput: true,
+      display: {
+        compact: false,
+        fullWidth: true,
+        pageCanvas: true,
+      },
+    }));
+
+    expect(container.querySelector('.space-y-5.px-12')).toBeInTheDocument();
+  });
+});
+
 describe('SessionChat copy action', () => {
+  it('excludes hidden task metadata from copied text', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-copy-filtered',
+          role: 'assistant',
+          parts: [{
+            id: 'text-1',
+            type: 'text',
+            text: 'copy this result\n\n<task_metadata>\nsession_id: ses-child\n</task_metadata>',
+          }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledOnce());
+
+    const copiedText = writeText.mock.calls[0][0];
+    expect(copiedText).toContain('copy this result');
+    expect(copiedText).not.toContain('task_metadata');
+    expect(copiedText).not.toContain('ses-child');
+  });
+
+  it('preserves user-authored task metadata in the bubble and copied text', async () => {
+    const user = userEvent.setup();
+    const writeText = vi.fn().mockResolvedValue(undefined);
+    const text = [
+      'Please explain this payload:',
+      '',
+      '```xml',
+      '<task_metadata>',
+      'session_id: ses-user-example',
+      '</task_metadata>',
+      '```',
+    ].join('\n');
+
+    Object.defineProperty(window, 'isSecureContext', {
+      configurable: true,
+      value: true,
+    });
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText },
+    });
+
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-task-metadata-example',
+          role: 'user',
+          parts: [{ id: 'text-1', type: 'text', text }],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    expect(screen.getByText(/session_id: ses-user-example/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: 'chat.copy' }));
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(text));
+  });
+
   it('falls back when async clipboard is unavailable', async () => {
     const user = userEvent.setup();
     const execCommand = vi.fn().mockReturnValue(true);
@@ -1008,6 +1141,38 @@ describe('SessionChat standalone thinking indicator', () => {
     }
   });
 
+  it('clears local messages before refetching after session.cleared', () => {
+    const clearMessages = vi.fn();
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({ id: 'message-before-clear', role: 'assistant', parts: [] })],
+      loading: false,
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages,
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.cleared',
+        properties: { sessionID: 'sess-1' },
+      });
+    });
+
+    expect(clearMessages).toHaveBeenCalledOnce();
+    expect(refetch).toHaveBeenCalledOnce();
+    expect(clearMessages.mock.invocationCallOrder[0]).toBeLessThan(
+      refetch.mock.invocationCallOrder[0],
+    );
+  });
+
   it('removes an intermediate assistant when message.removed arrives', () => {
     const removeMessage = vi.fn();
     useSessionMessagesMock.mockReturnValue({
@@ -1040,6 +1205,42 @@ describe('SessionChat standalone thinking indicator', () => {
 });
 
 describe('SessionChat instruction display text', () => {
+  it('filters internal task metadata from visible message text', () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-with-task-metadata',
+          role: 'assistant',
+          parts: [{
+            id: 'assistant-with-task-metadata-part',
+            type: 'text',
+            text: [
+              '查询完成。',
+              '<task_metadata>',
+              'session_id: ses-child',
+              '</task_metadata>',
+              '消息发送失败。',
+            ].join('\n'),
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByText('查询完成。')).toBeInTheDocument();
+    expect(screen.getByText('消息发送失败。')).toBeInTheDocument();
+    expect(screen.queryByText(/task_metadata/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/ses-child/)).not.toBeInTheDocument();
+  });
+
   it('renders metadata displayText while keeping the raw prompt out of the bubble', () => {
     useSessionMessagesMock.mockReturnValue({
       messages: [
@@ -1695,7 +1896,8 @@ describe('SessionChat intermediate process collapse', () => {
     expect(processGroup.open).toBe(false);
   });
 
-  it('uses one global process group and leaves only the final reply visible', () => {
+  it('uses one global process group and renders intermediate summaries as peer steps', async () => {
+    const user = userEvent.setup();
     useSessionMessagesMock.mockReturnValue({
       messages: [
         makeMessage({
@@ -1779,6 +1981,16 @@ describe('SessionChat intermediate process collapse', () => {
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 5 个步骤')).toBeInTheDocument();
     expect(screen.getByText('最终结果已生成。')).toBeVisible();
+
+    await user.click(screen.getByText('查看 5 个步骤'));
+
+    const summaryStep = screen.getByTestId('chat-process-text-step');
+    const reasoningStep = screen.getAllByTestId('chat-process-reasoning-step')[0];
+    expect(summaryStep).toHaveTextContent('已经读取文件，继续检查相关配置。');
+    expect(summaryStep.querySelector('svg')).not.toBeInTheDocument();
+    expect(summaryStep.className).not.toContain('pl-');
+    expect(summaryStep.querySelector('.border-l')).not.toBeInTheDocument();
+    expect(summaryStep.parentElement?.parentElement).toBe(reasoningStep.parentElement?.parentElement);
   });
 
   it('keeps a user-opened process group open when new tool parts arrive', async () => {
@@ -2334,6 +2546,45 @@ describe('SessionChat intermediate process collapse', () => {
 });
 
 describe('SessionChat optimistic message identity', () => {
+  it.each([
+    ['prompt', 'message that fails', '/api/session/sess-1/prompt_async'],
+    ['slash command', '/tools', '/api/session/sess-1/command'],
+  ])('removes the optimistic message when a %s request fails', async (_kind, input, endpoint) => {
+    const user = userEvent.setup();
+    const addMessage = vi.fn();
+    const removeMessage = vi.fn();
+    const alertSpy = vi.spyOn(window, 'alert').mockImplementation(() => {});
+    clientPostMock.mockRejectedValueOnce(new Error('network down'));
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage,
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+      await user.type(screen.getByPlaceholderText('请输入消息'), `${input}{enter}`);
+
+      await waitFor(() => expect(clientPostMock).toHaveBeenCalledWith(
+        endpoint,
+        expect.any(Object),
+      ));
+      await waitFor(() => expect(removeMessage).toHaveBeenCalledOnce());
+
+      const optimisticMessage = addMessage.mock.calls[0][0] as Message;
+      expect(removeMessage).toHaveBeenCalledWith(optimisticMessage.id);
+    } finally {
+      alertSpy.mockRestore();
+    }
+  });
+
   it('uses the optimistic user message ID for the persisted prompt', async () => {
     const user = userEvent.setup();
     const addMessage = vi.fn();

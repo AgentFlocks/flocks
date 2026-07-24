@@ -10,6 +10,7 @@ import {
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
+import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import { useSSE } from '@/hooks/useSSE';
@@ -435,18 +436,13 @@ function SessionChatSkeleton() {
     <div
       data-testid="session-chat-skeleton"
       aria-hidden="true"
-      className="flex min-h-0 flex-1 justify-center overflow-hidden px-7 py-6"
+      className="flex min-h-0 flex-1 justify-center overflow-hidden px-7 pt-16"
     >
-      <div className="w-full max-w-[760px] animate-pulse space-y-7">
-        <div className="ml-auto h-16 w-[42%] rounded-2xl bg-black/[0.045] dark:bg-white/[0.055]" />
-        <div className="space-y-3">
-          <div className="h-3 w-24 rounded-full bg-black/[0.06] dark:bg-white/[0.07]" />
-          <div className="h-4 w-[86%] rounded-full bg-black/[0.055] dark:bg-white/[0.065]" />
-          <div className="h-4 w-[68%] rounded-full bg-black/[0.045] dark:bg-white/[0.055]" />
-          <div className="h-20 w-full rounded-2xl bg-black/[0.035] dark:bg-white/[0.045]" />
-        </div>
-        <div className="ml-auto h-12 w-[34%] rounded-2xl bg-black/[0.04] dark:bg-white/[0.05]" />
-      </div>
+      <LoadingSpinner
+        size="sm"
+        delayMs={180}
+        className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
+      />
     </div>
   );
 }

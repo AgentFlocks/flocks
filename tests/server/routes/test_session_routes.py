@@ -1061,6 +1061,24 @@ class TestSessionMessages:
         assert len(data) == 0
 
     @pytest.mark.asyncio
+    async def test_list_messages_reports_storage_failure(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A read failure must not look like a successfully empty history."""
+        monkeypatch.setattr(
+            Message,
+            "list_with_parts",
+            AsyncMock(side_effect=RuntimeError("storage unavailable")),
+        )
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    @pytest.mark.asyncio
     async def test_send_message_noReply(self, client: AsyncClient, session_id: str):
         """POST /api/session/{id}/message with noReply=True stores without triggering LLM."""
         payload = {

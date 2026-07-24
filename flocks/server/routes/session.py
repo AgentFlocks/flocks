@@ -2007,9 +2007,10 @@ async def get_session_messages(
         return result
     except Exception as e:
         log.error("session.messages.error", {"error": str(e), "sessionID": sessionID})
-        if page or before is not None:
-            return MessagePage(sessionID=sessionID, items=[], hasMore=False, nextBefore=None)
-        return []
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load session messages",
+        ) from e
 
 
 @router.get(

@@ -3,6 +3,8 @@ export interface PromptDisplayOptions {
 }
 
 const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
+const TASK_METADATA_BLOCK_PATTERN = /<task_metadata\b[^>]*>[\s\S]*?<\/task_metadata\s*>/gi;
+const TRAILING_TASK_METADATA_PATTERN = /<task_metadata\b[^>]*>[\s\S]*$/i;
 
 export function buildInstructionDisplayText(label: string): string {
   return `${INSTRUCTION_DISPLAY_PREFIX}${label}`;
@@ -12,6 +14,12 @@ export function parseInstructionDisplayText(text: string): string | null {
   return text.startsWith(INSTRUCTION_DISPLAY_PREFIX)
     ? text.slice(INSTRUCTION_DISPLAY_PREFIX.length).trim() || null
     : null;
+}
+
+export function stripTaskMetadata(text: string): string {
+  return text
+    .replace(TASK_METADATA_BLOCK_PATTERN, '')
+    .replace(TRAILING_TASK_METADATA_PATTERN, '');
 }
 
 /** Display-related options grouped to reduce prop surface. */

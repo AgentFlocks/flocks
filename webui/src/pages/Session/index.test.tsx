@@ -1767,9 +1767,8 @@ describe('SessionPage session actions menu', () => {
       expect(sessionApi.get).toHaveBeenCalledWith('session-missing-from-list');
     });
     expect(screen.queryByTestId('session-chat')).not.toBeInTheDocument();
-    expect(screen.getByTestId('session-chat-skeleton')).toBeInTheDocument();
+    expect(screen.getByTestId('session-chat-skeleton')).not.toHaveClass('animate-pulse');
     expect(screen.getByTestId('workbench-refresh-status')).toHaveTextContent('restoringTask');
-    expect(screen.queryByText('loading-spinner')).not.toBeInTheDocument();
 
     await act(async () => {
       request.resolve(fetchedSession);
