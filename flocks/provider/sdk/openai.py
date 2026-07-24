@@ -18,6 +18,7 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
+    _normalize_stream_usage,
     build_reasoning_metadata,
     _coerce_bool,
     extract_reasoning_content_with_source,
@@ -219,15 +220,12 @@ class OpenAIProvider(BaseProvider):
         
         # Track usage from final chunk (when stream_options.include_usage is set)
         stream_usage: Optional[Dict[str, int]] = None
+        usage_emitted = False
         
         async for chunk in stream:
             # Capture usage from the final chunk (OpenAI returns it in a chunk with no choices)
             if hasattr(chunk, 'usage') and chunk.usage:
-                stream_usage = {
-                    "prompt_tokens": getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                    "completion_tokens": getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                    "total_tokens": getattr(chunk.usage, 'total_tokens', 0) or 0,
-                }
+                stream_usage = _normalize_stream_usage(chunk.usage)
             
             if not chunk.choices:
                 continue
@@ -251,6 +249,7 @@ class OpenAIProvider(BaseProvider):
                             finish_reason=choice.finish_reason,
                             usage=stream_usage,
                         )
+                    usage_emitted = stream_usage is not None
                 continue
 
             # Handle reasoning/thinking content (for o1/o3/gpt-5 models)
@@ -315,6 +314,13 @@ class OpenAIProvider(BaseProvider):
                         finish_reason=choice.finish_reason,
                         usage=stream_usage,
                     )
+                usage_emitted = stream_usage is not None
+
+        # OpenAI sends the usage-only chunk after the terminal finish chunk.
+        # Surface it separately when it was not available on the terminal chunk
+        # so the runner can persist usage and nested reasoning tokens.
+        if stream_usage and not usage_emitted:
+            yield StreamChunk(delta="", finish_reason=None, usage=stream_usage)
     
     # Embeddings support (added for memory system)
     async def embed(

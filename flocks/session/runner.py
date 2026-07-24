@@ -1627,7 +1627,7 @@ class SessionRunner:
             try:
                 # Set status to busy
                 SessionStatus.set(self.session.id, SessionStatusBusy())
-                
+
                 # Call LLM with tools
                 result = await self._call_llm(
                     provider=provider,
@@ -1770,12 +1770,12 @@ class SessionRunner:
                 finish = "tool-calls" if result.tool_calls else "stop"
                 await Message.update(self.session.id, assistant_msg.id, finish=finish)
                 await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
-                
+
                 # Note: Compaction check is now done in the main loop (run()) before processing step
                 # This matches Flocks's logic: check lastFinished.tokens at loop start
 
                 return result
-                
+
             except Exception as e:
                 error_attempt += 1
                 error_log_context = {
@@ -1906,6 +1906,66 @@ class SessionRunner:
                 "read": stream_usage.get("cache_read_input_tokens", 0),
                 "write": stream_usage.get("cache_creation_input_tokens", 0),
             },
+        }
+
+    @staticmethod
+    def _serialize_chat_message_for_langfuse(message: ChatMessage) -> Dict[str, Any]:
+        """Serialize the exact provider-bound message payload for Langfuse."""
+        if hasattr(message, "model_dump"):
+            return message.model_dump(exclude_none=True)
+        return {
+            "role": message.role,
+            "content": message.content,
+            "reasoning": getattr(message, "reasoning", None),
+            "tool_calls": getattr(message, "tool_calls", None),
+            "tool_call_id": getattr(message, "tool_call_id", None),
+            "name": getattr(message, "name", None),
+            "custom_settings": getattr(message, "custom_settings", {}),
+        }
+
+    @classmethod
+    def _build_langfuse_request_payload(
+        cls,
+        *,
+        step: int,
+        messages: List[ChatMessage],
+        request_tools: Optional[List[Dict[str, Any]]],
+        available_tools: List[Dict[str, Any]],
+        provider_options: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "step": step,
+            "messages": [cls._serialize_chat_message_for_langfuse(message) for message in messages],
+            "provider_options": provider_options,
+        }
+        if request_tools is not None:
+            payload["request_tools"] = request_tools
+        if available_tools:
+            payload["available_tools"] = available_tools
+        return payload
+
+    @staticmethod
+    def _build_langfuse_response_payload(
+        *,
+        action: str,
+        content: str,
+        reasoning: str,
+        finish_reason: Optional[str],
+        tool_calls: List[ToolCall],
+    ) -> Dict[str, Any]:
+        return {
+            "action": action,
+            "content": content,
+            "reasoning": reasoning,
+            "finish_reason": finish_reason,
+            "tool_calls": [
+                {
+                    "id": tool_call.id,
+                    "name": tool_call.name,
+                    "arguments": tool_call.arguments,
+                }
+                for tool_call in tool_calls
+            ],
         }
 
     def _resolve_usage_pricing(self) -> Optional[Any]:
@@ -2713,7 +2773,7 @@ class SessionRunner:
                                 "type": "text",
                                 "text": "The following tool was executed by the user",
                             })
-                
+
                 if user_content_blocks and any(
                     block.get("type") == "image"
                     for block in user_content_blocks
@@ -3073,6 +3133,7 @@ class SessionRunner:
         # Build provider options (thinking / reasoning / max_tokens)
         from flocks.provider.options import build_provider_options
         provider_options = build_provider_options(self.provider_id, self.model_id)
+        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
 
         # Clean up any leftover reasoning state from a previous (failed) call
         if hasattr(self, '_current_reasoning_id'):
@@ -3094,13 +3155,6 @@ class SessionRunner:
         generation_ctx = None
         if langfuse_is_active():
             try:
-                input_preview = []
-                for _msg in messages[-12:]:
-                    _mc = _msg.content or ""
-                    input_preview.append(
-                        {"role": _msg.role, "chars": len(_mc), "preview": _mc[:240]}
-                    )
-
                 trace_tags = [
                     f"session:{self.session.id}",
                     f"step:{self._step}",
@@ -3108,36 +3162,47 @@ class SessionRunner:
                     f"agent:{agent.name}",
                     f"provider:{self.provider_id}",
                 ]
+                request_payload = self._build_langfuse_request_payload(
+                    step=self._step,
+                    messages=messages,
+                    request_tools=provider_tools,
+                    available_tools=tools,
+                    provider_options=provider_options,
+                )
                 trace_ctx = trace_scope(
                     name="SessionRunner.step",
                     session_id=self.session.id,
                     tags=trace_tags,
-                    input={
-                        "step": self._step,
-                        "message_count": len(messages),
-                        "tool_count": len(tools),
-                        "last_user_preview": next(
-                            ((m.content or "")[:280] for m in reversed(messages) if m.role == "user"),
-                            "",
-                        ),
-                    },
+                    input=request_payload,
                     metadata={
                         "provider_id": self.provider_id,
                         "model_id": self.model_id,
                         "agent": agent.name,
                         "workspace": self.session.directory,
+                        "message_count": len(messages),
+                        "available_tool_count": len(tools),
+                        "request_tool_count": len(provider_tools or []),
+                        "tool_transport": (
+                            "provider_param" if provider_tools is not None else "text_prompt"
+                        ),
                     },
                 )
                 generation_ctx = generation_scope(
                     parent=trace_ctx.observation,
                     name="LLM.generate",
                     model=self.model_id,
-                    input=input_preview,
+                    input=request_payload,
                     metadata={
                         "provider_id": self.provider_id,
                         "session_id": self.session.id,
                         "step": self._step,
-                        "tool_names": [t.get("function", {}).get("name", "") for t in tools][:50],
+                        "agent": agent.name,
+                        "workspace": self.session.directory,
+                        "available_tool_count": len(tools),
+                        "request_tool_count": len(provider_tools or []),
+                        "tool_transport": (
+                            "provider_param" if provider_tools is not None else "text_prompt"
+                        ),
                     },
                 )
                 processor._langfuse_generation = generation_ctx.observation
@@ -3170,7 +3235,6 @@ class SessionRunner:
         stream_usage: Optional[Dict[str, int]] = None
         
         # Stream response and convert chunks to events
-        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
         if provider_tools is None and tools:
             log.info("runner.text_tool_call_mode.enabled", {
                 "session_id": self.session.id,
@@ -3266,20 +3330,20 @@ class SessionRunner:
                         provider_id=self.provider_id,
                         model_id=self.model_id,
                     )
-                
+
                 chunk_finish = getattr(chunk, 'finish_reason', None)
                 if chunk_finish:
                     stream_finish_reason = chunk_finish
-                
+
                 # Capture usage from chunk (providers may include it in the final chunk)
                 if hasattr(chunk, 'usage') and chunk.usage:
                     stream_usage = chunk.usage
-                
+
                 # Check for abort
                 if self.is_aborted:
                     aborted_during_stream = True
                     break
-                
+
                 # Determine event type from chunk.  A single chunk may carry any
                 # combination of reasoning / text / tool_calls (e.g. Gemini bundles
                 # them).  We must not drop non-reasoning content when reasoning is
@@ -3502,6 +3566,7 @@ class SessionRunner:
             )
             for tc_state in list(processor.tool_calls.values())
         ]
+        finish_reason = processor.get_finish_reason()
         result_action = "continue" if tool_calls_for_result else "stop"
         response_payload = _build_llm_response_payload(
             content=content,
@@ -3539,26 +3604,23 @@ class SessionRunner:
                 log.debug("runner.hook.llm_after.error", {"error": str(exc)})
         
         if tool_calls_for_result:
+            response_payload = self._build_langfuse_response_payload(
+                action="continue",
+                content=content,
+                reasoning=reasoning,
+                finish_reason=finish_reason,
+                tool_calls=tool_calls_for_result,
+            )
             self._end_observability(
                 generation_ctx, trace_ctx,
-                output={
-                    "content_preview": content[:600],
-                    "content_chars": len(content),
-                    "reasoning_chars": len(reasoning),
-                    "tool_calls": [{"id": tc.id, "name": tc.name} for tc in tool_calls_for_result[:30]],
-                },
+                output=response_payload,
                 usage=stream_usage,
                 metadata={
-                    "finish_reason": processor.get_finish_reason(),
+                    "finish_reason": finish_reason,
                     "status": "continue_with_tools",
                     "tool_call_count": len(tool_calls_for_result),
                 },
-                trace_output={
-                    "status": "ok",
-                    "next_action": "continue",
-                    "finish_reason": processor.get_finish_reason(),
-                    "tool_call_count": len(tool_calls_for_result),
-                },
+                trace_output=response_payload,
             )
             return StepResult(
                 action=result_action,
@@ -3567,24 +3629,23 @@ class SessionRunner:
                 usage=stream_usage,
             )
         
+        response_payload = self._build_langfuse_response_payload(
+            action="stop",
+            content=content,
+            reasoning=reasoning,
+            finish_reason=finish_reason,
+            tool_calls=tool_calls_for_result,
+        )
         self._end_observability(
             generation_ctx, trace_ctx,
-            output={
-                "content_preview": content[:600],
-                "content_chars": len(content),
-                "reasoning_chars": len(reasoning),
-            },
+            output=response_payload,
             usage=stream_usage,
             metadata={
-                "finish_reason": processor.get_finish_reason(),
+                "finish_reason": finish_reason,
                 "status": "stop",
                 "tool_call_count": 0,
             },
-            trace_output={
-                "status": "ok",
-                "next_action": "stop",
-                "finish_reason": processor.get_finish_reason(),
-            },
+            trace_output=response_payload,
         )
         return StepResult(action=result_action, content=content, usage=stream_usage)
     

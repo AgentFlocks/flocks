@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -34,6 +34,7 @@ import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
+import { redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
@@ -826,27 +827,19 @@ export function getMessageBubbleClassName({
   isUser: boolean;
   isEditing: boolean;
 }): string {
-  if (compact) {
-    const widthClass = isUser
-      ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
-      : 'w-full max-w-full';
-
-    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
-      isUser
-        ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
-        : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
-    }`;
+  if (!isUser) {
+    return 'w-full max-w-full min-w-0 bg-transparent py-1 text-sm text-[#34393e] break-words dark:text-zinc-100';
   }
 
-  const widthClass = isUser
-    ? (isEditing ? 'w-full' : 'w-auto')
-    : 'w-full';
+  if (compact) {
+    const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
-    isUser
-      ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
-      : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
-  }`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  }
+
+  const widthClass = isEditing ? 'w-full' : 'w-auto';
+
+  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -1522,6 +1515,7 @@ export default function SessionChat({
   const toast = useToast();
   const compact = display?.compact ?? true;
   const fullWidth = display?.fullWidth ?? false;
+  const pageCanvas = display?.pageCanvas ?? false;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
   const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
@@ -3225,11 +3219,17 @@ export default function SessionChat({
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
     ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
-    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
+    : pageCanvas
+      ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
+      : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
 
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
-    : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
+    : fullWidth
+      ? 'space-y-5 w-full px-5'
+      : pageCanvas
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
     : null;
@@ -3345,7 +3345,7 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
@@ -3403,7 +3403,7 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
@@ -3448,8 +3448,26 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'} dark:bg-zinc-950`}>
-          <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}`}>
+        <div
+          className={`flex-shrink-0 ${
+            compact
+              ? 'bg-white px-4 py-3 dark:bg-zinc-950'
+              : pageCanvas
+                ? 'bg-transparent px-7 pb-6 pt-2'
+                : 'bg-white py-4 dark:bg-zinc-950'
+          }`}
+        >
+          <div
+            className={`relative min-w-0 ${
+              !compact
+                ? fullWidth
+                  ? 'w-full px-5'
+                  : pageCanvas
+                    ? 'mx-auto w-full max-w-[760px]'
+                    : 'w-[min(76%,64rem)] mx-auto px-6'
+                : ''
+            }`}
+          >
             {conversationBottomSlot && (
               <div className="mb-2 min-w-0">
                 {typeof conversationBottomSlot === 'function'
@@ -3523,14 +3541,16 @@ export default function SessionChat({
               onDragOver={handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
-              className={`rounded-2xl border transition-all ${
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
                     ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
                       ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
-                      : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
+                      : pageCanvas && !compact
+                        ? 'border-black/[0.07] bg-zinc-50 hover:border-black/[0.11] focus-within:border-black/[0.11] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.08] dark:bg-[#303842] dark:hover:border-white/[0.13] dark:focus-within:border-white/[0.14] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
                 {/* Node reference chip */}
@@ -3985,14 +4005,14 @@ function ProcessGroupDetails({
     <details
       open={effectiveOpen}
       data-testid="chat-process-group"
-      className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+      className="group/process mt-2 w-full first:mt-0 text-[#6f757c] dark:text-zinc-400"
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50"
+        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-semibold transition-colors hover:text-zinc-900 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden"
       >
         {summary}
-        <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
+        <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
       </summary>
       {children}
     </details>
@@ -4025,7 +4045,7 @@ function ChatMessageBubbleInner({
   onEditSend,
   onRegenerate,
 }: ChatMessageBubbleProps) {
-  const { t } = useTranslation('session');
+  const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
@@ -4063,17 +4083,26 @@ function ChatMessageBubbleInner({
   const editableRawText = latestEditablePart?.text || '';
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
+  const hasProcessOutput = collapseIntermediateSteps && !isUser && parts.some((part) => {
+    if (part.type === 'reasoning' || part.type === 'thinking') {
+      return !!getRenderableThinkingText(part);
+    }
+    if (part.type !== 'tool') return false;
+    return !(part.callID && pendingQuestions?.[part.callID]);
+  });
   const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
     ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0]))
     : null;
 
   const bubbleClass = instructionDisplayLabel
     ? getInstructionDisplayBubbleClassName(compact)
-    : getMessageBubbleClassName({ compact, isUser, isEditing });
+    : hasProcessOutput
+      ? 'w-full max-w-full min-w-0 break-words text-sm text-zinc-700 dark:text-zinc-200'
+      : getMessageBubbleClassName({ compact, isUser, isEditing });
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-gray-400 transition-colors duration-150 hover:bg-white hover:text-gray-700 active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-500 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
@@ -4096,7 +4125,11 @@ function ChatMessageBubbleInner({
 
   const headerHeight = compact ? 'h-7' : 'h-8';
   const bubble = (
-    <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
+    <div
+      className={`${bubbleClass} relative`}
+      data-process-output={hasProcessOutput ? 'true' : undefined}
+      style={{ overflowWrap: 'anywhere' }}
+    >
 
       {/* Empty / loading state */}
       {(parts.length === 0 || shouldRenderAssistantErrorState) && (
@@ -4167,14 +4200,14 @@ function ChatMessageBubbleInner({
           const activeTailPart = isActive
             ? [...displayParts].reverse().find(isRenderableDisplayPart)
             : undefined;
-          const renderPart = (part: MessagePart, i: number, isVisible = true) => (
+          const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
             // own `mt-2 first:mt-0`, but since every part lives in its own
             // wrapper div, `first:` always matched and the gap collapsed
             // to zero between, e.g., a tool card and the next thinking
             // block, making them look glued together.
-            <div key={part.id || i} className="mt-2 first:mt-0">
+            <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
               {/* Text */}
               {part.type === 'text' && (() => {
                 const rawText = part.text || '';
@@ -4201,10 +4234,19 @@ function ChatMessageBubbleInner({
                         <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
                       </div>
                     )}
-                    <StreamingMarkdown
-                      content={displayText}
-                      isStreaming={isActive && !isUser}
-                    />
+                    {processStep ? (
+                      <div className="mb-[9px] ml-2 mt-[3px] border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                        <StreamingMarkdown
+                          content={displayText}
+                          isStreaming={isActive && !isUser}
+                        />
+                      </div>
+                    ) : (
+                      <StreamingMarkdown
+                        content={displayText}
+                        isStreaming={isActive && !isUser}
+                      />
+                    )}
                   </>
                 );
               })()}
@@ -4220,6 +4262,7 @@ function ChatMessageBubbleInner({
                   onReject={onQuestionReject && part.callID
                     ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
                     : undefined}
+                  processStep={processStep}
                 />
               )}
 
@@ -4230,6 +4273,37 @@ function ChatMessageBubbleInner({
                 const partKey = part.id || `reasoning-${i}`;
                 const isThinking = part === activeTailPart;
                 const isExpanded = isThinking || getPartExpanded(partKey);
+                if (processStep) {
+                  return (
+                    <div data-testid="chat-process-reasoning-step">
+                      <button
+                        type="button"
+                        aria-expanded={isExpanded}
+                        onClick={() => togglePart(partKey)}
+                        disabled={isThinking}
+                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200"
+                      >
+                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
+                          {isThinking ? (
+                            <Loader2 className="h-[15px] w-[15px] animate-spin" />
+                          ) : (
+                            <Brain className="h-[15px] w-[15px]" />
+                          )}
+                        </span>
+                        <span className="min-w-0">{t('chat.process.deepThinking')}</span>
+                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      {isExpanded && isVisible && (
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                          <StreamingReasoningText
+                            content={thinkingText}
+                            isStreaming={isThinking}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
                 return (
                   // Vertical spacing is provided by the parent part wrapper
                   // (see `otherParts.map` above); keep this container neutral
@@ -4276,14 +4350,6 @@ function ChatMessageBubbleInner({
             </div>
           );
           const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
-            const reasoningCount = group.filter(({ part }) => part.type === 'reasoning' || part.type === 'thinking').length;
-            const toolCount = group.filter(({ part }) => part.type === 'tool').length;
-            const textCount = group.filter(({ part }) => part.type === 'text').length;
-            const summary = [
-              reasoningCount > 0 ? t('chat.process.reasoningCount', { count: reasoningCount }) : '',
-              toolCount > 0 ? t('chat.process.toolCount', { count: toolCount }) : '',
-              textCount > 0 ? t('chat.process.textCount', { count: textCount }) : '',
-            ].filter(Boolean).join(' · ');
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
             const hasStoredOpenState = !!processGroupOpenState
@@ -4299,20 +4365,17 @@ function ChatMessageBubbleInner({
                 onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
                 summary={(
                   <>
-                    <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
-                    <span className="flex-shrink-0 font-semibold text-zinc-700">
+                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
+                      <Eye className="h-4 w-4" />
+                    </span>
+                    <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
                     </span>
-                    {summary && (
-                      <span className="min-w-0 truncate text-zinc-500">
-                        {summary}
-                      </span>
-                    )}
                   </>
                 )}
               >
-                <div className="border-t border-zinc-200/70 px-2.5 py-2">
-                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen))}
+                <div data-testid="chat-process-timeline" className="mt-3 grid gap-1 pl-1">
+                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen, true))}
                 </div>
               </ProcessGroupDetails>
             );
@@ -4441,11 +4504,14 @@ function ChatMessageBubbleInner({
       )}
     </div>
   );
+  const footerTimestamp = showTimestamp && message.timestamp
+    ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    : null;
   const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
-    <div className="flex items-center justify-between mt-1.5">
-      {showTimestamp && message.timestamp
-        ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
-        : <span />}
+    <div className={`mt-1.5 flex items-center ${
+      isUser ? 'justify-between' : `justify-start${footerTimestamp ? ' gap-1.5' : ''}`
+    }`}>
+      {isUser && (footerTimestamp || <span />)}
       <div className={actionBarClass}>
         {isUser ? (
           <>
@@ -4493,6 +4559,7 @@ function ChatMessageBubbleInner({
           </>
         )}
       </div>
+      {!isUser && footerTimestamp}
     </div>
   ) : null;
 
@@ -4548,7 +4615,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>
@@ -4574,7 +4641,7 @@ function ChatMessageBubbleInner({
         {avatar}
         <div className="flex flex-col items-start flex-1 min-w-0">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>
@@ -4801,15 +4868,19 @@ function formatQuestionAnswerValue(question: QuestionItem, value: string, t: Tod
 
 function ChatQuestionResult({
   state,
+  actionLabel,
   statusLabel,
   statusIcon,
   statusIconColor,
+  processStep = false,
   t,
 }: {
   state: Partial<ToolState>;
+  actionLabel: string;
   statusLabel: string;
   statusIcon: React.ReactNode;
   statusIconColor: string;
+  processStep?: boolean;
   t: TodoTranslator;
 }) {
   const questions = readQuestionItems(state.input?.questions);
@@ -4835,6 +4906,67 @@ function ChatQuestionResult({
     ? 'bg-red-50 text-red-500'
     : 'bg-zinc-100 text-zinc-500';
   const firstQuestion = questions[0]?.header || questions[0]?.question || '';
+  const questionDetails = questions.map((question, index) => {
+    const answers = normalizeQuestionAnswer(rawAnswers[index]);
+    const displayAnswers = answers.length > 0
+      ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
+      : [t('chat.questionResult.unanswered')];
+    return (
+      <div
+        key={`${question.question}-${index}`}
+        className={`space-y-2 py-2 last:pb-0 ${processStep ? 'first:pt-0' : 'first:pt-2'}`}
+      >
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
+            {t('chat.questionResult.questionLabel')}
+          </span>
+          <div className="min-w-0">
+            {question.header && (
+              <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
+            )}
+            <div className="text-xs leading-5 text-zinc-700 dark:text-zinc-300">{question.question}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
+            {t('chat.questionResult.answerLabel')}
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-1.5">
+            {displayAnswers.map((answer, answerIndex) => (
+              <span
+                key={`${answer}-${answerIndex}`}
+                className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
+              >
+                {answer}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  });
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
+            {statusIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
+          {firstQuestion && (
+            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {firstQuestion}
+            </span>
+          )}
+          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {questionDetails}
+        </div>
+      </details>
+    );
+  }
 
   return (
     <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
@@ -4842,7 +4974,7 @@ function ChatQuestionResult({
         <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">question</span>
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{actionLabel}</span>
             {firstQuestion && (
               <span className="text-[11px] text-zinc-400 truncate min-w-0">
                 {firstQuestion}
@@ -4858,45 +4990,7 @@ function ChatQuestionResult({
         </div>
       </summary>
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {questions.map((question, index) => {
-          const answers = normalizeQuestionAnswer(rawAnswers[index]);
-          const displayAnswers = answers.length > 0
-            ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
-            : [t('chat.questionResult.unanswered')];
-          return (
-            <div
-              key={`${question.question}-${index}`}
-              className="space-y-2 py-2 first:pt-2 last:pb-0"
-            >
-              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-                <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
-                  {t('chat.questionResult.questionLabel')}
-                </span>
-                <div className="min-w-0">
-                  {question.header && (
-                    <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
-                  )}
-                  <div className="text-xs leading-5 text-zinc-700">{question.question}</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-                <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
-                  {t('chat.questionResult.answerLabel')}
-                </span>
-                <div className="flex min-w-0 flex-wrap gap-1.5">
-                  {displayAnswers.map((answer, answerIndex) => (
-                    <span
-                      key={`${answer}-${answerIndex}`}
-                      className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
-                    >
-                      {answer}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        {questionDetails}
       </div>
     </details>
   );
@@ -5129,16 +5223,17 @@ export interface ChatToolPartProps {
   pendingQuestion?: PendingQuestion;
   onAnswer?: (answers: string[][]) => Promise<void>;
   onReject?: () => Promise<void>;
+  processStep?: boolean;
 }
 
-export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: ChatToolPartProps) {
+export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, processStep = false }: ChatToolPartProps) {
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
   // Keep the delegate fallback narrow: many MCP tools also carry a generic
   // `category` field (for example wecom_mcp category="doc").
   if (shouldRenderDelegateTaskCard(part)) {
-    return <DelegateTaskCard part={part} />;
+    return <DelegateTaskCard part={part} processStep={processStep} />;
   }
 
   const state: Partial<ToolState> = part.state || {};
@@ -5188,20 +5283,53 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     : [];
   const showGenericToolPayload = toolName !== 'todo' && !isBashTool;
   const isTodoTool = toolName === 'todo';
+  const toolPresentation = resolveToolPresentation(toolName, state, t);
+  const hasToolInput = Boolean(state.input && Object.keys(state.input).length > 0);
+  const safeToolInput = hasToolInput
+    ? redactToolInput(state.input) as Record<string, unknown>
+    : undefined;
+  const showActionProgress = showGenericToolPayload
+    && !safeToolInput
+    && (status === 'pending' || status === 'running');
+  const actionProgressLabel = toolName === 'write'
+    ? t('chat.tool.progress.writingFile')
+    : toolName === 'edit' || toolName === 'apply_patch'
+      ? t('chat.tool.progress.editingFile')
+      : t('chat.tool.progress.working');
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
-  const inputSummary = state.input
+  const inputSummary = hasToolInput
     ? truncateToolDisplayText(
         toolName === 'todo'
           ? buildTodoSummary(state, t)
           : isBashTool
           ? buildBashHeaderSummary(state)
-          : buildToolInputSummary(state.input),
+          : buildToolInputSummary(safeToolInput || {}),
       )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
+  const semanticDetail = truncateToolDisplayText(toolPresentation.detail);
+  const toolDisplayName = toolPresentation.label;
+  const processStepLabel = isTodoTool
+    ? t('chat.tool.todoUpdated')
+    : toolPresentation.known
+      ? toolDisplayName
+      : config.label;
+  const processStepDetail = workflowHeaderSummary
+    || semanticDetail
+    || displayTitle
+    || inputSummary
+    || (toolPresentation.known ? '' : toolDisplayName);
+  const cardHeaderDetail = workflowHeaderSummary
+    || semanticDetail
+    || inputSummary
+    || displayTitle;
+  const processStepIcon = isTodoTool
+    ? <ListTree className="h-[15px] w-[15px]" />
+    : config.icon;
+  const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
     ? 'text-[11px] font-medium text-zinc-500'
     : `text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
@@ -5224,11 +5352,120 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     return (
       <ChatQuestionResult
         state={state}
+        actionLabel={toolDisplayName}
         statusLabel={config.label}
         statusIcon={config.icon}
         statusIconColor={config.iconColor}
+        processStep={processStep}
         t={t}
       />
+    );
+  }
+
+  const toolDetails = (
+    <>
+      {isTodoTool && todoEntries.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
+            <span>{t('chat.tool.todoStages')}</span>
+            <span className="font-normal text-zinc-400">{todoEntries.length}</span>
+          </div>
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+            {todoEntries.map((todo, index) => (
+              <div
+                key={todo.id || index}
+                className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
+              >
+                <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                  {todoStatusIcon(todo.status)}
+                </span>
+                <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
+                  {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
+                </span>
+                <span
+                  className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
+                >
+                  {todoStatusLabel(todo.status, t)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isBashTool && (
+        <ChatBashPayload state={state} t={t} />
+      )}
+
+      {showActionProgress && (
+        <div
+          data-testid="chat-tool-action-progress"
+          className="flex min-h-6 items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500"
+        >
+          <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
+          </span>
+          <span>{actionProgressLabel}</span>
+        </div>
+      )}
+
+      {showGenericToolPayload && safeToolInput && (
+        <details>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.inputParams')}
+          </summary>
+          <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
+            {JSON.stringify(safeToolInput, null, 2)}
+          </pre>
+        </details>
+      )}
+
+      {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
+        <details open>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.outputResult')}
+          </summary>
+          <pre className="max-h-48 overflow-x-auto overflow-y-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400">
+            {formatToolPayload(state.output)}
+          </pre>
+        </details>
+      )}
+
+      {status === 'error' && state.error && (
+        <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+          {state.error}
+        </div>
+      )}
+
+      {state.time?.start && state.time?.end && (
+        <div className="text-right text-[10px] text-zinc-400">
+          {((state.time.end - state.time.start) / 1000).toFixed(2)}s
+        </div>
+      )}
+    </>
+  );
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
+            {processStepIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
+          {processStepDetail && (
+            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {processStepDetail}
+            </span>
+          )}
+          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {toolDetails}
+        </div>
+      </details>
     );
   }
 
@@ -5241,28 +5478,15 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
-            {workflowHeaderSummary ? (
-              <span className="text-[11px] text-emerald-700 truncate min-w-0">
-                {workflowHeaderSummary}
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
+            {cardHeaderDetail && (
+              <span
+                className={`text-[11px] truncate min-w-0 ${
+                  workflowHeaderSummary ? 'text-emerald-700' : 'text-zinc-400'
+                }`}
+              >
+                {cardHeaderDetail}
               </span>
-            ) : (
-              <>
-                {inputSummary && (
-                  <span
-                    className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
-                  >
-                    {inputSummary}
-                  </span>
-                )}
-                {displayTitle && !inputSummary && (
-                  <span
-                    className="text-[11px] text-zinc-400 truncate min-w-0"
-                  >
-                    {displayTitle}
-                  </span>
-                )}
-              </>
             )}
           </div>
         </div>
@@ -5274,73 +5498,8 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         </div>
       </summary>
 
-      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {isTodoTool && todoEntries.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
-              <span>{t('chat.tool.todoStages')}</span>
-              <span className="font-normal text-zinc-400">{todoEntries.length}</span>
-            </div>
-            <div className="divide-y divide-zinc-100">
-              {todoEntries.map((todo, index) => (
-                <div
-                  key={todo.id || index}
-                  className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
-                >
-                  <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                    {todoStatusIcon(todo.status)}
-                  </span>
-                  <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
-                    {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
-                  </span>
-                  <span
-                    className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
-                  >
-                    {todoStatusLabel(todo.status, t)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {isBashTool && (
-          <ChatBashPayload state={state} t={t} />
-        )}
-
-        {showGenericToolPayload && state.input && (
-          <details>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
-              {t('chat.tool.inputParams')}
-            </summary>
-            <pre className="p-2 bg-zinc-950 text-zinc-300 rounded-md text-[11px] overflow-x-auto font-mono leading-relaxed">
-              {JSON.stringify(state.input, null, 2)}
-            </pre>
-          </details>
-        )}
-
-        {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
-          <details open>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
-              {t('chat.tool.outputResult')}
-            </summary>
-            <pre className="p-2 bg-zinc-950 text-green-400 rounded-md text-[11px] overflow-x-auto max-h-48 overflow-y-auto font-mono leading-relaxed">
-              {formatToolPayload(state.output)}
-            </pre>
-          </details>
-        )}
-
-        {status === 'error' && state.error && (
-          <div className="px-2.5 py-1.5 bg-red-50 border border-red-100 rounded-md text-[11px] text-red-600">
-            {state.error}
-          </div>
-        )}
-
-        {state.time?.start && state.time?.end && (
-          <div className="text-zinc-400 text-right text-[10px]">
-            {((state.time.end - state.time.start) / 1000).toFixed(2)}s
-          </div>
-        )}
+      <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
+        {toolDetails}
       </div>
     </details>
   );

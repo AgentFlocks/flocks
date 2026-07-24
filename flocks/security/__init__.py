@@ -52,13 +52,19 @@ def _resolve_fofa_derived_secret(secret_id: str, secrets: SecretManager) -> Opti
 
 
 def resolve_secret_value(secret_id: str, secrets: Optional[SecretManager] = None) -> Optional[str]:
-    """Resolve a secret by id, including provider-specific derived secrets."""
+    """Resolve a secret by id, including read-only legacy fallbacks."""
     if secrets is None:
         secrets = get_secret_manager()
 
     value = secrets.get(secret_id)
     if value is not None:
         return value
+
+    if secret_id.endswith("_llm_key"):
+        provider_id = secret_id.removesuffix("_llm_key")
+        legacy_value = secrets.get(f"{provider_id}_api_key")
+        if legacy_value is not None:
+            return legacy_value
 
     return _resolve_fofa_derived_secret(secret_id, secrets)
 

@@ -229,6 +229,7 @@ function sessionEffectiveProjectId(session: Session): string {
 export function useSessions(search = '', options?: UseSessionsOptions) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [hasMoreByProject, setHasMoreByProject] = useState<Record<string, boolean>>({});
@@ -292,6 +293,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         setLoading(true);
       }
       if (!append) {
+        setRefreshing(true);
         activeAppendProjectsRef.current.clear();
         setLoadingMore(false);
         setLoadingMoreProjectIds(new Set());
@@ -390,6 +392,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         }
       } else if (isCurrentRequest()) {
         setLoading(false);
+        setRefreshing(false);
         initializedRef.current = true;
       }
     }
@@ -437,6 +440,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   return {
     sessions,
     loading,
+    refreshing,
     error,
     refetch: fetchSessions,
     updateSessionTitle,
