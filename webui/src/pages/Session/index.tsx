@@ -267,13 +267,13 @@ function SessionSidebarItemInner({
           />
         )}
         {session.category === 'workflow' && (
-          <span title={t('workflowSession')} className="mr-1.5 flex-shrink-0">
-            <WorkflowIcon className="h-5 w-5 text-orange-400" />
+          <span title={t('workflowSession')} className="flex-shrink-0">
+            <WorkflowIcon className="h-3.5 w-3.5 text-orange-400" />
           </span>
         )}
         {session.category === 'entity-config' && (
-          <span title={t('configSession')} className="mr-1.5 flex-shrink-0">
-            <Settings2 className="h-5 w-5 text-purple-400" />
+          <span title={t('configSession')} className="flex-shrink-0">
+            <Settings2 className="h-3.5 w-3.5 text-purple-400" />
           </span>
         )}
         {renaming ? (
@@ -1868,24 +1868,24 @@ export default function SessionPage() {
           <div className="space-y-0.5">
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
-                ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 animate-spin text-[#7b8087]" />
-                : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+                ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
+                : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
               <button
                 onClick={handleStartNewSession}
                 disabled={creating}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-10 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
               >
                 {t('newSession')}
               </button>
             </div>
 
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t('filterConversations', 'Filter conversations...')}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-10 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
               />
               {searchQuery && (
                 <button
@@ -1972,7 +1972,7 @@ export default function SessionPage() {
                           aria-label={t('selectProject', { project: group.label })}
                           aria-expanded={!collapsed}
                         >
-                          <FolderGit2 className="mr-1 h-5 w-5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
+                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
                           <span className="min-w-0 flex-1 truncate">{group.label}</span>
                           {group.isShared && (
                             <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">

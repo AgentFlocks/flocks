@@ -412,8 +412,8 @@ describe('SessionPage session actions menu', () => {
     const projectsSection = projectsHeading.closest('section');
     const newSessionButton = screen.getByRole('button', { name: 'newSession' });
     const searchInput = screen.getByPlaceholderText('filterConversations');
-    expect(newSessionButton.previousElementSibling).toHaveClass('h-5', 'w-5');
-    expect(searchInput.previousElementSibling).toHaveClass('h-5', 'w-5');
+    expect(newSessionButton.previousElementSibling).toHaveClass('h-3.5', 'w-3.5');
+    expect(searchInput.previousElementSibling).toHaveClass('h-3.5', 'w-3.5');
     expect(searchInput).toHaveClass('text-sm', 'font-medium');
     expect(tasksHeading.closest('div')).toHaveClass('text-xs', 'text-zinc-500');
     expect(projectsHeading.closest('div')).toHaveClass('text-xs', 'text-zinc-500');
@@ -616,7 +616,7 @@ describe('SessionPage session actions menu', () => {
     const firstRender = renderSessionPage();
 
     await screen.findByText('Labs');
-    expect(screen.getByRole('button', { name: 'selectProject' }).querySelector('svg')).toHaveClass('h-5', 'w-5');
+    expect(screen.getByRole('button', { name: 'selectProject' }).querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
     expect(screen.queryByText('Labs')).not.toBeInTheDocument();
 
