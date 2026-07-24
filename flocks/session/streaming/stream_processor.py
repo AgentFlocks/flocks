@@ -703,6 +703,7 @@ class StreamProcessor:
             log.error("stream.tool_before_hook.error", {"error": str(e)})
             hook_blocked = False
             hook_block_reason = ""
+        tool_state.input = tool_input
 
         # Execute tool synchronously
         tool_span_ctx = None

@@ -461,6 +461,9 @@ class TestToolCallExecution:
         assert post_payload["tool"]["input"] == {"command": "echo changed"}
         assert post_payload["result"]["output"] == "original result"
         assert post_payload["durationMs"] >= 0
+        assert proc.tool_calls["tc_changed"].input == {
+            "command": "echo changed"
+        }
         assert proc.tool_calls["tc_changed"].output == "hook result"
 
     @pytest.mark.asyncio

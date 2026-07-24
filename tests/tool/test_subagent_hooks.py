@@ -157,3 +157,50 @@ async def test_subagent_stop_reports_interruption() -> None:
     assert stop_payload["status"] == "interrupted"
     assert stop_payload["summary"] is None
     assert stop_payload["error"] == "Sub-agent execution was interrupted"
+
+
+@pytest.mark.asyncio
+async def test_subagent_stop_reports_normalized_loop_abort() -> None:
+    ctx = ToolContext(
+        session_id="ses_parent",
+        message_id="msg_parent",
+        agent="rex",
+    )
+    stop_hook = AsyncMock()
+    loop_result = SimpleNamespace(
+        action="stop",
+        error=None,
+        last_message=None,
+        metadata={"aborted": True},
+    )
+
+    with (
+        patch(
+            "flocks.tool.agent.delegate_task.SessionLoop.run",
+            AsyncMock(return_value=loop_result),
+        ),
+        patch(
+            "flocks.hooks.pipeline.HookPipeline.run_subagent_start",
+            AsyncMock(),
+        ),
+        patch(
+            "flocks.hooks.pipeline.HookPipeline.run_subagent_stop",
+            stop_hook,
+        ),
+    ):
+        result = await _run_subagent_with_hooks(
+            ctx=ctx,
+            child_session_id="ses_child",
+            child_agent="explore",
+            workspace="/tmp/project",
+            prompt="inspect hooks",
+            description="Inspect hooks",
+            resumed=False,
+        )
+
+    assert result is loop_result
+    stop_hook.assert_awaited_once()
+    stop_payload = stop_hook.await_args.args[0]
+    assert stop_payload["status"] == "interrupted"
+    assert stop_payload["summary"] is None
+    assert stop_payload["error"] == "Sub-agent execution was interrupted"

@@ -1039,6 +1039,48 @@ class SessionLoop:
                 "message_id": last_message.id,
             })
             return False
+        if ctx.should_abort():
+            log.info("loop.hook.turn_finish.ignored_after_abort", {
+                "session_id": ctx.session.id,
+                "message_id": last_message.id,
+            })
+            return False
+
+        try:
+            if ctx.session_ctx:
+                post_hook_messages = await ctx.session_ctx.get_messages()
+            else:
+                post_hook_messages = await Message.list(ctx.session.id)
+            queued_user = await cls._detect_queued_user_message(
+                ctx.session.id,
+                post_hook_messages,
+                last_user.id,
+                last_message,
+            )
+        except Exception as exc:
+            queued_user = None
+            log.debug("loop.hook.turn_finish.queued_recheck_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+        if queued_user is not None:
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="queued_message",
+                queued_message_detected=True,
+            )
+            await cls._publish_runtime_event(callbacks, "turn.continued", {
+                **turn_state.model_dump(by_alias=True),
+                "queuedUserMessageID": queued_user.id,
+            })
+            log.info("loop.hook.turn_finish.queued_message_won", {
+                "session_id": ctx.session.id,
+                "queued_user_id": queued_user.id,
+                "source_assistant_message_id": last_message.id,
+            })
+            return True
 
         from flocks.agent.registry import Agent
         from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
@@ -2081,6 +2123,7 @@ class SessionLoop:
 
                 if (
                     not step_result.error
+                    and not ctx.should_abort()
                     and last_message is not None
                     and getattr(last_message, "finish", None) == "stop"
                     and await cls._run_turn_finish_hook(
@@ -2155,6 +2198,7 @@ class SessionLoop:
                 "steps": ctx.step,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
+                **({"aborted": True} if ctx.should_abort() else {}),
             },
         )
     

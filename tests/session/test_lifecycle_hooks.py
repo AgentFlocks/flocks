@@ -195,6 +195,65 @@ async def test_turn_finish_block_creates_synthetic_continuation() -> None:
 
 
 @pytest.mark.asyncio
+async def test_queued_prompt_arriving_during_turn_finish_wins() -> None:
+    ctx = _loop_context("ses_turn_finish_queue_race")
+    ctx.turn_user_id = "msg_001"
+    user = SimpleNamespace(id="msg_001", agent="rex", role="user")
+    assistant = SimpleNamespace(
+        id="msg_002",
+        agent="rex",
+        role="assistant",
+        finish="stop",
+    )
+    queued_user = SimpleNamespace(id="msg_003", agent="rex", role="user")
+    ctx.session_ctx = SimpleNamespace(
+        get_messages=AsyncMock(
+            return_value=[user, assistant, queued_user],
+        )
+    )
+    callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
+    create_message = AsyncMock()
+
+    with (
+        patch(
+            "flocks.session.session_loop.Message.get",
+            AsyncMock(return_value=user),
+        ),
+        patch(
+            "flocks.session.session_loop.Message.get_text_content",
+            AsyncMock(side_effect=["prompt", "response"]),
+        ),
+        patch(
+            "flocks.session.session_loop.Message.create",
+            create_message,
+        ),
+        patch(
+            "flocks.hooks.pipeline.HookPipeline.run_turn_finish",
+            AsyncMock(
+                return_value=HookContext(
+                    stage=HookStage.TURN_FINISH,
+                    input={},
+                    output={"decision": "block", "reason": "continue"},
+                )
+            ),
+        ),
+    ):
+        continued = await SessionLoop._run_turn_finish_hook(
+            ctx,
+            callbacks,
+            user,
+            assistant,
+        )
+
+    assert continued is True
+    create_message.assert_not_awaited()
+    callbacks.event_publish_callback.assert_awaited_once()
+    event_name, payload = callbacks.event_publish_callback.await_args.args
+    assert event_name == "turn.continued"
+    assert payload["queuedUserMessageID"] == queued_user.id
+
+
+@pytest.mark.asyncio
 async def test_turn_finish_block_is_ignored_at_agent_step_limit() -> None:
     ctx = _loop_context("ses_turn_finish_limit")
     ctx.turn_user_id = "msg_user"
@@ -568,3 +627,73 @@ async def test_abort_does_not_trigger_turn_finish() -> None:
         await SessionLoop._run_loop(ctx, LoopCallbacks())
 
     run_turn_finish.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_late_abort_after_step_completion_skips_turn_finish() -> None:
+    ctx = _loop_context("ses_turn_finish_late_abort")
+    user = _message("msg_001", "user")
+    assistant = _message("msg_002", "assistant", finish="stop")
+    ctx.session_ctx = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, assistant],
+            ]
+        )
+    )
+    run_turn_finish = AsyncMock(return_value=False)
+
+    async def abort_after_step(_step: int) -> None:
+        ctx.abort_event.set()
+
+    with (
+        patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.session_loop.Message.get_text_content",
+            AsyncMock(return_value="final response"),
+        ),
+        patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="inactive",
+                    verdict="inactive",
+                )
+            ),
+        ),
+        patch(
+            "flocks.session.session_loop.SessionLoop._run_user_prompt_submit_hook",
+            AsyncMock(),
+        ),
+        patch(
+            "flocks.session.session_loop.SessionLoop._run_turn_finish_hook",
+            run_turn_finish,
+        ),
+        patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.session_loop.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        result = await SessionLoop._run_loop(
+            ctx,
+            LoopCallbacks(on_step_end=abort_after_step),
+        )
+
+    run_turn_finish.assert_not_awaited()
+    assert result.metadata["aborted"] is True

@@ -121,7 +121,20 @@ async def _run_subagent_with_hooks(
                 "error": str(exc),
             })
     result_error = getattr(result, "error", None)
-    status = "error" if getattr(result, "action", None) == "error" or result_error else "completed"
+    result_metadata = getattr(result, "metadata", None)
+    interrupted = (
+        isinstance(result_metadata, dict)
+        and bool(result_metadata.get("aborted"))
+    )
+    if interrupted:
+        status = "interrupted"
+        stop_error = result_error or "Sub-agent execution was interrupted"
+    elif getattr(result, "action", None) == "error" or result_error:
+        status = "error"
+        stop_error = result_error
+    else:
+        status = "completed"
+        stop_error = None
     duration_ms = int((time.perf_counter() - started_at) * 1000)
     try:
         await HookPipeline.run_subagent_stop({
@@ -129,7 +142,7 @@ async def _run_subagent_with_hooks(
             "status": status,
             "durationMs": duration_ms,
             "summary": summary,
-            "error": result_error,
+            "error": stop_error,
         })
     except Exception as exc:
         log.debug("delegate_task.hook.subagent_stop.error", {
