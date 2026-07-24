@@ -52,6 +52,7 @@ import {
   type ImagePartData,
 } from '@/utils/imageUpload';
 import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 import {
   buildInstructionDisplayText,
   fetchSessionChatCommands,
@@ -149,6 +150,10 @@ export interface SessionChatProps {
   agentName?: string;
   /** Model override to include in prompt_async requests */
   model?: { providerID: string; modelID: string } | null;
+  /** Execution mode to include in prompt and queue requests. */
+  executionMode?: SessionExecutionMode;
+  /** Called after a prompt using the current execution mode is accepted. */
+  onExecutionModeAccepted?: (mode: SessionExecutionMode) => void;
   /** Persist Auto failover before sending through an existing session. */
   modelAuto?: boolean;
   /** Agents available for one-turn @mention routing. */
@@ -194,6 +199,7 @@ export interface SessionChatProps {
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
+    executionModeOverride?: SessionExecutionMode,
   ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
@@ -1485,6 +1491,8 @@ export default function SessionChat({
   initialDisplayText,
   agentName,
   model,
+  executionMode = 'build',
+  onExecutionModeAccepted,
   modelAuto = false,
   display,
   welcomeContent,
@@ -2577,8 +2585,16 @@ export default function SessionChat({
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
       if (options?.displayText) payload.displayText = options.displayText;
+      payload.executionMode = executionMode;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      if (executionMode === 'goal' && text.trim()) {
+        goalHydrationVersionRef.current += 1;
+        writeDismissedGoalKey(sessionId, '');
+        setGoalBanner({ objective: text.trim(), status: 'active' });
+        setDismissedGoalKey('');
+      }
+      onExecutionModeAccepted?.(executionMode);
     } catch (err: unknown) {
       setIsStreaming(false);
       const axiosErr = err as any;
@@ -2608,7 +2624,9 @@ export default function SessionChat({
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
+        executionMode,
       });
+      onExecutionModeAccepted?.(executionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -2647,7 +2665,15 @@ export default function SessionChat({
       setSending(true);
       try {
         setPendingAgentName(agentName || 'rex');
-        await onCreateAndSend(trimmed, [], agentName, model, options);
+        await onCreateAndSend(
+          trimmed,
+          [],
+          agentName,
+          model,
+          options,
+          executionMode,
+        );
+        onExecutionModeAccepted?.(executionMode);
       } catch {
         setInput(trimmed);
       } finally {
@@ -2726,7 +2752,15 @@ export default function SessionChat({
         try {
           const effectiveAgent = mentionedAgent || agentName;
           setPendingAgentName(effectiveAgent || 'rex');
-          await onCreateAndSend(text, imageParts, effectiveAgent || undefined, model);
+          await onCreateAndSend(
+            text,
+            imageParts,
+            effectiveAgent || undefined,
+            model,
+            undefined,
+            executionMode,
+          );
+          onExecutionModeAccepted?.(executionMode);
           setAttachments([]);
         } catch {
           // Restore both the text and the attachment list so the user can

@@ -1107,6 +1107,7 @@ describe('SessionChat composer controls', () => {
       expect(clientPostMock).toHaveBeenCalledWith(
         '/api/session/sess-1/prompt_async',
         expect.objectContaining({
+          executionMode: 'build',
           messageID: expect.any(String),
           parts: [{ type: 'text', text: 'continue' }],
         }),
@@ -2486,6 +2487,8 @@ describe('SessionChat agent mentions', () => {
         [],
         'explore',
         undefined,
+        undefined,
+        'build',
       );
     });
   });
@@ -3279,6 +3282,28 @@ describe('SessionChat context usage popover', () => {
 });
 
 describe('SessionChat goal banner', () => {
+  it('shows a Goal-mode objective as soon as the request is accepted', async () => {
+    const user = userEvent.setup();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      executionMode: 'goal',
+    }));
+
+    await user.type(screen.getByPlaceholderText('请输入消息'), '实现解析项目下.flocks{enter}');
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({
+          executionMode: 'goal',
+          parts: [{ type: 'text', text: '实现解析项目下.flocks' }],
+        }),
+      );
+    });
+    expect(await screen.findByText('Goal')).toBeInTheDocument();
+    expect(screen.getByText('实现解析项目下.flocks')).toBeInTheDocument();
+  });
+
   it('hydrates a persisted goal banner when the session loads', async () => {
     sessionApiGetMock.mockResolvedValue({
       id: 'sess-1',

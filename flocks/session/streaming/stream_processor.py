@@ -119,6 +119,7 @@ class StreamProcessor:
         workspace_dir: Optional[str] = None,
         langfuse_generation: Optional[Any] = None,
         step_index: Optional[int] = None,
+        execution_mode: str = "build",
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -136,6 +137,7 @@ class StreamProcessor:
         self._workspace_dir = workspace_dir
         self._langfuse_generation = langfuse_generation
         self._step_index = step_index
+        self._execution_mode = execution_mode
         self._sandbox_runtime_cache = None
         self._sandbox_config_cache = None
         self._sandbox_context_cache = None
@@ -818,6 +820,10 @@ class StreamProcessor:
                         _cb.mark_finished = _mark_finished
                         return _cb
 
+                    tool_extra = {
+                        **sandbox_meta["extra"],
+                        "execution_mode": self._execution_mode,
+                    }
                     ctx = ToolContext(
                         session_id=self.session_id,
                         message_id=self.assistant_message.id,
@@ -825,7 +831,7 @@ class StreamProcessor:
                         call_id=tool_call_id,
                         abort_event=self.abort_event,
                         permission_callback=self.permission_callback,
-                        extra=sandbox_meta["extra"],
+                        extra=tool_extra,
                         metadata_callback=_make_metadata_cb(),
                         event_publish_callback=self.event_publish_callback,
                     )

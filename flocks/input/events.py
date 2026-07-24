@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from flocks.command.command import CommandInfo
 from flocks.input.types import InputSourceType, surface_for_source
+from flocks.session.execution_mode import SessionExecutionMode
 
 
 class UserInputEvent(BaseModel):
@@ -31,6 +32,10 @@ class UserInputEvent(BaseModel):
     mock_reply: Optional[str] = Field(None, alias="mockReply")
     system: Optional[str] = None
     tools: Optional[Dict[str, bool]] = None
+    execution_mode: SessionExecutionMode = Field(
+        SessionExecutionMode.BUILD,
+        alias="executionMode",
+    )
 
     @property
     def surface(self) -> str:
