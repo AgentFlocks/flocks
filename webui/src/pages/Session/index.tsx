@@ -1855,17 +1855,6 @@ export default function SessionPage() {
                 {t('sessionCount', { count: sessions.length })}
               </span>
             </div>
-            {!selectMode && sessions.length > 0 && (
-              <button
-                type="button"
-                onClick={handleEnterSelectMode}
-                className="grid h-[30px] w-[30px] shrink-0 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
-                title={t('selectMode')}
-                aria-label={t('selectMode')}
-              >
-                <MoreHorizontal className="h-4 w-4" />
-              </button>
-            )}
           </div>
 
           <div className="space-y-0.5">
