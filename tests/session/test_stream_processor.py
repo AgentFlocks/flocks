@@ -16,6 +16,7 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from flocks.hooks.pipeline import HookContext, HookStage
 from flocks.tool.registry import ToolResult
 from flocks.session.streaming.stream_processor import StreamProcessor, ToolCallState
 from flocks.session.streaming.stream_events import (
@@ -399,6 +400,285 @@ class TestToolInputStart:
 # ---------------------------------------------------------------------------
 
 class TestToolCallExecution:
+    @pytest.mark.asyncio
+    async def test_tool_before_can_update_input_and_tool_after_can_replace_result(self):
+        proc = _make_processor()
+        execute = AsyncMock(return_value=ToolResult(
+            success=True,
+            output="original result",
+        ))
+
+        async def update_input(payload):
+            payload["tool"]["input"] = {"command": "echo changed"}
+            return HookContext(
+                stage=HookStage.TOOL_BEFORE,
+                input=payload,
+            )
+
+        post_hook = AsyncMock(return_value=HookContext(
+            stage=HookStage.TOOL_AFTER,
+            input={},
+            output={
+                "result": {
+                    "success": True,
+                    "output": "hook result",
+                },
+            },
+        ))
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(side_effect=update_input),
+            ) as pre_hook,
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=post_hook,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=execute,
+            ),
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_changed", tool_name="bash")
+            )
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_changed",
+                tool_name="bash",
+                input={"command": "echo original"},
+            ))
+
+        pre_hook.assert_awaited_once()
+        assert execute.await_args.kwargs["command"] == "echo changed"
+        post_hook.assert_awaited_once()
+        post_payload = post_hook.await_args.args[0]
+        assert post_payload["status"] == "completed"
+        assert post_payload["tool"]["input"] == {"command": "echo changed"}
+        assert post_payload["result"]["output"] == "original result"
+        assert post_payload["durationMs"] >= 0
+        assert proc.tool_calls["tc_changed"].output == "hook result"
+
+    @pytest.mark.asyncio
+    async def test_tool_error_still_emits_tool_after(self):
+        proc = _make_processor()
+        post_hook = AsyncMock(return_value=HookContext(
+            stage=HookStage.TOOL_AFTER,
+            input={},
+        ))
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(return_value=HookContext(
+                    stage=HookStage.TOOL_BEFORE,
+                    input={
+                        "tool": {
+                            "name": "bash",
+                            "input": {"command": "false"},
+                            "callID": "tc_error",
+                        }
+                    },
+                )),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=post_hook,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(return_value=ToolResult(
+                    success=False,
+                    error="command failed",
+                )),
+            ),
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_error", tool_name="bash")
+            )
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_error",
+                tool_name="bash",
+                input={"command": "false"},
+            ))
+
+        post_hook.assert_awaited_once()
+        post_payload = post_hook.await_args.args[0]
+        assert post_payload["status"] == "error"
+        assert post_payload["error"] == "command failed"
+
+    @pytest.mark.asyncio
+    async def test_tool_before_can_block_and_tool_after_reports_blocked(self):
+        proc = _make_processor()
+        execute = AsyncMock(
+            return_value=ToolResult(success=True, output="should not run")
+        )
+        post_hook = AsyncMock(return_value=HookContext(
+            stage=HookStage.TOOL_AFTER,
+            input={},
+        ))
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(return_value=HookContext(
+                    stage=HookStage.TOOL_BEFORE,
+                    input={
+                        "tool": {
+                            "name": "bash",
+                            "input": {"command": "rm -rf target"},
+                            "callID": "tc_blocked",
+                        }
+                    },
+                    output={
+                        "decision": "block",
+                        "reason": "Destructive command is not allowed",
+                    },
+                )),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=post_hook,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=execute,
+            ),
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_blocked", tool_name="bash")
+            )
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_blocked",
+                tool_name="bash",
+                input={"command": "rm -rf target"},
+            ))
+
+        execute.assert_not_awaited()
+        assert proc.tool_calls["tc_blocked"].status == "error"
+        assert proc.tool_calls["tc_blocked"].error == (
+            "Destructive command is not allowed"
+        )
+        post_payload = post_hook.await_args.args[0]
+        assert post_payload["status"] == "blocked"
+        assert post_payload["error"] == "Destructive command is not allowed"
+
+    @pytest.mark.asyncio
+    async def test_sandbox_block_still_emits_tool_after(self):
+        proc = _make_processor()
+        post_hook = AsyncMock(return_value=HookContext(
+            stage=HookStage.TOOL_AFTER,
+            input={},
+        ))
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(return_value=HookContext(
+                    stage=HookStage.TOOL_BEFORE,
+                    input={
+                        "tool": {
+                            "name": "bash",
+                            "input": {"command": "pwd"},
+                            "callID": "tc_sandbox",
+                        }
+                    },
+                )),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=post_hook,
+            ),
+            patch.object(
+                proc,
+                "_resolve_sandbox_meta",
+                new=AsyncMock(return_value={
+                    "blocked": True,
+                    "error": "Sandbox denied tool",
+                    "extra": {},
+                }),
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(),
+            ) as execute,
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_sandbox", tool_name="bash")
+            )
+            await proc.process_event(ToolCallEvent(
+                tool_call_id="tc_sandbox",
+                tool_name="bash",
+                input={"command": "pwd"},
+            ))
+
+        execute.assert_not_awaited()
+        assert post_hook.await_args.args[0]["status"] == "blocked"
+
+    @pytest.mark.asyncio
+    async def test_cancelled_tool_emits_interrupted_tool_after(self):
+        proc = _make_processor()
+        post_hook = AsyncMock(return_value=HookContext(
+            stage=HookStage.TOOL_AFTER,
+            input={},
+        ))
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_before",
+                new=AsyncMock(return_value=HookContext(
+                    stage=HookStage.TOOL_BEFORE,
+                    input={
+                        "tool": {
+                            "name": "bash",
+                            "input": {"command": "sleep 10"},
+                            "callID": "tc_interrupted",
+                        }
+                    },
+                )),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=post_hook,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(side_effect=asyncio.CancelledError()),
+            ),
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_interrupted", tool_name="bash")
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(ToolCallEvent(
+                    tool_call_id="tc_interrupted",
+                    tool_name="bash",
+                    input={"command": "sleep 10"},
+                ))
+
+        post_hook.assert_awaited_once()
+        assert post_hook.await_args.args[0]["status"] == "interrupted"
+
     @pytest.mark.asyncio
     async def test_tool_call_executes_tool(self):
         proc = _make_processor()

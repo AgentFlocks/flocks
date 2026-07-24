@@ -4,6 +4,8 @@ delegate_task tool - category or subagent-based delegation (Oh-My-Flocks parity)
 
 from __future__ import annotations
 
+import asyncio
+import time
 from typing import Optional, List, Dict, Any
 
 from flocks.tool.registry import (
@@ -30,6 +32,111 @@ from flocks.tool.subagent_result import format_sync_subagent_result
 from flocks.utils.log import Log
 
 log = Log.create(service="tool.delegate_task")
+
+
+async def _run_subagent_with_hooks(
+    *,
+    ctx: ToolContext,
+    child_session_id: str,
+    child_agent: str,
+    workspace: str,
+    prompt: str,
+    description: str,
+    resumed: bool,
+    provider_id: Optional[str] = None,
+    model_id: Optional[str] = None,
+    callbacks: Optional[Any] = None,
+) -> Any:
+    """Run one child session with paired SubagentStart/SubagentStop hooks."""
+    from flocks.hooks.pipeline import HookPipeline
+
+    common_payload = {
+        "sessionID": ctx.session_id,
+        "workspace": workspace,
+        "parentSessionID": ctx.session_id,
+        "parentMessageID": ctx.message_id,
+        "childSessionID": child_session_id,
+        "agentType": child_agent,
+        "prompt": prompt,
+        "description": description,
+        "resumed": resumed,
+    }
+    try:
+        await HookPipeline.run_subagent_start(common_payload)
+    except Exception as exc:
+        log.debug("delegate_task.hook.subagent_start.error", {
+            "child_session_id": child_session_id,
+            "error": str(exc),
+        })
+
+    started_at = time.perf_counter()
+    try:
+        result = await SessionLoop.run(
+            child_session_id,
+            provider_id=provider_id,
+            model_id=model_id,
+            callbacks=callbacks,
+        )
+    except asyncio.CancelledError:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        try:
+            await HookPipeline.run_subagent_stop({
+                **common_payload,
+                "status": "interrupted",
+                "durationMs": duration_ms,
+                "summary": None,
+                "error": "Sub-agent execution was interrupted",
+            })
+        except Exception as exc:
+            log.debug("delegate_task.hook.subagent_stop.error", {
+                "child_session_id": child_session_id,
+                "error": str(exc),
+            })
+        raise
+    except Exception as exc:
+        duration_ms = int((time.perf_counter() - started_at) * 1000)
+        try:
+            await HookPipeline.run_subagent_stop({
+                **common_payload,
+                "status": "error",
+                "durationMs": duration_ms,
+                "summary": None,
+                "error": str(exc),
+            })
+        except Exception as hook_exc:
+            log.debug("delegate_task.hook.subagent_stop.error", {
+                "child_session_id": child_session_id,
+                "error": str(hook_exc),
+            })
+        raise
+
+    summary = None
+    last_message = getattr(result, "last_message", None)
+    if last_message is not None:
+        try:
+            summary = await Message.get_text_content(last_message)
+        except Exception as exc:
+            log.debug("delegate_task.hook.subagent_summary.error", {
+                "child_session_id": child_session_id,
+                "error": str(exc),
+            })
+    result_error = getattr(result, "error", None)
+    status = "error" if getattr(result, "action", None) == "error" or result_error else "completed"
+    duration_ms = int((time.perf_counter() - started_at) * 1000)
+    try:
+        await HookPipeline.run_subagent_stop({
+            **common_payload,
+            "status": status,
+            "durationMs": duration_ms,
+            "summary": summary,
+            "error": result_error,
+        })
+    except Exception as exc:
+        log.debug("delegate_task.hook.subagent_stop.error", {
+            "child_session_id": child_session_id,
+            "error": str(exc),
+        })
+    return result
 
 
 async def _subagent_session_permissions(agent_name: str) -> list:
@@ -395,8 +502,15 @@ async def delegate_task_tool(
             agent=session.agent or ctx.agent,
         )
         from flocks.session.session_loop import LoopCallbacks
-        result = await SessionLoop.run(
-            session.id,
+
+        result = await _run_subagent_with_hooks(
+            ctx=ctx,
+            child_session_id=session.id,
+            child_agent=session.agent or ctx.agent,
+            workspace=getattr(session, "directory", None) or "",
+            prompt=prompt,
+            description=description,
+            resumed=True,
             callbacks=LoopCallbacks(
                 event_publish_callback=ctx.event_publish_callback,
             ),
@@ -494,8 +608,14 @@ async def delegate_task_tool(
         description=description,
     )
     ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
-    result = await SessionLoop.run(
-        created.id,
+    result = await _run_subagent_with_hooks(
+        ctx=ctx,
+        child_session_id=created.id,
+        child_agent=agent_to_use,
+        workspace=runtime_directory,
+        prompt=full_prompt,
+        description=description,
+        resumed=False,
         provider_id=(category_model or {}).get("providerID"),
         model_id=(category_model or {}).get("modelID"),
         callbacks=forwarder.build_callbacks(

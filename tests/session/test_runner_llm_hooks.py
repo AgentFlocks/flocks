@@ -59,6 +59,9 @@ class _FakeProcessor:
     def get_finish_reason(self):
         return self.finish_reason
 
+    async def drain_parallel_tool_calls(self) -> None:
+        return None
+
 
 class _FakeToolAccumulator:
     def __init__(self, processor):

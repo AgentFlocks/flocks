@@ -302,6 +302,8 @@ class SessionRunner:
         static_cache: Optional[Dict[str, Any]] = None,
         defer_step_errors: bool = False,
         failover_available: bool = False,
+        turn_additional_context: Optional[str] = None,
+        session_start_pending: bool = False,
     ):
         self.session = session
         from flocks.session.core.defaults import fallback_provider_id, fallback_model_id
@@ -318,6 +320,9 @@ class SessionRunner:
         self._static_cache = static_cache if static_cache is not None else {}
         self._defer_step_errors = defer_step_errors
         self._failover_available = failover_available
+        self._turn_additional_context = turn_additional_context
+        self._session_start_pending = session_start_pending
+        self._session_start_fired = False
         self._attempt_state = LlmAttemptState()
 
     @staticmethod
@@ -355,6 +360,26 @@ class SessionRunner:
     def _should_warn_about_tool_loop(self, *, last_user_id: str) -> bool:
         state = self._get_tool_loop_guard_state(last_user_id=last_user_id)
         return int(state.get("exact_count", 0)) >= max(2, REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD - 1)
+
+    async def _run_session_start_hook(self, agent: Any) -> None:
+        """Run SessionStart after the first system prompt has been built."""
+        if not self._session_start_pending or self._session_start_fired:
+            return
+        self._session_start_fired = True
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+
+            await HookPipeline.run_session_start({
+                "sessionID": self.session.id,
+                "workspace": self.session.directory,
+                "agent": agent.name,
+                "model": {
+                    "providerID": self.provider_id,
+                    "modelID": self.model_id,
+                },
+            })
+        except Exception as exc:
+            log.debug("runner.hook.session_start.error", {"error": str(exc)})
 
     def _build_tool_loop_halt_message(
         self,
@@ -1414,6 +1439,11 @@ class SessionRunner:
         )
         self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
 
+        await self._run_session_start_hook(agent)
+
+        if self._turn_additional_context:
+            system_prompts.append(self._turn_additional_context)
+
         if self._should_use_text_tool_call_mode() and tools:
             text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
             if text_tool_catalog:
@@ -1448,29 +1478,6 @@ class SessionRunner:
                 from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
                 system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
-        # Hook pipeline: chat.message stage
-        try:
-            from flocks.hooks.pipeline import HookPipeline
-            user_text = await Message.get_text_content(last_user)
-            hook_input = {
-                "sessionID": self.session.id,
-                "workspace": self.session.directory,
-                "agent": agent.name,
-                "model": {"providerID": self.provider_id, "modelID": self.model_id},
-                "message": {
-                    "id": last_user.id,
-                    "role": "user",
-                    "content": user_text,
-                },
-            }
-            hook_output = {"message": {"variant": getattr(last_user, "variant", None)}}
-            ctx = await HookPipeline.run_chat_message(hook_input, hook_output)
-            variant = ctx.output.get("message", {}).get("variant") if ctx else None
-            if variant:
-                await Message.update(self.session.id, last_user.id, variant=variant)
-        except Exception as e:
-            log.debug("runner.hook.chat_message.error", {"error": str(e)})
-        
         # Convert messages to chat format with error handling
         try:
             queued_user_message_ids = self._get_queued_user_message_ids(messages)
