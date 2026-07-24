@@ -618,7 +618,7 @@ describe('getMessageBubbleClassName', () => {
       isEditing: false,
     });
 
-    expect(className).toContain('bg-[#fafaf8]');
+    expect(className).toContain('bg-zinc-50');
     expect(className).toContain('border-black/[0.07]');
     expect(className).not.toContain('bg-sky-50');
     expect(className).not.toContain('border-sky-100');

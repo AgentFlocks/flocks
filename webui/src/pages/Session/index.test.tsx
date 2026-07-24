@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, useNavigate } from 'react-router-dom';
 import { __resetChatModelResourcesForTesting } from '@/hooks/useChatModelResources';
+import { formatRelativeTime } from '@/utils/time';
 import SessionPage from './index';
 
 const sessionStatusSSEOptionsRef = vi.hoisted(() => ({
@@ -225,7 +226,7 @@ vi.mock('@/utils/agentDisplay', () => ({
 
 vi.mock('@/utils/time', () => ({
   formatSessionDate: () => 'formatted-date',
-  formatRelativeTime: () => '17小时前',
+  formatRelativeTime: vi.fn(() => '17小时前'),
 }));
 
 vi.mock('react-i18next', () => ({
@@ -409,6 +410,13 @@ describe('SessionPage session actions menu', () => {
     const projectsHeading = screen.getByText('projectsSection');
     const tasksSection = tasksHeading.closest('section');
     const projectsSection = projectsHeading.closest('section');
+    const newSessionButton = screen.getByRole('button', { name: 'newSession' });
+    const searchInput = screen.getByPlaceholderText('filterConversations');
+    expect(newSessionButton.previousElementSibling).toHaveClass('h-5', 'w-5');
+    expect(searchInput.previousElementSibling).toHaveClass('h-5', 'w-5');
+    expect(searchInput).toHaveClass('text-sm', 'font-medium');
+    expect(tasksHeading.closest('div')).toHaveClass('text-xs', 'text-zinc-500');
+    expect(projectsHeading.closest('div')).toHaveClass('text-xs', 'text-zinc-500');
     expect(tasksSection).not.toBeNull();
     expect(projectsSection).not.toBeNull();
     expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
@@ -418,7 +426,7 @@ describe('SessionPage session actions menu', () => {
       pageSize: 20,
     });
     expect(screen.queryByText('defaultProjectName')).not.toBeInTheDocument();
-    expect(screen.getByText('Original Session').closest('h3')).toHaveClass('text-sm');
+    expect(screen.getByText('Original Session').closest('h3')).toHaveClass('text-sm', 'font-medium');
 
     await user.click(screen.getByRole('button', { name: 'toggleTasks' }));
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
@@ -427,24 +435,55 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByText('Original Session')).toBeInTheDocument();
   });
 
+  it('keeps the workbench canvas, sidebar, selected row, and dark palette classes stable', async () => {
+    renderSessionPage('/sessions?session=session-1');
+
+    const workbenchSidebar = screen.getByLabelText('managementTitle');
+    const workbenchCanvas = workbenchSidebar.parentElement;
+    const mainCanvas = workbenchSidebar.nextElementSibling;
+    const sessionTitle = await within(workbenchSidebar).findByText('Original Session');
+    const selectedRow = sessionTitle.closest('div.group');
+
+    expect(workbenchCanvas).toHaveClass('bg-gray-50', 'dark:bg-[#252c35]');
+    expect(workbenchSidebar).toHaveClass('bg-white', 'dark:bg-[#303842]');
+    expect(mainCanvas).toHaveClass('bg-gray-50', 'dark:bg-[#252c35]');
+    await waitFor(() => {
+      expect(selectedRow).toHaveClass('bg-zinc-200/70', 'dark:bg-[#3a434e]');
+    });
+  });
+
   it('shows and clears the sidebar running state from recovered and live session status', async () => {
+    useSessions.mockReturnValue({
+      sessions: [session, secondSession],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
     client.get.mockImplementation((url: string) => Promise.resolve({
       data: url === '/api/session/status'
-        ? { [session.id]: { type: 'busy' } }
+        ? {
+            [session.id]: { type: 'busy' },
+            [secondSession.id]: { type: 'busy' },
+          }
         : [{
             id: 'default',
             worktree: '/tmp/project',
             name: '默认',
             isDefault: true,
             pathStatus: 'available',
-            sessionCount: 1,
+            sessionCount: 2,
           }],
     }));
 
     renderSessionPage();
 
-    const runningStatus = await screen.findByRole('status', { name: 'chat.tool.running' });
-    expect(runningStatus).toHaveAttribute('data-session-running', session.id);
+    const runningStatuses = await screen.findAllByRole('status', { name: 'chat.tool.running' });
+    expect(runningStatuses.map((status) => status.getAttribute('data-session-running')))
+      .toEqual(expect.arrayContaining([session.id, secondSession.id]));
 
     act(() => {
       sessionStatusSSEOptionsRef.current?.onEvent({
@@ -456,7 +495,8 @@ describe('SessionPage session actions menu', () => {
       });
     });
 
-    expect(screen.queryByRole('status', { name: 'chat.tool.running' })).not.toBeInTheDocument();
+    expect(screen.getByRole('status', { name: 'chat.tool.running' }))
+      .toHaveAttribute('data-session-running', secondSession.id);
 
     act(() => {
       sessionStatusSSEOptionsRef.current?.onEvent({
@@ -468,8 +508,8 @@ describe('SessionPage session actions menu', () => {
       });
     });
 
-    expect(screen.getByRole('status', { name: 'chat.tool.running' }))
-      .toHaveAttribute('data-session-running', session.id);
+    expect(screen.getAllByRole('status', { name: 'chat.tool.running' }))
+      .toHaveLength(2);
   });
 
   it('shows load more as text without an idle arrow', async () => {
@@ -576,6 +616,7 @@ describe('SessionPage session actions menu', () => {
     const firstRender = renderSessionPage();
 
     await screen.findByText('Labs');
+    expect(screen.getByRole('button', { name: 'selectProject' }).querySelector('svg')).toHaveClass('h-5', 'w-5');
     await user.click(screen.getByRole('button', { name: 'toggleProjects' }));
     expect(screen.queryByText('Labs')).not.toBeInTheDocument();
 
@@ -1259,12 +1300,33 @@ describe('SessionPage session actions menu', () => {
     const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
 
     expect(timestamp).not.toHaveClass('group-hover:opacity-0');
+    expect(timestamp).toHaveClass('text-zinc-500');
     expect(timestamp).toHaveAttribute('title', 'formatted-date');
     expect(actionsTrigger).not.toHaveClass('hover:bg-white/80');
 
     await user.click(actionsTrigger);
 
     expect(actionsTrigger).not.toHaveClass('bg-white/80');
+  });
+
+  it('refreshes relative session timestamps every minute', () => {
+    vi.useFakeTimers();
+    let relativeTimeLabel = '17小时前';
+    vi.mocked(formatRelativeTime).mockImplementation(() => relativeTimeLabel);
+    try {
+      renderSessionPage();
+      expect(screen.getByText('17小时前')).toBeInTheDocument();
+
+      relativeTimeLabel = '18小时前';
+      act(() => {
+        vi.advanceTimersByTime(60_000);
+      });
+
+      expect(screen.getByText('18小时前')).toBeInTheDocument();
+    } finally {
+      vi.mocked(formatRelativeTime).mockImplementation(() => '17小时前');
+      vi.useRealTimers();
+    }
   });
 
   it('renames a session inline from the actions menu', async () => {

@@ -211,6 +211,7 @@ interface SessionSidebarItemProps {
   renameValue: string;
   renameSubmitting: boolean;
   language: string;
+  relativeTimeClock: number;
   t: (key: string, options?: Record<string, unknown>) => string;
   renameInputRef: RefObject<HTMLInputElement | null>;
   onSelect: (sessionId: string) => void;
@@ -249,7 +250,7 @@ function SessionSidebarItemInner({
         nested ? 'ml-[19px]' : ''
       } ${
         !selectMode && selected
-          ? 'border-transparent bg-[#ececea] text-[#202328] dark:bg-[#3a434e] dark:text-white'
+          ? 'border-transparent bg-zinc-200/70 text-[#202328] dark:bg-[#3a434e] dark:text-white'
           : selectMode && checked
           ? 'border-blue-200 bg-blue-50 text-[#202328] dark:border-blue-400/40 dark:bg-blue-500/10 dark:text-white'
           : 'border-transparent text-[#5b6067] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white'
@@ -266,13 +267,13 @@ function SessionSidebarItemInner({
           />
         )}
         {session.category === 'workflow' && (
-          <span title={t('workflowSession')} className="flex-shrink-0">
-            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+          <span title={t('workflowSession')} className="mr-1.5 flex-shrink-0">
+            <WorkflowIcon className="h-5 w-5 text-orange-400" />
           </span>
         )}
         {session.category === 'entity-config' && (
-          <span title={t('configSession')} className="flex-shrink-0">
-            <Settings2 className="w-3 h-3 text-purple-400" />
+          <span title={t('configSession')} className="mr-1.5 flex-shrink-0">
+            <Settings2 className="h-5 w-5 text-purple-400" />
           </span>
         )}
         {renaming ? (
@@ -293,9 +294,7 @@ function SessionSidebarItemInner({
             data-session-rename-input
           />
         ) : (
-          <h3 className={`flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm ${
-            selected ? 'font-medium' : 'font-normal'
-          }`}>
+          <h3 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium">
             <span className="truncate">{session.title}</span>
             {session.isShared && (
               <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
@@ -308,7 +307,7 @@ function SessionSidebarItemInner({
           <time
             dateTime={new Date(session.time.updated).toISOString()}
             title={formatSessionDate(session.time.updated)}
-            className="ml-1 shrink-0 whitespace-nowrap text-[11px] font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]"
+            className="ml-1 shrink-0 whitespace-nowrap text-[11px] font-normal tabular-nums text-zinc-500 dark:text-[#8f9ba8]"
           >
             {formatRelativeTime(session.time.updated, language)}
           </time>
@@ -369,6 +368,7 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.renameValue === next.renameValue &&
   prev.renameSubmitting === next.renameSubmitting &&
   prev.language === next.language &&
+  prev.relativeTimeClock === next.relativeTimeClock &&
   prev.t === next.t
 ));
 
@@ -471,6 +471,7 @@ export default function SessionPage() {
   const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
+  const [relativeTimeClock, setRelativeTimeClock] = useState(0);
   const [creating, setCreating] = useState(false);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
@@ -971,6 +972,13 @@ export default function SessionPage() {
   useEffect(() => {
     void refreshRunningSessionIds();
   }, [refreshRunningSessionIds]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setRelativeTimeClock((tick) => tick + 1);
+    }, 60_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     if (!openProjectMenuId) return;
@@ -1834,10 +1842,10 @@ export default function SessionPage() {
   const showSessionListSkeleton = loadingSessions && sessions.length === 0;
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-[#f4f4f2] text-[#202328] dark:bg-[#252c35] dark:text-[#d7dee8]">
+    <div className="flex h-full w-full overflow-hidden bg-gray-50 text-[#202328] dark:bg-[#252c35] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`flex h-[calc(100%_-_1.5rem)] flex-shrink-0 flex-col overflow-hidden rounded-2xl border bg-[#f8f8f6] shadow-[0_3px_12px_rgba(22,27,34,0.045)] transition-[width,margin,opacity] duration-200 dark:border-white/[0.08] dark:bg-[#303842] dark:shadow-[0_8px_24px_rgba(15,18,22,0.16)] ${
+        className={`flex h-[calc(100%_-_1.5rem)] flex-shrink-0 flex-col overflow-hidden rounded-2xl border bg-white shadow-[0_3px_12px_rgba(22,27,34,0.045)] transition-[width,margin,opacity] duration-200 dark:border-white/[0.08] dark:bg-[#303842] dark:shadow-[0_8px_24px_rgba(15,18,22,0.16)] ${
           sidebarCollapsed
             ? 'my-3 w-0 border-transparent opacity-0'
             : 'm-3 w-[282px] border-black/[0.07] opacity-100'
@@ -1860,24 +1868,24 @@ export default function SessionPage() {
           <div className="space-y-0.5">
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
-                ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 animate-spin text-[#7b8087]" />
-                : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-4 w-4 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+                ? <Loader2 className="pointer-events-none absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 animate-spin text-[#7b8087]" />
+                : <PencilLine className="pointer-events-none absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
               <button
                 onClick={handleStartNewSession}
                 disabled={creating}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-10 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
               >
                 {t('newSession')}
               </button>
             </div>
 
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
-              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-[15px] w-[15px] -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
+              <Search className="pointer-events-none absolute left-2.5 top-1/2 h-5 w-5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
                 placeholder={t('filterConversations', 'Filter conversations...')}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-10 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
               />
               {searchQuery && (
                 <button
@@ -1904,7 +1912,7 @@ export default function SessionPage() {
           ) : (
           <div>
             <section className="group/projects-section">
-                <div className="flex h-7 select-none items-center gap-1.5 px-2 text-[11px] font-semibold uppercase tracking-[0.02em] text-[#8a8e94] dark:text-[#8f9ba8]">
+                <div className="flex h-7 select-none items-center gap-1.5 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-zinc-500 dark:text-[#8f9ba8]">
                   <button
                     type="button"
                     onClick={() => setProjectsSectionCollapsed((collapsed) => !collapsed)}
@@ -1964,7 +1972,7 @@ export default function SessionPage() {
                           aria-label={t('selectProject', { project: group.label })}
                           aria-expanded={!collapsed}
                         >
-                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
+                          <FolderGit2 className="mr-1 h-5 w-5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
                           <span className="min-w-0 flex-1 truncate">{group.label}</span>
                           {group.isShared && (
                             <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
@@ -2086,6 +2094,7 @@ export default function SessionPage() {
                                 renameValue={renameValue}
                                 renameSubmitting={renameSubmitting}
                                 language={i18n.language}
+                                relativeTimeClock={relativeTimeClock}
                                 t={t}
                                 renameInputRef={renameInputRef}
                                 onSelect={handleSelectSessionRow}
@@ -2143,7 +2152,7 @@ export default function SessionPage() {
               </section>
               {taskSessionGroup && (
                 <section className="group/tasks-section mt-3">
-                  <div className="flex h-7 select-none items-center gap-1 px-2 text-[11px] font-semibold uppercase tracking-[0.02em] text-[#8a8e94] dark:text-[#8f9ba8]">
+                  <div className="flex h-7 select-none items-center gap-1 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-zinc-500 dark:text-[#8f9ba8]">
                     <button
                       type="button"
                       onClick={() => {
@@ -2202,6 +2211,7 @@ export default function SessionPage() {
                           renameValue={renameValue}
                           renameSubmitting={renameSubmitting}
                           language={i18n.language}
+                          relativeTimeClock={relativeTimeClock}
                           t={t}
                           renameInputRef={renameInputRef}
                           onSelect={handleSelectSessionRow}
@@ -2298,7 +2308,7 @@ export default function SessionPage() {
       </div>
 
       {/* ── Main area ── */}
-      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#f4f4f2] dark:bg-[#252c35]">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-gray-50 dark:bg-[#252c35]">
         {/* Header */}
         <div className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
           <div className="shrink-0">
@@ -2994,7 +3004,7 @@ function WelcomeScreen({
         <button
           onClick={onAlertOperationsSetup}
           disabled={alertOperationsBusy}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-[#f8f8f6] px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-[#fafaf8] hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           {alertOperationsBusy ? (
             <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
@@ -3005,14 +3015,14 @@ function WelcomeScreen({
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-[#f8f8f6] px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-[#fafaf8] hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           <Search className="h-[18px] w-[18px] text-[#f4511e]" />
           <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
-          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-[#f8f8f6] px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-[#fafaf8] hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
           <span>{t('welcome.incidentResponse')}</span>

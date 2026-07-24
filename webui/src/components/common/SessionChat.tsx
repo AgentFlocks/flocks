@@ -828,12 +828,12 @@ export function getMessageBubbleClassName({
   if (compact) {
     const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-[#fafaf8] text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
   }
 
   const widthClass = isEditing ? 'w-full' : 'w-auto';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm border border-black/[0.07] bg-[#fafaf8] text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -3515,7 +3515,7 @@ export default function SessionChat({
                     : isStreaming
                       ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
                       : pageCanvas && !compact
-                        ? 'border-black/[0.07] bg-[#fafaf8] hover:border-black/[0.11] focus-within:border-black/[0.11] focus-within:bg-[#fdfdfc] focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.08] dark:bg-[#303842] dark:hover:border-white/[0.13] dark:focus-within:border-white/[0.14] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        ? 'border-black/[0.07] bg-zinc-50 hover:border-black/[0.11] focus-within:border-black/[0.11] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.08] dark:bg-[#303842] dark:hover:border-white/[0.13] dark:focus-within:border-white/[0.14] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
                         : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
