@@ -921,6 +921,34 @@ class InboundDispatcher:
             **Session.inherited_model_kwargs(session),
             **owner_kwargs,
         )
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            from flocks.session.execution_profile import (
+                get_session_execution_profile,
+                upsert_session_execution_profile,
+            )
+
+            await upsert_session_execution_profile(
+                new_session.id,
+                patch={
+                    "entry": "channel",
+                    "channel_id": msg.channel_id,
+                    "account_id": msg.account_id,
+                    "default_agent": str(new_session.agent or "").strip(),
+                },
+                source="channel.command.new_session",
+            )
+            profile = await get_session_execution_profile(new_session.id)
+            await HookPipeline.run_action_before(
+                {
+                    "operation": "session.mode.initialize",
+                    "session_id": new_session.id,
+                    "entry": "channel",
+                    "session_execution_profile": profile or {},
+                }
+            )
+        except Exception:
+            pass
         new_binding = await self.binding_service.rebind(
             msg,
             new_session.id,

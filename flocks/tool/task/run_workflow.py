@@ -159,6 +159,14 @@ def _create_nested_tool_context(
     sandbox/session identity.
     """
     extra = dict(ctx.extra)
+    profile = (
+        dict(extra.get("session_execution_profile"))
+        if isinstance(extra.get("session_execution_profile"), dict)
+        else {}
+    )
+    if profile:
+        profile["entry"] = "workflow"
+        extra["session_execution_profile"] = profile
     if workflow_id:
         extra["workflow_context"] = {
             "source": "run_workflow_tool",

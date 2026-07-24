@@ -109,6 +109,14 @@ async def list_session_callable_tool_infos(
     }
     if agent:
         projection_payload["agent"] = agent
+    try:
+        from flocks.session.execution_profile import get_session_execution_profile
+
+        profile = await get_session_execution_profile(session_id)
+        if isinstance(profile, dict):
+            projection_payload["session_execution_profile"] = profile
+    except Exception:
+        pass
     subject = get_current_subject()
     if subject is not None:
         # Subject is an opaque extension carrier.  Flocks deliberately keeps

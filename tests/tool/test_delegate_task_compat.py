@@ -17,18 +17,23 @@ class TestDelegateTaskTolerance:
         assert "prompt" in schema.required
         assert "load_skills" not in schema.required
         assert "description" not in schema.required
+        assert "permission_mode" in schema.properties
         assert "run_in_background" not in schema.properties
         # Legacy batch shape is gone: tasks=[...] is no longer a public option.
         assert "tasks" not in schema.properties
 
     @pytest.mark.asyncio
     async def test_delegate_task_derives_description_and_ignores_blank_skills(self):
+        from flocks.tool.agent.delegate_task import delegate_task_tool
+
         parent_session = SimpleNamespace(
             id="test-session",
             project_id="proj",
             directory="/tmp/project",
             provider=None,
             model=None,
+            agent="rex",
+            metadata={},
         )
         child_session = SimpleNamespace(id="ses-child")
         with (
@@ -38,6 +43,14 @@ class TestDelegateTaskTolerance:
             patch("flocks.tool.agent.delegate_task.Skill.get", AsyncMock()) as skill_get,
             patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
             patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)) as create_session,
+            patch(
+                "flocks.session.execution_profile.get_session_execution_profile",
+                AsyncMock(return_value={"permission_mode": "require-confirm", "entry": "interactive"}),
+            ),
+            patch(
+                "flocks.session.execution_profile.upsert_session_execution_profile",
+                AsyncMock(),
+            ) as update_profile,
             patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
             patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
                 action="stop",
@@ -45,9 +58,8 @@ class TestDelegateTaskTolerance:
                 last_message=None,
             ))),
         ):
-            result = await ToolRegistry.execute(
-                "delegate_task",
-                ctx=_make_ctx(),
+            result = await delegate_task_tool(
+                _make_ctx(),
                 subagent_type="asset-survey",
                 prompt="Investigate threatbook.cn assets",
                 load_skills=["", "   "],
@@ -61,15 +73,72 @@ class TestDelegateTaskTolerance:
         denied_permissions = {rule.permission for rule in permissions if rule.action == "deny"}
         assert "delegate_task" not in denied_permissions
         assert "task" not in denied_permissions
+        assert any(
+            call.kwargs.get("patch", {}).get("entry") == "delegate"
+            and "permission_mode" not in call.kwargs.get("patch", {})
+            for call in update_profile.await_args_list
+        )
 
     @pytest.mark.asyncio
-    async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):
+    async def test_delegate_task_allows_explicit_child_permission_mode(self):
+        from flocks.tool.agent.delegate_task import delegate_task_tool
+
         parent_session = SimpleNamespace(
             id="test-session",
             project_id="proj",
             directory="/tmp/project",
             provider=None,
             model=None,
+            agent="rex",
+            metadata={},
+        )
+        child_session = SimpleNamespace(id="ses-child")
+        with (
+            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
+            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
+            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
+            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
+            patch(
+                "flocks.session.execution_profile.get_session_execution_profile",
+                AsyncMock(return_value={"permission_mode": "auto-allow-all", "entry": "interactive"}),
+            ),
+            patch(
+                "flocks.session.execution_profile.upsert_session_execution_profile",
+                AsyncMock(),
+            ) as update_profile,
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
+                action="stop",
+                error=None,
+                last_message=None,
+            ))),
+        ):
+            result = await delegate_task_tool(
+                _make_ctx(),
+                subagent_type="asset-survey",
+                prompt="Inspect the repository",
+                permission_mode="require-confirm",
+            )
+
+        assert result.success is True
+        assert any(
+            call.kwargs.get("patch", {}).get("requested_permission_mode")
+            == "require-confirm"
+            for call in update_profile.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):
+        from flocks.tool.agent.delegate_task import delegate_task_tool
+
+        parent_session = SimpleNamespace(
+            id="test-session",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+            agent="rex",
         )
         child_session = SimpleNamespace(id="ses-quick")
         cfg = SimpleNamespace(categories={
@@ -93,9 +162,8 @@ class TestDelegateTaskTolerance:
                  error=None,
                  last_message=None,
              ))) as loop_run:
-            result = await ToolRegistry.execute(
-                "delegate_task",
-                ctx=_make_ctx(),
+            result = await delegate_task_tool(
+                _make_ctx(),
                 category="quick",
                 prompt="Summarize the diff",
                 description="quick task",
@@ -155,9 +223,15 @@ class TestDelegateTaskTolerance:
 
     @pytest.mark.asyncio
     async def test_delegate_task_sync_continue_fails_when_last_message_missing(self):
+        from flocks.tool.agent.delegate_task import delegate_task_tool
+
         session = SimpleNamespace(
             id="ses-child",
             agent="asset-survey",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
         )
 
         with patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))), \
@@ -168,9 +242,8 @@ class TestDelegateTaskTolerance:
                  error=None,
                  last_message=None,
              ))):
-            result = await ToolRegistry.execute(
-                "delegate_task",
-                ctx=_make_ctx(),
+            result = await delegate_task_tool(
+                _make_ctx(),
                 session_id="ses-child",
                 prompt="Continue investigating",
             )

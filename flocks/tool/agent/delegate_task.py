@@ -316,6 +316,15 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
             description="Optional model override (provider/model or model)",
             required=False,
         ),
+        ToolParameter(
+            name="permission_mode",
+            type=ParameterType.STRING,
+            description=(
+                "Optional child session mode: readonly, require-confirm, or "
+                "auto-allow-all. Omit to inherit the parent session mode."
+            ),
+            required=False,
+        ),
     ],
 )
 async def delegate_task_tool(
@@ -333,6 +342,7 @@ async def delegate_task_tool(
     session_id: Optional[str] = None,
     command: Optional[str] = None,
     model: Optional[str] = None,
+    permission_mode: Optional[str] = None,
 ) -> ToolResult:
     if run_in_background:
         return ToolResult(
@@ -347,6 +357,8 @@ async def delegate_task_tool(
     if not prompt:
         return ToolResult(success=False, error="prompt is required")
 
+    requested_permission_mode = str(permission_mode or "").strip().lower()
+
     load_skills = [str(name).strip() for name in (load_skills or []) if str(name).strip()]
     description = _derive_task_description(description, prompt, subagent_type, category, session_id)
     if category and subagent_type:
@@ -358,7 +370,12 @@ async def delegate_task_tool(
         permission="delegate_task",
         patterns=[category or subagent_type or "continue"],
         always=["*"],
-        metadata={"description": description, "category": category, "subagent_type": subagent_type},
+        metadata={
+            "description": description,
+            "category": category,
+            "subagent_type": subagent_type,
+            "permission_mode": requested_permission_mode or None,
+        },
     )
 
     # Dedup: if an identical delegate_task already completed in this session,
@@ -476,6 +493,21 @@ async def delegate_task_tool(
             model_pinned=bool(explicit_model),
         )
     created = await Session.create(**create_kwargs)
+    try:
+        from flocks.session.execution_profile import upsert_session_execution_profile
+
+        await upsert_session_execution_profile(
+            created.id,
+            patch={
+                "entry": "delegate",
+                "parent_session_id": parent_session.id,
+                "requested_permission_mode": requested_permission_mode or None,
+                "default_agent": agent_to_use,
+            },
+            source="delegate_task.child_metadata",
+        )
+    except Exception:
+        pass
     await Message.create(
         session_id=created.id,
         role=MessageRole.USER,
@@ -490,10 +522,21 @@ async def delegate_task_tool(
         description=description,
     )
     ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
+    parent_profile_snapshot: dict[str, Any] = {}
+    try:
+        from flocks.session.execution_profile import get_session_execution_profile
+
+        profile = await get_session_execution_profile(parent_session.id)
+        if isinstance(profile, dict):
+            parent_profile_snapshot = dict(profile)
+    except Exception:
+        pass
     child_payload = {
         "operation": "session.child.run",
         "parent_session_id": parent_session.id,
         "child_session_id": created.id,
+        "requested_permission_mode": requested_permission_mode or None,
+        "parent_session_profile": parent_profile_snapshot,
     }
     result = await execute_with_hooks(
         child_payload,

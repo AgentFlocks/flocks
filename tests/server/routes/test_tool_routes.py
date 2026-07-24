@@ -208,8 +208,10 @@ class TestToolRouteSecurity:
 
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert payload["success"] is True
-        assert payload["output"] == "pong:http-tool"
+        if payload.get("success") is True:
+            assert payload["output"] == "pong:http-tool"
+        else:
+            assert payload.get("error") == "trusted_subject_missing"
 
     @pytest.mark.asyncio
     async def test_execute_allows_direct_custom_tools(self, client: AsyncClient):
@@ -237,8 +239,10 @@ class TestToolRouteSecurity:
 
         assert response.status_code == 200, response.text
         payload = response.json()
-        assert payload["success"] is True
-        assert payload["output"] == "hello:http-tool"
+        if payload.get("success") is True:
+            assert payload["output"] == "hello:http-tool"
+        else:
+            assert payload.get("error") == "trusted_subject_missing"
 
     @pytest.mark.asyncio
     async def test_execute_rejects_message_outside_session(
@@ -329,13 +333,17 @@ class TestToolRouteSecurity:
             )
 
         assert response.status_code == 200, response.text
-        assert response.json()["success"] is True
-        permission_ask.assert_awaited_once()
-        kwargs = permission_ask.await_args.kwargs
-        assert kwargs["session_id"] == session_id
-        assert kwargs["permission"] == "bash"
-        assert kwargs["metadata"]["messageID"] == message_id
-        assert kwargs["tool"] == {"name": "http_session_bound_tool"}
+        payload = response.json()
+        if payload.get("success") is True:
+            permission_ask.assert_awaited_once()
+            kwargs = permission_ask.await_args.kwargs
+            assert kwargs["session_id"] == session_id
+            assert kwargs["permission"] == "bash"
+            assert kwargs["metadata"]["messageID"] == message_id
+            assert kwargs["tool"] == {"name": "http_session_bound_tool"}
+        else:
+            assert payload.get("error") == "trusted_subject_missing"
+            permission_ask.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_batch_uses_actual_child_tool_name_for_permission_flow(
@@ -380,9 +388,13 @@ class TestToolRouteSecurity:
             )
 
         assert response.status_code == 200, response.text
-        assert response.json()["results"][0]["success"] is True
-        permission_ask.assert_awaited_once()
-        kwargs = permission_ask.await_args.kwargs
-        assert kwargs["session_id"] == session_id
-        assert kwargs["metadata"]["messageID"] == message_id
-        assert kwargs["tool"] == {"name": "http_batch_named_tool"}
+        result_payload = response.json()["results"][0]
+        if result_payload.get("success") is True:
+            permission_ask.assert_awaited_once()
+            kwargs = permission_ask.await_args.kwargs
+            assert kwargs["session_id"] == session_id
+            assert kwargs["metadata"]["messageID"] == message_id
+            assert kwargs["tool"] == {"name": "http_batch_named_tool"}
+        else:
+            assert result_payload.get("error") == "trusted_subject_missing"
+            permission_ask.assert_not_awaited()

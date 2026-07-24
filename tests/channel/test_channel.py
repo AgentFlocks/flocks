@@ -573,6 +573,21 @@ class TestFeishuNativeCommands:
         monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
         update_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("flocks.session.session.Session.update", update_mock)
+        profile_upsert = AsyncMock(return_value=None)
+        profile_get = AsyncMock(return_value={"entry": "channel", "revision": 1})
+        mode_init = AsyncMock(return_value=SimpleNamespace(output={}))
+        monkeypatch.setattr(
+            "flocks.session.execution_profile.upsert_session_execution_profile",
+            profile_upsert,
+        )
+        monkeypatch.setattr(
+            "flocks.session.execution_profile.get_session_execution_profile",
+            profile_get,
+        )
+        monkeypatch.setattr(
+            "flocks.hooks.pipeline.HookPipeline.run_action_before",
+            mode_init,
+        )
 
         handled = await dispatcher._handle_feishu_native_command(
             binding=binding,
@@ -590,6 +605,16 @@ class TestFeishuNativeCommands:
         assert create_kwargs["title"] == "[Feishu] oc_group"
         assert "session_new" in delivered[0]
         assert "已开始全新对话。" in delivered[0]
+        profile_upsert.assert_awaited_once()
+        assert profile_upsert.await_args.args[0] == "session_new"
+        assert profile_upsert.await_args.kwargs["patch"]["entry"] == "channel"
+        assert profile_upsert.await_args.kwargs["patch"]["channel_id"] == "feishu"
+        assert profile_upsert.await_args.kwargs["patch"]["account_id"] == "default"
+        mode_init.assert_awaited_once()
+        assert (
+            mode_init.await_args.args[0]["operation"] == "session.mode.initialize"
+        )
+        assert mode_init.await_args.args[0]["entry"] == "channel"
         # The previous session must be archived so it no longer appears in the
         # active IM session list used for scheduled-task target resolution.
         update_mock.assert_awaited_once()

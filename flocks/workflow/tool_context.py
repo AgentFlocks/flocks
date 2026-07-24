@@ -10,6 +10,10 @@ from fastapi import HTTPException
 
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
+from flocks.session.execution_profile import (
+    get_session_execution_profile,
+    upsert_session_execution_profile,
+)
 from flocks.tool import ToolContext
 from flocks.workflow.fs_store import find_workspace_root
 
@@ -86,9 +90,41 @@ async def build_workflow_tool_context(
         )
         effective_message_id = message.id
 
+    try:
+        # Workflow runtime carries provenance metadata only; mode resolution is
+        # fully Pro-owned.
+        from flocks.hooks.pipeline import HookPipeline
+
+        await upsert_session_execution_profile(
+            effective_session_id,
+            patch={
+                "entry": "workflow",
+                "default_agent": effective_agent or "rex",
+            },
+            source="workflow.runtime.tool_context",
+        )
+        profile = await get_session_execution_profile(effective_session_id)
+        await HookPipeline.run_action_before(
+            {
+                "operation": "session.mode.initialize",
+                "session_id": effective_session_id,
+                "entry": "workflow",
+                "workflow_context": {
+                    "source": "workflow_runtime",
+                    "workflow_id": workflow_id,
+                    "action_name": action_name,
+                },
+                "session_execution_profile": profile or {},
+            }
+        )
+    except Exception:
+        pass
+    session_profile = await get_session_execution_profile(effective_session_id)
+
     extra = {
         "workspace_dir": workspace_dir,
         "main_session_key": effective_session_id,
+        "session_execution_profile": session_profile or {},
         "workflow_context": {
             "source": "workflow_runtime",
             "workflow_id": workflow_id,

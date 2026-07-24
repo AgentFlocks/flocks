@@ -527,7 +527,11 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             )
             for p in request.permission
         ]
-    
+
+    # WebUI creates an interactive session with an explicit confirmation mode.
+    # Mode resolution is Pro-owned; OSS only records session provenance metadata.
+    from flocks.session.execution_profile import PROFILE_METADATA_KEY
+
     session = await Session.create(
         project_id=project_id,
         directory=directory,
@@ -535,8 +539,29 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
         parent_id=request.parentID,
         permission=permission,
         owner_user_id=current_user.id,
+        metadata={
+            PROFILE_METADATA_KEY: {
+                "entry": "interactive",
+                "source": "webui.session.create",
+            }
+        },
         **({"category": request.category} if request.category else {}),
     )
+    try:
+        from flocks.hooks.pipeline import HookPipeline
+        from flocks.session.execution_profile import get_session_execution_profile
+
+        profile = await get_session_execution_profile(session.id)
+        await HookPipeline.run_action_before(
+            {
+                "operation": "session.mode.initialize",
+                "session_id": session.id,
+                "entry": "interactive",
+                "session_execution_profile": profile or {},
+            }
+        )
+    except Exception:
+        pass
 
     log.info("session.created", {"session_id": session.id})
     try:

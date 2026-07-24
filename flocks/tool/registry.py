@@ -542,6 +542,9 @@ class Tool:
             # enclosing lifecycle.  Flocks treats this as an opaque carrier;
             # installed extensions remain responsible for validating its data.
             from flocks.hooks.execution import current_execution_context, execute_with_hooks
+            from flocks.session.tool_execution import (
+                build_session_tool_execution_payload,
+            )
 
             tool_context_extra = dict(ctx.extra)
             inherited_context = current_execution_context()
@@ -549,25 +552,18 @@ class Tool:
                 tool_context_extra.get("execution_context"), dict
             ):
                 tool_context_extra["execution_context"] = inherited_context
+            payload = await build_session_tool_execution_payload(
+                session_id=ctx.session_id,
+                message_id=ctx.message_id,
+                agent=ctx.agent,
+                tool_name=self.info.name,
+                tool_input=raw_kwargs,
+                tool_context_extra=tool_context_extra,
+                execution_domain="execution_runtime",
+            )
 
             result = await execute_with_hooks(
-                {
-                    "operation": "tool.execute",
-                    # Neutral execution provenance for extensions.  Flocks
-                    # does not use this value to decide policy outcomes.
-                    "execution_domain": "execution_runtime",
-                    "tool": {
-                        "name": self.info.name,
-                        "input": raw_kwargs,
-                    },
-                    "session_id": ctx.session_id,
-                    "message_id": ctx.message_id,
-                    "agent": ctx.agent,
-                    # Opaque carrier for optional extensions.  Flocks does
-                    # not parse, normalize, authorize, or otherwise assign
-                    # policy meaning to this caller-provided context.
-                    "tool_context_extra": tool_context_extra,
-                },
+                payload,
                 lambda: self.handler(ctx, **coerced_kwargs),
             )
 

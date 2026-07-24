@@ -277,6 +277,23 @@ class Session:
             if current_user:
                 kwargs.setdefault("owner_user_id", current_user.id)
                 kwargs.setdefault("owner_username", current_user.username)
+
+        # Ensure every session carries a canonical execution profile envelope.
+        from flocks.session.execution_profile import (
+            PROFILE_METADATA_KEY,
+        )
+        metadata = dict(kwargs.get("metadata") or {})
+        if PROFILE_METADATA_KEY not in metadata:
+            metadata[PROFILE_METADATA_KEY] = {
+                "version": "v1",
+                "entry": "interactive",
+                "visible_agents": [],
+                "default_agent": str(kwargs.get("agent") or "").strip(),
+                "revision": 1,
+                "source": "session.create",
+                "updated_at": datetime.now().astimezone().isoformat(),
+            }
+        kwargs["metadata"] = metadata
         
         session = SessionInfo(
             project_id=project_id,

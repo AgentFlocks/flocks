@@ -63,7 +63,9 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: Any = None,
     ):
+        _ = tool_context
         captured_inputs.update(inputs)
         assert workflow["start"] == "n1"
         assert workflow["nodes"][0]["id"] == "n1"
@@ -193,7 +195,9 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: Any = None,
     ):
+        _ = tool_context
         assert workflow["start"] == "n1"
         assert workflow["nodes"][0]["id"] == "n1"
         assert timeout_s == 9
@@ -284,8 +288,9 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: Any = None,
     ):
-        _ = workflow, inputs, timeout_s, trace, cancel, run_id
+        _ = workflow, inputs, timeout_s, trace, cancel, run_id, tool_context
         _ = on_step_complete
         assert execution_profile == "high_frequency"
         # Keep the run active until the test releases it so a second tick skips.
@@ -380,8 +385,9 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: Any = None,
     ):
-        _ = workflow, inputs, timeout_s, trace, cancel, run_id
+        _ = workflow, inputs, timeout_s, trace, cancel, run_id, tool_context
         _ = on_step_complete
         assert execution_profile == "high_frequency"
         release_run.wait(0.2)

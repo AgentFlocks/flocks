@@ -106,6 +106,11 @@ class TestSessionCRUD:
         assert data["id"].startswith("ses_")
         assert "projectID" in data
         assert "directory" in data
+        from flocks.session.execution_profile import get_session_execution_profile
+
+        profile = await get_session_execution_profile(data["id"])
+        assert profile is not None
+        assert profile["permission_mode"] == "require-confirm"
 
     @pytest.mark.asyncio
     async def test_create_session_with_title(self, client: AsyncClient):

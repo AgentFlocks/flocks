@@ -165,6 +165,8 @@ class TaskExecutor:
         cls, execution: TaskExecution, scheduler: TaskScheduler
     ) -> Optional[str]:
         from flocks.workflow.fs_store import read_workflow_from_fs
+        from flocks.workflow.tool_context import build_workflow_tool_context
+        from flocks.hooks.execution import current_execution_context
 
         if not execution.workflow_id:
             raise ValueError("workflow execution_mode requires workflow_id")
@@ -173,11 +175,21 @@ class TaskExecutor:
             raise FileNotFoundError(f"Workflow not found: {execution.workflow_id}")
         snapshot = execution.execution_input_snapshot or {}
         inputs = snapshot.get("context") or scheduler.context or {}
+        context_kwargs: dict[str, Any] = {}
+        execution_context = current_execution_context()
+        if execution_context:
+            context_kwargs["execution_context"] = execution_context
+        tool_context = await build_workflow_tool_context(
+            workflow_id=execution.workflow_id,
+            action_name="task",
+            **context_kwargs,
+        )
         result = await asyncio.to_thread(
             cls._run_workflow_sync,
             execution.id,
             workflow_data["workflowJson"],
             inputs,
+            tool_context,
         )
         result_status = getattr(result, "status", None)
         if result_status == "CANCELLED":
@@ -194,6 +206,7 @@ class TaskExecutor:
         execution_id: str,
         workflow: dict[str, Any],
         inputs: Dict[str, Any],
+        tool_context: Any = None,
     ):
         from flocks.workflow.runner import run_workflow
 
@@ -208,6 +221,7 @@ class TaskExecutor:
                 inputs=inputs,
                 timeout_s=_TASK_ABSOLUTE_TIMEOUT_S,
                 cancel=cancel_event.is_set,
+                tool_context=tool_context,
             )
         finally:
             done_event.set()

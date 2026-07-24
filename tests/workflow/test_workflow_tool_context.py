@@ -48,6 +48,10 @@ async def test_build_workflow_tool_context_creates_temp_parent_session_and_messa
         "workflow_id": "wf-1",
         "action_name": "invoke",
     }
+    assert (
+        tool_context.extra["session_execution_profile"]["permission_mode"]
+        == "auto-allow-all"
+    )
 
     message = await Message.get(tool_context.session_id, tool_context.message_id)
     assert message is not None

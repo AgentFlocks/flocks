@@ -288,6 +288,24 @@ class SessionBindingService:
                     last_message_at=now,
                 )
                 await self._insert(existing)
+                try:
+                    from flocks.session.execution_profile import (
+                        upsert_session_execution_profile,
+                    )
+
+                    await upsert_session_execution_profile(
+                        existing.session_id,
+                        patch={
+                            "entry": "channel",
+                            "channel_id": existing.channel_id,
+                            "account_id": existing.account_id,
+                            "visible_agents": allowed_agents,
+                            "default_agent": fallback_agent,
+                        },
+                        source="channel.binding.rebind",
+                    )
+                except Exception:
+                    pass
             # Verify the bound session still exists (user may have deleted it via WebUI)
             from flocks.session.session import Session as _Session
             still_alive = await _Session.get_by_id(existing.session_id)
@@ -303,7 +321,10 @@ class SessionBindingService:
             await self.unbind(existing.session_id)
 
         session_id = await self._create_session(
-            msg, default_agent=default_agent, directory=directory,
+            msg,
+            default_agent=default_agent,
+            visible_agents=allowed_agents,
+            directory=directory,
         )
         now = time.time()
         binding = SessionBinding(
@@ -554,6 +575,7 @@ class SessionBindingService:
     async def _create_session(
         msg: InboundMessage,
         default_agent: Optional[str] = None,
+        visible_agents: Optional[list[str]] = None,
         directory: Optional[str] = None,
     ) -> str:
         """Create a new Flocks Session and return its ID.
@@ -575,6 +597,35 @@ class SessionBindingService:
             agent=default_agent,
             **owner_kwargs,
         )
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            from flocks.session.execution_profile import (
+                get_session_execution_profile,
+                upsert_session_execution_profile,
+            )
+
+            await upsert_session_execution_profile(
+                session.id,
+                patch={
+                    "entry": "channel",
+                    "channel_id": msg.channel_id,
+                    "account_id": msg.account_id,
+                    "visible_agents": [a for a in (visible_agents or []) if str(a).strip()],
+                    "default_agent": str(default_agent or session.agent or "").strip(),
+                },
+                source="channel.binding.create",
+            )
+            profile = await get_session_execution_profile(session.id)
+            await HookPipeline.run_action_before(
+                {
+                    "operation": "session.mode.initialize",
+                    "session_id": session.id,
+                    "entry": "channel",
+                    "session_execution_profile": profile or {},
+                }
+            )
+        except Exception:
+            pass
         return session.id
 
 
