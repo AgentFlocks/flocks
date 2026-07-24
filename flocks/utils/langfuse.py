@@ -42,17 +42,47 @@ _current_observation: contextvars.ContextVar[Any] = contextvars.ContextVar(
     "langfuse_current_observation",
     default=None,
 )
+_CAPTURE_MODE_ENV = "FLOCKS_LANGFUSE_CAPTURE_MODE"
+_MAX_CHARS_ENV = "FLOCKS_LANGFUSE_MAX_CHARS"
+_DEFAULT_CAPTURE_MODE = "full"
+_DEFAULT_MAX_CHARS = 8000
+_VALID_CAPTURE_MODES = {"full", "truncated"}
+_TRACE_NAME_ATTR = "langfuse.trace.name"
+_TRACE_USER_ID_ATTR = "user.id"
+_TRACE_SESSION_ID_ATTR = "session.id"
+_TRACE_TAGS_ATTR = "langfuse.trace.tags"
 
 
 def _filter_none(values: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in values.items() if v is not None}
 
 
-def _truncate_value(value: Any, max_chars: int = 8000) -> Any:
+def _get_capture_mode() -> str:
+    mode = os.getenv(_CAPTURE_MODE_ENV, _DEFAULT_CAPTURE_MODE).strip().lower()
+    if mode in _VALID_CAPTURE_MODES:
+        return mode
+    return _DEFAULT_CAPTURE_MODE
+
+
+def _get_capture_max_chars() -> int:
+    raw_value = os.getenv(_MAX_CHARS_ENV, str(_DEFAULT_MAX_CHARS)).strip()
+    try:
+        max_chars = int(raw_value)
+    except (TypeError, ValueError):
+        return _DEFAULT_MAX_CHARS
+    if max_chars <= 0:
+        return _DEFAULT_MAX_CHARS
+    return max_chars
+
+
+def _truncate_value(value: Any, max_chars: Optional[int] = None) -> Any:
     if isinstance(value, str):
-        if len(value) <= max_chars:
+        if _get_capture_mode() == "full":
             return value
-        return value[:max_chars] + f"...[truncated:{len(value) - max_chars}]"
+        limit = max_chars if max_chars is not None else _get_capture_max_chars()
+        if len(value) <= limit:
+            return value
+        return value[:limit] + f"...[truncated:{len(value) - limit}]"
     return value
 
 
@@ -65,6 +95,58 @@ def _sanitize_payload(value: Any) -> Any:
     if isinstance(value, list):
         return [_sanitize_payload(v) for v in value]
     return _truncate_value(value)
+
+
+def _set_trace_attribute(observation: Any, key: str, value: Any) -> None:
+    otel_span = getattr(observation, "_otel_span", None)
+    if otel_span is None or not hasattr(otel_span, "is_recording"):
+        return
+    try:
+        if otel_span.is_recording():
+            otel_span.set_attribute(key, value)
+    except Exception:
+        return
+
+
+def _propagate_trace_dimensions(
+    observation: Any,
+    *,
+    trace_name: Optional[str] = None,
+    session_id: Optional[str] = None,
+    user_id: Optional[str] = None,
+    tags: Optional[list[str]] = None,
+    parent: Any = None,
+) -> Any:
+    inherited_trace_name = trace_name
+    inherited_session_id = session_id
+    inherited_user_id = user_id
+    inherited_tags = tags
+
+    parent_span = getattr(parent, "_otel_span", None)
+    parent_attrs = getattr(parent_span, "attributes", None) if parent_span is not None else None
+    if parent_attrs:
+        if inherited_trace_name is None:
+            inherited_trace_name = parent_attrs.get(_TRACE_NAME_ATTR)
+        if inherited_session_id is None:
+            inherited_session_id = parent_attrs.get(_TRACE_SESSION_ID_ATTR)
+        if inherited_user_id is None:
+            inherited_user_id = parent_attrs.get(_TRACE_USER_ID_ATTR)
+        if inherited_tags is None:
+            parent_tags = parent_attrs.get(_TRACE_TAGS_ATTR)
+            if isinstance(parent_tags, list):
+                inherited_tags = parent_tags
+            elif isinstance(parent_tags, tuple):
+                inherited_tags = list(parent_tags)
+
+    if inherited_trace_name is not None:
+        _set_trace_attribute(observation, _TRACE_NAME_ATTR, inherited_trace_name)
+    if inherited_session_id is not None:
+        _set_trace_attribute(observation, _TRACE_SESSION_ID_ATTR, inherited_session_id)
+    if inherited_user_id is not None:
+        _set_trace_attribute(observation, _TRACE_USER_ID_ATTR, inherited_user_id)
+    if inherited_tags is not None:
+        _set_trace_attribute(observation, _TRACE_TAGS_ATTR, inherited_tags)
+    return observation
 
 
 def initialize() -> None:
@@ -140,26 +222,48 @@ def create_trace(
     )
     try:
         # Old SDKs may expose .trace(), newer SDKs are OTEL-native and expose
-        # .start_span() / .start_observation().
+        # .start_observation().
         if hasattr(client, "trace"):
             return client.trace(**payload)
-        trace_obs = client.start_span(
-            name=name,
-            input=payload.get("input"),
-            metadata=payload.get("metadata"),
-        )
-        # Best-effort enrich current trace with session/user dimensions.
-        try:
-            client.update_current_trace(
+        if hasattr(client, "start_observation"):
+            trace_metadata = dict(payload.get("metadata") or {})
+            if session_id is not None:
+                trace_metadata.setdefault("session_id", session_id)
+            if user_id is not None:
+                trace_metadata.setdefault("user_id", user_id)
+            if tags is not None:
+                trace_metadata.setdefault("tags", tags)
+            trace_obs = client.start_observation(
+                name=name,
+                as_type="span",
+                input=payload.get("input"),
+                metadata=trace_metadata or None,
+            )
+            return _propagate_trace_dimensions(
+                trace_obs,
+                trace_name=name,
                 session_id=session_id,
                 user_id=user_id,
                 tags=tags,
+            )
+        if hasattr(client, "start_span"):
+            trace_obs = client.start_span(
+                name=name,
                 input=payload.get("input"),
                 metadata=payload.get("metadata"),
             )
-        except Exception:
-            pass
-        return trace_obs
+            # Best-effort enrich current trace with session/user dimensions.
+            try:
+                client.update_current_trace(
+                    session_id=session_id,
+                    user_id=user_id,
+                    tags=tags,
+                    input=payload.get("input"),
+                    metadata=payload.get("metadata"),
+                )
+            except Exception:
+                pass
+            return trace_obs
     except Exception as exc:
         log.warn("langfuse.trace_failed", {"error": str(exc), "name": name})
         return _NoopObservation("trace")
@@ -189,15 +293,21 @@ def create_generation(
     )
     try:
         if parent and hasattr(parent, "generation"):
-            return parent.generation(**payload)
+            return _propagate_trace_dimensions(parent.generation(**payload), parent=parent)
         if parent and hasattr(parent, "start_generation"):
-            return parent.start_generation(**payload)
+            return _propagate_trace_dimensions(parent.start_generation(**payload), parent=parent)
         if parent and hasattr(parent, "start_observation"):
-            return parent.start_observation(as_type="generation", **payload)
+            return _propagate_trace_dimensions(
+                parent.start_observation(as_type="generation", **payload),
+                parent=parent,
+            )
         if hasattr(client, "start_generation"):
-            return client.start_generation(**payload)
+            return _propagate_trace_dimensions(client.start_generation(**payload), parent=parent)
         if hasattr(client, "start_observation"):
-            return client.start_observation(as_type="generation", **payload)
+            return _propagate_trace_dimensions(
+                client.start_observation(as_type="generation", **payload),
+                parent=parent,
+            )
     except Exception as exc:
         log.warn("langfuse.generation_failed", {"error": str(exc), "name": name})
     return _NoopObservation("generation")
@@ -225,15 +335,21 @@ def create_span(
     )
     try:
         if parent and hasattr(parent, "span"):
-            return parent.span(**payload)
+            return _propagate_trace_dimensions(parent.span(**payload), parent=parent)
         if parent and hasattr(parent, "start_span"):
-            return parent.start_span(**payload)
+            return _propagate_trace_dimensions(parent.start_span(**payload), parent=parent)
         if parent and hasattr(parent, "start_observation"):
-            return parent.start_observation(as_type="span", **payload)
+            return _propagate_trace_dimensions(
+                parent.start_observation(as_type="span", **payload),
+                parent=parent,
+            )
         if hasattr(client, "start_span"):
-            return client.start_span(**payload)
+            return _propagate_trace_dimensions(client.start_span(**payload), parent=parent)
         if hasattr(client, "start_observation"):
-            return client.start_observation(as_type="span", **payload)
+            return _propagate_trace_dimensions(
+                client.start_observation(as_type="span", **payload),
+                parent=parent,
+            )
     except Exception as exc:
         log.warn("langfuse.span_failed", {"error": str(exc), "name": name})
     return _NoopObservation("span")
@@ -267,19 +383,31 @@ def end_observation(
             observation.end(**payload)
             return
     except TypeError:
-        try:
-            observation.end()
-            return
-        except Exception:
-            pass
+        pass
     except Exception:
         pass
 
     try:
         if hasattr(observation, "update"):
-            observation.update(**payload)
+            update_payload = dict(payload)
+            if usage:
+                update_payload["usage_details"] = usage
+            try:
+                observation.update(**update_payload)
+            except TypeError:
+                fallback_payload = dict(payload)
+                if usage:
+                    fallback_payload["usage"] = usage
+                    fallback_payload.pop("usage_details", None)
+                observation.update(**fallback_payload)
     except Exception as exc:
         log.debug("langfuse.end_fallback_update_failed", {"error": str(exc)})
+
+    try:
+        if hasattr(observation, "end"):
+            observation.end()
+    except Exception as exc:
+        log.debug("langfuse.end_fallback_end_failed", {"error": str(exc)})
 
 
 def is_active() -> bool:
