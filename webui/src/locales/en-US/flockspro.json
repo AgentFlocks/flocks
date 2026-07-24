@@ -210,7 +210,7 @@
     },
     "sections": {
       "rollout": "Rollout Modes",
-      "rolloutDescription": "These four switches control different stages of the security path and can be enabled independently for staged rollout. Changes take effect immediately after saving.",
+      "rolloutDescription": "These four switches control different stages of the security path and can be enabled independently for staged rollout. When rollout env vars are unset, all modes default to enforce. Changes take effect immediately after saving.",
       "permissionBaseline": "Permission Baseline",
       "permissionBaselineDescription": "Default permission modes for sessions created from different entry points. Fixed by the system and not editable here.",
       "baseline": "System Baseline",
