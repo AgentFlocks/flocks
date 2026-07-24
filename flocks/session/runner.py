@@ -552,18 +552,25 @@ class SessionRunner:
         agent: AgentInfo,
         messages: List[MessageInfo],
     ) -> Tuple[List[Any], Dict[str, Any]]:
+        execution_mode = self._execution_mode_from_messages(messages)
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=getattr(agent, "tools", None),
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
-        execution_mode = self._execution_mode_from_messages(messages)
         tool_infos = [
             tool_info
             for tool_info in result.tool_infos
             if is_tool_allowed(execution_mode, tool_info.name)
         ]
+        if (
+            execution_mode == SessionExecutionMode.PLAN
+            and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
+        ):
+            plan_exit = ToolRegistry.get("plan_exit")
+            if plan_exit is not None and getattr(plan_exit.info, "enabled", True):
+                tool_infos.append(plan_exit.info)
         metadata = dict(result.metadata)
         metadata["executionMode"] = execution_mode.value
         metadata["modeAllowedToolNames"] = sorted(

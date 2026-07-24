@@ -777,6 +777,19 @@ export default function SessionPage() {
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    if (
+      event.type === 'session.execution_mode.changed'
+      && event.properties?.sessionID === selectedSessionId
+      && event.properties?.executionMode === 'build'
+    ) {
+      setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+      writeSessionExecutionMode(
+        selectedSessionId,
+        DEFAULT_SESSION_EXECUTION_MODE,
+      );
+      setShowExecutionModeOptions(false);
+      return;
+    }
     if (event.type === 'session.notice' && event.properties?.kind === 'directory-fallback') {
       toast.warning(
         t('projectDirectoryFallbackTitle'),
@@ -796,7 +809,13 @@ export default function SessionPage() {
       // those bursts don't turn into a request/re-render storm.
       scheduleSessionListRefetch();
     }
-  }, [scheduleSessionListRefetch, t, toast, updateSessionTitle]);
+  }, [
+    scheduleSessionListRefetch,
+    selectedSessionId,
+    t,
+    toast,
+    updateSessionTitle,
+  ]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);

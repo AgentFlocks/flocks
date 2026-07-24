@@ -2646,6 +2646,12 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
 
         objective = _extract_text_from_parts(request.parts).strip()
         state = await GoalManager.set_goal(sessionID, objective)
+        await publish_event("session.goal.updated", {
+            "sessionID": sessionID,
+            "status": state.status,
+            "objective": state.objective,
+            "reason": state.last_reason,
+        })
         request = request.model_copy(update={
             "parts": _replace_text_parts(
                 request.parts,
@@ -3821,7 +3827,7 @@ def _build_prompt_request_from_event(event, prompt_text: str, display_text: Opti
 async def _dispatch_sse_input(sessionID: str, session, event, working_directory: str) -> None:
     import time as _time
 
-    from flocks.input.dispatcher import dispatch_user_input
+    from flocks.input.dispatcher import dispatch_user_input, parse_slash_command
     from flocks.input.output import SSEOutputSink
     from flocks.server.routes.event import publish_event
     from flocks.session.message import Message, MessageRole
@@ -3931,6 +3937,18 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+        parsed = parse_slash_command(output_event.text, output_event.metadata)
+        if parsed is not None and parsed.canonical_name == "goal":
+            from flocks.session.goal import GoalManager
+
+            state = await GoalManager.get(sessionID)
+            if state is not None:
+                await publish_event("session.goal.updated", {
+                    "sessionID": sessionID,
+                    "status": state.status,
+                    "objective": state.objective,
+                    "reason": state.last_reason,
+                })
         request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
         await _process_session_message(sessionID, session, request, working_directory)
 
@@ -3975,18 +3993,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         session_control=_run_session_control,
         clear_history=_clear_history,
     )
-    result = await dispatch_user_input(event, sink)
-    if result.command_name == "goal" and result.action == "llm":
-        from flocks.session.goal import GoalManager
-
-        state = await GoalManager.get(sessionID)
-        if state is not None:
-            await publish_event("session.goal.updated", {
-                "sessionID": sessionID,
-                "status": state.status,
-                "objective": state.objective,
-                "reason": state.last_reason,
-            })
+    await dispatch_user_input(event, sink)
 
 
 class PromptQueueUpdateRequest(BaseModel):

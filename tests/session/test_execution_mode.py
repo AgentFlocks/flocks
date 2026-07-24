@@ -78,12 +78,16 @@ def test_plan_uses_read_only_permission_rules() -> None:
     assert is_tool_allowed(SessionExecutionMode.PLAN, "read")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "grep")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "question")
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "plan_exit")
     assert not is_tool_allowed(SessionExecutionMode.PLAN, "bash")
     assert not is_tool_allowed(SessionExecutionMode.PLAN, "edit")
     assert not is_tool_allowed(SessionExecutionMode.PLAN, "unknown_plugin_tool")
 
     assert is_tool_allowed(SessionExecutionMode.BUILD, "bash")
+    assert not is_tool_allowed(SessionExecutionMode.BUILD, "plan_exit")
     assert "decision-complete implementation plan" in execution_mode_prompt("plan")
+    assert "material clarification question" in execution_mode_prompt("plan")
+    assert "call plan_exit" in execution_mode_prompt("plan")
     assert execution_mode_prompt("build") == ""
 
 
@@ -167,6 +171,17 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "flocks.session.runner.list_session_callable_tool_infos",
         list_tools,
     )
+    monkeypatch.setattr(
+        ToolRegistry,
+        "get",
+        classmethod(
+            lambda _cls, name: (
+                SimpleNamespace(info=SimpleNamespace(name="plan_exit", enabled=True))
+                if name == "plan_exit"
+                else None
+            )
+        ),
+    )
     messages = [
         SimpleNamespace(
             role="user",
@@ -179,6 +194,6 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         messages,
     )
 
-    assert [tool.name for tool in tools] == ["read"]
+    assert [tool.name for tool in tools] == ["read", "plan_exit"]
     assert metadata["executionMode"] == "plan"
-    assert metadata["modeAllowedToolNames"] == ["read"]
+    assert metadata["modeAllowedToolNames"] == ["plan_exit", "read"]

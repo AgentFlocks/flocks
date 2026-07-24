@@ -209,6 +209,19 @@ vi.mock('@/components/common/SessionChat', () => ({
         >
           mock-session-updated
         </button>
+        <button
+          type="button"
+          onClick={() => onSSEEvent?.({
+            type: 'session.execution_mode.changed',
+            properties: {
+              sessionID: sessionId,
+              executionMode: 'build',
+              reason: 'plan-approved',
+            },
+          })}
+        >
+          mock-plan-approved
+        </button>
       </div>
     );
   },
@@ -409,6 +422,22 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
     });
+  });
+
+  it('switches an approved Plan to Build from the session event', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.plan.label/,
+    }));
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
+
+    await user.click(screen.getByRole('button', { name: 'mock-plan-approved' }));
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+    expect(localStorage.getItem('flocks:session-execution-mode:session-1')).toBeNull();
   });
 
   it('resets Goal to Build after the prompt is accepted', async () => {

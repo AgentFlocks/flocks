@@ -2594,6 +2594,12 @@ export default function SessionChat({
       payload.executionMode = executionMode;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      if (executionMode === 'goal' && text.trim()) {
+        goalHydrationVersionRef.current += 1;
+        writeDismissedGoalKey(sessionId, '');
+        setGoalBanner({ objective: text.trim(), status: 'active' });
+        setDismissedGoalKey('');
+      }
       onExecutionModeAccepted?.(executionMode);
     } catch (err: unknown) {
       setIsStreaming(false);
