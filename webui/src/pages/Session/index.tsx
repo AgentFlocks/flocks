@@ -2159,20 +2159,10 @@ export default function SessionPage() {
                         setSelectedProjectId(taskSessionGroup.id);
                         toggleProjectCollapsed(taskSessionGroup.id);
                       }}
-                      className="flex h-6 min-w-0 items-center truncate rounded-lg px-1 text-left transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:hover:bg-white/[0.06] dark:hover:text-white"
-                      aria-label={t('selectTasks')}
-                    >
-                      {t('tasksSection')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleProjectCollapsed(taskSessionGroup.id);
-                      }}
-                      className="mr-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className="flex h-6 items-center gap-1 rounded-lg px-1 text-left transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:hover:bg-white/[0.06] dark:hover:text-white"
                       aria-label={t('toggleTasks')}
                     >
+                      <span>{t('tasksSection')}</span>
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
@@ -2184,7 +2174,7 @@ export default function SessionPage() {
                         void handleCreateSession(TASK_SESSION_GROUP_ID);
                       }}
                       disabled={creating || taskSessionGroup.pathStatus !== 'available'}
-                      className="grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                       title={t('createTaskSession')}
                       aria-label={t('createTaskSession')}
                     >

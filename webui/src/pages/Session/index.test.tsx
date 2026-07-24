@@ -430,10 +430,15 @@ describe('SessionPage session actions menu', () => {
     expect(taskTitle).toHaveClass('text-sm', 'font-medium');
     expect(taskTitle?.parentElement?.parentElement).toHaveClass('px-3');
 
-    await user.click(screen.getByRole('button', { name: 'toggleTasks' }));
+    const tasksToggle = screen.getByRole('button', { name: 'toggleTasks' });
+    expect(tasksToggle).toContainElement(tasksHeading);
+    expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
+    expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
+
+    await user.click(tasksToggle);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
 
-    await user.click(screen.getByRole('button', { name: 'selectTasks' }));
+    await user.click(tasksToggle);
     expect(screen.getByText('Original Session')).toBeInTheDocument();
   });
 
