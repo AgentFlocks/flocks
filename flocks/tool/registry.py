@@ -267,6 +267,20 @@ class ToolContext:
             always: Always-allow patterns
             metadata: Additional metadata
         """
+        execution_mode = self.extra.get("execution_mode")
+        if execution_mode:
+            from flocks.session.execution_mode import is_permission_allowed
+
+            if not is_permission_allowed(
+                execution_mode,
+                permission,
+                patterns,
+                self,
+            ):
+                raise PermissionError(
+                    "Plan mode may only edit the current session plan file."
+                )
+
         request = PermissionRequest(
             permission=permission,
             patterns=patterns,
@@ -872,7 +886,10 @@ class ToolRegistry:
 
         execution_mode = ctx.extra.get("execution_mode")
         if execution_mode:
-            from flocks.session.execution_mode import is_tool_allowed
+            from flocks.session.execution_mode import (
+                is_tool_allowed,
+                tool_call_denial_reason,
+            )
 
             if not is_tool_allowed(execution_mode, tool_name):
                 log.warn("tool.execute.execution_mode_denied", {
@@ -887,6 +904,19 @@ class ToolRegistry:
                         f"{str(execution_mode)!r} execution mode."
                     ),
                 )
+            denial_reason = tool_call_denial_reason(
+                execution_mode,
+                tool_name,
+                kwargs,
+                ctx,
+            )
+            if denial_reason:
+                log.warn("tool.execute.execution_mode_call_denied", {
+                    "name": tool_name,
+                    "execution_mode": str(execution_mode),
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(success=False, error=denial_reason)
 
         log.info("tool.execute", {
             "name": tool_name,

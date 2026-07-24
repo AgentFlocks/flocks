@@ -120,6 +120,9 @@ class StreamProcessor:
         langfuse_generation: Optional[Any] = None,
         step_index: Optional[int] = None,
         execution_mode: str = "build",
+        plan_file_path: Optional[str] = None,
+        plan_relative_path: Optional[str] = None,
+        plan_permission_path: Optional[str] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -138,6 +141,9 @@ class StreamProcessor:
         self._langfuse_generation = langfuse_generation
         self._step_index = step_index
         self._execution_mode = execution_mode
+        self._plan_file_path = plan_file_path
+        self._plan_relative_path = plan_relative_path
+        self._plan_permission_path = plan_permission_path
         self._sandbox_runtime_cache = None
         self._sandbox_config_cache = None
         self._sandbox_context_cache = None
@@ -823,6 +829,22 @@ class StreamProcessor:
                     tool_extra = {
                         **sandbox_meta["extra"],
                         "execution_mode": self._execution_mode,
+                        "workspace_dir": self._workspace_dir,
+                        "model": {
+                            "providerID": getattr(
+                                self.assistant_message,
+                                "providerID",
+                                None,
+                            ),
+                            "modelID": getattr(
+                                self.assistant_message,
+                                "modelID",
+                                None,
+                            ),
+                        },
+                        "plan_file_path": self._plan_file_path,
+                        "plan_relative_path": self._plan_relative_path,
+                        "plan_permission_path": self._plan_permission_path,
                     }
                     ctx = ToolContext(
                         session_id=self.session_id,

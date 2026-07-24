@@ -77,6 +77,7 @@ from flocks.session.execution_mode import (
     is_tool_allowed,
     runtime_execution_mode,
 )
+from flocks.session.plan_file import session_plan_file
 
 
 log = Log.create(service="session.runner")
@@ -1305,6 +1306,12 @@ class SessionRunner:
             getattr(last_user, "executionMode", None)
         )
         self._turn_execution_mode = turn_execution_mode
+        from flocks.project.instance import Instance
+
+        self._turn_plan_file = session_plan_file(
+            self.session,
+            worktree=Instance.get_worktree(),
+        )
         # Check for CLI callbacks (if running in CLI mode)
         # Only use CLI fallback if no callbacks were explicitly provided via constructor
         has_explicit_callbacks = any([
@@ -1441,7 +1448,11 @@ class SessionRunner:
             agent_prompt=getattr(agent, "prompt", None),
             provider_id=self.provider_id,
             model_id=self.model_id,
-            execution_mode_prompt=execution_mode_prompt(turn_execution_mode),
+            execution_mode_prompt=execution_mode_prompt(
+                turn_execution_mode,
+                session=self.session,
+                plan_file=self._turn_plan_file,
+            ),
             prompt_tool_names=prompt_tool_names,
             tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
@@ -3105,6 +3116,9 @@ class SessionRunner:
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
 
+        turn_plan_file = getattr(self, "_turn_plan_file", None)
+        if turn_plan_file is None:
+            turn_plan_file = session_plan_file(self.session)
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
@@ -3128,6 +3142,9 @@ class SessionRunner:
                     SessionExecutionMode.BUILD,
                 )
             ).value,
+            plan_file_path=str(turn_plan_file.path),
+            plan_relative_path=turn_plan_file.relative_path,
+            plan_permission_path=turn_plan_file.permission_path,
         )
         
         # Build provider options (thinking / reasoning / max_tokens)

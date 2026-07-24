@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 from enum import Enum
-from functools import lru_cache
-from typing import Iterable
+from typing import Any, Iterable, Optional
 
-from flocks.permission.helpers import from_config
-from flocks.permission.next import PermissionNext
+from flocks.session.plan_file import (
+    SessionPlanFile,
+    is_current_plan_path,
+    plan_edit_patterns_allowed,
+    plan_file_prompt,
+)
 
 
 class SessionExecutionMode(str, Enum):
@@ -18,27 +21,28 @@ class SessionExecutionMode(str, Enum):
     GOAL = "goal"
 
 
-READ_ONLY_TOOL_NAMES = frozenset(
+PLAN_ONLY_TOOL_NAMES = frozenset({"plan_exit"})
+PLAN_DENIED_TOOL_NAMES = frozenset(
     {
-        "glob",
-        "grep",
-        "lsp",
-        "plan_exit",
-        "question",
-        "read",
-        "tool_search",
-        "webfetch",
-        "websearch",
+        # OpenCode denies task.general in Plan. Flocks' task aliases do not
+        # have a safe read-only subtype, so deny both delegation entry points.
+        "delegate_task",
+        "task",
+        # Explicit slash commands keep their existing direct user-only path.
+        "run_slash_command",
     }
 )
-
-PLAN_ONLY_TOOL_NAMES = frozenset({"plan_exit"})
+PLAN_PATH_SCOPED_TOOL_NAMES = frozenset({"apply_patch", "edit", "write"})
 
 PLAN_MODE_PROMPT = """# Plan Mode
 
-You are in a read-only planning turn. You may inspect files, configuration,
-types, tests, and documentation, but you must not modify the workspace or
-perform any other side effect.
+You are in a planning turn. You may inspect files, configuration, types,
+tests, and documentation. Bash is available only for read-only exploration
+and validation. Do not use shell commands to modify files, configuration,
+services, dependencies, version control state, or any other system state.
+
+The only file you may modify is the session plan file named below. The runtime
+enforces this boundary for file-editing tools.
 
 Follow this workflow:
 
@@ -49,12 +53,13 @@ Follow this workflow:
    answers, continue exploring and planning as needed.
 3. Review the proposed approach for remaining gaps. Ask another focused
    question if a decision is still required.
-4. Present a decision-complete implementation plan that another engineer can
-   execute without making additional design decisions.
-5. Immediately after presenting the final plan, call plan_exit. That tool asks
-   the user whether to start implementation. If approved, it switches the next
-   turn to Build and starts implementing the approved plan. If declined, remain
-   in Plan and use the feedback to refine it.
+4. Write the decision-complete implementation plan to the session plan file.
+   The plan must be detailed enough for another engineer to execute without
+   making additional design decisions.
+5. Present the final plan to the user, then immediately call plan_exit. That
+   tool asks the user whether to start implementation. If approved, it switches
+   the next turn to Build and starts implementing the approved plan. If
+   declined, remain in Plan and use the feedback to refine it.
 
 Do not ask for implementation approval with ordinary prose or the question
 tool; plan_exit owns that transition. A Plan turn may end only by asking a
@@ -82,22 +87,76 @@ def runtime_execution_mode(value: object) -> SessionExecutionMode:
     return mode
 
 
-@lru_cache(maxsize=1)
-def _read_only_rules():
-    permission_config = {"*": "deny"}
-    permission_config.update({name: "allow" for name in READ_ONLY_TOOL_NAMES})
-    return from_config(permission_config)
-
-
 def is_tool_allowed(value: object, tool_name: str) -> bool:
-    """Evaluate a tool against the mode-specific PermissionNext rules."""
+    """Evaluate tool visibility against OpenCode-style Plan permissions."""
 
     mode = runtime_execution_mode(value)
     if tool_name in PLAN_ONLY_TOOL_NAMES:
         return mode == SessionExecutionMode.PLAN
     if mode == SessionExecutionMode.BUILD:
         return True
-    return PermissionNext.evaluate(tool_name, "*", _read_only_rules()) == "allow"
+    return tool_name not in PLAN_DENIED_TOOL_NAMES
+
+
+def tool_call_denial_reason(
+    value: object,
+    tool_name: str,
+    arguments: dict[str, Any],
+    ctx: Any,
+) -> Optional[str]:
+    """Return a hard Plan-mode denial reason for a concrete tool call."""
+
+    if runtime_execution_mode(value) != SessionExecutionMode.PLAN:
+        return None
+    if tool_name not in PLAN_PATH_SCOPED_TOOL_NAMES:
+        return None
+
+    if tool_name in {"edit", "write"}:
+        paths = [arguments.get("filePath")]
+    else:
+        try:
+            from flocks.tool.file.apply_patch import parse_patch
+
+            hunks = parse_patch(str(arguments.get("patchText") or ""))
+        except Exception:
+            hunks = []
+        paths = [
+            path
+            for hunk in hunks
+            for path in (getattr(hunk, "path", None), getattr(hunk, "move_path", None))
+            if path
+        ]
+
+    if paths and all(is_current_plan_path(ctx, path) for path in paths):
+        return None
+    return (
+        f"Tool {tool_name!r} may only edit the current session plan file "
+        "while Plan mode is active."
+    )
+
+
+def is_permission_allowed(
+    value: object,
+    permission: str,
+    patterns: Iterable[object],
+    ctx: Any,
+) -> bool:
+    """Apply the same Plan file boundary at the permission entry point."""
+
+    if runtime_execution_mode(value) != SessionExecutionMode.PLAN:
+        return True
+    if permission != "edit":
+        return True
+    return plan_edit_patterns_allowed(ctx, patterns)
+
+
+def is_plan_file_edit(value: object, ctx: Any, path: object) -> bool:
+    """Return whether a read-only sandbox may allow this Plan artifact edit."""
+
+    return (
+        runtime_execution_mode(value) == SessionExecutionMode.PLAN
+        and is_current_plan_path(ctx, path)
+    )
 
 
 def filter_tool_names(value: object, tool_names: Iterable[str]) -> list[str]:
@@ -106,10 +165,20 @@ def filter_tool_names(value: object, tool_names: Iterable[str]) -> list[str]:
     return [name for name in tool_names if is_tool_allowed(value, name)]
 
 
-def execution_mode_prompt(value: object) -> str:
+def execution_mode_prompt(
+    value: object,
+    *,
+    session: Any = None,
+    plan_file: Optional[SessionPlanFile] = None,
+) -> str:
     """Return the per-turn developer guidance for a mode."""
 
     mode = runtime_execution_mode(value)
     if mode == SessionExecutionMode.PLAN:
-        return PLAN_MODE_PROMPT
+        file_prompt = (
+            plan_file_prompt(session, plan=plan_file)
+            if session is not None
+            else ""
+        )
+        return f"{PLAN_MODE_PROMPT.rstrip()}\n\n{file_prompt}".strip()
     return ""
