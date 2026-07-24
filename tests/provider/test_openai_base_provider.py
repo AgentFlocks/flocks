@@ -805,7 +805,7 @@ class TestOpenAIBaseProviderStreamingUsage:
 
         assert chunks[-1].usage == {
             "prompt_tokens": 11,
-            "completion_tokens": 7,
+            "completion_tokens": 2,
             "total_tokens": 18,
             "reasoning_tokens": 5,
         }

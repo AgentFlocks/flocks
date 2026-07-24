@@ -86,7 +86,7 @@ class TestOpenAIProviderStreamingUsage:
             choices=[SimpleNamespace(delta=None, finish_reason="stop")],
             usage=None,
         )
-        create.return_value = _stream_from_chunks(usage_chunk, finish_chunk)
+        create.return_value = _stream_from_chunks(finish_chunk, usage_chunk)
 
         chunks = [
             chunk
@@ -98,7 +98,7 @@ class TestOpenAIProviderStreamingUsage:
 
         assert chunks[-1].usage == {
             "prompt_tokens": 11,
-            "completion_tokens": 7,
+            "completion_tokens": 2,
             "total_tokens": 18,
             "reasoning_tokens": 5,
         }

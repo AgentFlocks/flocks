@@ -303,12 +303,24 @@ def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
     completion_tokens = (_ct if _ct is not None else getattr(raw_usage, "output_tokens", 0)) or 0
     completion_details = getattr(raw_usage, "completion_tokens_details", None)
     output_details = getattr(raw_usage, "output_tokens_details", None)
-    reasoning_tokens = (
-        getattr(raw_usage, "reasoning_tokens", 0)
-        or getattr(completion_details, "reasoning_tokens", 0)
+    nested_reasoning_tokens = (
+        getattr(completion_details, "reasoning_tokens", 0)
         or getattr(output_details, "reasoning_tokens", 0)
         or 0
     )
+    reasoning_tokens = (
+        getattr(raw_usage, "reasoning_tokens", 0)
+        or nested_reasoning_tokens
+        or 0
+    )
+    if nested_reasoning_tokens:
+        # OpenAI reports reasoning_tokens as a breakdown already included in
+        # completion_tokens / output_tokens. Flocks stores visible output and
+        # reasoning separately, so remove that nested subset before persisting.
+        completion_tokens = max(
+            0,
+            completion_tokens - nested_reasoning_tokens,
+        )
     total_tokens = getattr(raw_usage, "total_tokens", 0) or (
         prompt_tokens + completion_tokens + reasoning_tokens
     )
