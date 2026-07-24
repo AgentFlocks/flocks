@@ -14,6 +14,7 @@ import {
   Save,
   Settings as SettingsIcon,
   ShieldCheck,
+  Shield,
   Sun,
   TextCursorInput,
   Upload,
@@ -31,8 +32,9 @@ const ConfigPage = lazy(() => import('@/pages/Config'));
 const SystemLogPage = lazy(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazy(() => import('@/pages/FlocksproUpgrade'));
 const AuditLogsPage = lazy(() => import('@/pages/AuditLogs'));
+const SecurityConfigPage = lazy(() => import('@/pages/SecurityConfig'));
 
-type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
+type SettingsSectionId = 'preferences' | 'account' | 'security-config' | 'system-logs' | 'audit-logs' | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -61,6 +63,7 @@ function isSettingsSectionId(value: string | undefined): value is SettingsSectio
   return (
     value === 'preferences' ||
     value === 'account' ||
+    value === 'security-config' ||
     value === 'system-logs' ||
     value === 'audit-logs' ||
     value === 'flockspro'
@@ -369,6 +372,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   return (
     <Suspense fallback={<RoutePageSkeleton />}>
       {sectionId === 'account' && <ConfigPage />}
+      {sectionId === 'security-config' && <SecurityConfigPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}
       {sectionId === 'flockspro' && <FlocksproUpgradePage />}
@@ -440,6 +444,7 @@ export default function SettingsPage() {
         name: t('settingsGroupSystem'),
         items: [
           { id: 'account', name: t('accountManagement'), icon: UserCog },
+          { id: 'security-config', name: t('securityConfig'), icon: Shield, adminOnly: true, requiresFlockspro: true },
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
           { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
           { id: 'flockspro', name: productName, icon: ArrowUpCircle, adminOnly: true },

@@ -45,6 +45,10 @@ vi.mock('@/pages/AuditLogs', () => ({
   default: () => <div>audit logs page</div>,
 }));
 
+vi.mock('@/pages/SecurityConfig', () => ({
+  default: () => <div>security config page</div>,
+}));
+
 vi.mock('@/pages/FlocksproUpgrade', () => ({
   default: () => <div>flocks pro page</div>,
 }));
@@ -160,9 +164,22 @@ describe('SettingsPage', () => {
 
     const mobileNav = screen.getByRole('navigation', { name: 'settingsTitle' });
     expect(within(mobileNav).getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
+    expect(within(mobileNav).getByRole('link', { name: 'securityConfig' })).toHaveAttribute('href', '/settings/security-config');
     expect(within(mobileNav).getByRole('link', { name: 'auditLogs' })).toHaveAttribute('href', '/settings/audit-logs');
     expect(within(mobileNav).queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
     expect(within(mobileNav).queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
+  });
+
+  it('renders security config in settings for Flocks Pro admins', async () => {
+    renderSettings('/settings/security-config');
+
+    expect(await screen.findByText('security config page')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'securityConfig' })[0]).toHaveAttribute('href', '/settings/security-config');
+    const links = screen.getAllByRole('link');
+    const accountIndex = links.findIndex((item) => item.textContent === 'accountManagement');
+    const securityIndex = links.findIndex((item) => item.textContent === 'securityConfig');
+    expect(accountIndex).toBeGreaterThanOrEqual(0);
+    expect(securityIndex).toBeGreaterThan(accountIndex);
   });
 
   it('renders audit logs in settings for Flocks Pro admins', async () => {
@@ -176,10 +193,11 @@ describe('SettingsPage', () => {
   it('hides audit logs when Flocks Pro capability is unavailable', async () => {
     flocksproUsersApi.hasCapability.mockResolvedValue(false);
 
-    renderSettings('/settings/audit-logs');
+    renderSettings('/settings/security-config');
 
     expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'securityConfig' })).not.toBeInTheDocument();
   });
 
   it('hides Flocks Pro settings for non-admin users', async () => {

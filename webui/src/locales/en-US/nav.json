@@ -18,6 +18,7 @@
   "management": "System Center",
   "systemCenter": "System Center",
   "accountManagement": "Account",
+  "securityConfig": "Security Config",
   "systemLog": "System Logs",
   "flocksproUpgrade": "Upgrade",
   "checkUpdate": "Check for updates",
