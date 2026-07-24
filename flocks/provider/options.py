@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional, Tuple
 from flocks.provider.interleaved import (
     REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
     REASONING_TRANSPORT_GENERIC_CHAT,
+    is_kimi_k27_code_model,
+    is_kimi_k3_model,
     resolve_interleaved_capability,
     resolve_reasoning_transport,
 )
@@ -230,7 +232,7 @@ def _build_generic_chat_extra_body(
     model_lower = model_id.lower()
     enabled = reasoning_enabled is not False
 
-    if "kimi-k3" in model_lower:
+    if is_kimi_k3_model(model_id):
         effort = reasoning_effort or DEFAULT_KIMI_K3_REASONING_EFFORT
         if effort not in KIMI_K3_REASONING_EFFORTS:
             log.warning(
@@ -271,7 +273,7 @@ def _build_generic_chat_extra_body(
             )
         }
 
-    if "kimi-k2.7" in model_lower:
+    if is_kimi_k27_code_model(model_id):
         # K2.7 cannot disable thinking. Send the enabled form explicitly
         # because OpenAI-compatible gateways may not apply Moonshot's default.
         return {"thinking": {"type": "enabled"}}
@@ -399,8 +401,8 @@ def build_provider_options(
         configured_extra_body
         or interleaved_enabled
         or reasoning_enabled is True
-        or "kimi-k2.7" in model_lower
-        or "kimi-k3" in model_lower
+        or is_kimi_k27_code_model(model_id)
+        or is_kimi_k3_model(model_id)
     ):
         automatic_extra_body = _build_generic_chat_extra_body(
             provider_id,
@@ -410,7 +412,7 @@ def build_provider_options(
             reasoning_effort,
         )
         extra_body = dict(configured_extra_body or automatic_extra_body or {})
-        if "kimi-k3" in model_lower:
+        if is_kimi_k3_model(model_id):
             # K3 is always a reasoning model and uses the top-level
             # reasoning_effort field instead of the K2.x thinking object.
             extra_body.pop("thinking", None)
@@ -426,7 +428,7 @@ def build_provider_options(
                         "reasoning_effort",
                         DEFAULT_KIMI_K3_REASONING_EFFORT,
                     )
-        elif "kimi-k2.7" in model_lower:
+        elif is_kimi_k27_code_model(model_id):
             # K2.7 rejects disabled thinking. Normalize configured values so
             # direct and gateway-backed endpoints always request reasoning.
             extra_body["thinking"] = {"type": "enabled"}

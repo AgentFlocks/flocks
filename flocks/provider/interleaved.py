@@ -6,6 +6,11 @@ from typing import Any, Dict, Optional
 
 REASONING_TRANSPORT_GENERIC_CHAT = "generic_chat"
 REASONING_TRANSPORT_ANTHROPIC_MESSAGES = "anthropic_messages"
+KIMI_K27_CODE_MODELS = frozenset({
+    "kimi-k2.7-code",
+    "kimi-k2.7-code-highspeed",
+})
+KIMI_K3_MODELS = frozenset({"kimi-k3"})
 
 
 _STRICT_REASONING_CONTENT = {
@@ -43,10 +48,8 @@ _STRICT_REASONING_CONTENT_TOKENS = (
     "r1-0528",
     "kimi-k2.5",
     "kimi-k2.6",
-    "kimi-k2.7",
     "kimi-k2-thinking",
     "kimi-k2-thinking-turbo",
-    "kimi-k3",
     "k2-thinking",
     "k2-thinking-turbo",
     "mimo",
@@ -89,6 +92,18 @@ def _matches_any(text: str, *tokens: str) -> bool:
     return any(token in text for token in tokens)
 
 
+def normalize_model_id(model_id: str) -> str:
+    return model_id.strip().lower().replace("_", "-")
+
+
+def is_kimi_k27_code_model(model_id: str) -> bool:
+    return normalize_model_id(model_id) in KIMI_K27_CODE_MODELS
+
+
+def is_kimi_k3_model(model_id: str) -> bool:
+    return normalize_model_id(model_id) in KIMI_K3_MODELS
+
+
 def infer_interleaved_capability(
     *,
     provider_id: str,
@@ -102,7 +117,7 @@ def infer_interleaved_capability(
     works without user-visible toggles.
     """
     pid = _lower(provider_id)
-    mid = _lower(model_id)
+    mid = normalize_model_id(model_id)
     burl = _lower(base_url)
 
     if "minimax" in mid or pid == "minimax":
@@ -124,6 +139,8 @@ def infer_interleaved_capability(
     ):
         return dict(_PROMOTE_REASONING_CONTENT)
 
+    if is_kimi_k27_code_model(mid) or is_kimi_k3_model(mid):
+        return dict(_STRICT_REASONING_CONTENT)
     if _matches_any(mid, *_STRICT_REASONING_CONTENT_TOKENS):
         return dict(_STRICT_REASONING_CONTENT)
     if (

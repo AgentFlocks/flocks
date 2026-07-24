@@ -47,6 +47,7 @@ import pytest
 
 from flocks.provider import model_catalog
 from flocks.provider import options as provider_options
+from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 
 DEEPSEEK_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
 GLM_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled", "clear_thinking": False}}
@@ -98,9 +99,9 @@ def _expected_generic_chat_extra_body(
         return GLM_THINKING_EXTRA_BODY
     if "mimo" in model_lower:
         return MIMO_THINKING_EXTRA_BODY
-    if "kimi-k3" in model_lower:
+    if is_kimi_k3_model(model_id):
         return {"reasoning_effort": "max"}
-    if "kimi-k2.7" in model_lower:
+    if is_kimi_k27_code_model(model_id):
         return KIMI_THINKING_EXTRA_BODY
     if "kimi" in model_lower:
         return KIMI_THINKING_EXTRA_BODY
@@ -441,8 +442,9 @@ class TestDispatchShape:
             ("qwen3-7b-uncatalogued", {"enable_thinking": True}),
             ("glm-5-uncatalogued", GLM_THINKING_EXTRA_BODY),
             ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
-            ("kimi-k2.7-code-uncatalogued", KIMI_THINKING_EXTRA_BODY),
-            ("kimi-k3-uncatalogued", {"reasoning_effort": "max"}),
+            ("kimi-k2.7-code", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k2.7-code-highspeed", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k3", {"reasoning_effort": "max"}),
             ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
             ("minimax-m4-uncatalogued", {"reasoning_split": True}),
             ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),
@@ -470,6 +472,16 @@ class TestDispatchShape:
             "series-token fallback should have inferred interleaved and "
             f"emitted {expected_extra_body}. options={options!r}"
         )
+
+    def test_kimi_k27_dispatch_does_not_match_unknown_suffix(self) -> None:
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k2.7-code-future",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert "extra_body" not in options
 
     @pytest.mark.parametrize(
         "provider_id,model_id,expected_extra_body",
