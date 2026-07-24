@@ -25,6 +25,20 @@ def test_resolve_secret_value_prefers_real_fofa_split_secrets():
     assert resolve_secret_value("fofa_api_key", secrets) == "override-api-key"
 
 
+def test_resolve_secret_value_reads_legacy_llm_key_without_mutating_secrets():
+    secrets = MagicMock()
+    secrets.get.side_effect = lambda key: {
+        "custom-codex_api_key": "legacy-provider-key",
+    }.get(key)
+
+    assert (
+        resolve_secret_value("custom-codex_llm_key", secrets)
+        == "legacy-provider-key"
+    )
+    secrets.set.assert_not_called()
+    secrets.delete.assert_not_called()
+
+
 def test_resolve_secret_refs_returns_empty_for_invalid_fofa_canonical_secret():
     secrets = MagicMock()
     secrets.get.side_effect = lambda key: {

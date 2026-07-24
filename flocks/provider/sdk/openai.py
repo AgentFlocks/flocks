@@ -18,6 +18,7 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
+    _normalize_stream_usage,
     build_reasoning_metadata,
     _coerce_bool,
     extract_reasoning_content_with_source,
@@ -223,11 +224,7 @@ class OpenAIProvider(BaseProvider):
         async for chunk in stream:
             # Capture usage from the final chunk (OpenAI returns it in a chunk with no choices)
             if hasattr(chunk, 'usage') and chunk.usage:
-                stream_usage = {
-                    "prompt_tokens": getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                    "completion_tokens": getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                    "total_tokens": getattr(chunk.usage, 'total_tokens', 0) or 0,
-                }
+                stream_usage = _normalize_stream_usage(chunk.usage)
             
             if not chunk.choices:
                 continue
