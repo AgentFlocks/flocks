@@ -113,6 +113,9 @@ class LoopContext:
     model_candidates: List[RuntimeModel] = field(default_factory=list)
     candidate_index: int = 0
     turn_user_id: Optional[str] = None
+    turn_additional_context: Optional[str] = None
+    stop_hook_active: bool = False
+    session_start_pending: bool = False
 
     @property
     def trace_step(self) -> int:
@@ -646,6 +649,7 @@ class SessionLoop:
             auto_failover_allowed=auto_failover,
             model_candidates=model_candidates,
             candidate_index=candidate_index,
+            session_start_pending=trace_offset == 0,
         )
         
         # Register context
@@ -836,8 +840,19 @@ class SessionLoop:
         cls,
         ctx: LoopContext,
         last_user: MessageInfo,
-    ) -> None:
-        """Synchronize routing when the loop advances to a real WebUI turn."""
+    ) -> bool:
+        """Synchronize routing when the loop advances to a real WebUI turn.
+
+        Returns:
+            True when ``last_user`` starts a new non-synthetic user turn.
+        """
+        if last_user.id == ctx.turn_user_id:
+            return False
+
+        parts = await Message.parts(last_user.id, ctx.session.id)
+        if any(bool(getattr(part, "synthetic", False)) for part in parts):
+            return False
+
         if ctx.turn_user_id is None:
             ctx.turn_user_id = last_user.id
             if ctx.auto_failover and ctx.auto_failover_allowed:
@@ -856,13 +871,7 @@ class SessionLoop:
                     ctx.model_candidates,
                 )
                 cls._select_candidate(ctx, next_index)
-            return
-        if last_user.id == ctx.turn_user_id:
-            return
-
-        parts = await Message.parts(last_user.id, ctx.session.id)
-        if any(bool(getattr(part, "synthetic", False)) for part in parts):
-            return
+            return True
 
         ctx.turn_user_id = last_user.id
         persisted_session = await Session.get_by_id(ctx.session.id)
@@ -904,7 +913,7 @@ class SessionLoop:
                 "provider_id": provider_id,
                 "model_id": model_id,
             })
-            return
+            return True
 
         from flocks.config.config import Config
 
@@ -938,6 +947,208 @@ class SessionLoop:
             "to_model_id": active.model_id,
             "cooldown_active": next_index > 0,
         })
+        return True
+
+    @classmethod
+    async def _run_user_prompt_submit_hook(
+        cls,
+        ctx: LoopContext,
+        last_user: MessageInfo,
+    ) -> None:
+        """Run UserPromptSubmit once for a newly observed real user turn."""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+
+            prompt = await Message.get_text_content(last_user)
+            hook_ctx = await HookPipeline.run_user_prompt_submit({
+                "sessionID": ctx.session.id,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_user, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "messageID": last_user.id,
+                "prompt": prompt,
+            })
+            additional_context = hook_ctx.output.get("additionalContext")
+            if isinstance(additional_context, str) and additional_context.strip():
+                ctx.turn_additional_context = additional_context.strip()
+        except Exception as exc:
+            log.debug("loop.hook.user_prompt_submit.error", {
+                "session_id": ctx.session.id,
+                "message_id": last_user.id,
+                "error": str(exc),
+            })
+
+    @classmethod
+    async def _run_turn_finish_hook(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        last_message: MessageInfo,
+    ) -> bool:
+        """Run TurnFinish and continue the loop when the hook blocks stopping."""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+
+            hook_user = last_user
+            if ctx.turn_user_id:
+                hook_user = (
+                    await Message.get(ctx.session.id, ctx.turn_user_id)
+                    or last_user
+                )
+            user_text = await Message.get_text_content(hook_user)
+            assistant_text = await Message.get_text_content(last_message)
+            hook_ctx = await HookPipeline.run_turn_finish({
+                "sessionID": ctx.session.id,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_message, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "step": ctx.trace_step,
+                "userMessage": {
+                    "id": hook_user.id,
+                    "content": user_text,
+                },
+                "assistantMessage": {
+                    "id": last_message.id,
+                    "content": assistant_text,
+                },
+                "finishReason": "stop",
+                "stopHookActive": ctx.stop_hook_active,
+            })
+        except Exception as exc:
+            log.debug("loop.hook.turn_finish.error", {
+                "session_id": ctx.session.id,
+                "message_id": getattr(last_message, "id", None),
+                "error": str(exc),
+            })
+            return False
+
+        decision = str(hook_ctx.output.get("decision") or "").strip().lower()
+        reason = str(hook_ctx.output.get("reason") or "").strip()
+        if decision != "block":
+            return False
+        if not reason:
+            log.warn("loop.hook.turn_finish.missing_reason", {
+                "session_id": ctx.session.id,
+                "message_id": last_message.id,
+            })
+            return False
+        if ctx.should_abort():
+            log.info("loop.hook.turn_finish.ignored_after_abort", {
+                "session_id": ctx.session.id,
+                "message_id": last_message.id,
+            })
+            return False
+
+        try:
+            if ctx.session_ctx:
+                post_hook_messages = await ctx.session_ctx.get_messages()
+            else:
+                post_hook_messages = await Message.list(ctx.session.id)
+            queued_user = await cls._detect_queued_user_message(
+                ctx.session.id,
+                post_hook_messages,
+                last_user.id,
+                last_message,
+            )
+        except Exception as exc:
+            queued_user = None
+            log.debug("loop.hook.turn_finish.queued_recheck_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+        if queued_user is not None:
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="queued_message",
+                queued_message_detected=True,
+            )
+            await cls._publish_runtime_event(callbacks, "turn.continued", {
+                **turn_state.model_dump(by_alias=True),
+                "queuedUserMessageID": queued_user.id,
+            })
+            log.info("loop.hook.turn_finish.queued_message_won", {
+                "session_id": ctx.session.id,
+                "queued_user_id": queued_user.id,
+                "source_assistant_message_id": last_message.id,
+            })
+            return True
+
+        from flocks.agent.registry import Agent
+        from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
+
+        try:
+            agent = await Agent.get(
+                getattr(last_message, "agent", None) or ctx.agent_name
+            )
+        except Exception as exc:
+            log.debug("loop.hook.turn_finish.agent_load_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+            agent = None
+        max_steps = (
+            agent.steps
+            if agent is not None and getattr(agent, "steps", None) is not None
+            else DEFAULT_MAX_TOOL_STEPS
+        )
+        if ctx.trace_step >= max_steps:
+            log.warn("loop.hook.turn_finish.step_limit", {
+                "session_id": ctx.session.id,
+                "step": ctx.trace_step,
+                "max_steps": max_steps,
+            })
+            return False
+
+        try:
+            continuation = await Message.create(
+                session_id=ctx.session.id,
+                role=MessageRole.USER,
+                content=reason,
+                agent=getattr(hook_user, "agent", None) or ctx.agent_name,
+                model={
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                synthetic=True,
+                part_metadata={
+                    "turnFinishContinuation": True,
+                    "stopHookActive": True,
+                    "sourceAssistantMessageID": last_message.id,
+                },
+            )
+        except Exception as exc:
+            log.error("loop.hook.turn_finish.continuation_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+            return False
+        ctx.stop_hook_active = True
+        turn_state = set_turn_state(
+            ctx.session.id,
+            step=ctx.step,
+            status="continued",
+            continue_reason="turn_finish_hook",
+            queued_message_detected=False,
+        )
+        await cls._publish_runtime_event(callbacks, "turn.continued", {
+            **turn_state.model_dump(by_alias=True),
+            "turnFinishMessageID": continuation.id,
+        })
+        log.info("loop.continuing_for_turn_finish_hook", {
+            "session_id": ctx.session.id,
+            "continuation_message_id": continuation.id,
+            "source_assistant_message_id": last_message.id,
+        })
+        return True
 
     @classmethod
     async def _finalize_deferred_failure(
@@ -1001,10 +1212,14 @@ class SessionLoop:
                     ctx.auto_failover
                     and ctx.candidate_index + 1 < len(ctx.model_candidates)
                 ),
+                turn_additional_context=ctx.turn_additional_context,
+                session_start_pending=ctx.session_start_pending,
             )
             runner._step = ctx.trace_step
 
             step_result = await runner._process_step(messages, last_user)
+            if runner._session_start_fired:
+                ctx.session_start_pending = False
             failure = step_result.failure
             if not ctx.auto_failover or failure is None:
                 return step_result
@@ -1216,8 +1431,6 @@ class SessionLoop:
                 )
                 break
 
-            await cls._prepare_auto_turn(ctx, last_user)
-            
             last_assistant_parts = (
                 await Message.parts(last_assistant.id, ctx.session.id)
                 if last_assistant
@@ -1238,6 +1451,11 @@ class SessionLoop:
                 })
                 last_message = last_assistant
                 break
+
+            if await cls._prepare_auto_turn(ctx, last_user):
+                ctx.turn_additional_context = None
+                ctx.stop_hook_active = False
+                await cls._run_user_prompt_submit_hook(ctx, last_user)
             
             # Bootstrap memory on first step (once per loop, stored in ctx)
             if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
@@ -1903,6 +2121,20 @@ class SessionLoop:
                         })
                         continue
 
+                if (
+                    not step_result.error
+                    and not ctx.should_abort()
+                    and last_message is not None
+                    and getattr(last_message, "finish", None) == "stop"
+                    and await cls._run_turn_finish_hook(
+                        ctx,
+                        callbacks,
+                        last_user,
+                        last_message,
+                    )
+                ):
+                    continue
+
                 stop_reason = step_result.error or (getattr(last_message, "finish", None) if last_message else None) or "stop"
                 turn_state = set_turn_state(
                     ctx.session.id,
@@ -1966,6 +2198,7 @@ class SessionLoop:
                 "steps": ctx.step,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
+                **({"aborted": True} if ctx.should_abort() else {}),
             },
         )
     
