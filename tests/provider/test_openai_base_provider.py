@@ -866,6 +866,53 @@ class TestOpenAIBaseProviderStreamingUsage:
         }
 
     @pytest.mark.asyncio
+    async def test_chat_stream_preserves_nested_reasoning_tokens(self):
+        provider, create = self._build_provider_with_stream()
+
+        content_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="hello", tool_calls=None),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                total_tokens=18,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
+            ),
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=None, finish_reason="stop")],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(
+            content_chunk, usage_chunk, finish_chunk
+        )
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.6-luna",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert chunks[-1].usage == {
+            "prompt_tokens": 11,
+            "completion_tokens": 2,
+            "total_tokens": 18,
+            "reasoning_tokens": 5,
+        }
+
+    @pytest.mark.asyncio
     async def test_chat_stream_emits_trailing_usage_when_usage_only_chunk_arrives_after_finish(self):
         provider, create = self._build_provider_with_stream()
 

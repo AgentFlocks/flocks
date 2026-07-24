@@ -311,6 +311,15 @@ describe('ModelPage configure provider dialog', () => {
     expect(mocks.revealCredentials).toHaveBeenCalledWith('openai');
   }
 
+  it('does not test provider credentials when the page loads', async () => {
+    renderWithRouter(<ModelPage />);
+
+    await waitFor(() => {
+      expect(mocks.getCredentials).toHaveBeenCalledWith('openai');
+    });
+    expect(mocks.testCredentials).not.toHaveBeenCalled();
+  });
+
   it('displays and preserves the existing API key when saving a new base URL', async () => {
     const user = userEvent.setup();
     await openConfigureDialog(user);
@@ -327,6 +336,7 @@ describe('ModelPage configure provider dialog', () => {
     await user.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.testCredentials).not.toHaveBeenCalled();
     const payload = mocks.setCredentials.mock.calls.at(-1)?.[1];
     expect(payload).toEqual(expect.objectContaining({
       base_url: 'https://new.example.com/v1',

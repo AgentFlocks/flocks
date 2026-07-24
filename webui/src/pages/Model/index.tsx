@@ -185,11 +185,6 @@ export default function ModelPage() {
     });
   }, []);
 
-  // Auto-test all configured providers on initial load, with cache (connected: 1h, failed: 5min)
-  const [autoTested, setAutoTested] = useState(false);
-  const handleTestConnectionRef = useRef<(id: string, silent?: boolean) => Promise<void>>(null!);
-
-
   // Only show configured (connected) providers
   const configuredProviders = useMemo(() => {
     return providers.filter(p => p.configured).sort((a, b) => a.name.localeCompare(b.name));
@@ -270,42 +265,28 @@ export default function ModelPage() {
   }, []);
   handleSelectProviderRef.current = handleSelectProvider;
 
-  const handleTestConnection = async (providerId: string, silent = false) => {
-    try {
-      const response = await providerAPI.testCredentials(providerId);
-      if (response.data.success) {
-        setConnectionStatus(prev => ({ ...prev, [providerId]: 'connected' }));
-        saveConnectionCache(providerId, 'connected');
-        if (!silent) toast.success(t('testSuccess'), `${t('latency')}: ${response.data.latency_ms}ms`);
-      } else {
-        setConnectionStatus(prev => ({ ...prev, [providerId]: 'failed' }));
-        saveConnectionCache(providerId, 'failed');
-        if (!silent) toast.error(t('testFailed'), response.data.message);
-      }
-    } catch (err: any) {
-      setConnectionStatus(prev => ({ ...prev, [providerId]: 'failed' }));
-      saveConnectionCache(providerId, 'failed');
-      if (!silent) toast.error(t('testFailed'), err.message);
-    }
-  };
-  handleTestConnectionRef.current = handleTestConnection;
-
-  // Auto-test effect (runs once after handlers are defined)
+  // Restore statuses from explicit connection tests without issuing API calls.
   useEffect(() => {
-    if (!loading && !autoTested && providers.length > 0) {
-      setAutoTested(true);
-      const cache = loadConnectionCache();
-      const configuredList = providers.filter(p => p.configured);
-      configuredList.forEach(p => {
-        const cached = getCachedStatus(cache, p.id);
-        if (cached !== null) {
-          setConnectionStatus(prev => ({ ...prev, [p.id]: cached }));
+    if (!loading && providers.length > 0) {
+      const cachedStatuses = loadConnectionCache();
+      setConnectionStatus(prev => {
+        let changed = false;
+        const next = { ...prev };
+        providers.filter(p => p.configured).forEach(p => {
+          const cached = getCachedStatus(cachedStatuses, p.id);
+          if (cached !== null && next[p.id] !== cached) {
+            next[p.id] = cached;
+            changed = true;
+          }
+        });
+        if (changed) {
+          return next;
         } else {
-          handleTestConnectionRef.current(p.id, true);
+          return prev;
         }
       });
     }
-  }, [loading, providers, autoTested]);
+  }, [loading, providers]);
 
   const handleDeleteProvider = async (providerId: string) => {
     const isDefaultAffected = defaultModel && defaultModel.provider_id === providerId;
@@ -363,10 +344,7 @@ export default function ModelPage() {
     if (addedProviderId) {
       setConnectionStatus(prev => ({ ...prev, [addedProviderId]: 'unknown' }));
       setPendingSelectId(addedProviderId);
-      setTimeout(() => {
-        refetch();
-        handleTestConnection(addedProviderId, true);
-      }, 500);
+      setTimeout(() => refetch(), 500);
     } else {
       setTimeout(() => refetch(), 300);
     }
@@ -577,8 +555,6 @@ export default function ModelPage() {
               setCredentials(res.data);
               // Refresh model list in right panel
               handleSelectProvider(selectedProvider);
-              // Auto-test after credential update
-              handleTestConnection(selectedProvider.id, true);
             }
             refetch();
             setShowConfigDialog(false);

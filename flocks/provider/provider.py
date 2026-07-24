@@ -1061,7 +1061,10 @@ class BaseProvider:
     
     def configure(self, config: ProviderConfig) -> None:
         """Configure the provider"""
+        config_changed = self._config != config
         self._config = config
+        if config_changed and hasattr(self, "_client"):
+            self._client = None
         self.log.info("provider.configured", {
             "provider_id": self.id,
             "has_api_key": config.api_key is not None,

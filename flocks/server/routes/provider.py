@@ -1938,6 +1938,10 @@ async def set_provider_credentials(
                 config_dict["name"] = request.provider_name
             ConfigWriter.add_provider(provider_id, config_dict)
 
+        # Config.get() caches resolved secret values. Invalidate it after
+        # persisting credentials so a later session cannot reapply the old key.
+        Config.clear_cache()
+
         # 3. Configure the provider runtime so is_configured() reflects the change
         await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
