@@ -59,6 +59,7 @@ import {
   parseInstructionDisplayText,
   resolveSessionChatSSEAction,
   shouldForwardSSEEventToParent,
+  stripTaskMetadata,
   type CompactionStage,
   usePendingQuestions,
   useSessionContextUsage,
@@ -111,11 +112,12 @@ export interface ConversationBottomSlotActions {
   hasMessages: boolean;
 }
 
-function getMessagePartDisplayText(part: MessagePart): string {
+function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
   const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
-  return typeof metadataDisplayText === 'string' && metadataDisplayText
+  const displayText = typeof metadataDisplayText === 'string' && metadataDisplayText
     ? metadataDisplayText
     : part.text || '';
+  return hideTaskMetadata ? stripTaskMetadata(displayText) : displayText;
 }
 
 export interface SessionChatProps {
@@ -1712,9 +1714,6 @@ export default function SessionChat({
     }
   }, []);
 
-  const loadOlderMessagesRef = useRef<(() => Promise<void>) | null>(null);
-  const hasMoreMessagesRef = useRef(false);
-  const loadingOlderMessagesRef = useRef(false);
   const rafScheduledRef = useRef(false);
   const handleScroll = useCallback(() => {
     if (rafScheduledRef.current) return;
@@ -1723,18 +1722,6 @@ export default function SessionChat({
       const el = scrollContainerRef.current;
       if (el) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
-        if (el.scrollTop <= 80 && hasMoreMessagesRef.current && !loadingOlderMessagesRef.current) {
-          const previousHeight = el.scrollHeight;
-          const previousTop = el.scrollTop;
-          const loadPromise = loadOlderMessagesRef.current?.();
-          if (loadPromise) void loadPromise.finally(() => {
-            requestAnimationFrame(() => {
-              const current = scrollContainerRef.current;
-              if (!current) return;
-              current.scrollTop = current.scrollHeight - previousHeight + previousTop;
-            });
-          });
-        }
       }
       rafScheduledRef.current = false;
     });
@@ -1743,22 +1730,17 @@ export default function SessionChat({
   const {
     messages,
     loading,
-    loadingOlder,
-    hasMore: hasMoreMessages,
     refetch,
-    loadOlder,
     addMessage,
     updateMessage,
     updateMessagePart,
     removeMessage,
+    clearMessages,
     replaceMessageText,
     markMessageStopped,
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
-  useEffect(() => { loadOlderMessagesRef.current = loadOlder; }, [loadOlder]);
-  useEffect(() => { hasMoreMessagesRef.current = hasMoreMessages; }, [hasMoreMessages]);
-  useEffect(() => { loadingOlderMessagesRef.current = loadingOlder; }, [loadingOlder]);
   const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
   const contextUsageBreakdown = useMemo(
     () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
@@ -1836,6 +1818,7 @@ export default function SessionChat({
           setIsStreaming(false);
           setGoalBanner(null);
           setDismissedGoalKey('');
+          clearMessages();
           refetch();
           void refreshContextUsage({ clear: true });
           return;
@@ -2004,6 +1987,7 @@ export default function SessionChat({
       updateMessage,
       updateMessagePart,
       removeMessage,
+      clearMessages,
       refetch,
       refreshContextUsage,
       applyContextUsagePushSnapshot,
@@ -2520,6 +2504,7 @@ export default function SessionChat({
       }
     } catch (err: unknown) {
       setIsStreaming(false);
+      removeMessage(messageId);
       const axiosErr = err as any;
       if (axiosErr?.response?.status === 404) {
         onError?.('Session not found. Please start a new session.');
@@ -2581,6 +2566,7 @@ export default function SessionChat({
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
     } catch (err: unknown) {
       setIsStreaming(false);
+      removeMessage(messageId);
       const axiosErr = err as any;
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
@@ -3192,7 +3178,7 @@ export default function SessionChat({
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
     : fullWidth
-      ? 'space-y-5 w-full px-5'
+      ? 'space-y-5 w-full px-12'
       : pageCanvas
         ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
         : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
@@ -3216,7 +3202,11 @@ export default function SessionChat({
       >
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
-            <LoadingSpinner />
+            <LoadingSpinner
+              size="sm"
+              delayMs={180}
+              className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
+            />
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
@@ -3234,19 +3224,6 @@ export default function SessionChat({
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
-            {hasMoreMessages && (
-              <div className="flex justify-center pb-2">
-                <button
-                  type="button"
-                  onClick={() => void loadOlder()}
-                  disabled={loadingOlder}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {loadingOlder ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
-                  <span>{loadingOlder ? t('chat.loadingOlder', 'Loading...') : t('chat.loadOlder', 'Load earlier messages')}</span>
-                </button>
-              </div>
-            )}
             <ChatMessageTimeline
               items={historyItems}
               pendingQuestions={pendingQuestions}
@@ -4034,11 +4011,13 @@ function ChatMessageBubbleInner({
   const rawAgentName = message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
-  const getTextContent = () =>
-    parts
+  const getTextContent = () => {
+    const text = parts
       .filter((p) => p.type === 'text' && p.text)
       .map((p) => p.text)
       .join('\n\n');
+    return isUser ? text : stripTaskMetadata(text);
+  };
 
   const editableTextParts = parts.filter((part): part is MessagePart & { text: string } =>
     part.type === 'text' && typeof part.text === 'string',
@@ -4057,7 +4036,7 @@ function ChatMessageBubbleInner({
     return !(part.callID && pendingQuestions?.[part.callID]);
   });
   const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
-    ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0]))
+    ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0], false))
     : null;
 
   const bubbleClass = instructionDisplayLabel
@@ -4154,7 +4133,7 @@ function ChatMessageBubbleInner({
             return true;
           };
           const isRenderableTextPart = (part: MessagePart): boolean => (
-            part.type === 'text' && !!getMessagePartDisplayText(part).trim()
+            part.type === 'text' && !!getMessagePartDisplayText(part, !isUser).trim()
           );
           const isRenderableDisplayPart = (part: MessagePart): boolean => {
             if (isIntermediateProcessPart(part)) return true;
@@ -4180,7 +4159,7 @@ function ChatMessageBubbleInner({
                 const nodeRefMatch = isUser
                   ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
                   : null;
-                const partDisplayText = getMessagePartDisplayText(part);
+                const partDisplayText = getMessagePartDisplayText(part, !isUser);
                 if (!partDisplayText.trim()) return null;
                 const displayText = nodeRefMatch && partDisplayText === rawText ? nodeRefMatch[3] : partDisplayText;
                 const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
@@ -4201,7 +4180,10 @@ function ChatMessageBubbleInner({
                       </div>
                     )}
                     {processStep ? (
-                      <div className="mb-[9px] ml-2 mt-[3px] border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                      <div
+                        data-testid="chat-process-text-step"
+                        className="min-w-0 py-1 text-sm leading-7 text-[#686e6c] dark:text-zinc-400"
+                      >
                         <StreamingMarkdown
                           content={displayText}
                           isStreaming={isActive && !isUser}
