@@ -184,7 +184,18 @@ class TestOpenAICompatibleProviderTemperature:
         assert create.await_count == 1
 
     @pytest.mark.asyncio
-    async def test_stream_logs_effective_kimi_k3_thinking_state(self):
+    @pytest.mark.parametrize(
+        ("model_id", "extra_body"),
+        [
+            ("kimi-k2.7-code-highspeed", {"thinking": {"type": "enabled"}}),
+            ("kimi-k3", {"reasoning_effort": "max"}),
+        ],
+    )
+    async def test_stream_logs_effective_kimi_thinking_state(
+        self,
+        model_id,
+        extra_body,
+    ):
         provider, create = _build_provider_with_client()
         provider.log = MagicMock()
         create.return_value = _stream_from_chunks(
@@ -202,9 +213,9 @@ class TestOpenAICompatibleProviderTemperature:
         _ = [
             chunk
             async for chunk in provider.chat_stream(
-                "kimi-k3",
+                model_id,
                 [ChatMessage(role="user", content="hello")],
-                extra_body={"reasoning_effort": "max"},
+                extra_body=extra_body,
             )
         ]
 
