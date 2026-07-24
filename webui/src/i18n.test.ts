@@ -32,7 +32,7 @@ describe('i18n lazy namespaces', () => {
     expect(zhSession.createSession).toBe('新建任务');
     expect(zhSession.createSessionInProject).toBe('在项目 {{project}} 中新建任务');
     expect(zhSession.projectDialog.newSessionAction).toBe('新建任务');
-    expect(zhSession.filterConversations).toBe('搜索任务...');
+    expect(zhSession.filterConversations).toBe('搜索任务');
     expect(zhSession.noResults).toBe('没有匹配的任务');
 
     expect(enNav.sessions).toBe('Workbench');
@@ -45,7 +45,7 @@ describe('i18n lazy namespaces', () => {
     expect(enSession.createSession).toBe('New Task');
     expect(enSession.createSessionInProject).toBe('New task in project {{project}}');
     expect(enSession.projectDialog.newSessionAction).toBe('New task');
-    expect(enSession.filterConversations).toBe('Search tasks...');
+    expect(enSession.filterConversations).toBe('Search tasks');
     expect(enSession.noResults).toBe('No matching tasks');
   });
 });

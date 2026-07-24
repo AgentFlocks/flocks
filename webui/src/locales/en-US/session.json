@@ -406,7 +406,7 @@
     "copyPathFailed": "Failed to copy project path",
     "saveFailed": "Failed to save project"
   },
-  "filterConversations": "Search tasks...",
+  "filterConversations": "Search tasks",
   "noResults": "No matching tasks",
   "showMore": "Show {{count}} more",
   "showLess": "Show less"

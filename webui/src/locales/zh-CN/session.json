@@ -406,7 +406,7 @@
     "copyPathFailed": "复制项目路径失败",
     "saveFailed": "保存项目失败"
   },
-  "filterConversations": "搜索任务...",
+  "filterConversations": "搜索任务",
   "noResults": "没有匹配的任务",
   "showMore": "显示更多 {{count}} 条",
   "showLess": "收起"

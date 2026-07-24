@@ -1884,7 +1884,7 @@ export default function SessionPage() {
               <input
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t('filterConversations', 'Filter conversations...')}
+                placeholder={t('filterConversations', 'Search tasks')}
                 className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
               />
               {searchQuery && (
