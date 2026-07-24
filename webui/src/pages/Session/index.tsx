@@ -6,7 +6,7 @@ import {
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
   FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
-  Hammer, MessageCircleQuestion, ClipboardList, Target, Check,
+  Hammer, ClipboardList, Target, Check,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import i18n from '@/i18n';
@@ -64,7 +64,7 @@ const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
-const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'ask', 'plan', 'goal'];
+const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 
 function ExecutionModeIcon({
@@ -74,7 +74,6 @@ function ExecutionModeIcon({
   mode: SessionExecutionMode;
   className?: string;
 }) {
-  if (mode === 'ask') return <MessageCircleQuestion className={className} />;
   if (mode === 'plan') return <ClipboardList className={className} />;
   if (mode === 'goal') return <Target className={className} />;
   return <Hammer className={className} />;

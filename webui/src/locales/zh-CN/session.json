@@ -49,10 +49,6 @@
         "label": "Build",
         "description": "使用 Rex 的完整工具完成任务"
       },
-      "ask": {
-        "label": "Ask",
-        "description": "只读取和回答，不执行修改"
-      },
       "plan": {
         "label": "Plan",
         "description": "调研需求并输出可实施计划"

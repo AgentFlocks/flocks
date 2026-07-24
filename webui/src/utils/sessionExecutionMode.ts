@@ -1,4 +1,4 @@
-export type SessionExecutionMode = 'build' | 'ask' | 'plan' | 'goal';
+export type SessionExecutionMode = 'build' | 'plan' | 'goal';
 export type PersistentSessionExecutionMode = Exclude<SessionExecutionMode, 'goal'>;
 
 export const DEFAULT_SESSION_EXECUTION_MODE: PersistentSessionExecutionMode = 'build';
@@ -6,7 +6,7 @@ export const EXECUTION_MODE_STORAGE_PREFIX = 'flocks:session-execution-mode:';
 export const EXECUTION_MODE_DRAFT_STORAGE_KEY = `${EXECUTION_MODE_STORAGE_PREFIX}draft`;
 
 function isPersistentMode(value: unknown): value is PersistentSessionExecutionMode {
-  return value === 'build' || value === 'ask' || value === 'plan';
+  return value === 'build' || value === 'plan';
 }
 
 function storageKey(sessionId?: string | null): string {

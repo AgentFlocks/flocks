@@ -134,8 +134,8 @@ vi.mock('@/components/common/SessionChat', () => ({
     initialMessage?: string | null;
     initialDisplayText?: string | null;
     model?: { providerID: string; modelID: string } | null;
-    executionMode?: 'build' | 'ask' | 'plan' | 'goal';
-    onExecutionModeAccepted?: (mode: 'build' | 'ask' | 'plan' | 'goal') => void;
+    executionMode?: 'build' | 'plan' | 'goal';
+    onExecutionModeAccepted?: (mode: 'build' | 'plan' | 'goal') => void;
     supportsVision?: boolean;
     contextWindowTokens?: number | null;
     hideInput?: boolean;
@@ -153,7 +153,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       agentOverride?: string,
       modelOverride?: unknown,
       options?: { displayText?: string },
-      executionModeOverride?: 'build' | 'ask' | 'plan' | 'goal',
+      executionModeOverride?: 'build' | 'plan' | 'goal',
     ) => Promise<unknown> | unknown;
     onSSEEvent?: (event: { type: string; properties?: Record<string, unknown> }) => void;
   }) {
@@ -388,7 +388,7 @@ describe('SessionPage session actions menu', () => {
     ).toBeTruthy();
   });
 
-  it('persists Ask and Plan per session', async () => {
+  it('persists Plan per session', async () => {
     const user = userEvent.setup();
     renderSessionPage('/sessions?session=session-1');
 
@@ -403,11 +403,11 @@ describe('SessionPage session actions menu', () => {
   });
 
   it('restores a persisted session execution mode', async () => {
-    localStorage.setItem('flocks:session-execution-mode:session-1', 'ask');
+    localStorage.setItem('flocks:session-execution-mode:session-1', 'plan');
     renderSessionPage('/sessions?session=session-1');
 
     await waitFor(() => {
-      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'ask');
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
     });
   });
 

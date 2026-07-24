@@ -14,7 +14,6 @@ class SessionExecutionMode(str, Enum):
     """Execution mode selected for a user turn."""
 
     BUILD = "build"
-    ASK = "ask"
     PLAN = "plan"
     GOAL = "goal"
 
@@ -31,16 +30,6 @@ READ_ONLY_TOOL_NAMES = frozenset(
         "websearch",
     }
 )
-
-ASK_MODE_PROMPT = """# Ask Mode
-
-Answer the user's question directly. You may inspect the workspace and use
-read-only search or research tools when evidence is needed.
-
-Do not edit files, run shell commands, change configuration, delegate work, or
-perform any other side effect. Do not turn the answer into an implementation
-plan unless the user explicitly asks for one.
-"""
 
 PLAN_MODE_PROMPT = """# Plan Mode
 
@@ -101,8 +90,6 @@ def execution_mode_prompt(value: object) -> str:
     """Return the per-turn developer guidance for a mode."""
 
     mode = runtime_execution_mode(value)
-    if mode == SessionExecutionMode.ASK:
-        return ASK_MODE_PROMPT
     if mode == SessionExecutionMode.PLAN:
         return PLAN_MODE_PROMPT
     return ""

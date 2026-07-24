@@ -49,10 +49,6 @@
         "label": "Build",
         "description": "Use Rex's full tools to complete the task"
       },
-      "ask": {
-        "label": "Ask",
-        "description": "Inspect and answer without making changes"
-      },
       "plan": {
         "label": "Plan",
         "description": "Research and produce an implementation plan"

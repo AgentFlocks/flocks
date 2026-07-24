@@ -2,6 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from pydantic import ValidationError
 
 from flocks.server.routes.session import (
     PromptRequest,
@@ -25,15 +26,23 @@ from flocks.tool.registry import (
 )
 
 
-def test_prompt_request_defaults_to_build_and_accepts_camel_case() -> None:
+def test_prompt_request_defaults_to_build_and_accepts_plan() -> None:
     default_request = PromptRequest(parts=[{"type": "text", "text": "hello"}])
-    ask_request = PromptRequest.model_validate({
+    plan_request = PromptRequest.model_validate({
         "parts": [{"type": "text", "text": "hello"}],
-        "executionMode": "ask",
+        "executionMode": "plan",
     })
 
     assert default_request.execution_mode == SessionExecutionMode.BUILD
-    assert ask_request.execution_mode == SessionExecutionMode.ASK
+    assert plan_request.execution_mode == SessionExecutionMode.PLAN
+
+
+def test_prompt_request_rejects_removed_ask_mode() -> None:
+    with pytest.raises(ValidationError):
+        PromptRequest.model_validate({
+            "parts": [{"type": "text", "text": "hello"}],
+            "executionMode": "ask",
+        })
 
 
 def test_goal_transport_uses_build_permissions_and_slash_dispatch() -> None:
@@ -65,17 +74,15 @@ def test_goal_requires_text_only_objective() -> None:
         _validate_execution_mode_request(attachment)
 
 
-def test_ask_and_plan_use_read_only_permission_rules() -> None:
-    for mode in (SessionExecutionMode.ASK, SessionExecutionMode.PLAN):
-        assert is_tool_allowed(mode, "read")
-        assert is_tool_allowed(mode, "grep")
-        assert is_tool_allowed(mode, "question")
-        assert not is_tool_allowed(mode, "bash")
-        assert not is_tool_allowed(mode, "edit")
-        assert not is_tool_allowed(mode, "unknown_plugin_tool")
+def test_plan_uses_read_only_permission_rules() -> None:
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "read")
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "grep")
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "question")
+    assert not is_tool_allowed(SessionExecutionMode.PLAN, "bash")
+    assert not is_tool_allowed(SessionExecutionMode.PLAN, "edit")
+    assert not is_tool_allowed(SessionExecutionMode.PLAN, "unknown_plugin_tool")
 
     assert is_tool_allowed(SessionExecutionMode.BUILD, "bash")
-    assert "Answer the user's question directly" in execution_mode_prompt("ask")
     assert "decision-complete implementation plan" in execution_mode_prompt("plan")
     assert execution_mode_prompt("build") == ""
 
@@ -126,7 +133,7 @@ async def test_registry_denies_disallowed_tool_before_handler(monkeypatch) -> No
         ctx=ToolContext(
             session_id="session-1",
             message_id="message-1",
-            extra={"execution_mode": "ask"},
+            extra={"execution_mode": "plan"},
         ),
     )
 

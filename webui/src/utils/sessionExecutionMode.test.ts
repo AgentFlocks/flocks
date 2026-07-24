@@ -20,12 +20,10 @@ describe('sessionExecutionMode storage', () => {
     expect(readSessionExecutionMode('session-1')).toBe(DEFAULT_SESSION_EXECUTION_MODE);
   });
 
-  it('persists Ask and Plan independently by session', () => {
-    writeSessionExecutionMode('session-1', 'ask');
-    writeSessionExecutionMode('session-2', 'plan');
+  it('persists Plan independently by session', () => {
+    writeSessionExecutionMode('session-1', 'plan');
 
-    expect(readSessionExecutionMode('session-1')).toBe('ask');
-    expect(readSessionExecutionMode('session-2')).toBe('plan');
+    expect(readSessionExecutionMode('session-1')).toBe('plan');
   });
 
   it('promotes the draft mode to a newly created session', () => {
@@ -37,7 +35,7 @@ describe('sessionExecutionMode storage', () => {
   });
 
   it('stores Build by removing the override', () => {
-    localStorage.setItem(`${EXECUTION_MODE_STORAGE_PREFIX}session-1`, 'ask');
+    localStorage.setItem(`${EXECUTION_MODE_STORAGE_PREFIX}session-1`, 'plan');
     writeSessionExecutionMode('session-1', 'build');
     writeSessionExecutionMode(null, 'plan');
     resetDraftExecutionMode();
@@ -46,7 +44,10 @@ describe('sessionExecutionMode storage', () => {
     expect(localStorage.getItem(EXECUTION_MODE_DRAFT_STORAGE_KEY)).toBeNull();
   });
 
-  it('ignores unsupported persisted values including one-shot Goal', () => {
+  it('ignores removed and one-shot persisted modes', () => {
+    localStorage.setItem(`${EXECUTION_MODE_STORAGE_PREFIX}session-1`, 'ask');
+    expect(readSessionExecutionMode('session-1')).toBe('build');
+
     localStorage.setItem(`${EXECUTION_MODE_STORAGE_PREFIX}session-1`, 'goal');
     expect(readSessionExecutionMode('session-1')).toBe('build');
   });
