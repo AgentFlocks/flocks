@@ -23,6 +23,13 @@ async def test_save_poller_config_restarts_manager(
         assert workflow_id == "wf-1"
         return {"workflowId": workflow_id, "state": "running", "lastStatus": None}
 
+    async def _fake_persist(
+        _workflow_id: str,
+        workflow_data: dict[str, Any],
+        _triggers: list[Any],
+    ) -> dict[str, Any]:
+        return workflow_data
+
     monkeypatch.setattr(
         workflow_routes,
         "_read_workflow_from_fs",
@@ -31,6 +38,7 @@ async def test_save_poller_config_restarts_manager(
         ),
     )
     monkeypatch.setattr(workflow_routes.WorkflowStore, "put_config", _fake_put_config)
+    monkeypatch.setattr(workflow_routes, "_persist_workflow_triggers", _fake_persist)
     monkeypatch.setattr(
         "flocks.workflow.poller_manager.default_manager",
         SimpleNamespace(restart_workflow=_fake_restart),
