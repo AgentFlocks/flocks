@@ -57,6 +57,16 @@ async def add_session_callable_tools(session_id: str, tool_names: Iterable[str])
     return await set_session_callable_tools(session_id, current)
 
 
+async def remove_session_callable_tools(
+    session_id: str,
+    tool_names: Iterable[str],
+) -> Set[str]:
+    """Remove tools from a session's callable set."""
+    current = await get_session_callable_tools(session_id)
+    current.difference_update(_normalize_tool_names(tool_names))
+    return await set_session_callable_tools(session_id, current)
+
+
 async def initialize_session_callable_tools(
     session_id: str,
     base_tool_names: Iterable[str],

@@ -13,6 +13,7 @@ from flocks.memory.manager import MemoryManager
 from flocks.memory.bootstrap import MemoryBootstrap
 from flocks.memory.daily import DailyMemory
 from flocks.memory.flush import MemoryFlush, extract_and_save
+from flocks.memory.mission import MissionStore
 
 from flocks.memory.types import (
     MemorySource,
@@ -49,6 +50,7 @@ __all__ = [
     
     # OpenClaw-style components
     "MemoryBootstrap",
+    "MissionStore",
     "DailyMemory",
     "MemoryFlush",
     "extract_and_save",

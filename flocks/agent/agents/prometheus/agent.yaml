@@ -20,7 +20,6 @@ tools:
   - websearch
   - lsp
   - question
-  - memory_search
 permission:
   question: allow
   edit:

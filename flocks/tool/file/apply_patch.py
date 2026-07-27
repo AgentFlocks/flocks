@@ -316,6 +316,18 @@ async def apply_patch_tool(
             resolution = await resolve_tool_path(ctx, hunk.path)
             filepath = resolution.resolved_path
             move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
+            from flocks.memory.mission import agent_mission_mutation_error
+
+            paths_to_check = [filepath]
+            if move_resolution is not None:
+                paths_to_check.append(move_resolution.resolved_path)
+            for candidate in paths_to_check:
+                mission_error = await agent_mission_mutation_error(
+                    candidate,
+                    ctx.session_id,
+                )
+                if mission_error:
+                    return ToolResult(success=False, error=mission_error)
 
             if hunk.type == "add":
                 old_content = ""

@@ -143,6 +143,11 @@ class SessionInfo(BaseModel):
     
     # Memory system
     memory_enabled: bool = Field(True, description="Enable memory system for this session")
+    mission_id: Optional[str] = Field(
+        None,
+        alias="missionID",
+        description="Filesystem Mission bound to this session",
+    )
 
     # Session category: "user" for human-initiated conversations, "task" for task-triggered sessions
     category: str = Field("user", description="Session category: user or task")
@@ -693,6 +698,7 @@ class Session:
                 "parent_id": "parentID",
                 "owner_user_id": "ownerUserID",
                 "owner_username": "ownerUsername",
+                "mission_id": "missionID",
             }
 
             # Use ``_UNSET`` to explicitly clear a field; ordinary ``None``

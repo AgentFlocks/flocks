@@ -20,7 +20,7 @@ class DailyMemory:
     Daily memory file manager
     
     Manages daily/YYYY-MM-DD.md files in global memory storage.
-    Uses Flocks' global storage: ~/.flocks/data/memory/daily/
+        Uses Flocks' global storage: ~/.flocks/memory/daily/
     """
     
     def __init__(self):
@@ -28,8 +28,7 @@ class DailyMemory:
         from flocks.config import Config
         
         # Use global data directory (matching Flocks' architecture)
-        data_dir = Config.get_data_path()
-        self.memory_dir = data_dir / "memory"
+        self.memory_dir = Config.get_memory_path()
         self.daily_dir = self.memory_dir / "daily"
     
     async def ensure_structure(self) -> None:

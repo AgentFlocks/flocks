@@ -1,319 +1,281 @@
-"""
-Memory Bootstrap - Load memory files at session start
+"""Build filesystem Memory-State snapshots for model context."""
 
-Implements OpenClaw-style memory loading:
-1. MEMORY.md - Main long-term memory (auto-injected)
-2. memory/daily/YYYY-MM-DD.md - Daily notes for any calendar date
-3. memory_search tool - Search all history
-"""
+from __future__ import annotations
 
-from typing import Optional, Dict, Any, List
-from pathlib import Path
+import hashlib
+import os
+import tempfile
+import threading
 from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Dict, Optional
 
-from flocks.utils.file import File
+from flocks.config import Config
 from flocks.utils.log import Log
+
 
 log = Log.create(service="memory.bootstrap")
 
-# File names
-MEMORY_FILENAME = "MEMORY.md"
-MEMORY_ALT_FILENAME = "memory.md"
+GLOBAL_MEMORY_LIMIT = 4 * 1024
+USER_MEMORY_LIMIT = 4 * 1024
+PROJECT_MEMORY_LIMIT = 8 * 1024
+MISSION_CONTEXT_LIMIT = 16 * 1024
+_DAILY_LOCK = threading.RLock()
 
-# Default instructions for agent (similar to OpenClaw's AGENTS.md)
-# Uses global storage paths for Flocks
-MEMORY_INSTRUCTIONS = """
-## Memory System Guidance
+MEMORY_INSTRUCTIONS = """## Memory-State System Guidance
 
-You have access to a persistent memory system for continuity across sessions.
-On-disk memory root (absolute path): `{memory_root}`. The same store is shared across all your sessions.
+Persistent memory uses ordinary Markdown files, not a search service.
 
-### Files Available:
-1. `MEMORY.md` - Your long-term curated memory (already injected above)
-2. `daily/YYYY-MM-DD.md` - Daily notes for **any** calendar date; substitute the date you need, then read with `memory_get` (path is relative to the memory root above).
-3. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
+- Global memory: `{global_root}/MEMORY.md`
+- User profile: `{global_root}/USER.md`
+- Daily notes: `{global_root}/daily/YYYY-MM-DD.md`
+- Project memory: `{project_root}/MEMORY.md`
 
-### When to Write Memory:
-- **Daily notes**: Use path `daily/YYYY-MM-DD.md` - Raw logs of what happened today
-- **Long-term**: Use path `MEMORY.md` - Curated memories, decisions, lessons learned
-- Write memories BEFORE the session ends, especially if important work was done
-- If someone says "remember this", write it down immediately using memory tools
+Use read, glob, and grep for explicit lookup. Use write only to create a missing
+file and edit for precise changes to an existing file. Daily notes are not
+loaded automatically.
 
-### Memory Best Practices:
-- Use `daily/YYYY-MM-DD.md` for daily logs (system auto-creates if needed)
-- Update `MEMORY.md` for important, lasting information
-- Use `memory_search` tool to find information from all past memories
-- Review old daily files and distill key points into MEMORY.md
-- Don't keep secrets unless explicitly asked
+Save only stable preferences, non-derivable project constraints, explicit
+corrections, and verified reusable experience. Do not save secrets, guesses,
+large tool output, code facts available from the repository, or live Mission
+progress. Mission files are protected: update them with todo and
+mission_record. A Mission is complete only after its contract and evidence
+gate pass."""
 
-### Available Tools:
-- `memory_search` - Search all memories semantically
-- `memory_write` - Write to memory files (daily or MEMORY.md)
-- Standard `read`/`write` tools also work with memory paths
-""".strip()
+
+def _read_bounded(path: Path, limit: int) -> Optional[Dict[str, Any]]:
+    if not path.is_file():
+        return None
+    raw = path.read_bytes()
+    content = raw[:limit].decode("utf-8", errors="replace")
+    truncated = len(raw) > limit
+    if truncated:
+        content = content.rstrip() + "\n\n[Memory file truncated for context.]"
+    return {
+        "path": str(path),
+        "abs_path": str(path),
+        "content": content,
+        "size": len(raw),
+        "hash": hashlib.sha256(raw).hexdigest(),
+        "truncated": truncated,
+        "inject": True,
+    }
 
 
 class MemoryBootstrap:
-    """
-    Bootstrap memory files at session start
-    
-    Uses Flocks' global memory storage: ``<data_dir>/memory`` (see ``Config.get_data_path()``).
-    """
-    
-    def __init__(self):
-        """Initialize memory bootstrap using global storage"""
-        from flocks.config import Config
-        
-        # Use global data directory (matching Flocks' architecture)
-        data_dir = Config.get_data_path()
-        self.memory_dir = data_dir / "memory"
+    """Create and load global, project, and current-Mission context."""
+
+    def __init__(
+        self,
+        workspace_dir: Optional[str | Path] = None,
+        mission_id: Optional[str] = None,
+    ):
+        self.workspace_dir = (
+            Path(workspace_dir).expanduser().resolve(strict=False)
+            if workspace_dir
+            else None
+        )
+        self.mission_id = mission_id
+        self.memory_dir = Config.get_memory_path().expanduser().resolve(strict=False)
         self.daily_dir = self.memory_dir / "daily"
-    
+        self.project_memory_dir = (
+            self.workspace_dir / ".flocks" / "memory"
+            if self.workspace_dir
+            else None
+        )
+
+    async def create_memory_structure(self) -> None:
+        """Create stable memory files without overwriting existing content."""
+        self.daily_dir.mkdir(parents=True, exist_ok=True)
+        self._ensure_file(
+            self.memory_dir / "MEMORY.md",
+            "# Global Memory\n\n"
+            "Stable cross-project preferences, rules, and verified experience.\n",
+        )
+        self._ensure_file(
+            self.memory_dir / "USER.md",
+            "# User Profile\n\n"
+            "Stable user role, background, and collaboration preferences.\n",
+        )
+        if self.project_memory_dir:
+            self.project_memory_dir.mkdir(parents=True, exist_ok=True)
+            (self.project_memory_dir / "missions").mkdir(parents=True, exist_ok=True)
+            self._ensure_file(
+                self.project_memory_dir / "MEMORY.md",
+                "# Project Memory\n\n"
+                "Stable project constraints, decisions, and verified experience.\n",
+            )
+
+    @staticmethod
+    def _ensure_file(path: Path, initial_content: str) -> None:
+        if path.exists():
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            descriptor = os.open(
+                path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            return
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(initial_content)
+            handle.flush()
+            os.fsync(handle.fileno())
+
     async def load_main_memory(self) -> Optional[Dict[str, Any]]:
-        """
-        Load main MEMORY.md file from .flocks/memory/
-        
-        Returns:
-            Dict with path and content, or None if not found
-        """
-        # Try MEMORY.md first, then memory.md
-        for filename in [MEMORY_FILENAME, MEMORY_ALT_FILENAME]:
-            file_path = self.memory_dir / filename
-            
-            try:
-                if not file_path.exists():
-                    continue
-                
-                file_content = await File.read(str(file_path))
-                content = file_content.content if hasattr(file_content, 'content') else str(file_content)
-                
-                if content:
-                    log.info("bootstrap.loaded_main", {
-                        "path": filename,
-                        "size": len(content),
-                    })
-                    
-                    return {
-                        "path": filename,
-                        "abs_path": str(file_path),
-                        "content": content,
-                        "inject": True,  # Should be injected to system prompt
-                    }
-            except Exception as e:
-                log.warn("bootstrap.load_main_failed", {
-                    "path": str(file_path),
-                    "error": str(e),
-                })
-        
-        log.debug("bootstrap.main_not_found")
-        return None
-    
+        """Compatibility helper returning global MEMORY.md."""
+        return _read_bounded(self.memory_dir / "MEMORY.md", GLOBAL_MEMORY_LIMIT)
+
     def get_daily_memory_paths(
         self,
         days_back: int = 1,
         today: Optional[str] = None,
-    ) -> List[str]:
-        """
-        Get paths for daily memory files
-        
-        Args:
-            days_back: Number of days back to include (default: 1 = today + yesterday)
-            today: Today's date (YYYY-MM-DD), defaults to current date
-            
-        Returns:
-            List of relative paths to daily memory files
-        """
-        if today is None:
-            today_date = datetime.now()
-        else:
-            today_date = datetime.strptime(today, "%Y-%m-%d")
-        
-        paths = []
-        
-        # Generate paths for today and previous days
-        for i in range(days_back + 1):
-            date = today_date - timedelta(days=i)
-            date_str = date.strftime("%Y-%m-%d")
-            rel_path = f"daily/{date_str}.md"
-            paths.append(rel_path)
-        
-        return paths
-    
+    ) -> list[str]:
+        """Return possible daily paths without loading their contents."""
+        current = datetime.strptime(today, "%Y-%m-%d") if today else datetime.now()
+        return [
+            f"daily/{(current - timedelta(days=index)).strftime('%Y-%m-%d')}.md"
+            for index in range(days_back + 1)
+        ]
+
     async def load_daily_memories(
         self,
         days_back: int = 1,
         today: Optional[str] = None,
-    ) -> List[Dict[str, Any]]:
-        """
-        Load daily memory files from .flocks/memory/daily/
-        
-        Args:
-            days_back: Number of days back to load
-            today: Today's date (YYYY-MM-DD)
-            
-        Returns:
-            List of dicts with path and content for each file found
-        """
-        paths = self.get_daily_memory_paths(days_back=days_back, today=today)
-        loaded = []
-        
-        for rel_path in paths:
-            file_path = self.memory_dir / rel_path
-            
+    ) -> list[Dict[str, Any]]:
+        """Read explicitly requested daily files; bootstrap never calls this."""
+        result = []
+        for relative in self.get_daily_memory_paths(days_back, today):
+            loaded = _read_bounded(self.memory_dir / relative, GLOBAL_MEMORY_LIMIT)
+            if loaded:
+                result.append(loaded)
+        return result
+
+    def append_daily(self, content: str, *, date: Optional[str] = None) -> Path:
+        """Append one session digest to today's daily file atomically."""
+        day = date or datetime.now().strftime("%Y-%m-%d")
+        if not re_full_date(day):
+            raise ValueError(f"Invalid daily memory date: {day!r}")
+        path = self.daily_dir / f"{day}.md"
+        self.daily_dir.mkdir(parents=True, exist_ok=True)
+        with _DAILY_LOCK:
+            existing = path.read_text(encoding="utf-8") if path.exists() else ""
+            separator = "\n\n" if existing.strip() else ""
+            combined = existing.rstrip() + separator + content.rstrip() + "\n"
+            fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=str(path.parent))
+            tmp = Path(tmp_name)
             try:
-                if not file_path.exists():
-                    log.debug("bootstrap.daily_not_found", {
-                        "path": rel_path,
-                    })
-                    continue
-                
-                file_content = await File.read(str(file_path))
-                content = file_content.content if hasattr(file_content, 'content') else str(file_content)
-                
-                if content:
-                    loaded.append({
-                        "path": rel_path,
-                        "abs_path": str(file_path),
-                        "content": content,
-                    })
-                    
-                    log.info("bootstrap.loaded_daily", {
-                        "path": rel_path,
-                        "size": len(content),
-                    })
-            
-            except Exception as e:
-                log.warn("bootstrap.daily_load_failed", {
-                    "path": rel_path,
-                    "error": str(e),
-                })
-        
-        return loaded
-    
-    async def create_memory_structure(self) -> None:
-        """
-        Create memory directory structure if it doesn't exist
-        
-        Creates:
-        - .flocks/memory/
-        - .flocks/memory/daily/
-        - .flocks/memory/MEMORY.md (if not exists)
-        """
-        try:
-            # Create directories
-            self.memory_dir.mkdir(parents=True, exist_ok=True)
-            self.daily_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Create MEMORY.md if it doesn't exist
-            memory_file = self.memory_dir / MEMORY_FILENAME
-            if not memory_file.exists():
-                initial_content = """# Long-Term Memory
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+                    handle.write(combined)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                os.replace(tmp, path)
+            finally:
+                tmp.unlink(missing_ok=True)
+        return path
 
-This is your curated long-term memory file. Store important information here:
+    def get_agent_instructions(self, **_: Any) -> str:
+        project_root = self.project_memory_dir or Path("<no-project-memory>")
+        return MEMORY_INSTRUCTIONS.format(
+            global_root=self.memory_dir,
+            project_root=project_root,
+        )
 
-## Key Facts
-- 
-
-## Decisions & Preferences
-- 
-
-## Lessons Learned
-- 
-
-## Important Context
-- 
-"""
-                memory_file.write_text(initial_content, encoding='utf-8')
-                log.info("bootstrap.created_memory_file", {
-                    "path": MEMORY_FILENAME,
-                })
-            
-            log.info("bootstrap.structure_ready", {
-                "memory_dir": str(self.memory_dir),
-                "daily_dir": str(self.daily_dir),
-            })
-        
-        except Exception as e:
-            log.error("bootstrap.create_structure_failed", {
-                "error": str(e),
-            })
-            raise
-    
-    def get_agent_instructions(
-        self,
-        today: Optional[str] = None,
-        yesterday: Optional[str] = None,
-    ) -> str:
-        """
-        Get agent instructions with current dates filled in
-        
-        Args:
-            today: Today's date (YYYY-MM-DD)
-            yesterday: Yesterday's date (YYYY-MM-DD)
-            
-        Returns:
-            Instructions string with dates filled in
-        """
-        if today is None:
-            today_date = datetime.now()
-        else:
-            today_date = datetime.strptime(today, "%Y-%m-%d")
-        
-        today = today_date.strftime("%Y-%m-%d")
-        if yesterday is None:
-            yesterday = (today_date - timedelta(days=1)).strftime("%Y-%m-%d")
-
-        from flocks.config import Config
-
-        memory_root = (Config.get_data_path() / "memory").resolve()
-        instructions = MEMORY_INSTRUCTIONS.replace("{memory_root}", str(memory_root))
-        instructions = instructions.replace("{today}", today)
-        instructions = instructions.replace("{yesterday}", yesterday)
-
-        return instructions
-    
     async def bootstrap(
         self,
         load_main: bool = True,
-        load_daily: bool = True,
+        load_daily: bool = False,
         days_back: int = 1,
     ) -> Dict[str, Any]:
+        """Return a fresh layered Memory-State snapshot.
+
+        ``load_daily`` remains accepted for compatibility but daily files are
+        deliberately excluded from automatic context.
         """
-        Bootstrap all memory files
-        
-        Args:
-            load_main: Whether to load MEMORY.md
-            load_daily: Whether to load daily files
-            days_back: Days of daily files to load (0=only today, 1=today+yesterday)
-            
-        Returns:
-            Dict with loaded files and instructions
-        """
+        del load_daily, days_back
         await self.create_memory_structure()
-        
-        now = datetime.now()
-        today_str = now.strftime("%Y-%m-%d")
-        yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
-        
+
+        memory_files = []
+        global_memory = (
+            _read_bounded(self.memory_dir / "MEMORY.md", GLOBAL_MEMORY_LIMIT)
+            if load_main
+            else None
+        )
+        user_memory = _read_bounded(
+            self.memory_dir / "USER.md",
+            USER_MEMORY_LIMIT,
+        )
+        if global_memory:
+            global_memory["label"] = "Global MEMORY.md"
+            memory_files.append(global_memory)
+        if user_memory:
+            user_memory["label"] = "USER.md"
+            memory_files.append(user_memory)
+        if self.project_memory_dir:
+            project_memory = _read_bounded(
+                self.project_memory_dir / "MEMORY.md",
+                PROJECT_MEMORY_LIMIT,
+            )
+            if project_memory:
+                project_memory["label"] = "Project MEMORY.md"
+                memory_files.append(project_memory)
+
+        mission_context = None
+        mission_revision = None
+        if self.workspace_dir and self.mission_id:
+            try:
+                from flocks.memory.mission import MissionStore
+
+                store = MissionStore(self.workspace_dir)
+                state = store.load(self.mission_id)
+                content = store.render_hot_context(self.mission_id)
+                mission_context = {
+                    "path": str(store.mission_path(self.mission_id)),
+                    "content": content[:MISSION_CONTEXT_LIMIT],
+                    "hash": hashlib.sha256(content.encode("utf-8")).hexdigest(),
+                    "inject": True,
+                }
+                mission_revision = state["meta"].get("revision")
+            except (FileNotFoundError, ValueError, OSError) as exc:
+                log.warn(
+                    "bootstrap.mission_load_failed",
+                    {"mission_id": self.mission_id, "error": str(exc)},
+                )
+
+        snapshot_hash = hashlib.sha256(
+            "".join(
+                str(item.get("hash", ""))
+                for item in memory_files + ([mission_context] if mission_context else [])
+            ).encode("utf-8")
+        ).hexdigest()
         result = {
-            "main_memory": None,
+            "main_memory": global_memory,
+            "memory_files": memory_files,
             "daily_memories": [],
-            "instructions": self.get_agent_instructions(today=today_str, yesterday=yesterday_str),
-            "today": today_str,
-            "yesterday": yesterday_str,
+            "mission_context": mission_context,
+            "mission_id": self.mission_id,
+            "mission_revision": mission_revision,
+            "snapshot_hash": snapshot_hash,
+            "instructions": self.get_agent_instructions(),
+            "today": datetime.now().strftime("%Y-%m-%d"),
+            "yesterday": (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%d"),
         }
-        
-        if load_main:
-            main = await self.load_main_memory()
-            result["main_memory"] = main
-        
-        if load_daily:
-            dailies = await self.load_daily_memories(days_back=days_back, today=today_str)
-            result["daily_memories"] = dailies
-        
-        log.info("bootstrap.complete", {
-            "has_main": result["main_memory"] is not None,
-            "daily_count": len(result["daily_memories"]),
-        })
-        
+        log.info(
+            "bootstrap.complete",
+            {
+                "memory_files": len(memory_files),
+                "mission_id": self.mission_id,
+                "mission_revision": mission_revision,
+            },
+        )
         return result
+
+
+def re_full_date(value: str) -> bool:
+    """Return whether value is a canonical YYYY-MM-DD date."""
+    try:
+        return datetime.strptime(value, "%Y-%m-%d").strftime("%Y-%m-%d") == value
+    except ValueError:
+        return False

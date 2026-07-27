@@ -17,7 +17,6 @@ tools:
   - websearch
   - lsp
   - question
-  - memory_search
 prompt_metadata:
   category: advisor
   cost: EXPENSIVE

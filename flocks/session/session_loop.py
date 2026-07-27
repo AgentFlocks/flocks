@@ -1030,47 +1030,97 @@ class SessionLoop:
         last_message: MessageInfo,
     ) -> bool:
         """Run TurnFinish and continue the loop when the hook blocks stopping."""
+        hook_user = last_user
+        if ctx.turn_user_id:
+            hook_user = (
+                await Message.get(ctx.session.id, ctx.turn_user_id)
+                or last_user
+            )
+
+        decision = ""
+        reason = ""
         try:
-            from flocks.hooks.pipeline import HookPipeline
+            refreshed_session = await Session.get_by_id(ctx.session.id)
+            if refreshed_session is not None:
+                ctx.session = refreshed_session
+            if ctx.session.mission_id:
+                from flocks.memory.mission import MissionStore
 
-            hook_user = last_user
-            if ctx.turn_user_id:
-                hook_user = (
-                    await Message.get(ctx.session.id, ctx.turn_user_id)
-                    or last_user
+                store = MissionStore(ctx.session.directory)
+                state = store.load(ctx.session.mission_id)
+                has_open_tasks = any(
+                    task["status"] in {"pending", "running", "failed"}
+                    for task in state["tasks"]
                 )
-            user_text = await Message.get_text_content(hook_user)
-            assistant_text = await Message.get_text_content(last_message)
-            hook_ctx = await HookPipeline.run_turn_finish({
-                "sessionID": ctx.session.id,
-                "workspace": ctx.session.directory,
-                "agent": getattr(last_message, "agent", None) or ctx.agent_name,
-                "model": {
-                    "providerID": ctx.provider_id,
-                    "modelID": ctx.model_id,
-                },
-                "step": ctx.trace_step,
-                "userMessage": {
-                    "id": hook_user.id,
-                    "content": user_text,
-                },
-                "assistantMessage": {
-                    "id": last_message.id,
-                    "content": assistant_text,
-                },
-                "finishReason": "stop",
-                "stopHookActive": ctx.stop_hook_active,
-            })
-        except Exception as exc:
-            log.debug("loop.hook.turn_finish.error", {
-                "session_id": ctx.session.id,
-                "message_id": getattr(last_message, "id", None),
-                "error": str(exc),
-            })
-            return False
+                if (
+                    state["meta"]["status"] not in {"completed", "aborted"}
+                    and state["tasks"]
+                    and not has_open_tasks
+                ):
+                    gate = store.evaluate_completion(
+                        ctx.session.mission_id,
+                        session_id=ctx.session.id,
+                    )
+                    if gate["completed"]:
+                        from flocks.session.callable_state import (
+                            remove_session_callable_tools,
+                        )
 
-        decision = str(hook_ctx.output.get("decision") or "").strip().lower()
-        reason = str(hook_ctx.output.get("reason") or "").strip()
+                        await remove_session_callable_tools(
+                            ctx.session.id,
+                            {"mission_record"},
+                        )
+                    else:
+                        decision = "block"
+                        reason = (
+                            "The Mission completion gate is not satisfied. "
+                            "Resolve these gaps before finishing:\n- "
+                            + "\n- ".join(gate["gaps"])
+                        )
+        except (FileNotFoundError, OSError, ValueError) as exc:
+            log.warn(
+                "loop.mission.completion_gate_error",
+                {"session_id": ctx.session.id, "error": str(exc)},
+            )
+
+        if decision != "block":
+            try:
+                from flocks.hooks.pipeline import HookPipeline
+
+                user_text = await Message.get_text_content(hook_user)
+                assistant_text = await Message.get_text_content(last_message)
+                hook_ctx = await HookPipeline.run_turn_finish({
+                    "sessionID": ctx.session.id,
+                    "workspace": ctx.session.directory,
+                    "agent": getattr(last_message, "agent", None) or ctx.agent_name,
+                    "model": {
+                        "providerID": ctx.provider_id,
+                        "modelID": ctx.model_id,
+                    },
+                    "step": ctx.trace_step,
+                    "userMessage": {
+                        "id": hook_user.id,
+                        "content": user_text,
+                    },
+                    "assistantMessage": {
+                        "id": last_message.id,
+                        "content": assistant_text,
+                    },
+                    "finishReason": "stop",
+                    "stopHookActive": ctx.stop_hook_active,
+                })
+                decision = str(
+                    hook_ctx.output.get("decision") or ""
+                ).strip().lower()
+                reason = str(hook_ctx.output.get("reason") or "").strip()
+            except Exception as exc:
+                log.debug("loop.hook.turn_finish.error", {
+                    "session_id": ctx.session.id,
+                    "message_id": getattr(last_message, "id", None),
+                    "error": str(exc),
+                })
+                return False
+
         if decision != "block":
             return False
         if not reason:
@@ -1497,17 +1547,27 @@ class SessionLoop:
                 ctx.stop_hook_active = False
                 await cls._run_user_prompt_submit_hook(ctx, last_user)
             
-            # Bootstrap memory on first step (once per loop, stored in ctx)
-            if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
+            # Replace the Memory-State snapshot before every model step.
+            if ctx.session.memory_enabled:
                 try:
                     from flocks.memory.bootstrap import MemoryBootstrap
-                    ctx.memory_bootstrap_data = await MemoryBootstrap().bootstrap()
+
+                    refreshed_session = await Session.get_by_id(ctx.session.id)
+                    if refreshed_session is not None:
+                        ctx.session = refreshed_session
+                    ctx.memory_bootstrap_data = await MemoryBootstrap(
+                        workspace_dir=ctx.session.directory,
+                        mission_id=ctx.session.mission_id,
+                    ).bootstrap()
                     log.info("loop.memory_bootstrap_done", {
                         "session_id": ctx.session.id,
-                        "has_main": ctx.memory_bootstrap_data.get("main_memory") is not None,
+                        "snapshot_hash": ctx.memory_bootstrap_data.get("snapshot_hash"),
+                        "mission_id": ctx.session.mission_id,
                     })
                 except Exception as e:
                     log.error("loop.memory_bootstrap_error", {"error": str(e)})
+            else:
+                ctx.memory_bootstrap_data = None
 
             # Early title generation: fire concurrently with the first LLM call so
             # the title is ready (or nearly so) by the time the response completes.

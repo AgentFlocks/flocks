@@ -6,15 +6,13 @@ Inspired by OpenClaw's session-memory hook.
 """
 
 from typing import Optional, List, Dict, Any
-from pathlib import Path
 from datetime import datetime, timezone
 import json
 
 from flocks.hooks.types import HookEvent
 from flocks.hooks.registry import register_hook
 from flocks.session.recorder import Recorder
-from flocks.memory.manager import MemoryManager
-from flocks.memory.config import MemoryConfig
+from flocks.memory.bootstrap import MemoryBootstrap
 from flocks.config import Config
 from flocks.utils.log import Log
 
@@ -126,7 +124,7 @@ class SessionMemoryHook:
             context=context,
         )
         
-        # 4. Write to memory file (via MemoryManager)
+        # 4. Append the digest to today's daily Memory file.
         await SessionMemoryHook._write_to_memory(
             content=content,
             slug=slug,
@@ -319,43 +317,15 @@ class SessionMemoryHook:
         """
         Write to memory file
         
-        File path: ~/.flocks/data/memory/YYYY-MM-DD-slug.md
-        
-        Note: Flocks uses global path, different from OpenClaw's project-relative path.
-        This design enables cross-project memory sharing and access.
+        File path: ~/.flocks/memory/daily/YYYY-MM-DD.md.
         """
+        del project_id, workspace_dir, config
         try:
-            # Ensure config is a proper MemoryConfig instance
-            if isinstance(config, dict):
-                memory_config = MemoryConfig(**config)
-            elif isinstance(config, MemoryConfig):
-                memory_config = config
-            else:
-                memory_config = MemoryConfig(enabled=True)
-
-            memory_manager = MemoryManager.get_instance(
-                project_id=project_id,
-                workspace_dir=workspace_dir,
-                config=memory_config,
-            )
-            
-            await memory_manager.initialize()
-            
-            date_str = datetime.now().strftime("%Y-%m-%d")
-            filename = f"{date_str}-{slug}.md"
-            
-            from flocks.config import Config as _Cfg
-            _mem_root = _Cfg.get_data_path() / "memory"
-            file_exists = (_mem_root / filename).exists()
-            
-            written_path = await memory_manager.write_memory(
-                content=content,
-                path=filename,
-                append=file_exists,
-            )
+            entry = f"## {slug}\n\n{content.rstrip()}"
+            written_path = MemoryBootstrap().append_daily(entry)
             
             log.info("session_memory.saved", {
-                "path": written_path,
+                "path": str(written_path),
                 "length": len(content),
             })
             

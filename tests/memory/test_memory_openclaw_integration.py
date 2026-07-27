@@ -9,8 +9,20 @@ import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
 
+from flocks.config import Config
 from flocks.memory import DailyMemory, MemoryBootstrap, MemoryFlush
 from flocks.memory.config import MemoryAutoFlushConfig
+
+
+@pytest.fixture(autouse=True)
+def isolated_memory_root(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Keep filesystem Memory tests out of the user's real home."""
+    monkeypatch.setenv("FLOCKS_ROOT", str(tmp_path / "flocks-home"))
+    Config._global_config = None
+    Config.clear_cache()
 
 
 class TestDailyMemory:
@@ -183,15 +195,12 @@ class TestMemoryBootstrap:
             yesterday="2026-02-08"
         )
         
-        assert "Memory System" in instructions
+        assert "Memory-State System" in instructions
         assert "MEMORY.md" in instructions
         assert "daily/" in instructions
         assert "YYYY-MM-DD" in instructions
-        assert "daily/2026-02-09.md" in instructions
-        assert "daily/2026-02-08.md" in instructions
-        assert "memory_search" in instructions
-        assert "{memory_root}" not in instructions
-        assert "On-disk memory root" in instructions
+        assert "memory_search" not in instructions
+        assert "mission_record" in instructions
     
     @pytest.mark.asyncio
     async def test_bootstrap(self):
@@ -212,7 +221,8 @@ class TestMemoryBootstrap:
         
         # Check instructions
         assert result["instructions"]
-        assert "Memory System" in result["instructions"]
+        assert "Memory-State System" in result["instructions"]
+        assert result["daily_memories"] == []
 
 
 class TestMemoryFlush:
