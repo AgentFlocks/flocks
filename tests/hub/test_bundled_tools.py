@@ -28,7 +28,7 @@ from flocks.hub.installer import (
     install_plugin,
     uninstall_plugin,
 )
-from flocks.hub.models import HubPluginManifest
+from flocks.hub.models import HubPluginManifest, InstalledPluginRecord
 from flocks.hub.security import SKIP_NAMES, validate_package
 
 
@@ -73,9 +73,7 @@ def isolated_hub(tmp_path, monkeypatch):
         # them populated against the test's tmp flockshub, sibling tests
         # in the same session see a phantom (empty) catalog. Reset before
         # AND after to insulate both directions.
-        hub_catalog.load_index.cache_clear()
-        hub_catalog.load_taxonomy.cache_clear()
-        hub_catalog._manifest_path_lookup.cache_clear()
+        hub_catalog.clear_catalog_caches()
 
     Config._global_config = None
     Config._cached_config = None
@@ -136,7 +134,10 @@ def _write_bundled_tool(
 
 
 @pytest.mark.asyncio
-async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
+async def test_tool_runtime_refresh_scopes_errors_and_clears_device_template_cache(
+    monkeypatch,
+    tmp_path,
+):
     from flocks.config import api_versioning
     from flocks.tool.device import plugin_index
     from flocks.tool.registry import ToolRegistry
@@ -146,7 +147,9 @@ async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
     monkeypatch.setattr(
         ToolRegistry,
         "refresh_plugin_tools",
-        classmethod(lambda cls: calls.append("refresh")),
+        classmethod(
+            lambda cls, changed_path=None: calls.append(f"refresh:{changed_path}")
+        ),
     )
     monkeypatch.setattr(
         api_versioning,
@@ -155,10 +158,73 @@ async def test_tool_runtime_refresh_clears_device_template_cache(monkeypatch):
     )
     plugin_index._template_cache = []
 
-    await _refresh_runtime("device")
+    changed_path = tmp_path / "device"
+    await _refresh_runtime("device", changed_path)
 
     assert plugin_index._template_cache is None
-    assert calls == ["init", "refresh", "discover:True"]
+    assert calls == ["init", f"refresh:{changed_path}", "discover:True"]
+
+
+@pytest.mark.asyncio
+async def test_uninstall_missing_tool_record_clears_device_template_cache(isolated_hub, monkeypatch):
+    calls: list[str] = []
+    missing_path = isolated_hub["home"] / ".flocks" / "plugins" / "tools" / "api" / "ghost_tool"
+    local.save_installed_record(
+        InstalledPluginRecord(
+            id="ghost_tool",
+            type="tool",
+            version="1.0",
+            source="bundled",
+            installedAt=1,
+            installPath=str(missing_path),
+        )
+    )
+    monkeypatch.setattr("flocks.hub.installer.clear_catalog_caches", lambda: calls.append("catalog"))
+    monkeypatch.setattr(
+        "flocks.hub.installer._clear_device_template_cache_if_needed",
+        lambda plugin_type: calls.append(f"device:{plugin_type}"),
+    )
+
+    async def fake_refresh_runtime(plugin_type, changed_path=None):
+        calls.append(f"refresh:{plugin_type}:{changed_path}")
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fake_refresh_runtime)
+
+    removed = await uninstall_plugin("tool", "ghost_tool")
+
+    assert removed is True
+    assert local.get_record("tool", "ghost_tool") is None
+    assert calls == ["catalog", "device:tool", f"refresh:tool:{missing_path}"]
+
+
+@pytest.mark.asyncio
+async def test_uninstall_missing_tool_record_without_path_uses_canonical_path(
+    isolated_hub,
+    monkeypatch,
+):
+    local.save_installed_record(
+        InstalledPluginRecord(
+            id="ghost_tool",
+            type="tool",
+            version="1.0",
+            source="bundled",
+            installedAt=1,
+            installPath=None,
+        )
+    )
+    refresh_paths: list[Path | None] = []
+
+    async def fake_refresh_runtime(_plugin_type, changed_path=None):
+        refresh_paths.append(changed_path)
+
+    monkeypatch.setattr("flocks.hub.installer._refresh_runtime", fake_refresh_runtime)
+
+    removed = await uninstall_plugin("tool", "ghost_tool")
+
+    assert removed is True
+    assert refresh_paths == [
+        isolated_hub["home"] / ".flocks" / "plugins" / "tools" / "ghost_tool"
+    ]
 
 
 class TestBundledToolRoots:
@@ -198,6 +264,41 @@ class TestBundledToolRoots:
         empty_hub.mkdir()
         monkeypatch.setenv("FLOCKS_HUB_ROOT", str(empty_hub))
         assert catalog._bundled_tool_roots() == {}
+
+    def test_cache_refreshes_when_bundled_plugin_is_added(self, isolated_hub):
+        assert catalog._bundled_tool_roots() == {}
+
+        _write_bundled_tool(
+            isolated_hub["bundled"],
+            plugin_id="late_tool",
+            service_id="late_tool_api",
+            version="1.0",
+        )
+
+        assert ("tool", "late_tool") in catalog._bundled_tool_roots()
+
+    def test_cache_refreshes_when_project_plugin_is_added(self, isolated_hub):
+        assert catalog._system_plugin_roots() == {}
+
+        project_tool = (
+            isolated_hub["project"]
+            / ".flocks"
+            / "plugins"
+            / "tools"
+            / "api"
+            / "project_tool"
+        )
+        project_tool.mkdir(parents=True)
+        (project_tool / "_provider.yaml").write_text(
+            "name: Project Tool\nservice_id: project_tool\nversion: '1.0'\n",
+            encoding="utf-8",
+        )
+        (project_tool / "project_tool_query.yaml").write_text(
+            "name: project_tool_query\ndescription: Project query\nhandler:\n  type: http\n  method: GET\n  url: https://example/query\nparameters: []\n",
+            encoding="utf-8",
+        )
+
+        assert ("tool", "project_tool") in catalog._system_plugin_roots()
 
 
 # ---------------------------------------------------------------------------
@@ -711,6 +812,23 @@ class TestPackageValidationSkipNames:
         # Symlink that escapes the package root must still trip the guard.
         (package / "evil").symlink_to(outside)
         with pytest.raises(ValueError, match="escapes"):
+            validate_package(package, self._manifest())
+
+    def test_python_syntax_error_is_rejected_before_install(self, tmp_path):
+        package = tmp_path / "demo"
+        package.mkdir()
+        (package / "broken.handler.py").write_text("def broken(:\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Invalid Python source.*broken\.handler\.py"):
+            validate_package(package, self._manifest())
+
+    def test_nested_python_syntax_error_is_rejected_before_install(self, tmp_path):
+        package = tmp_path / "demo"
+        scripts = package / "scripts"
+        scripts.mkdir(parents=True)
+        (scripts / "broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Invalid Python source.*scripts/broken\.py"):
             validate_package(package, self._manifest())
 
 

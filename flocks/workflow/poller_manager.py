@@ -15,7 +15,6 @@ from typing import Any, Dict
 
 from croniter import croniter
 
-from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_outputs_for_storage,
@@ -24,8 +23,15 @@ from flocks.workflow.execution_store import (
     record_execution_result,
     resolve_execution_outcome,
 )
+from flocks.workflow.execution_plan import build_workflow_execution_plan
 from flocks.workflow.fs_store import read_workflow_from_fs
+from flocks.workflow.models import Workflow
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
+from flocks.workflow.store import WorkflowStore
+from flocks.workflow.tool_context import (
+    build_workflow_tool_context,
+    cleanup_workflow_tool_context,
+)
 
 WORKFLOW_POLLER_CONFIG_PREFIX = "workflow_poller_config/"
 DEFAULT_INTERVAL_SECONDS = 30
@@ -180,24 +186,27 @@ class WorkflowPollerManager:
 
     async def start_all(self) -> None:
         try:
-            keys = await Storage.list_keys(WORKFLOW_POLLER_CONFIG_PREFIX)
+            configs = await WorkflowStore.list_configs(kind="workflow_poller_config")
         except Exception as exc:
-            log.warning("poller.list_keys_failed", {"error": str(exc)})
+            log.warning("poller.list_configs_failed", {"error": str(exc)})
             return
 
-        for key in keys:
-            if not key.startswith(WORKFLOW_POLLER_CONFIG_PREFIX):
-                continue
-            workflow_id = key[len(WORKFLOW_POLLER_CONFIG_PREFIX):]
+        for workflow_id, data in configs:
             if not workflow_id:
                 continue
-            try:
-                data = await Storage.read(key)
-            except Exception as exc:
-                log.warning("poller.config_read_failed", {"key": key, "error": str(exc)})
-                continue
             if isinstance(data, dict) and data.get("enabled"):
-                await self.restart_workflow(workflow_id)
+                try:
+                    await self.restart_workflow(workflow_id, startup=True)
+                except Exception as exc:
+                    self._status[workflow_id] = {
+                        **self._base_status(workflow_id),
+                        "state": "failed",
+                        "error": str(exc),
+                    }
+                    log.warning(
+                        "poller.start_failed",
+                        {"workflow_id": workflow_id, "error": str(exc)},
+                    )
 
     async def stop_all(self) -> None:
         for workflow_id in list(self._tasks.keys()):
@@ -235,16 +244,20 @@ class WorkflowPollerManager:
             self._run_cancel_events.pop(workflow_id, None)
         self._status[workflow_id] = current
 
-    async def restart_workflow(self, workflow_id: str) -> Dict[str, Any]:
+    async def restart_workflow(
+        self,
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> Dict[str, Any]:
         await self.stop_workflow(workflow_id)
         try:
-            stored = await Storage.read(self._config_key(workflow_id))
+            stored = await WorkflowStore.get_config(workflow_id, kind="workflow_poller_config")
         except Exception as exc:
             log.warning("poller.restart_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return {"workflowId": workflow_id, "state": "failed", "error": str(exc)}
 
-        config = self._normalize_config(workflow_id, stored)
-        if not config.get("enabled"):
+        if not isinstance(stored, dict) or not stored.get("enabled"):
             self._status[workflow_id] = {
                 **self._base_status(workflow_id),
                 "workflowId": workflow_id,
@@ -259,11 +272,20 @@ class WorkflowPollerManager:
             self._status[workflow_id] = {
                 **self.get_status(workflow_id),
                 "workflowId": workflow_id,
-                "state": "failed",
+                "state": "stopped" if startup else "failed",
                 "error": err,
             }
+            poller_log = log.info if startup else log.warning
+            poller_log(
+                "poller.workflow_not_found_on_start" if startup else "poller.workflow_not_found",
+                {
+                    "workflow_id": workflow_id,
+                    **({"action": "stale_config_skipped"} if startup else {}),
+                },
+            )
             return self.get_status(workflow_id)
 
+        config = self._normalize_config(workflow_id, stored)
         workflow_json = wf_data.get("workflowJson")
         if not workflow_json:
             err = "workflow_json_missing"
@@ -273,6 +295,19 @@ class WorkflowPollerManager:
                 "state": "failed",
                 "error": err,
             }
+            return self.get_status(workflow_id)
+
+        try:
+            workflow_plan = build_workflow_execution_plan(Workflow.from_dict(workflow_json))
+        except Exception as exc:
+            err = f"workflow_plan_failed: {exc}"
+            self._status[workflow_id] = {
+                **self.get_status(workflow_id),
+                "workflowId": workflow_id,
+                "state": "failed",
+                "error": err,
+            }
+            log.warning("poller.workflow_plan_failed", {"workflow_id": workflow_id, "error": str(exc)})
             return self.get_status(workflow_id)
 
         abort_event = asyncio.Event()
@@ -290,7 +325,7 @@ class WorkflowPollerManager:
             "nextRunAt": self._compute_next_run_at_ms(config),
         }
         task = asyncio.create_task(
-            self._poller_loop(workflow_id, workflow_json, config, abort_event),
+            self._poller_loop(workflow_id, workflow_plan, config, abort_event),
             name=f"workflow-poller-{workflow_id}",
         )
         self._tasks[workflow_id] = task
@@ -298,7 +333,7 @@ class WorkflowPollerManager:
 
     async def run_once(self, workflow_id: str) -> Dict[str, Any]:
         try:
-            stored = await Storage.read(self._config_key(workflow_id))
+            stored = await WorkflowStore.get_config(workflow_id, kind="workflow_poller_config")
         except Exception as exc:
             log.warning("poller.run_once_read_failed", {"workflow_id": workflow_id, "error": str(exc)})
             current = self.get_status(workflow_id)
@@ -330,7 +365,7 @@ class WorkflowPollerManager:
     async def _poller_loop(
         self,
         workflow_id: str,
-        workflow_json: Dict[str, Any],
+        workflow_json: Any,
         config: Dict[str, Any],
         abort_event: asyncio.Event,
     ) -> None:
@@ -383,7 +418,7 @@ class WorkflowPollerManager:
     async def _schedule_run(
         self,
         workflow_id: str,
-        workflow_json: Dict[str, Any],
+        workflow_json: Any,
         config: Dict[str, Any],
     ) -> None:
         active_runs = self._cleanup_done_runs(workflow_id)
@@ -427,15 +462,23 @@ class WorkflowPollerManager:
         current["activeRuns"] = self._cleanup_done_runs(workflow_id)
         self._status[workflow_id] = current
 
+        tool_context = None
         try:
+            tool_context = await build_workflow_tool_context(
+                workflow_id=workflow_id,
+                action_name="trigger:schedule",
+            )
             result = await asyncio.to_thread(
                 run_workflow,
                 workflow=workflow_json,
                 inputs=inputs,
+                run_id=exec_id,
                 timeout_s=config["timeoutSeconds"],
                 trace=False,
+                execution_profile="high_frequency",
                 cancel=cancel_event.is_set,
                 on_step_complete=step_recorder.on_step_complete,
+                tool_context=tool_context,
             )
             if not isinstance(result, RunWorkflowResult):
                 result = RunWorkflowResult(status="failed", error="invalid_run_result")
@@ -448,23 +491,25 @@ class WorkflowPollerManager:
             summary = self._summarize_outputs(result.outputs)
             step_count = step_recorder.step_count or result.steps
             exec_data.update(step_recorder.summary)
-            exec_data.update({
-                "outputResults": compact_outputs_for_storage(result.outputs),
-                "status": status_value,
-                "finishedAt": _now_ms(),
-                "duration": duration_s,
-                "executionLog": [],
-                "errorMessage": error_message,
-                "stepCount": step_count,
-                "currentNodeId": result.last_node_id,
-                "currentPhase": status_value,
-                "currentStepIndex": step_count,
-                "triggerId": "schedule-default",
-                "triggerType": "schedule",
-                "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
-                "attempt": 1,
-                "triggerSource": "poller",
-            })
+            exec_data.update(
+                {
+                    "outputResults": compact_outputs_for_storage(result.outputs),
+                    "status": status_value,
+                    "finishedAt": _now_ms(),
+                    "duration": duration_s,
+                    "executionLog": [],
+                    "errorMessage": error_message,
+                    "stepCount": step_count,
+                    "currentNodeId": result.last_node_id,
+                    "currentPhase": status_value,
+                    "currentStepIndex": step_count,
+                    "triggerId": "schedule-default",
+                    "triggerType": "schedule",
+                    "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
+                    "attempt": 1,
+                    "triggerSource": "poller",
+                }
+            )
             current = self._status.get(workflow_id) or self._base_status(workflow_id)
             current.update(summary)
             current["lastRunAt"] = started_at_ms
@@ -483,19 +528,21 @@ class WorkflowPollerManager:
             status_value = "cancelled" if cancel_event.is_set() else "error"
             finished_at_ms = _now_ms()
             exec_data.update(step_recorder.summary)
-            exec_data.update({
-                "status": status_value,
-                "finishedAt": finished_at_ms,
-                "duration": duration_s,
-                "errorMessage": str(exc),
-                "executionLog": [],
-                "currentPhase": status_value,
-                "triggerId": "schedule-default",
-                "triggerType": "schedule",
-                "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
-                "attempt": 1,
-                "triggerSource": "poller",
-            })
+            exec_data.update(
+                {
+                    "status": status_value,
+                    "finishedAt": finished_at_ms,
+                    "duration": duration_s,
+                    "errorMessage": str(exc),
+                    "executionLog": [],
+                    "currentPhase": status_value,
+                    "triggerId": "schedule-default",
+                    "triggerType": "schedule",
+                    "deliveryId": inputs.get("_flocks", {}).get("trigger", {}).get("deliveryId"),
+                    "attempt": 1,
+                    "triggerSource": "poller",
+                }
+            )
             current = self._status.get(workflow_id) or self._base_status(workflow_id)
             current["lastRunAt"] = started_at_ms
             current["lastDurationMs"] = duration_ms
@@ -508,6 +555,7 @@ class WorkflowPollerManager:
             self._status[workflow_id] = current
             log.warning("poller.run_failed", {"workflow_id": workflow_id, "error": str(exc)})
         finally:
+            await cleanup_workflow_tool_context(tool_context)
             try:
                 await record_execution_result(workflow_id, exec_id, exec_data)
             except Exception as exc:

@@ -24,6 +24,8 @@ import os
 import platform
 import re
 import shutil
+import signal
+import subprocess
 import sys
 import tempfile
 import zipfile
@@ -115,11 +117,11 @@ def _resolve_source(source: str) -> dict:
         prefix = "skills-sh:" if source.startswith("skills-sh:") else "skills.sh:"
         return {"kind": "skills_sh", "value": source[len(prefix):]}
 
-    if source.startswith("safeskill:"):
-        return {"kind": "safeskill", "value": source[len("safeskill:"):]}
-
     if source.startswith("safeskill://"):
         return {"kind": "safeskill", "value": source}
+
+    if source.startswith("safeskill:"):
+        return {"kind": "safeskill", "value": source[len("safeskill:"):]}
 
     if source.startswith("clawhub:"):
         return {"kind": "clawhub", "value": source[len("clawhub:"):]}
@@ -168,6 +170,81 @@ class SkillInstaller:
     """Install skills from external sources and manage skill dependencies."""
 
     @staticmethod
+    def _subprocess_stdio_kwargs(
+        *,
+        cwd: Optional[str] = None,
+        env: Optional[dict[str, str]] = None,
+    ) -> dict:
+        kwargs = {
+            "cwd": cwd,
+            "env": env,
+            "stdin": asyncio.subprocess.DEVNULL,
+            "stdout": asyncio.subprocess.PIPE,
+            "stderr": asyncio.subprocess.PIPE,
+        }
+        if os.name == "nt":
+            kwargs["creationflags"] = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        else:
+            kwargs["start_new_session"] = True
+        return kwargs
+
+    @staticmethod
+    def _signal_process_tree(proc, sig: signal.Signals, *, force: bool = False) -> None:
+        pid = getattr(proc, "pid", None)
+        if os.name == "nt":
+            if force and isinstance(pid, int) and pid > 0:
+                try:
+                    completed = subprocess.run(
+                        ["taskkill", "/PID", str(pid), "/T", "/F"],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        check=False,
+                    )
+                    if completed.returncode == 0:
+                        return
+                except Exception:
+                    pass
+            try:
+                if force:
+                    proc.kill()
+                else:
+                    proc.terminate()
+            except ProcessLookupError:
+                pass
+            return
+
+        if os.name != "nt" and isinstance(pid, int) and pid > 0:
+            try:
+                os.killpg(pid, sig)
+                return
+            except ProcessLookupError:
+                return
+            except Exception:
+                pass
+        try:
+            if force:
+                proc.kill()
+            else:
+                proc.terminate()
+        except ProcessLookupError:
+            pass
+
+    @staticmethod
+    def _safeskill_staging_env(staging: Path) -> dict[str, str]:
+        env = os.environ.copy()
+        appdata = staging / "AppData"
+        env.update({
+            "HOME": str(staging),
+            "USERPROFILE": str(staging),
+            "APPDATA": str(appdata / "Roaming"),
+            "LOCALAPPDATA": str(appdata / "Local"),
+            "XDG_CONFIG_HOME": str(staging / ".config"),
+            "XDG_CACHE_HOME": str(staging / ".cache"),
+            "NPM_CONFIG_CACHE": str(staging / ".npm"),
+        })
+        return env
+
+    @staticmethod
     async def _run_subprocess(
         cmd: list[str],
         *,
@@ -177,10 +254,7 @@ class SkillInstaller:
     ) -> tuple[int, str, str]:
         proc = await asyncio.create_subprocess_exec(
             *cmd,
-            cwd=cwd,
-            env=env,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            **SkillInstaller._subprocess_stdio_kwargs(cwd=cwd, env=env),
         )
         try:
             stdout_b, stderr_b = await asyncio.wait_for(
@@ -188,14 +262,19 @@ class SkillInstaller:
                 timeout=timeout_sec,
             )
         except asyncio.TimeoutError:
-            try:
-                proc.kill()
-            except ProcessLookupError:
-                pass
+            SkillInstaller._signal_process_tree(proc, signal.SIGTERM)
             try:
                 await asyncio.wait_for(proc.communicate(), timeout=5)
             except Exception:
-                pass
+                SkillInstaller._signal_process_tree(
+                    proc,
+                    getattr(signal, "SIGKILL", signal.SIGTERM),
+                    force=True,
+                )
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=5)
+                except Exception:
+                    pass
             raise TimeoutError(f"Command timed out after {timeout_sec:g}s: {' '.join(cmd)}")
         return (
             proc.returncode if proc.returncode is not None else 0,
@@ -359,7 +438,7 @@ class SkillInstaller:
 
     @classmethod
     async def _install_from_safeskill(cls, source: str, scope: str) -> SkillInstallResult:
-        """Run SafeSkill CLI in a staging directory and import its agent output."""
+        """Run SafeSkill CLI in an isolated home and import its Flocks output."""
         npx = shutil.which("npx")
         if not npx:
             return SkillInstallResult(
@@ -373,27 +452,30 @@ class SkillInstaller:
                 success=False,
                 error=(
                     "safeskill source is required, e.g. "
-                    "safeskill:safeskill://official/acme/code-review"
+                    "safeskill://official/acme/code-review"
                 ),
             )
 
         with tempfile.TemporaryDirectory(prefix="flocks-safeskill-") as tmp:
             staging = Path(tmp)
+            env = cls._safeskill_staging_env(staging)
             cmd = [
                 npx,
                 "-y",
                 "@safeskill/cli",
+                "--region",
+                "cn",
                 "add",
                 source,
-                "--copy",
-                "-y",
-                "-a",
-                "universal",
+                "--agent",
+                "flocks",
+                "--yes",
             ]
             try:
                 returncode, stdout, stderr = await cls._run_subprocess(
                     cmd,
                     cwd=str(staging),
+                    env=env,
                     timeout_sec=_SKILLS_SH_CLI_TIMEOUT_SEC,
                 )
             except TimeoutError as exc:
@@ -416,7 +498,7 @@ class SkillInstaller:
                     success=False,
                     error=(
                         "SafeSkill CLI completed but no SKILL.md files were found "
-                        "in the staging agent directories."
+                        "in the staged Flocks/agent skill directories."
                     ),
                 )
 
@@ -499,11 +581,12 @@ class SkillInstaller:
 
     @classmethod
     def _import_staged_skill_dirs(cls, staging: Path, scope: str) -> List[tuple[str, Path]]:
-        """Copy staged SafeSkill agent directories into Flocks skill storage."""
+        """Copy staged agent skill directories into Flocks skill storage."""
         install_root = _resolve_install_root(scope)
         imported: List[tuple[str, Path]] = []
         seen: set[Path] = set()
         candidate_roots = [
+            staging / ".flocks" / "plugins" / "skills",
             staging / ".agents" / "skills",
             staging / ".claude" / "skills",
             staging / ".cursor" / "skills",
@@ -1208,16 +1291,26 @@ class SkillInstaller:
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
+                **cls._subprocess_stdio_kwargs(),
             )
             try:
                 stdout_b, stderr_b = await asyncio.wait_for(
                     proc.communicate(), timeout=timeout_sec
                 )
             except asyncio.TimeoutError:
-                proc.kill()
-                await proc.communicate()
+                cls._signal_process_tree(proc, signal.SIGTERM)
+                try:
+                    await asyncio.wait_for(proc.communicate(), timeout=5)
+                except Exception:
+                    cls._signal_process_tree(
+                        proc,
+                        getattr(signal, "SIGKILL", signal.SIGTERM),
+                        force=True,
+                    )
+                    try:
+                        await asyncio.wait_for(proc.communicate(), timeout=5)
+                    except Exception:
+                        pass
                 return DepInstallResult(
                     success=False,
                     spec_id=spec.id,

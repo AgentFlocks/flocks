@@ -1,0 +1,44 @@
+name: chaitin_dongjian_tasks
+description: Chaitin Dongjian scan plan, configuration, and instance read-only queries.
+description_cn: 长亭洞鉴扫描计划、任务配置和任务实例只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_dongjian_api
+version: "2.8"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - plan_filter
+        - plan_detail
+        - plugin_filter
+        - engine_filter
+        - xprocess_filter
+        - xprocess_detail
+        - xprocess_progress
+        - test
+      description: |
+        - plan_filter: POST /plan/filter/，筛选任务计划。
+        - plan_detail: GET /plan/{id}/，查询任务计划详情。
+        - plugin_filter: POST /plugin/filter/，获取漏洞插件列表。
+        - engine_filter: POST /engine/filter/，获取引擎节点列表。
+        - xprocess_filter: POST /xprocess/filter/，筛选任务实例。
+        - xprocess_detail: GET /xprocess/{id}/，查询任务实例详情。
+        - xprocess_progress: GET /xprocess/{id}/progress/，查询扫描进度。
+    id:
+      type: integer
+      description: 路径中的计划或任务实例 ID。
+    query:
+      type: object
+      description: GET query 参数。
+    body:
+      description: POST 查询 body。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_dongjian.handler.py
+  function: tasks

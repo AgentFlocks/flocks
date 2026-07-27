@@ -1,7 +1,7 @@
 {
   "badge": "AI 原生的安全运营",
   "subtitle": "AI 原生的安全运营自动化平台",
-  "description": "让 AI 替你做安全运营，从告警研判到威胁处置，全流程智能化，效率提升 10 倍",
+  "description": "让 AI 替你做安全运营，从告警运营到威胁处置，全流程智能化，效率提升 10 倍",
   "getStarted": "新手引导",
   "createWebUIContractPage": "自定义页面",
   "createWebUIContractPageSessionTitle": "自定义页面",
@@ -9,7 +9,7 @@
   "createWebUIContractPageError": "无法创建自定义页面会话，请稍后重试",
   "openSource": "开源项目",
   "systemCard": {
-    "title": "Flocks 系统",
+    "title": "系统",
     "tagline": "AI 原生安全平台",
     "cannotConnect": "无法连接到后端服务"
   },
@@ -20,6 +20,14 @@
     "workflows": "工作流",
     "normal": "正常",
     "abnormal": "异常",
+    "loadErrorHint": {
+      "authExpired": "登录状态已失效，请重新登录。",
+      "forbidden": "当前账号无权加载首页统计数据。",
+      "notFound": "当前后端版本不提供统计接口。",
+      "partial": "部分首页统计数据加载失败，当前数值可能不完整。",
+      "network": "首页统计数据加载失败，请检查 API 路由、Host 或代理配置。",
+      "unavailable": "首页统计数据加载失败。"
+    },
     "checking": "检测中...",
     "activeScheduled": "启动计划任务",
     "agentCount": "Agent 数量",
@@ -35,7 +43,7 @@
   },
   "quickActions": {
     "sessions": {
-      "title": "会话管理",
+      "title": "工作台",
       "description": "与 AI 对话，完成复杂的安全任务"
     },
     "workflows": {

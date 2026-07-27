@@ -258,6 +258,16 @@ class SystemPrompt:
     ) -> List[str]:
         """Build stable workspace metadata that should stay cache-friendly."""
         working_dir = directory or os.getcwd()
+        source_code_dir = str(
+            Path(
+                os.getenv(
+                    "FLOCKS_REPO_ROOT",
+                    str(Path(__file__).resolve().parents[2]),
+                )
+            )
+            .expanduser()
+            .resolve()
+        )
         is_git = vcs == "git"
 
         from flocks.workspace.manager import WorkspaceManager
@@ -267,7 +277,8 @@ class SystemPrompt:
         env_info = [
             "Here is some useful information about the environment you are running in:",
             "<env>",
-            f"  Source code directory: {working_dir}",
+            f"  flocks source code directory: {source_code_dir}",
+            f"  current working directory: {working_dir}",
             f"  Workspace outputs directory: {outputs_dir}",
             f"  Is directory a git repo: {'yes' if is_git else 'no'}",
             f"  Platform: {platform.system().lower()}",
@@ -1066,6 +1077,7 @@ class SessionPrompt:
         agent_prompt: Optional[str],
         provider_id: str,
         model_id: str,
+        execution_mode_prompt: Optional[str] = None,
         prompt_tool_names: Iterable[str] = (),
         tool_revision: Optional[int] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
@@ -1153,6 +1165,13 @@ class SessionPrompt:
                 cache_scope="agent",
                 digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
                 builder=lambda: cls._normalize_prompt_text(agent_prompt),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="execution_mode",
+                cache_scope="runtime",
+                digest_inputs={"prompt": execution_mode_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(execution_mode_prompt),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

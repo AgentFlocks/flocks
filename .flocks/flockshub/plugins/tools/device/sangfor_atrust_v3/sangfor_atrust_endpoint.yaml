@@ -1,0 +1,47 @@
+name: sangfor_atrust_endpoint
+description: Sangfor aTrust OpenAPI V3 endpoint device read-only queries.
+description_cn: 深信服 aTrust OpenAPI V3 终端信息只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_atrust
+version: "3"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - endpoint_list
+        - endpoint_detail
+        - test
+      description: |
+        - endpoint_list: POST /api/v1/device/queryAll，查询全量终端信息。
+        - endpoint_detail: GET /api/v1/device/query，查询单个终端信息。
+    id:
+      type: string
+      description: 终端 ID。
+    name:
+      type: string
+      description: 终端名称。
+    userId:
+      type: string
+      description: 用户 ID。
+    pageSize:
+      type: integer
+      description: 分页大小。
+    pageIndex:
+      type: integer
+      description: 分页页码。
+    query:
+      type: object
+      description: GET query string 参数。
+    body:
+      type: object
+      description: POST JSON body；传入后会优先使用该对象。
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_atrust.handler.py
+  function: endpoint

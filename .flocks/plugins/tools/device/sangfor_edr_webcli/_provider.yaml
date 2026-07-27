@@ -1,0 +1,124 @@
+name: Sangfor EDR WebCLI
+vendor: sangfor
+service_id: sangfor_edr
+version: "1.0.0"
+integration_type: device
+description: >
+  Sangfor EDR WebCLI-backed integration. It can reuse an existing browser
+  storage state, or refresh auth-state by driving the real EDR login page
+  through browser daemon / CDP when credentials are configured.
+description_cn: >
+  Sangfor EDR WebCLI device integration. It reuses full browser auth-state
+  from manual login, or refreshes full browser auth-state through CDP-assisted
+  browser login when credentials are configured.
+credential_fields:
+  - key: base_url
+    label: Base URL
+    storage: config
+    config_key: base_url
+    input_type: url
+    required: true
+    placeholder: "https://edr.example.com"
+  - key: auth_state_path
+    label: Auth State Path
+    storage: config
+    config_key: auth_state_path
+    input_type: text
+    required: false
+    default: "~/.flocks/browser/sangfor-edr/auth-state.json"
+  - key: username
+    label: Username
+    storage: secret
+    config_key: username
+    secret_id: sangfor_edr_username
+    input_type: text
+    required: false
+    description: Optional. Stored for CDP-assisted browser login when auth-state is missing or expired.
+  - key: password
+    label: Password
+    storage: secret
+    config_key: password
+    secret_id: sangfor_edr_password
+    input_type: password
+    required: false
+    description: Optional. Stored as a secret and used only to refresh browser auth-state.
+  - key: auto_ocr_code
+    label: Auto OCR Captcha
+    storage: config
+    config_key: auto_ocr_code
+    input_type: boolean
+    required: false
+    default: true
+  - key: max_captcha_retry
+    label: Max Captcha Retry
+    storage: config
+    config_key: max_captcha_retry
+    input_type: number
+    required: false
+    default: 5
+  - key: login_path
+    label: Login Path
+    storage: config
+    config_key: login_path
+    input_type: text
+    required: false
+    default: "/ui/login.php"
+  - key: index_path
+    label: Index Path
+    storage: config
+    config_key: index_path
+    input_type: text
+    required: false
+    default: "/ui/#/index"
+  - key: username_selector
+    label: Username Input Selector
+    storage: config
+    config_key: username_selector
+    input_type: text
+    required: false
+    default: "#user,input[name='user'],.username-input,#user_name,#username,input[name='user_name'],input[name='username'],input[type='text']"
+    description: Optional comma-separated selectors for the EDR username input.
+  - key: password_selector
+    label: Password Input Selector
+    storage: config
+    config_key: password_selector
+    input_type: text
+    required: false
+    default: "#password,input[name='password'],.input_text_password,input[name='pwd'],input[type='password']"
+    description: Optional comma-separated selectors for the EDR password input.
+  - key: captcha_selector
+    label: Captcha Input Selector
+    storage: config
+    config_key: captcha_selector
+    input_type: text
+    required: false
+    default: "#code,input[name='code'],.code_input_text,#randcode,#captcha,input[name='randcode'],input[name='captcha'],input[name='verify_code']"
+    description: Optional comma-separated selectors for the EDR captcha input.
+  - key: agreement_selector
+    label: Agreement Checkbox Selector
+    storage: config
+    config_key: agreement_selector
+    input_type: text
+    required: false
+    default: ".user-protocol-check input[type='checkbox']"
+  - key: submit_selector
+    label: Submit Button Selector
+    storage: config
+    config_key: submit_selector
+    input_type: text
+    required: false
+    default: "#button,input[name='button'],.login-opr-btn,#login,#submit,.login-btn,.btn-login,button[type='submit'],input[type='submit']"
+    description: Optional comma-separated selectors for the EDR login submit control.
+defaults:
+  timeout: 20
+  category: custom
+  verify_ssl: false
+notes: |
+  The existing manual-login flow saves a full browser storageState containing
+  cookies and localStorage. When credentials are available, the automatic flow
+  also drives the real EDR login page through browser daemon / CDP and then
+  saves the same full browser storageState format.
+
+  If captcha OCR, MFA, page selector matching, or login success detection fails,
+  keep the browser/manual login recovery path and save the resulting full
+  auth-state with flocks browser.

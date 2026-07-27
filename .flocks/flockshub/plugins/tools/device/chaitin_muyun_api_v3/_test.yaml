@@ -1,0 +1,60 @@
+schema_version: 1
+provider: chaitin_muyun_api
+
+connectivity:
+  tool: chaitin_muyun_assets
+  params:
+    action: product_info
+
+fixtures:
+  chaitin_muyun_assets:
+    - label: Query product information
+      label_cn: 查询产品信息
+      tags: [smoke, system]
+      params:
+        action: product_info
+      assert:
+        success: true
+    - label: Count host assets
+      label_cn: 统计主机资产数量
+      tags: [asset]
+      params:
+        action: host_count
+
+  chaitin_muyun_events:
+    - label: List malware events
+      label_cn: 查询恶意文件事件
+      tags: [event]
+      params:
+        action: malware_events
+        params:
+          limit: 10
+          offset: 0
+
+  chaitin_muyun_risk:
+    - label: List vulnerability events
+      label_cn: 查询漏洞事件
+      tags: [vulnerability]
+      params:
+        action: vuln_list
+        params:
+          limit: 10
+          offset: 0
+
+  chaitin_muyun_api_readonly:
+    - label: Show API catalog
+      label_cn: 查看 API 目录
+      tags: [api]
+      params:
+        action: api_catalog
+      assert:
+        success: true
+
+  chaitin_muyun_api_mutation:
+    - label: Show API catalog before confirmed mutation
+      label_cn: 变更调用前查看 API 目录
+      tags: [api, mutation]
+      params:
+        action: api_catalog
+      assert:
+        success: true

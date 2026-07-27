@@ -18,6 +18,12 @@
     "noCost": "暂无费用",
     "toggleCurrency": "点击切换人民币 / 美元"
   },
+  "modelSelection": {
+    "info": "模型信息",
+    "free": "免费",
+    "unavailable": "暂无",
+    "closeDefault": "关闭默认模型选择"
+  },
   "providerList": {
     "empty": "尚未添加模型供应商",
     "emptyHint": "点击右上角「添加模型供应商」开始配置",
@@ -81,6 +87,7 @@
     "apiKeyOptional": "（可选，无鉴权网关可留空）",
     "apiKeyOptionalHint": "若 Base URL 指向无需鉴权的内网网关或自建服务，可留空，系统会自动使用占位符。",
     "apiKeyOptionalPlaceholder": "可留空（无鉴权网关）",
+    "apiKeyKeepExisting": "留空以保留现有 API Key",
     "hide": "隐藏",
     "show": "查看",
     "availableModels": "可用模型",

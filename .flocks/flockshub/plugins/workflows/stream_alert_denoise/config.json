@@ -1,0 +1,42 @@
+{
+  "version": 1,
+  "kind": "workflow.integration-config",
+  "workflow": {
+    "id": "stream_alert_denoise",
+    "name": "stream_alert_denoise",
+    "source": "global",
+    "category": "default"
+  },
+  "triggers": [
+    {
+      "id": "syslog_main",
+      "type": "syslog",
+      "name": "Syslog实时告警流",
+      "enabled": true,
+      "config": {
+        "host": "0.0.0.0",
+        "port": 514,
+        "protocol": "udp",
+        "source_log_type": "auto",
+        "input_field": "syslog_message"
+      },
+      "runtime": {
+        "status": "stopped",
+        "apiKeyConfigured": false
+      }
+    }
+  ],
+  "publish": {
+    "api": {
+      "enabled": true,
+      "path": "/api/workflow/stream_alert_denoise/run",
+      "apiKeyConfigured": false
+    },
+    "syslog": {
+      "enabled": true,
+      "host": "0.0.0.0",
+      "port": 514,
+      "protocol": "udp"
+    }
+  }
+}

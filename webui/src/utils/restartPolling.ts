@@ -1,4 +1,5 @@
 const UPGRADE_PAGE_MARKER = 'flocks-upgrade-in-progress';
+const RESTART_READINESS_REQUEST_TIMEOUT_MS = 3_000;
 
 export interface RestartReadiness {
   ready: boolean;
@@ -11,9 +12,25 @@ function errorMessage(error: unknown): string {
   return 'request failed';
 }
 
+async function fetchWithTimeout(url: string): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = window.setTimeout(() => {
+    controller.abort();
+  }, RESTART_READINESS_REQUEST_TIMEOUT_MS);
+
+  try {
+    return await fetch(url, {
+      cache: 'no-store',
+      signal: controller.signal,
+    });
+  } finally {
+    window.clearTimeout(timeoutId);
+  }
+}
+
 async function readUpgradePageState(): Promise<string | null> {
   try {
-    const rootResponse = await fetch('/', { cache: 'no-store' });
+    const rootResponse = await fetchWithTimeout('/');
     if (!rootResponse.ok) {
       return `root page returned HTTP ${rootResponse.status}`;
     }
@@ -29,20 +46,9 @@ async function readUpgradePageState(): Promise<string | null> {
   return null;
 }
 
-function loopbackBackendHealthURL(): string | null {
-  if (typeof window === 'undefined') return null;
-
-  const { protocol, hostname, port } = window.location;
-  if (!['localhost', '127.0.0.1', '::1'].includes(hostname)) return null;
-  if (!port || port === '8000') return null;
-
-  const host = hostname === '::1' ? '[::1]' : hostname;
-  return `${protocol}//${host}:8000/api/health`;
-}
-
 async function checkHealth(url: string): Promise<Response | null> {
   try {
-    return await fetch(url, { cache: 'no-store' });
+    return await fetchWithTimeout(url);
   } catch {
     return null;
   }
@@ -54,22 +60,11 @@ export async function checkRestartReadiness(): Promise<RestartReadiness> {
     return { ready: true };
   }
 
-  const fallbackURL = loopbackBackendHealthURL();
-  const fallbackResponse = fallbackURL ? await checkHealth(fallbackURL) : null;
-  if (fallbackResponse?.ok) {
-    return { ready: true };
-  }
-
   const pageReason = await readUpgradePageState();
   return {
     ready: false,
     reason: [
       healthResponse ? `health check returned HTTP ${healthResponse.status}` : 'health check failed',
-      fallbackURL && fallbackResponse
-        ? `loopback health check returned HTTP ${fallbackResponse.status}`
-        : fallbackURL
-          ? `loopback health check failed: ${fallbackURL}`
-          : null,
       pageReason,
     ].filter(Boolean).join('; '),
   };

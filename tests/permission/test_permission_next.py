@@ -73,6 +73,26 @@ async def test_reply_persists_session_rule_without_in_memory_future(permission_s
 
 
 @pytest.mark.asyncio
+async def test_reply_persists_session_denial_without_in_memory_future(permission_storage) -> None:
+    request = PermissionRequestInfo(
+        id="per_testsessiondeny000000001",
+        sessionID="ses_testsessiondeny00000001",
+        permission="bash",
+        patterns=["*"],
+    )
+    await Storage.set(
+        f"{PermissionNext._PENDING_PREFIX}{request.id}",
+        request.model_dump(by_alias=True),
+        "permission_pending",
+    )
+
+    await PermissionNext.reply(request.id, "deny_session", session_id=request.session_id)
+
+    assert PermissionNext._session_permissions[request.session_id]["bash"] == "deny"
+    assert await Storage.get(f"{PermissionNext._SESSION_PREFIX}{request.session_id}") == {"bash": "deny"}
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("reply", ["allow", "once"])
 async def test_reply_unblocks_waiting_request_via_persisted_reply_when_memory_future_missing(
     permission_storage,
@@ -128,6 +148,32 @@ async def test_reply_denies_waiting_request_via_persisted_reply_when_memory_futu
         await asyncio.wait_for(ask_task, timeout=2)
 
     assert await Storage.get(f"{PermissionNext._REPLY_PREFIX}{request_id}") is None
+
+
+@pytest.mark.asyncio
+async def test_session_denial_applies_to_active_request_without_global_rule(permission_storage) -> None:
+    request_id = "per_waiting_session_deny"
+    session_id = "ses_waiting_session_deny"
+    ask_task = asyncio.create_task(
+        PermissionNext.ask(
+            session_id=session_id,
+            permission="bash",
+            patterns=["*"],
+            ruleset=[],
+            request_id=request_id,
+        )
+    )
+
+    while request_id not in PermissionNext._pending:
+        await asyncio.sleep(0)
+
+    await PermissionNext.reply(request_id, "deny_session", session_id=session_id)
+
+    with pytest.raises(DeniedError):
+        await asyncio.wait_for(ask_task, timeout=2)
+
+    assert PermissionNext._session_permissions[session_id]["bash"] == "deny"
+    assert "bash" not in PermissionNext._permanent_rules
 
 
 @pytest.mark.asyncio

@@ -54,7 +54,9 @@
   "error": {
     "backendUnavailable": "Cannot connect to backend service",
     "backendError": "Backend service error",
-    "backendErrorHint": "Please ensure the Flocks backend is running",
+    "backendErrorHint": "Please ensure the backend service is running",
+    "chunkLoadFailed": "Page resources failed to load",
+    "chunkLoadHint": "The application may have been updated. Refresh and try again.",
     "processingFailed": "Processing failed",
     "deleteFailed": "Delete failed",
     "saveFailed": "Save failed"
@@ -75,6 +77,7 @@
     "stopped": "Stopped"
   },
   "delegate": {
+    "delegatedTo": "Delegated to {{agent}}",
     "pending": "Waiting",
     "running": "Executing",
     "completed": "Completed",
@@ -86,6 +89,7 @@
     "resultSummary": "Result Summary",
     "viewFullChat": "View Full Conversation",
     "viewDialog": "View Dialog",
+    "viewExecution": "View Execution",
     "emptyChat": "Sub-agent conversation is empty",
     "subTask": "Sub-task"
   },
@@ -246,7 +250,7 @@
       "thirdPartySubtitle": "Choose another provider, enter its key, and select the default model.",
       "thirdPartyKeyPlaceholder": "Paste the third-party model API key",
       "thirdPartyBaseUrlPlaceholder": "Enter the model service base URL if needed",
-      "thirdPartyModelIdPlaceholder": "Enter the model ID (e.g. gpt-4o, deepseek-chat)",
+      "thirdPartyModelIdPlaceholder": "Enter the model ID (e.g. gpt-4o, deepseek-v4-flash)",
       "thirdPartyModelHint": "Will verify and set this as the default model: {{model}}",
       "thirdPartyAdvancedHint": "For advanced custom setups such as OpenAI Compatible, use the Models page instead.",
       "validateAndApply": "Validate & Apply",
@@ -270,7 +274,7 @@
       "securityApis": { "title": "Configure Security Tool APIs", "tags": ["ThreatBook", "VirusTotal", "FOFA", "URLScan", "Shodan"] },
       "channels": { "title": "Connect IM Channels", "tags": ["Feishu", "WeCom", "DingTalk", "Discord", "Telegram"] },
       "devices": { "title": "Connect NDR Devices", "tags": ["SkyEye", "TDP"] },
-      "scenes": { "title": "Scenarios Demo", "tags": ["Daily Intel", "Alert Triage", "Phishing Detection"] }
+      "scenes": { "title": "Scenarios Demo", "tags": ["Daily Intel", "Alert Operations", "Phishing Detection"] }
     }
   },
   "hookStatus": {

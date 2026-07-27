@@ -61,9 +61,9 @@ flocks browser --doctor
 | 结果 | 触发条件 | 一线修复 | 仍失败兜底 |
 |---|---|---|---|
 | **A** | `next action` 以 `ready` 开头 | 立即确定 `CDP 直连`,阅读 `references/cdp-direct.md`,之后不再切到 `agent-browser` | — |
-| **B** | `next action` 以 `attach` 开头 | 不要先反复 `--setup`；按输出执行 `flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'` 触发一次实际连接/观察 | 如果 `-c` 失败或仍无连接，执行 `flocks browser --reload` 清理旧 daemon，再执行 `flocks browser --setup`；setup 可能需要多次，直到用户完成浏览器 Allow/inspect 授权或错误信息稳定 |
-| **C** | `next action` 以 `setup` 开头 | 先执行 `flocks browser --setup`（不包短超时），再运行 `--doctor` 确认 | 如提示 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake 或 not live yet，再提示用户打开对应 inspect 页面并 Allow；用户确认后可多次 `--setup` |
-| **D** | `next action` 提示启动浏览器或提供 endpoint | 明确告知需要先启动 Chrome/Chromium/Edge 或提供 CDP endpoint | **不**擅自降级到 curl/webfetch；坚持告知 skill 边界 |
+| **B** | `next action` 以 `attach` 开头 | 不要先反复 `--setup`；按输出执行 `flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'` 触发一次实际连接/观察 | 如果 `-c` 失败或仍无连接，执行 `flocks browser --reload` 清理旧 daemon，再执行 `flocks browser --setup`；若 setup 输出本地 remote debugging 不可达，按 `references/cdp-setup.md` 的固定端口流程处理 |
+| **C** | `next action` 以 `setup` 开头 | 先执行 `flocks browser --setup`（不包短超时），再运行 `--doctor` 确认 | 如提示 remote debugging 不可达、`DevToolsActivePort` 缺失、403 handshake 或 not live yet，按 `references/cdp-setup.md` 指引使用非默认 `--user-data-dir` 启动 Chromium 系浏览器，再访问 `/json/version` 验证 |
+| **D** | `next action` 提示启动浏览器或提供 endpoint | 明确告知需要先用 remote-debugging 参数启动 Chrome/Chromium/Edge/Brave，或提供 CDP endpoint | **不**擅自降级到 curl/webfetch；坚持告知 skill 边界 |
 
 ### Step 4: 跨模式通用失败
 
@@ -79,7 +79,7 @@ flocks browser --doctor
 2. `cdp-headless` 是唯一例外：先读取 `references/cdp-headless.md` 完成浏览器启动与连接，再读取 `references/cdp-direct.md` 执行通用页面操作。
 3. 在 `cdp-headless` 中，如果当前任务自己启动了专用浏览器实例，必须记录 PID / 日志 / 专用 profile，并只在任务结束或明确放弃后清理自己启动的实例；不要关闭用户提供的远程浏览器。
 4. 不要同时加载 `references/cdp-direct.md` 和 `references/agent-browser.md`。
-5. `flocks browser` 的 daemon 文件固定放在 `~/.flocks/browser/`,例如 `bu.sock`、`bu.log`、`bu.pid`、`bu.port`。
+5. `flocks browser` 的 daemon 文件默认放在 `~/.flocks/browser/`（设置 `FLOCKS_ROOT` 时改为 `$FLOCKS_ROOT/browser/`）。默认 session 使用 `bu.*`；命名 session 使用 `bu-<BU_NAME>.*`。`.lock` 是启动互斥文件，可能在 daemon 退出后继续存在，不要手工删除 socket、port、PID 或 lock 文件，应使用 `flocks browser --reload`。
 6. 基础操作能力（打开、观察、点击、输入、滚动、截图、提取、等待、关闭）优先按 `references/cdp-direct.md` 的“基础操作速查”执行
 
 ## 产品经验Skill

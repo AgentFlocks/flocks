@@ -16,6 +16,12 @@ def _load_workflow() -> dict:
     return json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
 
 
+def test_tdp_alert_triage_exposes_chinese_name() -> None:
+    workflow = _load_workflow()
+
+    assert workflow["nameCn"] == "TDP 告警调查工作流"
+
+
 def test_tdp_alert_triage_has_join_before_report() -> None:
     workflow = _load_workflow()
     join_node = next(node for node in workflow["nodes"] if node["id"] == "join_results")

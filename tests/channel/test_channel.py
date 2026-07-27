@@ -32,6 +32,7 @@ from flocks.channel.base import (
     ChatType,
     DeliveryResult,
     InboundMessage,
+    NonRetryableChannelError,
     OutboundContext,
 )
 from flocks.config.config import ChannelAccountConfig, ChannelConfig, ConfigInfo
@@ -130,8 +131,11 @@ class TestChannelPluginStatus:
     def test_mark_connected(self):
         ch = _StubChannel()
         ch.reset_status("feishu")
+        ch.mark_disconnected(error="timeout")
         ch.mark_connected()
         assert ch.status.connected is True
+        assert ch.status.last_error is None
+        assert ch.status.error_count == 1
 
     def test_mark_disconnected_without_error(self):
         ch = _StubChannel()
@@ -339,6 +343,62 @@ class TestParseSlashCommand:
 
 class TestFeishuNativeCommands:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("category", "model_auto", "expected"),
+        [
+            ("user", True, True),
+            ("user", False, False),
+            ("task", True, False),
+        ],
+    )
+    async def test_im_loop_uses_supported_persisted_auto_mode(
+        self,
+        monkeypatch,
+        category,
+        model_auto,
+        expected,
+    ):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        binding = SessionBinding(
+            channel_id="slack",
+            account_id="T1",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            thread_id=None,
+            session_id="session_1",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_1",
+                    category=category,
+                    model_auto=model_auto,
+                )
+            ),
+        )
+        run_mock = AsyncMock(return_value=SimpleNamespace(last_message=None))
+        monkeypatch.setattr(
+            "flocks.session.session_loop.SessionLoop.run",
+            run_mock,
+        )
+
+        loop_callbacks = SimpleNamespace()
+        await InboundDispatcher._run_session_loop(binding, loop_callbacks)
+
+        run_mock.assert_awaited_once_with(
+            session_id="session_1",
+            agent_name="rex",
+            callbacks=loop_callbacks,
+            auto_failover=expected,
+        )
+
+    @pytest.mark.asyncio
     async def test_status_command_reports_session_state(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.channel.inbound.session_binding import SessionBinding
@@ -492,6 +552,7 @@ class TestFeishuNativeCommands:
                     "provider": "anthropic",
                     "model": "claude-sonnet-4-20250514",
                     "model_pinned": True,
+                    "model_auto": False,
                 },
             )
         ]
@@ -594,6 +655,190 @@ class TestFeishuNativeCommands:
         update_mock.assert_awaited_once()
         assert update_mock.await_args.args == ("channel", "session_old")
         assert update_mock.await_args.kwargs["status"] == "archived"
+
+    @pytest.mark.asyncio
+    async def test_new_command_inherits_auto_model_mode(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="wecom",
+                account_id="default",
+                chat_id="room_1",
+                chat_type=ChatType.DIRECT,
+                thread_id=None,
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="wecom",
+            account_id="default",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            thread_id=None,
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="wecom",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="user_1",
+            chat_id="room_1",
+            chat_type=ChatType.DIRECT,
+            text="/new",
+            mention_text="/new",
+        )
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    category="user",
+                    model_auto=True,
+                    model_pinned=False,
+                    provider=None,
+                    model=None,
+                )
+            ),
+        )
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(id="session_new", agent="rex")
+        )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
+        monkeypatch.setattr(
+            "flocks.session.session.Session.update",
+            AsyncMock(return_value=None),
+        )
+
+        await dispatcher._handle_session_command(
+            binding=binding,
+            msg=msg,
+            callbacks=dispatcher._build_callbacks(binding, msg),
+            scope_override=None,
+            channel_config=ChannelConfig(enabled=True),
+        )
+
+        create_kwargs = create_mock.await_args.kwargs
+        assert create_kwargs["model_auto"] is True
+        assert create_kwargs["model_pinned"] is False
+        assert "provider" not in create_kwargs
+        assert "model" not in create_kwargs
+
+    @pytest.mark.asyncio
+    async def test_new_command_with_args_sends_args_to_new_session(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.channel.inbound.session_binding import SessionBinding
+
+        dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
+        append_mock = AsyncMock()
+        run_mock = AsyncMock()
+        monkeypatch.setattr(dispatcher, "_append_user_message", append_mock)
+        monkeypatch.setattr(dispatcher, "_run_agent", run_mock)
+        dispatcher.binding_service.rebind = AsyncMock(
+            return_value=SessionBinding(
+                channel_id="slack",
+                account_id="T1",
+                chat_id="C123",
+                chat_type=ChatType.CHANNEL,
+                thread_id="171.1",
+                session_id="session_new",
+                agent_id="rex",
+                created_at=0,
+                last_message_at=0,
+            )
+        )
+        binding = SessionBinding(
+            channel_id="slack",
+            account_id="T1",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            thread_id="171.1",
+            session_id="session_old",
+            agent_id="rex",
+            created_at=0,
+            last_message_at=0,
+        )
+        msg = InboundMessage(
+            channel_id="slack",
+            account_id="T1",
+            message_id="171.1",
+            sender_id="U123",
+            chat_id="C123",
+            chat_type=ChatType.CHANNEL,
+            text="<@UBOT> /new 叫我uuuu",
+            mention_text="/new 叫我uuuu",
+            thread_id="171.1",
+            mentioned=True,
+        )
+
+        delivered: list[str] = []
+
+        async def fake_deliver(ctx, session_id=None):
+            delivered.append(ctx.text)
+
+        monkeypatch.setattr(
+            "flocks.channel.outbound.deliver.OutboundDelivery.deliver",
+            fake_deliver,
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id="session_old",
+                    project_id="channel",
+                    directory="/tmp/project",
+                    agent="rex",
+                    provider="anthropic",
+                    model="claude-sonnet-4-20250514",
+                    model_pinned=True,
+                )
+            ),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.create",
+            AsyncMock(return_value=SimpleNamespace(id="session_new", agent="rex")),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.update",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            "flocks.channel.inbound.dispatcher._resolve_session_model",
+            AsyncMock(return_value={"providerID": "anthropic", "modelID": "claude"}),
+        )
+
+        handled = await dispatcher._handle_feishu_native_command(
+            binding=binding,
+            msg=msg,
+            channel_config=ChannelConfig(enabled=True),
+            user_text="/new 叫我uuuu",
+            scope_override=None,
+        )
+
+        assert handled is True
+        assert "已开始全新对话。" in delivered[0]
+        append_mock.assert_awaited_once()
+        assert append_mock.await_args.args[:3] == ("session_new", "叫我uuuu", msg)
+        assert append_mock.await_args.kwargs["agent"] == "rex"
+        run_mock.assert_awaited_once()
+        assert run_mock.await_args.args[0].session_id == "session_new"
 
     @pytest.mark.asyncio
     async def test_reset_alias_matches_new_semantics(self, monkeypatch):
@@ -1059,10 +1304,10 @@ class TestMultimodalInput:
 # =====================================================================
 
 class TestCheckAllowlist:
-    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1"):
+    def _make_msg(self, *, chat_type=ChatType.DIRECT, sender_id="u1", channel_id="test", raw=None):
         return InboundMessage(
-            channel_id="test", account_id="acc", message_id="m1",
-            sender_id=sender_id, chat_type=chat_type,
+            channel_id=channel_id, account_id="acc", message_id="m1",
+            sender_id=sender_id, chat_type=chat_type, raw=raw,
         )
 
     def test_dm_open_allows_all(self):
@@ -1080,6 +1325,23 @@ class TestCheckAllowlist:
         cfg = ChannelConfig(dm_policy="allowlist", allow_from=["u1"])
         assert _check_allowlist(self._make_msg(sender_id="u1"), cfg) is True
 
+    def test_slack_dm_allow_from_without_policy_blocks_unlisted(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["U_ALLOWED"])
+        msg = self._make_msg(channel_id="slack", sender_id="U_BLOCKED")
+        assert _check_allowlist(msg, cfg) is False
+
+    def test_slack_dm_allow_from_without_policy_passes_listed(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["U_ALLOWED"])
+        msg = self._make_msg(channel_id="slack", sender_id="U_ALLOWED")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_non_slack_dm_allow_from_without_policy_stays_open(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["u2"])
+        assert _check_allowlist(self._make_msg(channel_id="test", sender_id="u1"), cfg) is True
+
     def test_dm_allowlist_empty_blocks_all(self):
         from flocks.channel.inbound.dispatcher import _check_allowlist
         cfg = ChannelConfig(dm_policy="allowlist", allow_from=None)
@@ -1095,6 +1357,28 @@ class TestCheckAllowlist:
         from flocks.channel.inbound.dispatcher import _check_allowlist
         cfg = ChannelConfig()
         msg = self._make_msg(chat_type=ChatType.GROUP)
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_lid_alias(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["25482795991095@lid"])
+        msg = self._make_msg(channel_id="whatsapp", sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_group_allowlist_matches_lid_alias(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(allow_from=["25482795991095@lid"])
+        msg = self._make_msg(channel_id="whatsapp", chat_type=ChatType.GROUP, sender_id="25482795991095")
+        assert _check_allowlist(msg, cfg) is True
+
+    def test_whatsapp_dm_allowlist_matches_sender_aliases(self):
+        from flocks.channel.inbound.dispatcher import _check_allowlist
+        cfg = ChannelConfig(dm_policy="allowlist", allow_from=["8618803405095"])
+        msg = self._make_msg(
+            channel_id="whatsapp",
+            sender_id="25482795991095",
+            raw={"senderAliases": ["25482795991095@lid", "8618803405095@s.whatsapp.net"]},
+        )
         assert _check_allowlist(msg, cfg) is True
 
 
@@ -1382,6 +1666,70 @@ class TestGatewayManagerHelpers:
         assert plugin.status.last_error == "fail"
         assert plugin.status.error_count == 1
 
+    async def test_run_with_reconnect_stops_on_non_retryable_error(self):
+        from flocks.channel.gateway.manager import GatewayManager
+
+        manager = GatewayManager()
+        plugin = _StubChannel()
+        attempts = 0
+        abort_event = asyncio.Event()
+
+        async def _fail_start(config, on_message, abort_event=None):
+            nonlocal attempts
+            attempts += 1
+            raise NonRetryableChannelError("bad credentials")
+
+        plugin.start = _fail_start  # type: ignore[method-assign]
+
+        await manager._run_with_reconnect(
+            channel_id="stub",
+            plugin=plugin,
+            config={},
+            on_message=AsyncMock(),
+            abort_event=abort_event,
+        )
+
+        assert attempts == 1
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "bad credentials"
+        assert plugin.status.error_count == 1
+
+    async def test_run_with_reconnect_does_not_pre_mark_self_managed_connection(self):
+        from flocks.channel.gateway.manager import GatewayManager
+
+        class _SelfManagedChannel(_StubChannel):
+            def capabilities(self) -> ChannelCapabilities:
+                return ChannelCapabilities(
+                    chat_types=[ChatType.DIRECT],
+                    self_managed_connection=True,
+                )
+
+        manager = GatewayManager()
+        plugin = _SelfManagedChannel()
+        started = asyncio.Event()
+        abort_event = asyncio.Event()
+
+        async def _start(config, on_message, abort_event=None):
+            started.set()
+            await asyncio.sleep(0.75)
+            abort_event.set()
+            raise RuntimeError("handshake failed")
+
+        plugin.start = _start  # type: ignore[method-assign]
+
+        await manager._run_with_reconnect(
+            channel_id="stub",
+            plugin=plugin,
+            config={},
+            on_message=AsyncMock(),
+            abort_event=abort_event,
+        )
+
+        assert started.is_set()
+        assert plugin.status.connected is False
+        assert plugin.status.last_error == "handshake failed"
+        assert plugin.status.error_count == 1
+
     async def test_stop_all_drains_cancelled_tasks(self, monkeypatch):
         from flocks.channel.gateway.manager import GatewayManager
         from flocks.channel.registry import ChannelRegistry
@@ -1423,7 +1771,7 @@ class TestMediaFilenameHelpers:
     def test_sanitize_filename_removes_path_separators(self):
         from flocks.channel.media_filename import sanitize_filename
 
-        assert sanitize_filename("../report.bin") == ".._report.bin"
+        assert sanitize_filename("../report.bin") == "report.bin"
 
 
 # ------------------------------------------------------------------
@@ -1527,6 +1875,34 @@ class TestDownloadChannelMediaRouting:
         assert captured["msg"].channel_id == "telegram"
 
     @pytest.mark.asyncio
+    async def test_dispatch_to_slack_downloader(self, monkeypatch):
+        from flocks.channel.inbound import dispatcher as dispatch_mod
+
+        captured = {}
+
+        async def fake_slack(msg, config):
+            captured["msg"] = msg
+            captured["config"] = config
+            return SimpleNamespace(
+                filename="slack.png", mime="image/png",
+                url="file:///tmp/slack.png", source={"channel": "slack"},
+            )
+
+        import flocks.channel.builtin.slack.inbound_media as slack_inb
+        monkeypatch.setattr(slack_inb, "download_inbound_media", fake_slack)
+
+        result = await dispatch_mod._download_channel_media(
+            InboundMessage(
+                channel_id="slack", account_id="T1", message_id="m",
+                sender_id="u", media_url="https://files.slack.com/x",
+            ),
+            {"botToken": "xoxb-test"},
+        )
+        assert result is not None
+        assert captured["msg"].channel_id == "slack"
+        assert captured["config"] == {"botToken": "xoxb-test"}
+
+    @pytest.mark.asyncio
     async def test_unknown_channel_returns_none(self):
         from flocks.channel.inbound import dispatcher as dispatch_mod
 
@@ -1548,6 +1924,7 @@ class TestIsPlaceholderText:
     def test_recognises_channel_placeholders(self):
         from flocks.channel.inbound.dispatcher import _is_placeholder_text
         assert _is_placeholder_text("[图片消息]") is True
+        assert _is_placeholder_text("[图片消息: screenshot.png]") is True
         assert _is_placeholder_text("[文件消息]") is True
         assert _is_placeholder_text("[文件消息: report.pdf]") is True
         assert _is_placeholder_text("[Image]") is True

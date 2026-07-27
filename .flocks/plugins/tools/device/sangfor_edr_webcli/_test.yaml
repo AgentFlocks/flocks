@@ -1,0 +1,15 @@
+schema_version: 1
+provider: sangfor_edr
+connectivity:
+  tool: sangfor_edr_auth
+  params:
+    action: ensure_auth_state
+fixtures:
+  sangfor_edr_auth:
+    - label: "Ensure EDR auth state"
+      label_cn: "Ensure or refresh EDR auth state"
+      tags: [smoke, auth]
+      params:
+        action: ensure_auth_state
+      assert:
+        success: true

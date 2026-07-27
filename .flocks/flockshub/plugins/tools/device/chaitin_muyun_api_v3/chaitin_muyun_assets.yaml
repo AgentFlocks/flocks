@@ -1,0 +1,42 @@
+name: chaitin_muyun_assets
+description: Chaitin Muyun product, user, host, application, website, and process asset queries.
+description_cn: 长亭牧云产品、用户、主机、应用、网站和进程资产查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_muyun_api
+version: "API 3.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - product_info
+        - current_user
+        - host_count
+        - host_list
+        - host_detail
+        - application_list
+        - website_list
+        - process_list
+        - test
+      description: |
+        资产类动作：
+        - product_info: 获取产品信息。
+        - current_user: 获取当前 Token 用户信息。
+        - host_count: 获取主机资产数量。
+        - host_list: 获取主机资产列表。
+        - host_detail: 获取主机资产详情。
+        - application_list: 获取应用/软件资产列表。
+        - website_list: 获取 Web 站点资产列表。
+        - process_list: 获取进程资产列表。
+    params:
+      type: object
+      description: JSON-RPC params 对象；字段按牧云 API 3.0 对应方法填写。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_muyun.handler.py
+  function: assets

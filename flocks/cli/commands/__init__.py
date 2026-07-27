@@ -8,6 +8,7 @@ from flocks.cli.commands.export import export_app
 from flocks.cli.commands.import_ import import_app
 from flocks.cli.commands.mcp import mcp_app
 from flocks.cli.commands.browser import BROWSER_CONTEXT_SETTINGS, browser_command
+from flocks.cli.commands.doctor import doctor_command
 from flocks.cli.commands.session import session_app
 from flocks.cli.commands.skill import skill_app
 from flocks.cli.commands.stats import stats_app
@@ -19,6 +20,7 @@ __all__ = [
     "mcp_app",
     "browser_command",
     "BROWSER_CONTEXT_SETTINGS",
+    "doctor_command",
     "export_app",
     "import_app",
     "stats_app",

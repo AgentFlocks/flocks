@@ -295,6 +295,9 @@ class TestAuthMiddlewareExempt:
     def test_protected_path_is_not_exempt(self):
         assert auth_module.auth_middleware_exempt("/api/session") is False
         assert auth_module.auth_middleware_exempt("/api/admin/users") is False
+        assert auth_module.auth_middleware_exempt("/docs") is False
+        assert auth_module.auth_middleware_exempt("/redoc") is False
+        assert auth_module.auth_middleware_exempt("/openapi.json") is False
 
     def test_channel_webhook_is_exempt_via_regex(self):
         # /api/channel/{channel_id}/webhook is the public callback entry for

@@ -1,0 +1,45 @@
+name: sangfor_atrust_monitor
+description: Sangfor aTrust OpenAPI V3 online monitoring queries.
+description_cn: 深信服 aTrust OpenAPI V3 在线监控查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_atrust
+version: "3"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - online_users
+        - test
+      description: |
+        - online_users: GET /api/v1/monitor/getUserStatus，查询在线用户。
+    pageSize:
+      type: integer
+      description: 每页大小，默认由 aTrust 服务端决定。
+    pageIndex:
+      type: integer
+      description: 当前页，从 1 开始。
+    filter:
+      type: string
+      description: 过滤条件，如 all、name、displayName、groupPath、remoteIp、vip、os、browser。
+    searchValue:
+      type: string
+      description: 搜索值。
+    sortBy:
+      type: string
+      description: 排序字段。
+    asc:
+      type: integer
+      description: 是否升序，1 为升序，0 为降序。
+    query:
+      type: object
+      description: 额外 query string 参数，会与上方简单字段合并。
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_atrust.handler.py
+  function: monitor

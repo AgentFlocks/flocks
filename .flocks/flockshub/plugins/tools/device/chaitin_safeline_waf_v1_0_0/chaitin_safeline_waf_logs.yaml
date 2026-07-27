@@ -1,0 +1,33 @@
+name: chaitin_safeline_waf_logs
+description: Chaitin SafeLine WAF attack log and traffic-learning read-only queries.
+description_cn: 长亭雷池 WAF 攻击日志与智学习只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_safeline_waf
+version: "1.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - attack_logs
+        - traffic_learning_overview
+        - test
+      description: |
+        - attack_logs: GET /api/FilterV2API，查询攻击检测日志列表页/详情页等筛选数据。
+        - traffic_learning_overview: GET /api/traffic_learning/v1/Overview，查询智学习总览。
+    query:
+      type: object
+      description: GET query 参数。
+    count:
+      type: integer
+    offset:
+      type: integer
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_safeline_waf.handler.py
+  function: logs

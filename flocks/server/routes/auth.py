@@ -4,6 +4,8 @@ Local account authentication routes.
 
 from __future__ import annotations
 
+import threading
+import time
 from typing import Any
 
 from fastapi import APIRouter, HTTPException, Request, Response, status
@@ -20,6 +22,166 @@ from flocks.server.auth import (
 )
 
 router = APIRouter()
+
+_LOGIN_FAILURE_WINDOW_SECONDS = 5 * 60
+_LOGIN_LOCKOUT_SECONDS = 15 * 60
+_LOGIN_MAX_FAILURES_PER_USER_AND_IP = 5
+_LOGIN_MAX_FAILURES_PER_IP = 20
+_LOGIN_PRUNE_INTERVAL_SECONDS = 60
+_LOGIN_MAX_TRACKED_BUCKETS = 2048
+
+
+class _LoginRateLimiter:
+    """In-process failed-login limiter for local account authentication."""
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._failures: dict[tuple[str, str], list[float]] = {}
+        self._locked_until: dict[tuple[str, str], float] = {}
+        self._last_pruned_at = 0.0
+
+    def check(self, *, username: str, ip: str | None) -> int | None:
+        """Return retry-after seconds when the login attempt is currently blocked."""
+        now = time.monotonic()
+        with self._lock:
+            retry_after = self._retry_after(("user_ip", self._user_ip_key(username, ip)), now)
+            if retry_after is not None:
+                return retry_after
+            return self._retry_after(("ip", self._ip_key(ip)), now)
+
+    def record_failure(self, *, username: str, ip: str | None) -> int | None:
+        """Record a failed login attempt and return retry-after when it locks out."""
+        now = time.monotonic()
+        with self._lock:
+            self._prune(now)
+            user_key = ("user_ip", self._user_ip_key(username, ip))
+            ip_key = ("ip", self._ip_key(ip))
+            user_retry = self._record_failure(
+                user_key,
+                limit=_LOGIN_MAX_FAILURES_PER_USER_AND_IP,
+                now=now,
+            )
+            ip_retry = self._record_failure(
+                ip_key,
+                limit=_LOGIN_MAX_FAILURES_PER_IP,
+                now=now,
+            )
+            self._enforce_capacity(now, preserve={user_key, ip_key})
+            if user_retry is not None and ip_retry is not None:
+                return max(user_retry, ip_retry)
+            return user_retry if user_retry is not None else ip_retry
+
+    def record_success(self, *, username: str, ip: str | None) -> None:
+        """Clear the exact user/IP failure bucket after a successful login."""
+        with self._lock:
+            key = ("user_ip", self._user_ip_key(username, ip))
+            self._failures.pop(key, None)
+            self._locked_until.pop(key, None)
+
+    def reset(self) -> None:
+        """Clear limiter state for tests and process lifecycle resets."""
+        with self._lock:
+            self._failures.clear()
+            self._locked_until.clear()
+            self._last_pruned_at = 0.0
+
+    def _retry_after(self, key: tuple[str, str], now: float) -> int | None:
+        locked_until = self._locked_until.get(key)
+        if locked_until is None:
+            return None
+        if locked_until <= now:
+            self._locked_until.pop(key, None)
+            self._failures.pop(key, None)
+            return None
+        return max(1, int(locked_until - now))
+
+    def _record_failure(self, key: tuple[str, str], *, limit: int, now: float) -> int | None:
+        if retry_after := self._retry_after(key, now):
+            return retry_after
+        cutoff = now - _LOGIN_FAILURE_WINDOW_SECONDS
+        failures = [timestamp for timestamp in self._failures.get(key, []) if timestamp >= cutoff]
+        failures.append(now)
+        self._failures[key] = failures
+        if len(failures) <= limit:
+            return None
+        locked_until = now + _LOGIN_LOCKOUT_SECONDS
+        self._locked_until[key] = locked_until
+        return _LOGIN_LOCKOUT_SECONDS
+
+    def _prune(self, now: float, *, force: bool = False) -> None:
+        if not force and (
+            now - self._last_pruned_at < _LOGIN_PRUNE_INTERVAL_SECONDS
+            and self._tracked_bucket_count() <= _LOGIN_MAX_TRACKED_BUCKETS
+        ):
+            return
+        cutoff = now - _LOGIN_FAILURE_WINDOW_SECONDS
+        for key, locked_until in list(self._locked_until.items()):
+            if locked_until <= now:
+                self._locked_until.pop(key, None)
+        for key, failures in list(self._failures.items()):
+            if self._locked_until.get(key, 0) > now:
+                continue
+            active_failures = [timestamp for timestamp in failures if timestamp >= cutoff]
+            if active_failures:
+                self._failures[key] = active_failures
+            else:
+                self._failures.pop(key, None)
+        self._last_pruned_at = now
+
+    def _enforce_capacity(self, now: float, *, preserve: set[tuple[str, str]]) -> None:
+        if self._tracked_bucket_count() <= _LOGIN_MAX_TRACKED_BUCKETS:
+            return
+        self._prune(now, force=True)
+        overflow = self._tracked_bucket_count() - _LOGIN_MAX_TRACKED_BUCKETS
+        if overflow <= 0:
+            return
+        candidates = [
+            (max(failures, default=0.0), key)
+            for key, failures in self._failures.items()
+            if key not in preserve and self._locked_until.get(key, 0) <= now
+        ]
+        candidates.sort()
+        for _latest_failure, key in candidates[:overflow]:
+            self._failures.pop(key, None)
+            self._locked_until.pop(key, None)
+        overflow = self._tracked_bucket_count() - _LOGIN_MAX_TRACKED_BUCKETS
+        if overflow <= 0:
+            return
+        locked_candidates = [
+            (locked_until, key)
+            for key, locked_until in self._locked_until.items()
+            if key not in preserve
+        ]
+        locked_candidates.sort()
+        for _locked_until, key in locked_candidates[:overflow]:
+            self._locked_until.pop(key, None)
+            self._failures.pop(key, None)
+
+    def _tracked_bucket_count(self) -> int:
+        return len(set(self._failures) | set(self._locked_until))
+
+    @staticmethod
+    def _user_ip_key(username: str, ip: str | None) -> str:
+        return f"{(username or '').strip().casefold()}@{ip or 'unknown'}"
+
+    @staticmethod
+    def _ip_key(ip: str | None) -> str:
+        return ip or "unknown"
+
+
+_login_rate_limiter = _LoginRateLimiter()
+
+
+def _request_ip(request: Request) -> str | None:
+    return getattr(getattr(request, "client", None), "host", None)
+
+
+def _raise_login_rate_limited(retry_after: int) -> None:
+    raise HTTPException(
+        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        detail="登录失败次数过多，请稍后再试",
+        headers={"Retry-After": str(retry_after)},
+    )
 
 
 def _parse_event_type(event_type: str) -> tuple[str, str]:
@@ -181,22 +343,39 @@ async def bootstrap_admin(payload: BootstrapAdminRequest, response: Response, re
 
 @router.post("/login", response_model=MeResponse, summary="登录本地账号")
 async def login(payload: LoginRequest, response: Response, request: Request) -> MeResponse:
+    ip = _request_ip(request)
+    retry_after = _login_rate_limiter.check(username=payload.username, ip=ip)
+    if retry_after is not None:
+        await _emit_auth_audit(
+            "account.login_rate_limited",
+            {
+                "username": payload.username,
+                "ip": ip,
+                "retry_after": retry_after,
+            },
+        )
+        _raise_login_rate_limited(retry_after)
+
     try:
         user, session_id = await AuthService.login(
             payload.username,
             payload.password,
         )
     except ValueError as exc:
+        retry_after = _login_rate_limiter.record_failure(username=payload.username, ip=ip)
         await _emit_auth_audit(
             "account.login_failed",
             {
                 "username": payload.username,
                 "reason": str(exc),
-                "ip": getattr(getattr(request, "client", None), "host", None),
+                "ip": ip,
             },
         )
+        if retry_after is not None:
+            _raise_login_rate_limited(retry_after)
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
 
+    _login_rate_limiter.record_success(username=payload.username, ip=ip)
     set_session_cookie(response, session_id, secure=should_use_secure_cookie(request))
     await _emit_auth_audit(
         "account.login",
@@ -208,7 +387,7 @@ async def login(payload: LoginRequest, response: Response, request: Request) -> 
             "username": user.username,
             "role": user.role,
             "session_id": session_id,
-            "ip": getattr(getattr(request, "client", None), "host", None),
+            "ip": ip,
         },
     )
     return _to_me_response(user)

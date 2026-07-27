@@ -7,16 +7,18 @@ import {
   type WebUIContractWorkspaceListItem,
 } from '@/api/webuiContractPages';
 import { useSSE } from '@/hooks/useSSE';
+import { useDelayedVisible } from '@/hooks/useDelayedVisible';
 import { ThemeContext } from '@/contexts/ThemeContext';
 import PageRuntimeHost from '@/pages/WebUIContractPageHost/PageRuntimeHost';
 import { buildWebUIContractWorkspaceSections } from '@/utils/webuiContractWorkspaceSections';
 
 export default function WebUIContractWorkspaceHost() {
   const { workspaceId, pageId } = useParams<{ workspaceId: string; pageId?: string }>();
-  const { t } = useTranslation('webuiContractPage');
+  const { t, i18n } = useTranslation('webuiContractPage');
   const [workspaces, setWorkspaces] = useState<WebUIContractWorkspaceListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const showLoading = useDelayedVisible(loading ? 180 : 0);
   const { theme, setTemporaryThemeOverride } = useContext(ThemeContext);
 
   const fetchWorkspaces = useCallback(async (silent = false) => {
@@ -56,8 +58,8 @@ export default function WebUIContractWorkspaceHost() {
     [workspace?.pages],
   );
   const sections = useMemo(
-    () => (workspace ? buildWebUIContractWorkspaceSections(workspace) : []),
-    [workspace],
+    () => (workspace ? buildWebUIContractWorkspaceSections(workspace, i18n.language) : []),
+    [i18n.language, workspace],
   );
   const currentPage = pages.find((page) => page.id === pageId);
   const currentSection = currentPage
@@ -82,6 +84,7 @@ export default function WebUIContractWorkspaceHost() {
   }
 
   if (loading) {
+    if (!showLoading) return null;
     return (
       <div className="flex items-center gap-2 text-sm text-zinc-500">
         <Loader2 className="h-4 w-4 animate-spin" />

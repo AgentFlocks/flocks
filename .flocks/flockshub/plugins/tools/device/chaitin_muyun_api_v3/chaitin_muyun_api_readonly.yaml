@@ -1,0 +1,47 @@
+name: chaitin_muyun_api_readonly
+description: Chaitin Muyun documented read-only JSON-RPC caller.
+description_cn: 长亭牧云文档内只读 JSON-RPC 调用工具。使用 api_catalog 查看已收录方法，再用 rpc_call_readonly 调用 kind=readonly 的方法。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_muyun_api
+version: "API 3.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rpc_call_readonly
+        - product_info
+        - current_user
+        - host_count
+        - host_list
+        - host_detail
+        - application_list
+        - website_list
+        - process_list
+        - webshell_events
+        - malware_events
+        - bruteforce_events
+        - abnormal_login_events
+        - realtime_events
+        - vuln_list
+        - vuln_detail
+        - security_check_events
+        - baseline_tasks
+        - emergency_vulns
+        - test
+    method:
+      type: string
+      description: rpc_call_readonly 使用的 JSON-RPC 方法名，例如 HostAssetService.GetHostAssetList。
+    params:
+      type: object
+      description: JSON-RPC params 对象。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_muyun.handler.py
+  function: api_readonly

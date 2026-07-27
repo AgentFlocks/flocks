@@ -86,8 +86,7 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     ``Session.create`` cannot infer the owner from ``current_auth_user``.
     When an existing channel session is being replaced, preserve its owner.
     Otherwise, attach new channel sessions to the local admin if one exists.
-    Installs without local accounts remain ownerless for backward-compatible
-    no-login operation.
+    Installs without local accounts use the explicit system identity.
     """
     owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
     owner_username = getattr(source_session, "owner_username", None) if source_session else None
@@ -103,7 +102,12 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
         from flocks.auth.service import AuthService
 
         if not await AuthService.has_users():
-            return {}
+            from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+
+            return {
+                "owner_user_id": API_TOKEN_SERVICE_USER_ID,
+                "owner_username": API_TOKEN_SERVICE_USER_ID,
+            }
         users = await AuthService.list_users()
     except Exception as exc:
         log.warn("channel.owner.resolve_failed", {"error": str(exc)})
@@ -135,6 +139,9 @@ async def _get_db() -> aiosqlite.Connection:
     """
     global _db_conn, _db_ready, _db_owner_pid
 
+    from flocks.storage.storage import Storage
+
+    await Storage._ensure_init()
     current_pid = os.getpid()
     if (
         _db_conn is not None
@@ -169,7 +176,6 @@ async def _get_db() -> aiosqlite.Connection:
             _db_ready = False
             _db_owner_pid = None
 
-        from flocks.storage.storage import Storage
         db_path = Storage.get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -230,17 +236,28 @@ async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
         })
 
 
+async def _close_binding_db_locked(*, suppress_errors: bool) -> None:
+    """Invalidate and close ``_db_conn`` while ``_init_lock`` is held."""
+
+    global _db_conn, _db_ready, _db_owner_pid
+
+    conn = _db_conn
+    _db_conn = None
+    _db_ready = False
+    _db_owner_pid = None
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception:
+            if not suppress_errors:
+                raise
+
+
 async def close_binding_db() -> None:
     """Close the persistent connection (call during shutdown)."""
-    global _db_conn, _db_ready, _db_owner_pid
-    if _db_conn is not None:
-        try:
-            await _db_conn.close()
-        except Exception:
-            pass
-        _db_conn = None
-        _db_ready = False
-        _db_owner_pid = None
+
+    async with _init_lock:
+        await _close_binding_db_locked(suppress_errors=True)
 
 
 class SessionBindingService:
@@ -275,23 +292,30 @@ class SessionBindingService:
         existing = await self._find_binding(
             msg.channel_id, msg.account_id, chat_id, thread_id,
         )
+        replaced_session = None
         if existing:
-            # Verify the bound session still exists (user may have deleted it via WebUI)
+            # Archived sessions are immutable history, not live conversation
+            # targets. Replace stale or inactive bindings before the dispatcher
+            # persists the inbound message.
             from flocks.session.session import Session as _Session
-            still_alive = await _Session.get_by_id(existing.session_id)
-            if still_alive:
+            bound_session = await _Session.get_by_id_unfiltered(existing.session_id)
+            if bound_session and bound_session.status == "active":
                 await self._touch(existing.session_id)
                 return existing
-            # Session was deleted — remove stale binding and fall through to create a new one
+            replaced_session = bound_session
             log.info("channel.binding.stale", {
                 "channel": msg.channel_id,
                 "chat_id": chat_id,
                 "old_session_id": existing.session_id,
+                "status": getattr(bound_session, "status", "missing"),
             })
             await self.unbind(existing.session_id)
 
         session_id = await self._create_session(
-            msg, default_agent=default_agent, directory=directory,
+            msg,
+            default_agent=default_agent,
+            directory=directory,
+            source_session=replaced_session,
         )
         now = time.time()
         binding = SessionBinding(
@@ -351,8 +375,11 @@ class SessionBindingService:
             ValueError: if *session_id* does not exist.
         """
         from flocks.session.session import Session as _Session
-        if not await _Session.get_by_id(session_id):
+        session = await _Session.get_by_id_unfiltered(session_id)
+        if not session:
             raise ValueError(f"Session '{session_id}' not found")
+        if session.status != "active":
+            raise ValueError(f"Session '{session_id}' is not active")
 
         now = time.time()
         binding = SessionBinding(
@@ -441,6 +468,33 @@ class SessionBindingService:
         rows = await cursor.fetchall()
         return [self._row_to_binding(r) for r in rows]
 
+    async def latest_active_user_binding(
+        self,
+        *,
+        channel_id: str,
+        account_id: Optional[str] = None,
+        chat_id: Optional[str] = None,
+    ) -> Optional[SessionBinding]:
+        """Return the binding only when a channel target resolves uniquely."""
+        from flocks.session.session import Session
+
+        candidates = await self.list_bindings(channel_id=channel_id)
+        if account_id:
+            candidates = [b for b in candidates if b.account_id == account_id]
+        if chat_id:
+            candidates = [b for b in candidates if b.chat_id == chat_id]
+
+        active_candidates: list[SessionBinding] = []
+        for binding in candidates:
+            session = await Session.get_by_id(binding.session_id)
+            if (
+                session
+                and session.status == "active"
+                and session.category == "user"
+            ):
+                active_candidates.append(binding)
+        return active_candidates[0] if len(active_candidates) == 1 else None
+
     # --- internal helpers ---
 
     async def _find_binding(
@@ -516,6 +570,7 @@ class SessionBindingService:
         msg: InboundMessage,
         default_agent: Optional[str] = None,
         directory: Optional[str] = None,
+        source_session=None,
     ) -> str:
         """Create a new Flocks Session and return its ID.
 
@@ -528,7 +583,7 @@ class SessionBindingService:
         from flocks.session.session import Session
 
         title = _build_title(msg)
-        owner_kwargs = await resolve_channel_session_owner_kwargs()
+        owner_kwargs = await resolve_channel_session_owner_kwargs(source_session)
         session = await Session.create(
             project_id="channel",
             directory=_resolve_session_directory(directory),

@@ -1,0 +1,35 @@
+name: chaitin_dongjian_assets
+description: Chaitin Dongjian web, host, service, and domain asset read-only queries.
+description_cn: 长亭洞鉴 Web、主机、服务和域名资产只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_dongjian_api
+version: "2.8"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - website_filter
+        - host_filter
+        - service_filter
+        - domain_filter
+        - test
+      description: |
+        - website_filter: POST /website/filter/，筛选 Web 站点。
+        - host_filter: POST /ip/filter/，筛选主机资产。
+        - service_filter: POST /service/filter/，筛选服务资产。
+        - domain_filter: POST /domain/filter/，筛选域名资产。
+    body:
+      description: POST 查询 body。
+    query:
+      type: object
+      description: Query 参数，例如 project_id。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_dongjian.handler.py
+  function: assets

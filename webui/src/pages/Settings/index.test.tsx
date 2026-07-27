@@ -1,16 +1,21 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
 import { ThemeContext, type Theme } from '@/contexts/ThemeContext';
+import { ToastProvider } from '@/components/common/Toast';
 
-const { changeLanguage, flocksproUsersApi, setTheme, useAuth } = vi.hoisted(() => ({
+const { changeLanguage, flocksproUsersApi, setTheme, toolFailureConfigApi, useAuth } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
   flocksproUsersApi: {
     hasCapability: vi.fn(),
   },
   setTheme: vi.fn(),
+  toolFailureConfigApi: {
+    get: vi.fn(),
+    update: vi.fn(),
+  },
   useAuth: vi.fn(),
 }));
 
@@ -32,6 +37,10 @@ vi.mock('@/api/flocksproUsers', () => ({
   flocksproUsersApi,
 }));
 
+vi.mock('@/api/toolFailureConfig', () => ({
+  toolFailureConfigApi,
+}));
+
 vi.mock('@/pages/Config', () => ({
   default: () => <div>account page</div>,
 }));
@@ -42,6 +51,10 @@ vi.mock('@/pages/SystemLog', () => ({
 
 vi.mock('@/pages/AuditLogs', () => ({
   default: () => <div>audit logs page</div>,
+}));
+
+vi.mock('./ArchivedDataPanel', () => ({
+  default: () => <div>archived data page</div>,
 }));
 
 vi.mock('@/pages/FlocksproUpgrade', () => ({
@@ -63,25 +76,27 @@ function LocationProbe() {
 
 function renderSettings(path: string, theme: Theme = 'light', state?: Record<string, unknown>) {
   return render(
-    <ThemeContext.Provider
-      value={{
-        theme,
-        effectiveTheme: theme,
-        toggleTheme: vi.fn(),
-        setTheme,
-        setTemporaryThemeOverride: vi.fn(),
-      }}
-    >
-      <MemoryRouter initialEntries={[state ? { pathname: path, state } : path]}>
-        <Routes>
-          <Route path="/settings/:sectionId?" element={<SettingsPage />} />
-          <Route path="/models" element={<div>models page</div>} />
-          <Route path="/channels" element={<div>channels page</div>} />
-          <Route path="/contracts/webui/workspaces/:workspaceId" element={<LocationProbe />} />
-          <Route path="/" element={<LocationProbe />} />
-        </Routes>
-      </MemoryRouter>
-    </ThemeContext.Provider>,
+    <ToastProvider>
+      <ThemeContext.Provider
+        value={{
+          theme,
+          effectiveTheme: theme,
+          toggleTheme: vi.fn(),
+          setTheme,
+          setTemporaryThemeOverride: vi.fn(),
+        }}
+      >
+        <MemoryRouter initialEntries={[state ? { pathname: path, state } : path]}>
+          <Routes>
+            <Route path="/settings/:sectionId?" element={<SettingsPage />} />
+            <Route path="/models" element={<div>models page</div>} />
+            <Route path="/channels" element={<div>channels page</div>} />
+            <Route path="/contracts/webui/workspaces/:workspaceId" element={<LocationProbe />} />
+            <Route path="/" element={<LocationProbe />} />
+          </Routes>
+        </MemoryRouter>
+      </ThemeContext.Provider>
+    </ToastProvider>,
   );
 }
 
@@ -89,6 +104,10 @@ describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     flocksproUsersApi.hasCapability.mockResolvedValue(true);
+    toolFailureConfigApi.get.mockResolvedValue({ disableOnRepeatedFailure: true });
+    toolFailureConfigApi.update.mockImplementation(async (disableOnRepeatedFailure: boolean) => ({
+      disableOnRepeatedFailure,
+    }));
     useAuth.mockReturnValue({
       user: {
         id: 'user-1',
@@ -114,12 +133,39 @@ describe('SettingsPage', () => {
     expect(setTheme).toHaveBeenCalledWith('dark');
   });
 
-  it('redirects legacy model and channel settings URLs to workspace pages', async () => {
+  it('loads and updates repeated tool failure auto-disable', async () => {
+    const user = userEvent.setup();
+    toolFailureConfigApi.get.mockResolvedValue({ disableOnRepeatedFailure: false });
+
+    renderSettings('/settings/preferences');
+
+    const autoDisableSwitch = await screen.findByRole('switch', {
+      name: 'toolFailureAutoDisable',
+    });
+    await waitFor(() => {
+      expect(autoDisableSwitch).toHaveAttribute('aria-checked', 'false');
+    });
+
+    await user.click(autoDisableSwitch);
+
+    await waitFor(() => {
+      expect(toolFailureConfigApi.update).toHaveBeenCalledWith(true);
+      expect(autoDisableSwitch).toHaveAttribute('aria-checked', 'true');
+    });
+  });
+
+  it('redirects legacy model and channel settings URLs into preferences', async () => {
     const { unmount } = renderSettings('/settings/models');
 
     expect(await screen.findByText('models page')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'models' })).toHaveAttribute(
+      'href',
+      '/settings/preferences?tab=models',
+    );
+    expect(screen.getByRole('link', { name: 'channels' })).toHaveAttribute(
+      'href',
+      '/settings/preferences?tab=channels',
+    );
 
     unmount();
     renderSettings('/settings/channels');
@@ -170,6 +216,16 @@ describe('SettingsPage', () => {
     expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
   });
 
+  it('renders archived data management for local users', async () => {
+    renderSettings('/settings/archived-data');
+
+    expect(await screen.findByText('archived data page')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'archivedData' })[0]).toHaveAttribute(
+      'href',
+      '/settings/archived-data',
+    );
+  });
+
   it('hides audit logs when Flocks Pro capability is unavailable', async () => {
     flocksproUsersApi.hasCapability.mockResolvedValue(false);
 
@@ -193,7 +249,7 @@ describe('SettingsPage', () => {
     renderSettings('/settings/flockspro');
 
     expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'flocksproUpgrade' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
   });
 });

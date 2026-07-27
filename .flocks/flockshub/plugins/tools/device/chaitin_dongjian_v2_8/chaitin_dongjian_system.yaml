@@ -1,0 +1,29 @@
+name: chaitin_dongjian_system
+description: Chaitin Dongjian management-node and service status read-only queries.
+description_cn: 长亭洞鉴管理节点与系统服务状态只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_dongjian_api
+version: "2.8"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - system_info_mgmt
+        - system_services
+        - test
+      description: |
+        - system_info_mgmt: GET /system/info/mgmt/，查询管理节点系统信息和负载。
+        - system_services: GET /system/info/services/，查询系统服务容器名称列表。
+    query:
+      type: object
+      description: GET query 参数。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_dongjian.handler.py
+  function: system

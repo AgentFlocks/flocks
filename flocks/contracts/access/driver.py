@@ -66,12 +66,21 @@ class SqliteJsonDriverExecutor:
         table = _sqlite_identifier(options.get("table"), "records")
         record_column = _sqlite_identifier(options.get("recordColumn"), "record_json")
         date_column = _sqlite_identifier(options.get("dateColumn"), "record_date")
+        event_time_column = _sqlite_identifier_optional(options.get("eventTimeColumn"))
         query = f"SELECT {record_column} FROM {table}"
+        conditions: list[str] = []
         query_params: list[Any] = []
         start_date, end_date = JsonlDriverExecutor()._request_date_range(plan.params)
         if start_date and end_date and date_column:
-            query += f" WHERE {date_column} BETWEEN ? AND ?"
+            conditions.append(f"{date_column} BETWEEN ? AND ?")
             query_params.extend([start_date, end_date])
+        start_time, end_time = JsonlDriverExecutor()._request_event_time_range(plan.params)
+        sql_event_time_filtered = start_time is not None and end_time is not None and bool(event_time_column)
+        if sql_event_time_filtered:
+            conditions.append(f"{event_time_column} BETWEEN ? AND ?")
+            query_params.extend([start_time, end_time])
+        if conditions:
+            query += f" WHERE {' AND '.join(conditions)}"
         query += " ORDER BY rowid"
 
         rows: list[dict[str, Any]] = []
@@ -102,6 +111,8 @@ class SqliteJsonDriverExecutor:
                 parse_errors += 1
                 continue
             if record.get("_type") == "file_header":
+                continue
+            if not sql_event_time_filtered and not self._matches_event_time_range(record, start_time, end_time):
                 continue
 
             total_raw += 1
@@ -144,6 +155,9 @@ class SqliteJsonDriverExecutor:
     def _matches_predicates(self, record: dict[str, Any], predicates: tuple[Predicate, ...]) -> bool:
         return JsonlDriverExecutor()._matches_predicates(record, predicates)
 
+    def _matches_event_time_range(self, record: dict[str, Any], start_time: int | None, end_time: int | None) -> bool:
+        return JsonlDriverExecutor()._matches_event_time_range(record, start_time, end_time)
+
 
 class JsonlDriverExecutor:
     def execute(self, plan: QueryPlan) -> DriverResult:
@@ -154,6 +168,7 @@ class JsonlDriverExecutor:
         duplicates = 0
         filtered_unique = 0
         parse_errors = 0
+        start_time, end_time = self._request_event_time_range(plan.params)
         for path in files:
             self._assert_allowed(path, plan.binding.driver_allowlist_roots)
             for record in self._iter_records(path):
@@ -161,6 +176,8 @@ class JsonlDriverExecutor:
                     parse_errors += 1
                     continue
                 if record.get("_type") == "file_header":
+                    continue
+                if not self._matches_event_time_range(record, start_time, end_time):
                     continue
 
                 total_raw += 1
@@ -243,6 +260,21 @@ class JsonlDriverExecutor:
             return from_date, to_date
         return None, None
 
+    def _request_event_time_range(self, params: dict[str, Any]) -> tuple[int | None, int | None]:
+        start_time = _epoch_seconds_from_value(
+            params.get("startTime") or params.get("fromTime") or params.get("eventStartTime")
+        )
+        end_time = _epoch_seconds_from_value(
+            params.get("endTime") or params.get("toTime") or params.get("eventEndTime")
+        )
+        if start_time is not None and end_time is None:
+            end_time = start_time
+        if end_time is not None and start_time is None:
+            start_time = end_time
+        if start_time is not None and end_time is not None and start_time > end_time:
+            start_time, end_time = end_time, start_time
+        return start_time, end_time
+
     def _assert_allowed(self, path: Path, allowlist_roots: tuple[Path, ...]) -> None:
         resolved = path.resolve()
         for root in allowlist_roots:
@@ -282,6 +314,18 @@ class JsonlDriverExecutor:
                 return False
         return True
 
+    def _matches_event_time_range(self, record: dict[str, Any], start_time: int | None, end_time: int | None) -> bool:
+        if start_time is None or end_time is None:
+            return True
+        record_time = _epoch_seconds_from_value(record.get("time"))
+        if record_time is None:
+            meta = record.get("_syslog_meta")
+            if isinstance(meta, dict):
+                record_time = _epoch_seconds_from_value(meta.get("timestamp"))
+        if record_time is None:
+            return False
+        return start_time <= record_time <= end_time
+
 
 def _data_file_date(root: Path, path: Path) -> str:
     try:
@@ -306,6 +350,32 @@ def _date_from_value(value: Any) -> str:
         return ""
 
 
+def _epoch_seconds_from_value(value: Any) -> int | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        seconds = float(value)
+        if seconds > 10_000_000_000:
+            seconds /= 1000
+        return int(seconds)
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        seconds = float(text)
+    except ValueError:
+        try:
+            parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        return int(parsed.timestamp())
+    if seconds > 10_000_000_000:
+        seconds /= 1000
+    return int(seconds)
+
+
 def _normalize_compare(value: Any) -> str:
     if isinstance(value, float) and value.is_integer():
         return str(int(value))
@@ -318,6 +388,20 @@ def _read_string(value: Any, fallback: str) -> str:
 
 def _sqlite_identifier(value: Any, fallback: str) -> str:
     text = str(value or fallback).strip()
+    if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
+        raise ContractRuntimeError(
+            "data_source_unavailable",
+            status_code=400,
+            user_message="WebUI contract SQLite source is misconfigured.",
+            admin_message=f"Invalid SQLite identifier: {text}",
+        )
+    return text
+
+
+def _sqlite_identifier_optional(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
     if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", text):
         raise ContractRuntimeError(
             "data_source_unavailable",

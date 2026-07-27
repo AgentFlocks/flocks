@@ -4,7 +4,17 @@ import client from './client';
 // Types
 // ======================================================================
 
-export type UpdateStage = 'fetching' | 'backing_up' | 'applying' | 'syncing' | 'restarting' | 'done' | 'error';
+export type UpdateStage =
+  | 'checking'
+  | 'reporting'
+  | 'fetching'
+  | 'backing_up'
+  | 'applying'
+  | 'syncing'
+  | 'downgrading'
+  | 'restarting'
+  | 'done'
+  | 'error';
 
 export type DeployMode = 'docker' | 'source';
 export type UpdateEdition = 'flocks' | 'flockspro';
@@ -42,11 +52,16 @@ export interface UpdateProgress {
 // API
 // ======================================================================
 
-export const checkUpdate = async (locale?: string, edition?: UpdateEdition): Promise<VersionInfo> => {
+export const checkUpdate = async (
+  locale?: string,
+  edition?: UpdateEdition,
+  force?: boolean,
+): Promise<VersionInfo> => {
   const response = await client.get<VersionInfo>('/api/update/check', {
     params: {
       ...(locale ? { locale } : {}),
       ...(edition ? { edition } : {}),
+      ...(force ? { force: true } : {}),
     },
   });
   return response.data;

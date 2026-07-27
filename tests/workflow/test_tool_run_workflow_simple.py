@@ -24,7 +24,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from flocks.tool import ToolRegistry, ToolContext
+from flocks.tool import ToolContext, ToolRegistry  # noqa: E402
 
 
 def _dump_tool_result(result) -> str:
@@ -71,7 +71,7 @@ async def run_simple_workflow_full_result():
     print(_dump_tool_result(result))
 
     assert result.success is True
-    assert result.metadata.get("status") == "SUCCEEDED"
+    assert result.metadata.get("status") == "success"
     assert "Status: SUCCEEDED" in (result.output or "")
 
 
@@ -148,7 +148,7 @@ async def run_specified_workflow_file_full_result(workflow_path=None, query=None
 
     # 基础断言：工作流应该成功执行
     assert result.success is True, f"Workflow execution failed: {result.error}"
-    assert result.metadata.get("status") == "SUCCEEDED", f"Expected SUCCEEDED status, got: {result.metadata.get('status')}"
+    assert result.metadata.get("status") == "success", f"Expected success status, got: {result.metadata.get('status')}"
     assert "Status: SUCCEEDED" in (result.output or ""), "Output should contain success status"
     
     # 验证最终节点：应该是 finalize_output

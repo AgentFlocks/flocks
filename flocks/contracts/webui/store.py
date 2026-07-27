@@ -223,6 +223,7 @@ class WebUIPagesStore:
                     WebUIPageListItem(
                         id=manifest.id,
                         title=manifest.title,
+                        titleEn=manifest.titleEn,
                         route=manifest.route,
                         icon=manifest.icon,
                         order=manifest.order,
@@ -232,6 +233,7 @@ class WebUIPagesStore:
                         buildStatus=build.status,
                         workspaceId=workspace.id if workspace else None,
                         workspaceTitle=workspace.title if workspace else None,
+                        workspaceTitleEn=workspace.titleEn if workspace else None,
                         workspaceRoute=webui_contract_workspace_route(workspace.id) if workspace else None,
                     )
                 )
@@ -268,6 +270,7 @@ class WebUIPagesStore:
                         WebUIPageListItem(
                             id=page_manifest.id,
                             title=page_manifest.title,
+                            titleEn=page_manifest.titleEn,
                             route=page_manifest.route,
                             icon=page_manifest.icon,
                             order=page_manifest.order,
@@ -277,6 +280,7 @@ class WebUIPagesStore:
                             buildStatus=build.status,
                             workspaceId=manifest.id,
                             workspaceTitle=manifest.title,
+                            workspaceTitleEn=manifest.titleEn,
                             workspaceRoute=webui_contract_workspace_route(manifest.id),
                         )
                     )
@@ -285,6 +289,7 @@ class WebUIPagesStore:
                     WebUIWorkspaceListItem(
                         id=manifest.id,
                         title=manifest.title,
+                        titleEn=manifest.titleEn,
                         route=webui_contract_workspace_route(manifest.id),
                         icon=manifest.icon,
                         order=manifest.order,
@@ -672,6 +677,8 @@ class WebUIPagesStore:
             page_dir = manifest_path.parent
             if page_dir == root:
                 continue
+            if self._is_hidden_relative(page_dir, root):
+                continue
             page_id = self._manifest_page_id_at(manifest_path)
             if page_id is None:
                 continue
@@ -695,6 +702,8 @@ class WebUIPagesStore:
         ):
             workspace_dir = manifest_path.parent
             if workspace_dir == root:
+                continue
+            if self._is_hidden_relative(workspace_dir, root):
                 continue
             manifest = self._read_workspace_manifest_at(workspace_dir)
             if manifest is None:
@@ -758,6 +767,23 @@ class WebUIPagesStore:
         page_path = (root / page_id).resolve()
         self._assert_inside_root(page_path, root)
         return page_path
+
+    @staticmethod
+    def _is_hidden_relative(path: Path, root: Path) -> bool:
+        """True when *path* lives under a dot-prefixed dir relative to *root*.
+
+        The Hub installer stages WebUI packages into sibling scratch dirs
+        named ``.<plugin>.<rand>`` / ``.<plugin>.bak`` inside this very root
+        before the atomic swap. On Windows that swap can fail (WinError 5)
+        while the page watcher holds the tree open, leaving those dot-dirs
+        behind. Scans must skip them so half-written or stale copies never
+        surface as real pages (and duplicate the live ones).
+        """
+        try:
+            rel = path.relative_to(root)
+        except ValueError:
+            return False
+        return any(part.startswith(".") for part in rel.parts)
 
     @staticmethod
     def _assert_inside_root(path: Path, root: Path) -> None:

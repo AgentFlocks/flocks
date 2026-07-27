@@ -130,14 +130,16 @@ async def _ensure_user_device_instances_unlocked(*, refresh_templates: bool = Fa
     await ensure_default_group()
     existing_storage_keys = {device.storage_key for device in await list_devices()}
     ignored_storage_keys = await _load_auto_instance_ignored_storage_keys()
-    user_template_storage_keys = _user_device_template_storage_keys(
+    user_template_storage_keys = await asyncio.to_thread(
+        _user_device_template_storage_keys,
         refresh_templates=refresh_templates,
     )
     created = 0
 
     from flocks.tool.device.plugin_index import list_device_templates
 
-    for template in list_device_templates(refresh=False):
+    templates = await asyncio.to_thread(list_device_templates, refresh=False)
+    for template in templates:
         if template.source != "global" or not template.installed:
             continue
         if template.storage_key in existing_storage_keys:

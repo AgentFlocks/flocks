@@ -21,6 +21,7 @@ from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.storage.storage import Storage
 from flocks.session.recorder import Recorder
+from flocks.session.execution_mode import SessionExecutionMode
 
 log = Log.create(service="message")
 
@@ -376,6 +377,10 @@ class UserMessageInfo(BaseModel):
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool availability")
     variant: Optional[str] = Field(None, description="Prompt variant")
     compacted: Optional[bool] = Field(None, description="Archived by compaction (soft-deleted)")
+    executionMode: SessionExecutionMode = Field(
+        SessionExecutionMode.BUILD,
+        description="Execution mode used for this user turn",
+    )
 
 
 class AssistantMessageInfo(BaseModel):
@@ -465,6 +470,25 @@ class Message:
         task = cls._parts_flush_tasks.pop(session_id, None)
         if task and not task.done():
             task.cancel()
+
+    @classmethod
+    async def quiesce_parts(cls, session_id: str, *, persist: bool) -> None:
+        """Stop a delayed parts flush, optionally persisting its latest cache."""
+        task = cls._parts_flush_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        async with _session_locks.get(session_id):
+            if persist and session_id in cls._parts_cache:
+                if cls._parts_storage_format.get(session_id) == "legacy":
+                    await cls._persist_parts(session_id)
+                else:
+                    for message_id in list(cls._parts_cache[session_id]):
+                        await cls._persist_parts(session_id, message_id=message_id)
 
     @classmethod
     def _cache_token(cls, session_id: str) -> tuple[int, int]:
@@ -942,6 +966,11 @@ class Message:
             if not isinstance(model_raw, dict):
                 model_raw = {}
             normalized["agent"] = normalized.get("agent") or "rex"
+            normalized["executionMode"] = (
+                normalized.get("executionMode")
+                or normalized.get("execution_mode")
+                or SessionExecutionMode.BUILD.value
+            )
             normalized["model"] = {
                 "providerID": model_raw.get("providerID")
                 or normalized.get("providerID")
@@ -1863,19 +1892,73 @@ class Message:
                 return False
             messages = cls._messages_cache.get(session_id, [])
             if idx < len(messages) and messages[idx].id == message_id:
-                messages.pop(idx)
+                missing = object()
+                removed_message = messages.pop(idx)
                 cls._rebuild_id_index(session_id)
-                if session_id in cls._parts_cache:
-                    cls._parts_cache[session_id].pop(message_id, None)
-                cls._parts_revision_cache.get(session_id, {}).pop(message_id, None)
-                cls._parts_serialized_cache.get(session_id, {}).pop(message_id, None)
+                parts_cache = cls._parts_cache.get(session_id)
+                removed_parts = (
+                    parts_cache.pop(message_id, missing)
+                    if parts_cache is not None
+                    else missing
+                )
+                parts_revision_cache = cls._parts_revision_cache.get(session_id)
+                removed_revision = (
+                    parts_revision_cache.pop(message_id, missing)
+                    if parts_revision_cache is not None
+                    else missing
+                )
+                parts_serialized_cache = cls._parts_serialized_cache.get(session_id)
+                removed_serialized = (
+                    parts_serialized_cache.pop(message_id, missing)
+                    if parts_serialized_cache is not None
+                    else missing
+                )
+                had_pending_parts_flush = session_id in cls._parts_flush_tasks
                 cls._cancel_parts_flush_task(session_id)
-                await cls._persist_messages(session_id)
-                if cls._parts_storage_format.get(session_id) == "legacy":
-                    await cls._persist_parts(session_id)
-                else:
-                    await Storage.delete(cls._parts_item_key(session_id, message_id))
-                    cls._parts_persisted_mids.setdefault(session_id, set()).discard(message_id)
+                try:
+                    await cls._persist_messages(session_id)
+                except BaseException:
+                    # Message metadata is the deletion commit point. Restore
+                    # every in-memory index/cache if it was not persisted so a
+                    # later retry or process restart sees the same message.
+                    messages.insert(idx, removed_message)
+                    cls._rebuild_id_index(session_id)
+                    if parts_cache is not None and removed_parts is not missing:
+                        parts_cache[message_id] = removed_parts
+                    if (
+                        parts_revision_cache is not None
+                        and removed_revision is not missing
+                    ):
+                        parts_revision_cache[message_id] = removed_revision
+                    if (
+                        parts_serialized_cache is not None
+                        and removed_serialized is not missing
+                    ):
+                        parts_serialized_cache[message_id] = removed_serialized
+                    if had_pending_parts_flush:
+                        cls._schedule_parts_flush(
+                            session_id,
+                            message_id=message_id,
+                        )
+                    raise
+
+                try:
+                    if cls._parts_storage_format.get(session_id) == "legacy":
+                        await cls._persist_parts(session_id)
+                    else:
+                        await Storage.delete(cls._parts_item_key(session_id, message_id))
+                        cls._parts_persisted_mids.setdefault(session_id, set()).discard(
+                            message_id
+                        )
+                except Exception as exc:
+                    # Metadata deletion has committed. Orphaned parts are not
+                    # user-visible and can be cleaned later; restoring the
+                    # message here would make cache and durable metadata diverge.
+                    log.warn("message.delete.parts_cleanup_failed", {
+                        "session_id": session_id,
+                        "message_id": message_id,
+                        "error": str(exc),
+                    })
                 log.info("message.deleted", {"id": message_id, "session_id": session_id})
                 return True
             return False
@@ -1924,7 +2007,7 @@ class Message:
             Number of messages cleared
         """
         await cls._ensure_message_cache(session_id)
-        
+
         async with _session_locks.get(session_id):
             count = len(cls._messages_cache.get(session_id, []))
             cls._messages_cache[session_id] = []
@@ -1935,18 +2018,33 @@ class Message:
             cls._parts_storage_format[session_id] = "per_message"
             cls._parts_fully_loaded.add(session_id)
             cls._cancel_parts_flush_task(session_id)
-            
-            # Persist changes
+
             await cls._persist_messages(session_id)
             await Storage.clear(prefix=cls._parts_item_prefix(session_id))
             await Storage.delete(cls._parts_blob_key(session_id))
-            
+
             log.info("messages.cleared", {
                 "session_id": session_id,
                 "count": count,
             })
-            
             return count
+
+    @classmethod
+    async def clear_active(
+        cls,
+        session_id: str,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> int:
+        """Clear history only while the owning session remains active."""
+
+        from flocks.session.session import Session
+
+        return await Session.run_active_write(
+            session_id,
+            lambda: cls.clear(session_id),
+            expected_generation=expected_generation,
+        )
     
     @classmethod
     def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
@@ -2479,7 +2577,7 @@ class MessageSync:
     @classmethod
     def clear(cls, session_id: str) -> int:
         """Sync version"""
-        return cls._run_async(Message.clear(session_id))
+        return cls._run_async(Message.clear_active(session_id))
     
     @classmethod
     def get_text_content(cls, message: MessageInfo) -> str:

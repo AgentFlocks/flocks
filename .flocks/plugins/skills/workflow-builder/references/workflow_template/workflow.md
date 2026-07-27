@@ -67,7 +67,8 @@ List thresholds, switches, timeouts, file paths, concurrency settings, and rollb
 Generation notes for Flocks:
 
 - Keep node IDs stable after users start configuring publish modes.
-- When adding or renaming outputs, update downstream edges and the runtime contract.
+- When adding or renaming outputs, update downstream edges, explicit edge mappings, and the runtime contract.
+- Every generated edge in `workflow.json` must contain a non-empty `mapping` object.
 - Do not store plaintext secrets in this directory.
 
 ## 6. Data Flow And Field Contract
@@ -106,12 +107,13 @@ Workflow configuration guidance lives in `guide.md`.
 - `workflow.md` describes intent, module boundaries, field contracts, and validation.
 - `workflow.json` describes executable nodes, edges, code, triggers, and metadata.
 - Regeneration should preserve node IDs unless the user explicitly requests a graph change.
-- Deleting or renaming a node requires updating edges, mappings, samples, and tests.
+- Deleting or renaming a node requires updating edges, explicit mappings, samples, and tests.
 
 ## 10. Validation Checklist
 
 - [ ] `workflow.md` and `workflow.json` describe the same flow.
 - [ ] A representative sample input runs successfully.
+- [ ] Every edge in `workflow.json` has a non-empty `mapping`.
 - [ ] At least one edge or error case is documented.
 - [ ] Publish page only shows capabilities enabled by `config.json`.
 - [ ] No plaintext secrets are stored in the workflow directory.

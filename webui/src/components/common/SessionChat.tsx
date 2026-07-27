@@ -17,28 +17,30 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, ListTree } from 'lucide-react';
-import { StreamingMarkdown } from './StreamingMarkdown';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree } from 'lucide-react';
+import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
-import CommandDropdown, { parseSlashCommand } from './CommandDropdown';
+import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
 import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
-import { usePendingQuestions, type PendingQuestion } from '@/hooks/usePendingQuestions';
 import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
 import client, { getApiBase } from '@/api/client';
-import { commandAPI, type Command } from '@/api/skill';
+import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
+import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
+import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { copyText } from '@/utils/clipboard';
+import { createMessageId } from '@/utils/messageId';
 import {
   FILE_INPUT_ACCEPT_IMAGES,
   batchCompressOptions,
@@ -50,20 +52,41 @@ import {
   type ImagePartData,
 } from '@/utils/imageUpload';
 import type { Message, MessagePart, SessionGoalState, ToolState } from '@/types';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
+import {
+  buildInstructionDisplayText,
+  fetchSessionChatCommands,
+  getQueuedPromptText,
+  parseInstructionDisplayText,
+  resolveSessionChatSSEAction,
+  shouldForwardSSEEventToParent,
+  stripTaskMetadata,
+  type CompactionStage,
+  usePendingQuestions,
+  useSessionContextUsage,
+  useSessionPromptQueue,
+  type PendingQuestion,
+  type PromptDisplayOptions,
+  type SSEChatEvent,
+  type SessionChatDisplay,
+} from '@/features/session-chat';
 
 export { formatSmartTime };
 export type { SSEConnectionStatus };
+export {
+  buildInstructionDisplayText,
+  parseInstructionDisplayText,
+  shouldForwardSSEEventToParent,
+  type PromptDisplayOptions,
+  type SSEChatEvent,
+  type SessionChatDisplay,
+} from '@/features/session-chat';
 
 // ============================================================================
 // Types
 // ============================================================================
 
 export type MergedMessage = Message & { _merged?: boolean };
-
-export interface SSEChatEvent {
-  type: string;
-  properties?: Record<string, any>;
-}
 
 /** Node reference shown above the chat input as a dismissible chip */
 export interface NodeRef {
@@ -90,45 +113,12 @@ export interface ConversationBottomSlotActions {
   hasMessages: boolean;
 }
 
-export interface PromptDisplayOptions {
-  displayText?: string;
-}
-
-const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
-
-export function buildInstructionDisplayText(label: string): string {
-  return `${INSTRUCTION_DISPLAY_PREFIX}${label}`;
-}
-
-export function parseInstructionDisplayText(text: string): string | null {
-  return text.startsWith(INSTRUCTION_DISPLAY_PREFIX)
-    ? text.slice(INSTRUCTION_DISPLAY_PREFIX.length).trim() || null
-    : null;
-}
-
-function getMessagePartDisplayText(part: MessagePart): string {
+function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
   const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
-  return typeof metadataDisplayText === 'string' && metadataDisplayText
+  const displayText = typeof metadataDisplayText === 'string' && metadataDisplayText
     ? metadataDisplayText
     : part.text || '';
-}
-
-/** Display-related options grouped to reduce prop surface. */
-export interface SessionChatDisplay {
-  /** Compact mode for panels/dialogs (default: true). Set false for full-page. */
-  compact?: boolean;
-  /** Let embedded chats use the full available message width. */
-  fullWidth?: boolean;
-  /** Show copy action on assistant messages */
-  showActions?: boolean;
-  /** Show timestamp below each message */
-  showTimestamp?: boolean;
-  /** Default-collapse intermediate reasoning and tool-process details in embedded panels. */
-  collapseIntermediateSteps?: boolean;
-  /** Initial open state for grouped reasoning/tool-process details. */
-  processGroupsDefaultOpen?: boolean;
-  /** Keep grouped reasoning/tool-process details open while the assistant message is actively streaming. */
-  processGroupsOpenWhileActive?: boolean;
+  return hideTaskMetadata ? stripTaskMetadata(displayText) : displayText;
 }
 
 export interface SessionChatProps {
@@ -154,12 +144,20 @@ export interface SessionChatProps {
   onStreamingDone?: () => void;
   /** Auto-send this message on mount via prompt_async */
   initialMessage?: string | null;
+  /** Optional short display text for the auto-sent initialMessage bubble. */
+  initialDisplayText?: string | null;
   /** Called immediately after initialMessage has been consumed (sent) */
   onInitialMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
   /** Model override to include in prompt_async requests */
   model?: { providerID: string; modelID: string } | null;
+  /** Execution mode to include in prompt and queue requests. */
+  executionMode?: SessionExecutionMode;
+  /** Called after a prompt using the current execution mode is accepted. */
+  onExecutionModeAccepted?: (mode: SessionExecutionMode) => void;
+  /** Persist Auto failover before sending through an existing session. */
+  modelAuto?: boolean;
   /** Agents available for one-turn @mention routing. */
   mentionAgents?: Agent[];
   /** Display configuration (compact, showActions, showTimestamp) */
@@ -203,6 +201,7 @@ export interface SessionChatProps {
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
+    executionModeOverride?: SessionExecutionMode,
   ) => Promise<unknown> | unknown;
   /** Called when the user sends "/new" to create a new session */
   onCreateNewSession?: () => Promise<void> | void;
@@ -251,6 +250,17 @@ export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text
   if (!text || INSIGNIFICANT_THINKING_TEXT_RE.test(text)) return '';
   return text;
 }
+
+const StreamingReasoningText = memo(function StreamingReasoningText({
+  content,
+  isStreaming,
+}: {
+  content: string;
+  isStreaming: boolean;
+}) {
+  const displayContent = useStreamingContent(content, isStreaming);
+  return <>{displayContent}</>;
+});
 
 function stringifyToolPayload(value: unknown): string {
   if (value == null) return '';
@@ -560,18 +570,18 @@ function ContextUsageRing({
   return (
     <div
       ref={wrapperRef}
-      className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center"
+      className="relative inline-flex h-6 shrink-0 items-center justify-center"
     >
       <button
         type="button"
-        className="relative inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+        className="relative inline-flex h-6 items-center gap-1 rounded-md px-1 text-[10px] font-medium tabular-nums text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
         title={title}
         aria-label={title}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <svg className="absolute inset-0 h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+        <svg className="h-5 w-5 shrink-0 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200 dark:stroke-zinc-800" />
           <circle
             cx="12"
@@ -585,6 +595,7 @@ function ContextUsageRing({
             strokeDashoffset={strokeDashoffset}
           />
         </svg>
+        <span aria-hidden="true">{clamped}%</span>
       </button>
 
       {open && (
@@ -706,18 +717,6 @@ export function listUploadedDocumentPaths(items: UploadedDocumentAttachmentLike[
 // don't share a draft, and namespaced to avoid colliding with other features.
 import { readChatDraft, writeChatDraft } from '@/utils/chatDraft';
 
-// Backend stages emitted by ``SessionCompaction.process`` /
-// ``summarize_chunked`` via the ``session.compaction_progress`` SSE event.
-// Keep in sync with ``flocks/session/lifecycle/compaction/{compaction,summary}.py``.
-type CompactionStage =
-  | 'load'
-  | 'strategy'
-  | 'chunk_done'
-  | 'merge_started'
-  | 'merge_done'
-  | 'summarize_done'
-  | 'complete';
-
 interface CompactionStageEntry {
   stage: CompactionStage;
   data: Record<string, unknown>;
@@ -831,27 +830,21 @@ export function getMessageBubbleClassName({
   isUser: boolean;
   isEditing: boolean;
 }): string {
-  if (compact) {
-    const widthClass = isUser
-      ? (isEditing ? 'w-full max-w-full' : 'max-w-full')
-      : 'w-full max-w-full';
+  if (!isUser) {
+    const typographyClass = compact ? 'text-sm' : 'text-[15px]';
 
-    return `${widthClass} px-4 py-3 rounded-[20px] text-sm break-words shadow-sm ${
-      isUser
-        ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
-        : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
-    }`;
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-[#34393e] break-words dark:text-zinc-100`;
   }
 
-  const widthClass = isUser
-    ? (isEditing ? 'w-full' : 'w-auto')
-    : 'w-full';
+  if (compact) {
+    const widthClass = isEditing ? 'w-full max-w-full' : 'max-w-full';
 
-  return `${widthClass} px-5 py-4 rounded-[24px] text-sm break-words shadow-sm ${
-    isUser
-      ? 'bg-sky-50 border border-sky-100 text-zinc-900 dark:border-zinc-700 dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-none'
-      : 'bg-white border border-zinc-200/90 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:shadow-none'
-  }`;
+    return `${widthClass} min-w-0 px-4 py-3 rounded-[20px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  }
+
+  const widthClass = isEditing ? 'w-full' : 'w-auto';
+
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-sm break-words shadow-sm border border-black/[0.09] bg-zinc-50 text-[#30343a] dark:border-white/[0.10] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -915,6 +908,54 @@ export function hasActiveToolPart(parts?: Array<Pick<MessagePart, 'type' | 'stat
   return parts?.some(isActiveToolPart) ?? false;
 }
 
+type FetchedMessageWithParts = {
+  info?: {
+    id?: string;
+    role?: string;
+    parentID?: string | null;
+    finish?: string | null;
+    time?: { completed?: number | null };
+  };
+  parts?: MessagePart[];
+};
+
+function getCurrentTurnAssistantMessages(
+  messages: FetchedMessageWithParts[],
+): FetchedMessageWithParts[] | null {
+  let latestUserIndex = -1;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    if (messages[index]?.info?.role === 'user') {
+      latestUserIndex = index;
+      break;
+    }
+  }
+
+  let turnParentID = latestUserIndex >= 0
+    ? messages[latestUserIndex]?.info?.id
+    : undefined;
+  let turnStartIndex = latestUserIndex + 1;
+
+  // A single tool-heavy turn can exceed the latest-message page. If its user
+  // message is outside the page, recover the turn from the newest assistant's
+  // parent instead of falling back to every historical tool in the page.
+  if (!turnParentID) {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const info = messages[index]?.info;
+      if (info?.role === 'assistant' && info.parentID) {
+        turnParentID = info.parentID;
+        turnStartIndex = 0;
+        break;
+      }
+    }
+  }
+
+  if (!turnParentID) return null;
+  return messages.slice(turnStartIndex).filter((message) => (
+    message.info?.role === 'assistant'
+    && message.info.parentID === turnParentID
+  ));
+}
+
 export function isActiveSessionStatus(status?: { type?: string } | null): boolean {
   return status?.type === 'busy' || status?.type === 'compacting' || status?.type === 'retry';
 }
@@ -946,7 +987,19 @@ export function getRenderableFileUrl(url: string): string {
   }
 }
 
-export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>): boolean {
+export function shouldRenderMessage(
+  message: Pick<Message, 'role' | 'parts' | 'finish' | 'error'>,
+  options?: { isActive?: boolean },
+): boolean {
+  if (
+    message.role === 'assistant' &&
+    (message.parts?.length ?? 0) === 0 &&
+    message.finish !== 'summary' &&
+    !message.error &&
+    !options?.isActive
+  ) {
+    return false;
+  }
   if (
     message.role === 'assistant' &&
     (message.parts?.length ?? 0) === 0 &&
@@ -969,6 +1022,91 @@ export function shouldRenderMessage(message: Pick<Message, 'role' | 'parts' | 'f
     return false;
   }
   return true;
+}
+
+export interface ChatTimelineItem {
+  message: MergedMessage;
+  isActive: boolean;
+}
+
+export function buildChatTimelineItems({
+  messages,
+  skipIndices,
+  isStreaming,
+}: {
+  messages: MergedMessage[];
+  skipIndices: Set<number>;
+  isStreaming: boolean;
+}): ChatTimelineItem[] {
+  const items: ChatTimelineItem[] = [];
+  for (let index = 0; index < messages.length; index++) {
+    if (skipIndices.has(index)) continue;
+    const message = messages[index];
+    const isActive =
+      isStreaming &&
+      index === messages.length - 1 &&
+      message.role === 'assistant' &&
+      !message.finish;
+    if (!shouldRenderMessage(message, { isActive })) continue;
+    items.push({ message, isActive });
+  }
+  return items;
+}
+
+export function areChatTimelineItemsRenderEqual(
+  prevItems: ChatTimelineItem[],
+  nextItems: ChatTimelineItem[],
+): boolean {
+  if (prevItems.length !== nextItems.length) return false;
+
+  for (let index = 0; index < prevItems.length; index++) {
+    const prev = prevItems[index];
+    const next = nextItems[index];
+    if (prev.isActive !== next.isActive) return false;
+
+    const prevMessage = prev.message;
+    const nextMessage = next.message;
+    if (prevMessage === nextMessage) continue;
+    if (prevMessage.id !== nextMessage.id) return false;
+    if (prevMessage.role !== nextMessage.role) return false;
+    if (prevMessage.finish !== nextMessage.finish) return false;
+    if (prevMessage.error !== nextMessage.error) return false;
+    if (prevMessage.agent !== nextMessage.agent) return false;
+    if (prevMessage.timestamp !== nextMessage.timestamp) return false;
+    if (prevMessage.compacted !== nextMessage.compacted) return false;
+    if (!areChatMessagePartsRenderEqual(prevMessage.parts, nextMessage.parts)) return false;
+  }
+
+  return true;
+}
+
+function useStableChatTimelineSegments(items: ChatTimelineItem[]): {
+  historyItems: ChatTimelineItem[];
+  tailItems: ChatTimelineItem[];
+} {
+  const previousRef = useRef<{
+    historyItems: ChatTimelineItem[];
+    tailItems: ChatTimelineItem[];
+  } | null>(null);
+
+  return useMemo(() => {
+    const tailStart = items.length > 0 && items[items.length - 1].isActive
+      ? items.length - 1
+      : items.length;
+    const nextHistoryItems = tailStart === items.length ? items : items.slice(0, tailStart);
+    const nextTailItems = tailStart === items.length ? [] : items.slice(tailStart);
+    const previous = previousRef.current;
+
+    const historyItems = previous && areChatTimelineItemsRenderEqual(previous.historyItems, nextHistoryItems)
+      ? previous.historyItems
+      : nextHistoryItems;
+    const tailItems = previous && areChatTimelineItemsRenderEqual(previous.tailItems, nextTailItems)
+      ? previous.tailItems
+      : nextTailItems;
+    const next = { historyItems, tailItems };
+    previousRef.current = next;
+    return next;
+  }, [items]);
 }
 
 export function getMessageErrorText(message: Pick<Message, 'error'>): string {
@@ -997,83 +1135,6 @@ export function getUserAvatarSpacerClassName(_compact: boolean): string {
   return 'h-0';
 }
 
-function areToolStatesRenderEqual(
-  prevState?: ToolState,
-  nextState?: ToolState,
-): boolean {
-  if (prevState === nextState) return true;
-  if (
-    prevState?.status !== nextState?.status ||
-    prevState?.title !== nextState?.title ||
-    prevState?.error !== nextState?.error ||
-    prevState?.time?.start !== nextState?.time?.start ||
-    prevState?.time?.end !== nextState?.time?.end
-  ) {
-    return false;
-  }
-
-  return (
-    JSON.stringify(prevState?.input) === JSON.stringify(nextState?.input)
-    && JSON.stringify(prevState?.output) === JSON.stringify(nextState?.output)
-    && JSON.stringify(prevState?.metadata) === JSON.stringify(nextState?.metadata)
-  );
-}
-
-function areLegacyToolPayloadsRenderEqual(
-  prevPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
-  nextPayload?: MessagePart['toolCall'] | MessagePart['toolResult'],
-): boolean {
-  if (prevPayload === nextPayload) return true;
-  return JSON.stringify(prevPayload) === JSON.stringify(nextPayload);
-}
-
-export function areChatMessagePartsRenderEqual(
-  prevParts?: MessagePart[],
-  nextParts?: MessagePart[],
-): boolean {
-  if (prevParts === nextParts) return true;
-  if ((prevParts?.length ?? 0) !== (nextParts?.length ?? 0)) return false;
-
-  const total = prevParts?.length ?? 0;
-  for (let i = 0; i < total; i++) {
-    const prevPart = prevParts?.[i];
-    const nextPart = nextParts?.[i];
-
-    if (prevPart === nextPart) continue;
-    if (!prevPart || !nextPart) return false;
-
-    if (
-      prevPart.id !== nextPart.id ||
-      prevPart.type !== nextPart.type ||
-      prevPart.text !== nextPart.text ||
-      prevPart.thinking !== nextPart.thinking ||
-      prevPart.synthetic !== nextPart.synthetic ||
-      prevPart.ignored !== nextPart.ignored ||
-      prevPart.tool !== nextPart.tool ||
-      prevPart.callID !== nextPart.callID ||
-      prevPart.mime !== nextPart.mime ||
-      prevPart.filename !== nextPart.filename ||
-      prevPart.url !== nextPart.url ||
-      prevPart.image?.url !== nextPart.image?.url ||
-      prevPart.image?.alt !== nextPart.image?.alt
-    ) {
-      return false;
-    }
-
-    if (!areToolStatesRenderEqual(prevPart.state, nextPart.state)) {
-      return false;
-    }
-    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolCall, nextPart.toolCall)) {
-      return false;
-    }
-    if (!areLegacyToolPayloadsRenderEqual(prevPart.toolResult, nextPart.toolResult)) {
-      return false;
-    }
-  }
-
-  return true;
-}
-
 // ============================================================================
 // Main component
 // ============================================================================
@@ -1081,6 +1142,7 @@ export function areChatMessagePartsRenderEqual(
 const ABORT_SSE_SETTLE_DELAY = 2000;
 const SCROLL_BOTTOM_THRESHOLD_PX = 80;
 const FALLBACK_POLL_MS = 5_000;
+const PENDING_QUESTION_RECONCILE_MS = 2_000;
 const WORKSPACE_UPLOAD_DEST = 'uploads';
 const FILE_INPUT_ACCEPT_DOCS = '.txt,.md,.json,.yaml,.yml,.xml,.csv,.pdf,.doc,.docx,.html,.htm,.ppt,.pptx,.xls,.xlsx';
 const FILE_INPUT_ACCEPT_ALL = `${FILE_INPUT_ACCEPT_DOCS},${FILE_INPUT_ACCEPT_IMAGES}`;
@@ -1091,13 +1153,6 @@ const ALLOWED_UPLOAD_EXTENSIONS = new Set([
 
 function isAllowedUploadFile(file: File): boolean {
   return ALLOWED_UPLOAD_EXTENSIONS.has(getFileExtension(file.name));
-}
-
-function getQueuedPromptText(item: QueuedPrompt): string {
-  if (typeof item.displayText === 'string' && item.displayText) return item.displayText;
-  if (typeof item.display_text === 'string' && item.display_text) return item.display_text;
-  const textPart = item.parts.find((part) => part.type === 'text' && typeof part.text === 'string');
-  return typeof textPart?.text === 'string' ? textPart.text : '';
 }
 
 function getGoalBannerKey(goal: GoalBannerState | null): string {
@@ -1438,8 +1493,12 @@ export default function SessionChat({
   onNodeRefDismiss,
   onStreamingDone,
   initialMessage,
+  initialDisplayText,
   agentName,
   model,
+  executionMode = 'build',
+  onExecutionModeAccepted,
+  modelAuto = false,
   display,
   welcomeContent,
   conversationBottomSlot,
@@ -1461,6 +1520,7 @@ export default function SessionChat({
   const toast = useToast();
   const compact = display?.compact ?? true;
   const fullWidth = display?.fullWidth ?? false;
+  const pageCanvas = display?.pageCanvas ?? false;
   const showActions = display?.showActions ?? false;
   const showTimestamp = display?.showTimestamp ?? false;
   const collapseIntermediateSteps = display?.collapseIntermediateSteps ?? false;
@@ -1470,6 +1530,18 @@ export default function SessionChat({
   const effectiveComposerTextareaMaxHeight = composerTextareaMaxHeight ?? (compact ? 96 : 200);
   const effectivePlaceholder = placeholder ?? t('chat.placeholder');
   const effectiveEmptyText = emptyText ?? t('chat.emptyText');
+  const autoModelSessionRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!modelAuto) autoModelSessionRef.current = null;
+  }, [modelAuto]);
+  const ensureAutoModelSession = useCallback(async () => {
+    if (!sessionId || !modelAuto || autoModelSessionRef.current === sessionId) return;
+    await sessionApi.update(sessionId, {
+      model_auto: true,
+      model_pinned: false,
+    });
+    autoModelSessionRef.current = sessionId;
+  }, [modelAuto, sessionId]);
   // Restore any persisted draft on first mount so navigating away (e.g.
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
@@ -1487,11 +1559,23 @@ export default function SessionChat({
   const [compactingMessage, setCompactingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
-  const [queuedPrompts, setQueuedPrompts] = useState<QueuedPrompt[]>([]);
-  const [queueExpanded, setQueueExpanded] = useState(true);
-  const [editingQueueId, setEditingQueueId] = useState<string | null>(null);
-  const [editingQueueText, setEditingQueueText] = useState('');
-  const [queueActionId, setQueueActionId] = useState<string | null>(null);
+  const {
+    items: queuedPrompts,
+    expanded: queueExpanded,
+    setExpanded: setQueueExpanded,
+    editingId: editingQueueId,
+    editingText: editingQueueText,
+    setEditingText: setEditingQueueText,
+    actionId: queueActionId,
+    refresh: fetchPromptQueue,
+    applyItems: applyPromptQueueItems,
+    enqueue: enqueuePrompt,
+    startEdit: startQueuedEdit,
+    cancelEdit: cancelQueuedEdit,
+    saveEdit: saveQueuedEdit,
+    remove: removeQueuedPrompt,
+    runNow: runQueuedPromptNow,
+  } = useSessionPromptQueue(sessionId);
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
@@ -1554,12 +1638,14 @@ export default function SessionChat({
   const [editingRole, setEditingRole] = useState<Message['role'] | null>(null);
   const [editingText, setEditingText] = useState('');
   const [actionMessageId, setActionMessageId] = useState<string | null>(null);
-  const [contextUsageSnapshot, setContextUsageSnapshot] = useState<ContextUsageSnapshot | null>(null);
-  const [contextUsageRefreshing, setContextUsageRefreshing] = useState(false);
-  const [contextUsageWindowTokens, setContextUsageWindowTokens] = useState(0);
-  const contextUsageRequestRef = useRef<{ sessionId: string; promise: Promise<void> } | null>(null);
-  const contextUsageRequestSeqRef = useRef(0);
-  const lastContextUsagePushAtRef = useRef(0);
+  const {
+    snapshot: contextUsageSnapshot,
+    refreshing: contextUsageRefreshing,
+    contextWindowTokens: contextUsageWindowTokens,
+    refresh: refreshContextUsage,
+    applyPushSnapshot: applyContextUsagePushSnapshot,
+    stopRefreshing: stopContextUsageRefreshing,
+  } = useSessionContextUsage(sessionId);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1569,6 +1655,7 @@ export default function SessionChat({
   const goalHydrationVersionRef = useRef(0);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
+  const suppressStreamingUntilIdleRef = useRef(false);
   const statusCheckedRef = useRef<string | null>(null);
   const {
     pendingQuestions,
@@ -1583,6 +1670,7 @@ export default function SessionChat({
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
+  const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
@@ -1592,7 +1680,8 @@ export default function SessionChat({
   const [showCommandDropdown, setShowCommandDropdown] = useState(false);
   const [commandQuery, setCommandQuery] = useState('');
   const [selectedCommandIndex, setSelectedCommandIndex] = useState(0);
-  const commandsLoadedRef = useRef(false);
+  const commandsLoadedAtRef = useRef(0);
+  const commandsLoadingRef = useRef(false);
   const [mentionQuery, setMentionQuery] = useState('');
   const [mentionRange, setMentionRange] = useState<{ start: number; end: number } | null>(null);
   const [selectedMentionIndex, setSelectedMentionIndex] = useState(0);
@@ -1622,14 +1711,20 @@ export default function SessionChat({
 
   const scrollToBottom = useCallback(() => {
     if (!isAtBottomRef.current) return;
-    requestAnimationFrame(() => {
+    if (scrollToBottomRafRef.current !== null) return;
+    scrollToBottomRafRef.current = requestAnimationFrame(() => {
+      scrollToBottomRafRef.current = null;
       messagesEndRef.current?.scrollIntoView({ behavior: 'instant' });
     });
   }, []);
 
-  const loadOlderMessagesRef = useRef<(() => Promise<void>) | null>(null);
-  const hasMoreMessagesRef = useRef(false);
-  const loadingOlderMessagesRef = useRef(false);
+  useEffect(() => () => {
+    if (scrollToBottomRafRef.current !== null) {
+      cancelAnimationFrame(scrollToBottomRafRef.current);
+      scrollToBottomRafRef.current = null;
+    }
+  }, []);
+
   const rafScheduledRef = useRef(false);
   const handleScroll = useCallback(() => {
     if (rafScheduledRef.current) return;
@@ -1638,18 +1733,6 @@ export default function SessionChat({
       const el = scrollContainerRef.current;
       if (el) {
         isAtBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight <= SCROLL_BOTTOM_THRESHOLD_PX;
-        if (el.scrollTop <= 80 && hasMoreMessagesRef.current && !loadingOlderMessagesRef.current) {
-          const previousHeight = el.scrollHeight;
-          const previousTop = el.scrollTop;
-          const loadPromise = loadOlderMessagesRef.current?.();
-          if (loadPromise) void loadPromise.finally(() => {
-            requestAnimationFrame(() => {
-              const current = scrollContainerRef.current;
-              if (!current) return;
-              current.scrollTop = current.scrollHeight - previousHeight + previousTop;
-            });
-          });
-        }
       }
       rafScheduledRef.current = false;
     });
@@ -1658,21 +1741,18 @@ export default function SessionChat({
   const {
     messages,
     loading,
-    loadingOlder,
-    hasMore: hasMoreMessages,
+    error: messagesError,
     refetch,
-    loadOlder,
     addMessage,
     updateMessage,
     updateMessagePart,
+    removeMessage,
+    clearMessages,
     replaceMessageText,
     markMessageStopped,
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
-  useEffect(() => { loadOlderMessagesRef.current = loadOlder; }, [loadOlder]);
-  useEffect(() => { hasMoreMessagesRef.current = hasMoreMessages; }, [hasMoreMessages]);
-  useEffect(() => { loadingOlderMessagesRef.current = loadingOlder; }, [loadingOlder]);
   const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
   const contextUsageBreakdown = useMemo(
     () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
@@ -1698,96 +1778,12 @@ export default function SessionChat({
   // Keep a ref to latest messages so handleAbort can read it without stale closure
   const messagesRef = useRef(messages);
   useEffect(() => { messagesRef.current = messages; }, [messages]);
+  const pendingQuestionsRef = useRef(pendingQuestions);
+  useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
 
   const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
-
-  const fetchPromptQueue = useCallback(async () => {
-    if (!sessionId) {
-      setQueuedPrompts([]);
-      return;
-    }
-    try {
-      const response = await sessionApi.listPromptQueue(sessionId);
-      setQueuedPrompts(response.items ?? []);
-    } catch (err) {
-      console.warn('[SessionChat] Failed to fetch prompt queue:', err);
-    }
-  }, [sessionId]);
-
-  const refreshContextUsage = useCallback((options?: { clear?: boolean; skipIfFreshMs?: number }) => {
-    if (!sessionId) {
-      setContextUsageSnapshot(null);
-      setContextUsageRefreshing(false);
-      setContextUsageWindowTokens(0);
-      contextUsageRequestSeqRef.current += 1;
-      contextUsageRequestRef.current = null;
-      lastContextUsagePushAtRef.current = 0;
-      return;
-    }
-    if (options?.clear) {
-      setContextUsageSnapshot(null);
-      setContextUsageRefreshing(true);
-      contextUsageRequestSeqRef.current += 1;
-      contextUsageRequestRef.current = null;
-      lastContextUsagePushAtRef.current = 0;
-    } else if (
-      options?.skipIfFreshMs &&
-      Date.now() - lastContextUsagePushAtRef.current < options.skipIfFreshMs
-    ) {
-      return;
-    }
-
-    const existingRequest = contextUsageRequestRef.current;
-    if (existingRequest?.sessionId === sessionId) {
-      return existingRequest.promise;
-    }
-
-    const requestSessionId = sessionId;
-    const requestSeq = contextUsageRequestSeqRef.current;
-    const request = sessionApi.getContextUsage(requestSessionId).then((snapshot) => {
-      if (requestSeq === contextUsageRequestSeqRef.current && snapshot.sessionID === sessionId) {
-        setContextUsageSnapshot(snapshot);
-        if (snapshot.contextWindow && snapshot.contextWindow > 0) {
-          setContextUsageWindowTokens(snapshot.contextWindow);
-        }
-        setContextUsageRefreshing(false);
-      }
-    }).catch((err) => {
-      setContextUsageRefreshing(false);
-      console.warn('[SessionChat] Failed to fetch context usage:', err);
-    }).finally(() => {
-      if (contextUsageRequestRef.current?.promise === request) {
-        contextUsageRequestRef.current = null;
-      }
-    });
-    contextUsageRequestRef.current = { sessionId: requestSessionId, promise: request };
-    return request;
-  }, [sessionId]);
-
-  useEffect(() => {
-    if (!sessionId) {
-      void refreshContextUsage({ clear: true });
-      return;
-    }
-    const requestIdle = (window as any).requestIdleCallback as
-      | ((cb: () => void, options?: { timeout?: number }) => number)
-      | undefined;
-    const cancelIdle = (window as any).cancelIdleCallback as
-      | ((id: number) => void)
-      | undefined;
-    if (requestIdle) {
-      const idleId = requestIdle(() => {
-        void refreshContextUsage({ clear: true });
-      }, { timeout: 1500 });
-      return () => cancelIdle?.(idleId);
-    }
-    const timer = window.setTimeout(() => {
-      void refreshContextUsage({ clear: true });
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [refreshContextUsage]);
 
   useEffect(() => {
     goalHydrationVersionRef.current += 1;
@@ -1816,178 +1812,204 @@ export default function SessionChat({
 
   const handleSSEEvent = useCallback(
     (event: SSEChatEvent) => {
-      const { type, properties } = event;
+      // Forward only global events or events relevant to this chat. The global
+      // stream can be very noisy when multiple sessions run in parallel.
+      if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
 
-      // Forward events with payload to parent (e.g. session.updated, workflow.updated).
-      // Skip empty events like heartbeats to avoid noisy callbacks.
-      if (properties) onSSEEvent?.(event);
+      const action = resolveSessionChatSSEAction(event, sessionId);
 
-      if (!properties || !sessionId) return;
-
-      if (type === 'session.cleared' && properties.sessionID === sessionId) {
-        abortingRef.current = false;
-        sessionBusyRef.current = false;
-        activeToolPartIdsRef.current.clear();
-        abortedMessageIdRef.current = null;
-        setContextUsageSnapshot(null);
-        setContextUsageRefreshing(true);
-        setContextUsageWindowTokens(0);
-        setIsStreaming(false);
-        setGoalBanner(null);
-        setDismissedGoalKey('');
-        refetch();
-        void refreshContextUsage({ clear: true });
-      } else if (
-        (type === 'session.status' && properties.sessionID === sessionId)
-        || (type === 'session.updated' && properties.id === sessionId && properties.status === 'idle')
-      ) {
-        const statusType = type === 'session.status' ? properties.status?.type : properties.status;
-        if (statusType === 'busy') {
-          sessionBusyRef.current = true;
-          if (!abortingRef.current) setIsStreaming(true);
-          setIsCompacting(false);
-          isCompactingRef.current = false;
-        } else if (statusType === 'compacting') {
-          sessionBusyRef.current = true;
-          if (!abortingRef.current) setIsStreaming(true);
-          setIsCompacting(true);
-          isCompactingRef.current = true;
-          setCompactingMessage(properties.status?.message || t('chat.compacting'));
-          // Reset progress state on each new compaction cycle so a stale
-          // run's stages do not leak into a fresh "Compacting..." panel.
-          setCompactionStages([]);
-        } else if (statusType === 'idle') {
+      switch (action.kind) {
+        case 'ignore':
+          return;
+        case 'session-cleared':
+          abortingRef.current = false;
           sessionBusyRef.current = false;
           activeToolPartIdsRef.current.clear();
+          abortedMessageIdRef.current = null;
+          suppressStreamingUntilIdleRef.current = false;
+          setIsStreaming(false);
+          setGoalBanner(null);
+          setDismissedGoalKey('');
+          clearMessages();
+          void refreshContextUsage({ clear: true });
+          return;
+        case 'session-status':
+          if (action.statusType === 'busy') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+          } else if (action.statusType === 'compacting') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(true);
+            isCompactingRef.current = true;
+            setCompactingMessage(action.message || t('chat.compacting'));
+            // Reset progress state on each new compaction cycle so a stale
+            // run's stages do not leak into a fresh "Compacting..." panel.
+            setCompactionStages([]);
+          } else if (action.statusType === 'idle') {
+            sessionBusyRef.current = false;
+            suppressStreamingUntilIdleRef.current = false;
+            activeToolPartIdsRef.current.clear();
+            setIsStreaming(false);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setCompactingMessage('');
+            setCompactionStages([]);
+            refetch();
+            void refreshContextUsage({ skipIfFreshMs: 500 });
+          }
+          return;
+        case 'message-updated': {
+          const { info } = action;
+          updateMessage(info);
+          if (
+            info.role === 'assistant' &&
+            (abortingRef.current || suppressStreamingUntilIdleRef.current)
+          ) {
+            if (info.id) {
+              abortedMessageIdRef.current = info.id;
+              markMessageStopped(info.id);
+            }
+            setIsStreaming(false);
+            setSending(false);
+            if (info.finish || info.time?.completed) {
+              void refreshContextUsage();
+            }
+          } else if (info.finish || info.time?.completed) {
+            const shouldRefetch = shouldRefetchFinishedMessage({
+              finishedMessageId: info.id,
+              abortedMessageId: abortedMessageIdRef.current,
+            });
+            // Preserve locally streamed partial text when the user aborts. The
+            // backend never persists in-flight text chunks, so refetching here
+            // would replace the visible partial response with an empty message.
+            if (shouldRefetch) {
+              refetch();
+              if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
+                setIsStreaming(false);
+              }
+            }
+            void refreshContextUsage();
+            abortingRef.current = false;
+            abortedMessageIdRef.current = null;
+          } else if (
+            info.role === 'assistant' &&
+            !info.finish &&
+            !abortingRef.current
+          ) {
+            setIsStreaming(true);
+          }
+          return;
+        }
+        case 'message-removed': {
+          const removedMessage = messagesRef.current.find((message) => message.id === action.messageID);
+          removedMessage?.parts.forEach((part) => {
+            if (part.id) activeToolPartIdsRef.current.delete(part.id);
+          });
+          if (abortedMessageIdRef.current === action.messageID) {
+            abortedMessageIdRef.current = null;
+          }
+          removeMessage(action.messageID);
+          return;
+        }
+        case 'message-part-updated': {
+          const part = action.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
+          if (part.id) {
+            if (isActiveToolPart(part)) {
+              activeToolPartIdsRef.current.add(part.id);
+              if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) setIsStreaming(true);
+            } else {
+              activeToolPartIdsRef.current.delete(part.id);
+            }
+          }
+          updateMessagePart(action.part, action.delta);
+          scrollToBottom();
+          return;
+        }
+        case 'question-asked':
+          handleQuestionAsked(action.callID, action.requestId, action.questions as QuestionItem[]);
+          scrollToBottom();
+          return;
+        case 'question-resolved':
+          removeByRequestId(action.requestId);
+          return;
+        case 'compaction-progress':
+          if (action.stage === 'complete' && action.data.result === 'continue') {
+            void refreshContextUsage({ skipIfFreshMs: 500 });
+          }
+          // Single source of truth: append into ``compactionStages`` and let
+          // the progress bar derive ``done/total`` from it via useMemo.
+          // ``chunk_done`` arrives in non-deterministic order under
+          // ``asyncio.gather``; deduplicate by chunk index here so SSE
+          // reconnects / accidental re-deliveries are idempotent.
+          setCompactionStages((prev) => {
+            if (action.stage === 'chunk_done') {
+              const chunkIdx = typeof action.data.chunk === 'number' ? action.data.chunk : undefined;
+              if (chunkIdx !== undefined && prev.some(
+                (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
+              )) {
+                return prev;
+              }
+            }
+            return [...prev, { stage: action.stage, data: action.data, ts: Date.now() }];
+          });
+          return;
+        case 'prompt-queue-updated':
+          applyPromptQueueItems(action.items);
+          return;
+        case 'goal-updated': {
+          const nextGoal = toGoalBannerState(action.goal);
+          if (nextGoal) {
+            goalHydrationVersionRef.current += 1;
+            setGoalBanner(nextGoal);
+            setDismissedGoalKey(readDismissedGoalKey(sessionId));
+          }
+          return;
+        }
+        case 'context-compacted':
+          void refreshContextUsage({ skipIfFreshMs: 500 });
+          return;
+        case 'context-usage-updated':
+          applyContextUsagePushSnapshot(action.snapshot);
+          return;
+        case 'session-error':
           setIsStreaming(false);
           setIsCompacting(false);
-          isCompactingRef.current = false;
-          setCompactingMessage('');
           setCompactionStages([]);
-          refetch();
+          stopContextUsageRefreshing();
           void refreshContextUsage({ skipIfFreshMs: 500 });
-        }
-      } else if (type === 'message.updated' && properties.info?.sessionID === sessionId) {
-        updateMessage(properties.info);
-        if (properties.info.finish || properties.info.time?.completed) {
-          const shouldRefetch = shouldRefetchFinishedMessage({
-            finishedMessageId: properties.info.id,
-            abortedMessageId: abortedMessageIdRef.current,
-          });
-          // Preserve locally streamed partial text when the user aborts. The
-          // backend never persists in-flight text chunks, so refetching here
-          // would replace the visible partial response with an empty message.
-          if (shouldRefetch) {
-            refetch();
-            if (!sessionBusyRef.current && activeToolPartIdsRef.current.size === 0) {
-              setIsStreaming(false);
-            }
-          }
-          void refreshContextUsage();
           abortingRef.current = false;
-          abortedMessageIdRef.current = null;
-        } else if (
-          properties.info.role === 'assistant' &&
-          !properties.info.finish &&
-          !abortingRef.current
-        ) {
-          setIsStreaming(true);
-        }
-      } else if (type === 'message.part.updated' && properties.part?.sessionID === sessionId) {
-        const part = properties.part as Pick<MessagePart, 'id' | 'type' | 'state'>;
-        if (part.id) {
-          if (isActiveToolPart(part)) {
-            activeToolPartIdsRef.current.add(part.id);
-            if (!abortingRef.current) setIsStreaming(true);
-          } else {
-            activeToolPartIdsRef.current.delete(part.id);
-          }
-        }
-        updateMessagePart(properties.part, properties.delta);
-        scrollToBottom();
-      } else if (type === 'question.asked' && properties.sessionID === sessionId) {
-        const callID: string | undefined = properties.tool?.callID;
-        const requestId: string | undefined = properties.id;
-        if (callID && requestId) {
-          handleQuestionAsked(callID, requestId, properties.questions || []);
-          scrollToBottom();
-        }
-      } else if (
-        (type === 'question.replied' || type === 'question.rejected') &&
-        properties.sessionID === sessionId
-      ) {
-        const requestId: string | undefined = properties.requestID;
-        if (requestId) {
-          removeByRequestId(requestId);
-        }
-      } else if (type === 'session.compaction_progress' && properties.sessionID === sessionId) {
-        const stage = properties.stage as CompactionStage | undefined;
-        const data = (properties.data ?? {}) as Record<string, unknown>;
-        if (!stage) return;
-        if (stage === 'complete' && data.result === 'continue') {
-          void refreshContextUsage({ skipIfFreshMs: 500 });
-        }
-        // Single source of truth: append into ``compactionStages`` and let
-        // the progress bar derive ``done/total`` from it via useMemo.
-        // ``chunk_done`` arrives in non-deterministic order under
-        // ``asyncio.gather``; deduplicate by chunk index here so SSE
-        // reconnects / accidental re-deliveries are idempotent.
-        setCompactionStages((prev) => {
-          if (stage === 'chunk_done') {
-            const chunkIdx = typeof data.chunk === 'number' ? data.chunk : undefined;
-            if (chunkIdx !== undefined && prev.some(
-              (e) => e.stage === 'chunk_done' && (e.data as { chunk?: number }).chunk === chunkIdx,
-            )) {
-              return prev;
-            }
-          }
-          return [...prev, { stage, data, ts: Date.now() }];
-        });
-      } else if (type === 'session.prompt_queue.updated' && properties.sessionID === sessionId) {
-        const items = Array.isArray(properties.items) ? properties.items : [];
-        setQueuedPrompts(items as QueuedPrompt[]);
-        if (items.length > 0) setQueueExpanded(true);
-      } else if (type === 'session.goal.updated' && properties.sessionID === sessionId) {
-        const nextGoal = toGoalBannerState(properties as SessionGoalState);
-        if (nextGoal) {
-          goalHydrationVersionRef.current += 1;
-          setGoalBanner(nextGoal);
-          setDismissedGoalKey(readDismissedGoalKey(sessionId));
-        }
-      } else if (type === 'context.compacted' && properties.sessionID === sessionId) {
-        void refreshContextUsage({ skipIfFreshMs: 500 });
-      } else if (type === 'context.usage.updated' && properties.sessionID === sessionId) {
-        setContextUsageSnapshot(properties as ContextUsageSnapshot);
-        if (typeof properties.contextWindow === 'number' && properties.contextWindow > 0) {
-          setContextUsageWindowTokens(properties.contextWindow);
-        }
-        contextUsageRequestSeqRef.current += 1;
-        contextUsageRequestRef.current = null;
-        lastContextUsagePushAtRef.current = Date.now();
-        setContextUsageRefreshing(false);
-      } else if (type === 'session.error' && properties.sessionID === sessionId) {
-        setIsStreaming(false);
-        setIsCompacting(false);
-        setCompactionStages([]);
-        setContextUsageRefreshing(false);
-        void refreshContextUsage({ skipIfFreshMs: 500 });
-        abortingRef.current = false;
-        sessionBusyRef.current = false;
-        activeToolPartIdsRef.current.clear();
-        onError?.(properties.error?.message || t('chat.placeholder'));
+          sessionBusyRef.current = false;
+          activeToolPartIdsRef.current.clear();
+          onError?.(action.message || t('chat.placeholder'));
+          return;
       }
     },
     [
       sessionId,
       updateMessage,
       updateMessagePart,
+      removeMessage,
+      clearMessages,
       refetch,
       refreshContextUsage,
+      applyContextUsagePushSnapshot,
+      stopContextUsageRefreshing,
       handleQuestionAsked,
       removeByRequestId,
+      applyPromptQueueItems,
       onSSEEvent,
       onError,
       scrollToBottom,
+      t,
     ],
   );
 
@@ -2090,17 +2112,13 @@ export default function SessionChat({
     setCompactionStages([]);
     setGoalBanner(null);
     setDismissedGoalKey('');
-    setQueuedPrompts([]);
-    setEditingQueueId(null);
-    setEditingQueueText('');
-    setQueueActionId(null);
-    setContextUsageWindowTokens(0);
     setMentionRange(null);
     setMentionQuery('');
     setSelectedMentionIndex(0);
     setPendingAgentName(agentName || 'rex');
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     sessionBusyRef.current = false;
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
@@ -2143,10 +2161,10 @@ export default function SessionChat({
       try {
         const res = await client.get('/api/session/status');
         const status = res.data[sessionId];
-        if (status?.type === 'busy') {
+        if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
-        } else if (status?.type === 'compacting') {
+        } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsCompacting(true);
@@ -2173,6 +2191,19 @@ export default function SessionChat({
     checkStatus();
   }, [sessionId, loading, messages, fetchPendingQuestions]);
 
+  // A remote proxy or a reconnect boundary can delay or lose the one-shot
+  // question.asked event. Reconcile only while the session is active; the
+  // hook ignores responses made stale by a newer SSE update.
+  useEffect(() => {
+    if (!sessionId || (!isStreaming && !sending)) return;
+    const timer = setInterval(() => {
+      fetchPendingQuestions(sessionId).catch((err) => {
+        console.warn('[SessionChat] Failed to reconcile pending questions:', err);
+      });
+    }, PENDING_QUESTION_RECONCILE_MS);
+    return () => clearInterval(timer);
+  }, [sessionId, isStreaming, sending, fetchPendingQuestions]);
+
   // Refetch when page becomes visible again
   useEffect(() => {
     if (!sessionId) return;
@@ -2180,11 +2211,14 @@ export default function SessionChat({
       if (document.visibilityState === 'visible') {
         refetch();
         fetchPromptQueue();
+        fetchPendingQuestions(sessionId).catch((err) => {
+          console.warn('[SessionChat] Failed to recover pending questions after visibility change:', err);
+        });
       }
     };
     document.addEventListener('visibilitychange', handler);
     return () => document.removeEventListener('visibilitychange', handler);
-  }, [sessionId, refetch, fetchPromptQueue]);
+  }, [sessionId, refetch, fetchPromptQueue, fetchPendingQuestions]);
 
   // Backup refetch when compaction ends — covers SSE reconnect scenarios
   // where the session.status event may have been missed.
@@ -2201,32 +2235,17 @@ export default function SessionChat({
     return () => { if (timer) clearTimeout(timer); };
   }, [isCompacting, sessionId, refetch]);
 
-  /** Lazily load slash commands on first use (for autocomplete dropdown). */
+  /** Lazily load slash commands and periodically revalidate while autocomplete is used. */
   const loadCommandsIfNeeded = useCallback(async (): Promise<void> => {
-    if (commandsLoadedRef.current) return;
-    commandsLoadedRef.current = true; // Optimistic: prevent concurrent fetches
+    if (commandsLoadingRef.current || Date.now() - commandsLoadedAtRef.current < 5_000) return;
+    commandsLoadingRef.current = true;
     try {
-      const res = await commandAPI.list();
-      const serverCommands = res.data ?? [];
-      // Merge client-side /new command into the autocomplete list
-      setCommands([
-        {
-          name: 'new',
-          canonical_name: 'new',
-          description: 'Create a new session',
-          template: '',
-          hidden: false,
-          aliases: [],
-          visible_surfaces: [],
-          execution_kind: 'session_control',
-          allow_attachments: false,
-          requires_existing_session: false,
-          channel_safe: false,
-        } satisfies Command,
-        ...serverCommands,
-      ]);
+      setCommands(await fetchSessionChatCommands());
+      commandsLoadedAtRef.current = Date.now();
     } catch {
-      commandsLoadedRef.current = false; // Allow retry on failure
+      commandsLoadedAtRef.current = 0;
+    } finally {
+      commandsLoadingRef.current = false;
     }
   }, []);
 
@@ -2464,25 +2483,29 @@ export default function SessionChat({
     if (!sessionId) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
 
     const displayText = args ? `/${command} ${args}` : `/${command}`;
-    const tempId = `temp-${Date.now()}`;
+    const messageId = createMessageId();
     addMessage({
-      id: tempId,
+      id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: [{ id: `${tempId}-part`, type: 'text', text: displayText }],
+      parts: [{ id: `temp-${messageId}-part`, type: 'text', text: displayText }],
       timestamp: Date.now(),
     } as Message);
 
     try {
+      await ensureAutoModelSession();
       await client.post(`/api/session/${sessionId}/command`, {
         command,
         arguments: args,
         agent: agentName,
+        messageID: messageId,
       });
       if (command === 'goal' && args.trim()) {
         goalHydrationVersionRef.current += 1;
@@ -2492,6 +2515,7 @@ export default function SessionChat({
       }
     } catch (err: unknown) {
       setIsStreaming(false);
+      removeMessage(messageId);
       const axiosErr = err as any;
       if (axiosErr?.response?.status === 404) {
         onError?.('Session not found. Please start a new session.');
@@ -2512,28 +2536,31 @@ export default function SessionChat({
     options?: PromptDisplayOptions,
   ) => {
     if (!sessionId) return;
+    await ensureAutoModelSession();
     const effectiveAgent = agentOverride || agentName;
     const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     // Force scroll to bottom when user sends a new message
     isAtBottomRef.current = true;
     setSending(true);
     setIsStreaming(true);
     setPendingAgentName(effectiveAgent || 'rex');
 
-    const tempId = `temp-${Date.now()}`;
+    const messageId = createMessageId();
     const tempParts: MessagePart[] = [];
-    if (visibleText) tempParts.push({ id: `${tempId}-text`, type: 'text', text: visibleText });
+    if (visibleText) tempParts.push({ id: `temp-${messageId}-text`, type: 'text', text: visibleText });
     imageParts.forEach((img, i) => {
-      tempParts.push({ id: `${tempId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
+      tempParts.push({ id: `temp-${messageId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
     });
 
     addMessage({
-      id: tempId,
+      id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `${tempId}-part`, type: 'text', text: visibleText }],
+      parts: tempParts.length > 0 ? tempParts : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
       timestamp: Date.now(),
       agent: effectiveAgent,
     } as Message);
@@ -2541,14 +2568,24 @@ export default function SessionChat({
     try {
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
+        messageID: messageId,
       };
       if (effectiveAgent) payload.agent = effectiveAgent;
       if (model) payload.model = model;
       if (options?.displayText) payload.displayText = options.displayText;
+      payload.executionMode = executionMode;
 
       await client.post(`/api/session/${sessionId}/prompt_async`, payload);
+      if (executionMode === 'goal' && text.trim()) {
+        goalHydrationVersionRef.current += 1;
+        writeDismissedGoalKey(sessionId, '');
+        setGoalBanner({ objective: text.trim(), status: 'active' });
+        setDismissedGoalKey('');
+      }
+      onExecutionModeAccepted?.(executionMode);
     } catch (err: unknown) {
       setIsStreaming(false);
+      removeMessage(messageId);
       const axiosErr = err as any;
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
@@ -2570,14 +2607,15 @@ export default function SessionChat({
     if (!sessionId) return;
     const effectiveAgent = agentOverride || agentName;
     try {
-      await sessionApi.enqueuePrompt(sessionId, {
+      await ensureAutoModelSession();
+      await enqueuePrompt({
         parts: buildPromptParts(text, imageParts),
         ...(effectiveAgent ? { agent: effectiveAgent } : {}),
         ...(model ? { model } : {}),
         ...(options?.displayText ? { displayText: options.displayText } : {}),
+        executionMode,
       });
-      await fetchPromptQueue();
-      setQueueExpanded(true);
+      onExecutionModeAccepted?.(executionMode);
     } catch (err: any) {
       const statusCode = err?.response?.status;
       const detail = err?.response?.data?.detail;
@@ -2616,7 +2654,15 @@ export default function SessionChat({
       setSending(true);
       try {
         setPendingAgentName(agentName || 'rex');
-        await onCreateAndSend(trimmed, [], agentName, model, options);
+        await onCreateAndSend(
+          trimmed,
+          [],
+          agentName,
+          model,
+          options,
+          executionMode,
+        );
+        onExecutionModeAccepted?.(executionMode);
       } catch {
         setInput(trimmed);
       } finally {
@@ -2695,7 +2741,15 @@ export default function SessionChat({
         try {
           const effectiveAgent = mentionedAgent || agentName;
           setPendingAgentName(effectiveAgent || 'rex');
-          await onCreateAndSend(text, imageParts, effectiveAgent || undefined, model);
+          await onCreateAndSend(
+            text,
+            imageParts,
+            effectiveAgent || undefined,
+            model,
+            undefined,
+            executionMode,
+          );
+          onExecutionModeAccepted?.(executionMode);
           setAttachments([]);
         } catch {
           // Restore both the text and the attachment list so the user can
@@ -2724,12 +2778,17 @@ export default function SessionChat({
   // Immediately notifies parent so the message won't re-send if selectedSessionId changes.
   useEffect(() => {
     if (!initialMessage || !sessionId) return;
-    const sentKey = `${sessionId}::${initialMessage}`;
+    const sentKey = `${sessionId}::${initialMessage}::${initialDisplayText ?? ''}`;
     if (initialMessageSentRef.current === sentKey) return;
     initialMessageSentRef.current = sentKey;
-    sendText(initialMessage).catch(() => {});
+    sendText(
+      initialMessage,
+      [],
+      undefined,
+      initialDisplayText ? { displayText: initialDisplayText } : undefined,
+    ).catch(() => {});
     onInitialMessageConsumed?.();
-  }, [initialMessage, sessionId]);
+  }, [initialDisplayText, initialMessage, sessionId]);
 
   const insertMention = useCallback((name: string) => {
     const currentValue = textareaRef.current?.value ?? input;
@@ -2828,80 +2887,72 @@ export default function SessionChat({
 
   const handleAbort = useCallback(async () => {
     if (!sessionId) return;
+    // Record the ID of the message being aborted so we can ignore its finish event later.
+    const lastAsstMsg = [...messagesRef.current].reverse().find(
+      (m) => m.role === 'assistant' && !m.finish,
+    );
+    const shouldRestoreActivity = isStreaming || sending || sessionBusyRef.current || Boolean(lastAsstMsg?.id);
+    abortedMessageIdRef.current = lastAsstMsg?.id || null;
+    abortingRef.current = true;
+    suppressStreamingUntilIdleRef.current = true;
+    sessionBusyRef.current = false;
+    setIsStreaming(false);
+    setSending(false);
     try {
-      // Record the ID of the message being aborted so we can ignore its finish event later
-      const lastAsstMsg = [...messagesRef.current].reverse().find(
-        (m) => m.role === 'assistant' && !m.finish,
-      );
-      abortedMessageIdRef.current = lastAsstMsg?.id || null;
-      abortingRef.current = true;
       await client.post(`/api/session/${sessionId}/abort`);
       if (lastAsstMsg?.id) {
         markMessageStopped(lastAsstMsg.id);
       }
-      setIsStreaming(false);
       setTimeout(() => { abortingRef.current = false; }, ABORT_SSE_SETTLE_DELAY);
     } catch (err) {
       console.error('[SessionChat] Abort failed:', err);
       abortingRef.current = false;
       abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
+      if (shouldRestoreActivity) {
+        sessionBusyRef.current = true;
+        setIsStreaming(true);
+        if (sending) setSending(true);
+      }
     }
-  }, [markMessageStopped, sessionId]);
+  }, [isStreaming, markMessageStopped, sending, sessionId]);
 
   const handleQueuedEditStart = useCallback((item: QueuedPrompt) => {
-    setEditingQueueId(item.id);
-    setEditingQueueText(getQueuedPromptText(item));
-  }, []);
+    startQueuedEdit(item);
+  }, [startQueuedEdit]);
 
   const handleQueuedEditCancel = useCallback(() => {
-    setEditingQueueId(null);
-    setEditingQueueText('');
-  }, []);
+    cancelQueuedEdit();
+  }, [cancelQueuedEdit]);
 
   const handleQueuedEditSave = useCallback(async (item: QueuedPrompt) => {
-    if (!sessionId) return;
-    const text = editingQueueText.trim();
-    if (!text) return;
-    setQueueActionId(item.id);
     try {
-      await sessionApi.updateQueuedPrompt(sessionId, item.id, text);
-      handleQueuedEditCancel();
-      await fetchPromptQueue();
+      await saveQueuedEdit(item);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.updateFailed'));
-    } finally {
-      setQueueActionId(null);
     }
-  }, [editingQueueText, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+  }, [saveQueuedEdit, t, toast]);
 
   const handleQueuedRemove = useCallback(async (item: QueuedPrompt) => {
-    if (!sessionId) return;
-    setQueueActionId(item.id);
     try {
-      await sessionApi.removeQueuedPrompt(sessionId, item.id);
-      if (editingQueueId === item.id) handleQueuedEditCancel();
-      await fetchPromptQueue();
+      await removeQueuedPrompt(item);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.removeFailed'));
-    } finally {
-      setQueueActionId(null);
     }
-  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+  }, [removeQueuedPrompt, t, toast]);
 
   const handleQueuedRunNow = useCallback(async (item: QueuedPrompt) => {
-    if (!sessionId) return;
-    setQueueActionId(item.id);
     try {
-      await sessionApi.runQueuedPromptNow(sessionId, item.id);
-      if (editingQueueId === item.id) handleQueuedEditCancel();
-      await fetchPromptQueue();
+      const didRun = await runQueuedPromptNow(item);
+      if (!didRun) return;
+      abortingRef.current = false;
+      abortedMessageIdRef.current = null;
+      suppressStreamingUntilIdleRef.current = false;
       setIsStreaming(true);
     } catch (err: any) {
       toast.error(err?.response?.data?.detail || err?.message || t('chat.queue.runNowFailed'));
-    } finally {
-      setQueueActionId(null);
     }
-  }, [editingQueueId, fetchPromptQueue, handleQueuedEditCancel, sessionId, t, toast]);
+  }, [runQueuedPromptNow, t, toast]);
 
   // Fire onStreamingDone when isStreaming transitions true → false
   useEffect(() => {
@@ -2914,24 +2965,81 @@ export default function SessionChat({
   // Fallback polling to detect completion when SSE events are missed
   useEffect(() => {
     if (!isStreaming || !sessionId) return;
+    let questionRecoveryInFlight = false;
     const timer = setInterval(async () => {
       try {
         const res = await client.get(`/api/session/${sessionId}/message`, {
           params: { page: true, limit: 50, include_archived: true },
         });
-        const msgs: any[] = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+        const msgs: FetchedMessageWithParts[] = Array.isArray(res.data)
+          ? res.data
+          : (res.data?.items || []);
+        const currentTurnAssistantMessages = getCurrentTurnAssistantMessages(msgs);
+        const shouldRecoverQuestionPart = (part: MessagePart) => (
+          isQuestionToolName(part.tool || '')
+          && (
+            isActiveToolPart(part)
+            || !!(part.callID && pendingQuestionsRef.current[part.callID])
+          )
+        );
+        const hasFetchedPendingQuestion = currentTurnAssistantMessages?.some((message) => (
+          (message.parts || []).some((part) => (
+            shouldRecoverQuestionPart(part)
+          ))
+        )) ?? false;
+        if (currentTurnAssistantMessages && hasFetchedPendingQuestion) {
+          const localQuestionPartIds = new Set<string>();
+          const localQuestionCallIds = new Set<string>();
+          for (const message of messagesRef.current) {
+            for (const part of message.parts || []) {
+              if (
+                (part.type !== 'tool' && part.type !== 'toolCall')
+                || !isQuestionToolName(part.tool || '')
+              ) continue;
+              if (part.id) localQuestionPartIds.add(part.id);
+              if (part.callID) localQuestionCallIds.add(part.callID);
+            }
+          }
+          const hasMissingFetchedQuestion = currentTurnAssistantMessages.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => (
+              shouldRecoverQuestionPart(part)
+              && !(
+                (part.id && localQuestionPartIds.has(part.id))
+                || (part.callID && localQuestionCallIds.has(part.callID))
+              )
+            ))
+          ));
+          if (hasMissingFetchedQuestion && !questionRecoveryInFlight) {
+            questionRecoveryInFlight = true;
+            try {
+              await refetch();
+            } finally {
+              questionRecoveryInFlight = false;
+            }
+          }
+        }
+
         const lastMsg = msgs[msgs.length - 1];
         if (lastMsg?.info?.role === 'assistant' && (lastMsg.info.finish || lastMsg.info.time?.completed)) {
-          const hasFetchedActiveTool = msgs.some((msg) => hasActiveToolPart(msg.parts));
-          if (hasFetchedActiveTool) {
-            return;
-          }
+          const currentTurnMessages = currentTurnAssistantMessages
+            ? new Set(currentTurnAssistantMessages)
+            : null;
+          const hasFetchedActiveTool = msgs.some((msg) => (
+            (msg.parts || []).some((part: MessagePart) => {
+              if (!isQuestionToolName(part.tool || '')) return isActiveToolPart(part);
+              const isPendingQuestion = isActiveToolPart(part)
+                || !!(part.callID && pendingQuestionsRef.current[part.callID]);
+              if (!isPendingQuestion) return false;
+              return currentTurnMessages === null || currentTurnMessages.has(msg);
+            })
+          ));
+          if (hasFetchedActiveTool) return;
+
           activeToolPartIdsRef.current.clear();
           const statusRes = await client.get('/api/session/status');
           const status = statusRes.data?.[sessionId];
-          if (isActiveSessionStatus(status)) {
-            return;
-          }
+          if (isActiveSessionStatus(status)) return;
+
           refetch();
           setIsStreaming(false);
         }
@@ -3013,6 +3121,8 @@ export default function SessionChat({
     if (!text) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(editingMessageId);
     try {
@@ -3043,6 +3153,8 @@ export default function SessionChat({
     if (!sessionId) return;
 
     abortingRef.current = false;
+    abortedMessageIdRef.current = null;
+    suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(messageId);
     try {
@@ -3080,10 +3192,6 @@ export default function SessionChat({
 
     for (let idx = 0; idx < merged.length; idx++) {
       const msg = merged[idx];
-      if (!shouldRenderMessage(msg)) {
-        skipIndices.add(idx);
-        continue;
-      }
       if (msg.parts.length > 0 && msg.parts.every(p => p.synthetic)) {
         skipIndices.add(idx);
         continue;
@@ -3092,15 +3200,25 @@ export default function SessionChat({
 
     return { merged, skipIndices };
   }, [messages]);
+  const timelineItems = useMemo(() => (
+    buildChatTimelineItems({ messages: merged, skipIndices, isStreaming })
+  ), [isStreaming, merged, skipIndices]);
+  const { historyItems, tailItems } = useStableChatTimelineSegments(timelineItems);
 
   // ── Styling based on compact mode ──
   const msgAreaClass = compact
     ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 px-4 py-4 dark:bg-zinc-950'
-    : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
+    : pageCanvas
+      ? 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-transparent py-5'
+      : 'relative flex flex-col flex-1 min-h-0 overflow-y-auto bg-gray-50 py-6 dark:bg-zinc-950';
 
   const msgListClass = compact
     ? fullWidth ? 'space-y-3 w-full px-4' : 'space-y-3'
-    : fullWidth ? 'space-y-5 w-full px-5' : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
+    : fullWidth
+      ? 'space-y-5 w-full px-12'
+      : pageCanvas
+        ? 'space-y-[18px] w-full max-w-[760px] mx-auto px-7'
+        : 'space-y-5 w-[min(76%,64rem)] mx-auto px-6';
   const visibleGoalBanner = goalBanner && getGoalBannerKey(goalBanner) !== dismissedGoalKey
     ? goalBanner
     : null;
@@ -3121,7 +3239,26 @@ export default function SessionChat({
       >
         {loading && messages.length === 0 ? (
           <div className="flex justify-center py-8">
-            <LoadingSpinner />
+            <LoadingSpinner
+              size="sm"
+              delayMs={180}
+              className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
+            />
+          </div>
+        ) : messagesError && messages.length === 0 ? (
+          <div className="flex min-h-40 items-center justify-center px-6" role="alert">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">
+                {t('chat.loadFailed')}
+              </span>
+              <button
+                type="button"
+                onClick={() => void refetch()}
+                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                {t('chat.retry')}
+              </button>
+            </div>
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
@@ -3139,56 +3276,56 @@ export default function SessionChat({
           )
         ) : (
           <div ref={messagesContentRef} className={msgListClass}>
-            {hasMoreMessages && (
-              <div className="flex justify-center pb-2">
-                <button
-                  type="button"
-                  onClick={() => void loadOlder()}
-                  disabled={loadingOlder}
-                  className="inline-flex items-center gap-1.5 rounded-full border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-500 transition-colors hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-60"
-                >
-                  {loadingOlder ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <ChevronDown className="h-3.5 w-3.5 rotate-180" />}
-                  <span>{loadingOlder ? t('chat.loadingOlder', 'Loading...') : t('chat.loadOlder', 'Load earlier messages')}</span>
-                </button>
-              </div>
-            )}
-            {merged.map((msg, i) => {
-              if (skipIndices.has(i)) return null;
-              return (
-                <ChatMessageBubble
-                  key={msg.id}
-                  message={msg}
-                  isActive={
-                    isStreaming &&
-                    i === merged.length - 1 &&
-                    msg.role === 'assistant' &&
-                    !msg.finish
-                  }
-                  pendingQuestions={pendingQuestions}
-                  onQuestionAnswer={handleQuestionAnswer}
-                  onQuestionReject={handleQuestionReject}
-                  showActions={showActions}
-                  showTimestamp={showTimestamp}
-                  collapseIntermediateSteps={collapseIntermediateSteps}
-                  processGroupsDefaultOpen={processGroupsDefaultOpen}
-                  processGroupsOpenWhileActive={processGroupsOpenWhileActive}
-                  processGroupOpenState={processGroupOpenState}
-                  onProcessGroupOpenChange={handleProcessGroupOpenChange}
-                  compact={compact}
-                  onCopy={handleCopy}
-                  editingMessageId={editingMessageId}
-                  editingText={editingText}
-                  actionsDisabled={sending || isStreaming}
-                  actionMessageId={actionMessageId}
-                  onEditStart={beginMessageEdit}
-                  onEditChange={setEditingText}
-                  onEditCancel={resetEditingState}
-                  onEditSave={handleSaveEditedMessage}
-                  onEditSend={handleSendEditedUserMessage}
-                  onRegenerate={handleRegenerateMessage}
-                />
-              );
-            })}
+            <ChatMessageTimeline
+              items={historyItems}
+              pendingQuestions={pendingQuestions}
+              onQuestionAnswer={handleQuestionAnswer}
+              onQuestionReject={handleQuestionReject}
+              showActions={showActions}
+              showTimestamp={showTimestamp}
+              collapseIntermediateSteps={collapseIntermediateSteps}
+              processGroupsDefaultOpen={processGroupsDefaultOpen}
+              processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+              processGroupOpenState={processGroupOpenState}
+              onProcessGroupOpenChange={handleProcessGroupOpenChange}
+              compact={compact}
+              onCopy={handleCopy}
+              editingMessageId={editingMessageId}
+              editingText={editingText}
+              actionsDisabled={sending || isStreaming}
+              actionMessageId={actionMessageId}
+              onEditStart={beginMessageEdit}
+              onEditChange={setEditingText}
+              onEditCancel={resetEditingState}
+              onEditSave={handleSaveEditedMessage}
+              onEditSend={handleSendEditedUserMessage}
+              onRegenerate={handleRegenerateMessage}
+            />
+            <ChatMessageTimeline
+              items={tailItems}
+              pendingQuestions={pendingQuestions}
+              onQuestionAnswer={handleQuestionAnswer}
+              onQuestionReject={handleQuestionReject}
+              showActions={showActions}
+              showTimestamp={showTimestamp}
+              collapseIntermediateSteps={collapseIntermediateSteps}
+              processGroupsDefaultOpen={processGroupsDefaultOpen}
+              processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+              processGroupOpenState={processGroupOpenState}
+              onProcessGroupOpenChange={handleProcessGroupOpenChange}
+              compact={compact}
+              onCopy={handleCopy}
+              editingMessageId={editingMessageId}
+              editingText={editingText}
+              actionsDisabled={sending || isStreaming}
+              actionMessageId={actionMessageId}
+              onEditStart={beginMessageEdit}
+              onEditChange={setEditingText}
+              onEditCancel={resetEditingState}
+              onEditSave={handleSaveEditedMessage}
+              onEditSend={handleSendEditedUserMessage}
+              onRegenerate={handleRegenerateMessage}
+            />
 
             {/* Compacting indicator with live progress stages */}
             {isCompacting && (
@@ -3203,7 +3340,7 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={`${compact ? 'w-full max-w-full px-4 py-3 rounded-[20px]' : 'w-full px-5 py-4 rounded-[24px]'} text-sm break-words shadow-sm bg-amber-50 border border-amber-200 dark:border-amber-500/35 dark:bg-amber-950/30 dark:shadow-none`}>
@@ -3261,7 +3398,7 @@ export default function SessionChat({
                   </span>
                   <div className="flex flex-col items-start flex-1 min-w-0">
                     <div className={`flex items-center gap-2 ${compact ? 'h-7' : 'h-8'}`}>
-                      <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
+                      <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">{formatAgentName(pendingAgentName)}</span>
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
@@ -3306,8 +3443,26 @@ export default function SessionChat({
 
       {/* Follow-up input */}
       {!hideInput && (
-        <div className={`flex-shrink-0 bg-white ${compact ? 'px-4 py-3' : 'py-4'} dark:bg-zinc-950`}>
-          <div className={`relative min-w-0 ${!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}`}>
+        <div
+          className={`flex-shrink-0 ${
+            compact
+              ? 'bg-white px-4 py-3 dark:bg-zinc-950'
+              : pageCanvas
+                ? 'bg-transparent px-7 pb-6 pt-2'
+                : 'bg-white py-4 dark:bg-zinc-950'
+          }`}
+        >
+          <div
+            className={`relative min-w-0 ${
+              !compact
+                ? fullWidth
+                  ? 'w-full px-5'
+                  : pageCanvas
+                    ? 'mx-auto w-full max-w-[760px]'
+                    : 'w-[min(76%,64rem)] mx-auto px-6'
+                : ''
+            }`}
+          >
             {conversationBottomSlot && (
               <div className="mb-2 min-w-0">
                 {typeof conversationBottomSlot === 'function'
@@ -3381,14 +3536,16 @@ export default function SessionChat({
               onDragOver={handleComposerDragOver}
               onDragLeave={handleComposerDragLeave}
               onDrop={handleComposerDrop}
-              className={`rounded-2xl border transition-all ${
+              className={`${pageCanvas && !compact ? 'min-h-[124px] rounded-[20px] shadow-[0_3px_12px_rgba(22,27,34,0.045)]' : 'rounded-2xl'} border transition-all ${
                 isCompacting
                   ? 'border-amber-200 bg-amber-50/30 dark:border-amber-500/35 dark:bg-amber-950/25'
                   : isDragOver
                     ? 'border-sky-300 bg-sky-50/60 ring-4 ring-sky-100 dark:border-sky-500/50 dark:bg-sky-950/35 dark:ring-sky-500/10'
                     : isStreaming
                       ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
-                      : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
+                      : pageCanvas && !compact
+                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:border-black/[0.14] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:border-white/[0.16] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
                 {/* Node reference chip */}
@@ -3520,15 +3677,20 @@ export default function SessionChat({
                       const cursor = e.target.selectionStart ?? val.length;
                       const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
                       const trimmed = val.trimStart();
+                      const slashQuery = trimmed.startsWith('/') ? trimmed.slice(1) : '';
                       if (mention && !trimmed.startsWith('/')) {
                         setMentionRange({ start: mention.start, end: mention.end });
                         setMentionQuery(mention.query);
                         setSelectedMentionIndex(0);
                         setShowCommandDropdown(false);
-                      } else if (trimmed.startsWith('/') && !trimmed.includes(' ') && successfulAttachments.length === 0) {
+                      } else if (
+                        trimmed.startsWith('/') &&
+                        !trimmed.includes(' ') &&
+                        (slashQuery === '' || isSlashCommandName(slashQuery)) &&
+                        successfulAttachments.length === 0
+                      ) {
                         void loadCommandsIfNeeded();
-                        const q = trimmed.slice(1);
-                        setCommandQuery(q);
+                        setCommandQuery(slashQuery);
                         setSelectedCommandIndex(0);
                         setShowCommandDropdown(true);
                         setMentionRange(null);
@@ -3551,7 +3713,7 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 ${
+                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
                       sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
                     }`}
                     style={{
@@ -3736,6 +3898,72 @@ export interface ChatMessageBubbleProps {
   onRegenerate?: (messageId: string) => Promise<void>;
 }
 
+interface ChatMessageTimelineProps extends Omit<ChatMessageBubbleProps, 'message' | 'isActive'> {
+  items: ChatTimelineItem[];
+}
+
+function ChatMessageTimelineInner({
+  items,
+  pendingQuestions,
+  onQuestionAnswer,
+  onQuestionReject,
+  showActions,
+  showTimestamp,
+  collapseIntermediateSteps,
+  processGroupsDefaultOpen,
+  processGroupsOpenWhileActive,
+  processGroupOpenState,
+  onProcessGroupOpenChange,
+  compact,
+  onCopy,
+  editingMessageId,
+  editingText,
+  actionsDisabled,
+  actionMessageId,
+  onEditStart,
+  onEditChange,
+  onEditCancel,
+  onEditSave,
+  onEditSend,
+  onRegenerate,
+}: ChatMessageTimelineProps) {
+  return (
+    <>
+      {items.map(({ message, isActive }) => (
+        <ChatMessageBubble
+          key={message.id}
+          message={message}
+          isActive={isActive}
+          pendingQuestions={pendingQuestions}
+          onQuestionAnswer={onQuestionAnswer}
+          onQuestionReject={onQuestionReject}
+          showActions={showActions}
+          showTimestamp={showTimestamp}
+          collapseIntermediateSteps={collapseIntermediateSteps}
+          processGroupsDefaultOpen={processGroupsDefaultOpen}
+          processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+          processGroupOpenState={processGroupOpenState}
+          onProcessGroupOpenChange={onProcessGroupOpenChange}
+          compact={compact}
+          onCopy={onCopy}
+          editingMessageId={editingMessageId}
+          editingText={editingText}
+          actionsDisabled={actionsDisabled}
+          actionMessageId={actionMessageId}
+          onEditStart={onEditStart}
+          onEditChange={onEditChange}
+          onEditCancel={onEditCancel}
+          onEditSave={onEditSave}
+          onEditSend={onEditSend}
+          onRegenerate={onRegenerate}
+        />
+      ))}
+    </>
+  );
+}
+
+export const ChatMessageTimeline = memo(ChatMessageTimelineInner);
+
 function ProcessGroupDetails({
   defaultOpen,
   open,
@@ -3772,14 +4000,14 @@ function ProcessGroupDetails({
     <details
       open={effectiveOpen}
       data-testid="chat-process-group"
-      className="group/process mt-2 first:mt-0 overflow-hidden rounded-lg border border-zinc-200/90 bg-white/80 shadow-none"
+      className="group/process mt-2 w-full first:mt-0 text-[#626874] dark:text-[#aab4bf]"
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex cursor-pointer list-none items-center gap-2 px-2.5 py-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-50"
+        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden"
       >
         {summary}
-        <ChevronDown className="ml-auto h-3 w-3 flex-shrink-0 text-zinc-400 transition-transform group-open/process:rotate-180" />
+        <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
       </summary>
       {children}
     </details>
@@ -3812,10 +4040,10 @@ function ChatMessageBubbleInner({
   onEditSend,
   onRegenerate,
 }: ChatMessageBubbleProps) {
-  const { t } = useTranslation('session');
+  const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
-  const { getPartExpanded, togglePart, isReasoningDone } = useReasoningToggle(parts, message.finish);
+  const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
   // ``window.open`` would land on a blank page. We open an in-app overlay
@@ -3835,11 +4063,13 @@ function ChatMessageBubbleInner({
   const rawAgentName = message.agent || 'rex';
   const agentName = rawAgentName.charAt(0).toUpperCase() + rawAgentName.slice(1);
 
-  const getTextContent = () =>
-    parts
+  const getTextContent = () => {
+    const text = parts
       .filter((p) => p.type === 'text' && p.text)
       .map((p) => p.text)
       .join('\n\n');
+    return isUser ? text : stripTaskMetadata(text);
+  };
 
   const editableTextParts = parts.filter((part): part is MessagePart & { text: string } =>
     part.type === 'text' && typeof part.text === 'string',
@@ -3850,19 +4080,34 @@ function ChatMessageBubbleInner({
   const editableRawText = latestEditablePart?.text || '';
   const isEditing = !!targetPartId && editingMessageId === targetMessageId;
   const isActionPending = actionMessageId === targetMessageId;
+  const hasProcessOutput = collapseIntermediateSteps && !isUser && parts.some((part) => {
+    if (part.type === 'reasoning' || part.type === 'thinking') {
+      return !!getRenderableThinkingText(part);
+    }
+    if (part.type !== 'tool') return false;
+    return !(part.callID && pendingQuestions?.[part.callID]);
+  });
   const instructionDisplayLabel = isUser && !isEditing && editableTextParts.length === 1
-    ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0]))
+    ? parseInstructionDisplayText(getMessagePartDisplayText(editableTextParts[0], false))
     : null;
 
   const bubbleClass = instructionDisplayLabel
     ? getInstructionDisplayBubbleClassName(compact)
-    : getMessageBubbleClassName({ compact, isUser, isEditing });
+    : hasProcessOutput
+      ? `w-full max-w-full min-w-0 break-words ${compact ? 'text-sm' : 'text-[15px]'} text-[#34393e] dark:text-zinc-100`
+      : getMessageBubbleClassName({ compact, isUser, isEditing });
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-gray-200/80 bg-white/80 text-gray-400 transition-colors duration-150 hover:border-gray-300 hover:text-gray-700 disabled:opacity-40 disabled:cursor-not-allowed dark:border-zinc-800 dark:bg-zinc-900/80 dark:text-zinc-500 dark:hover:border-zinc-700 dark:hover:text-zinc-200';
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-[#8b929d] transition-colors duration-150 hover:bg-white hover:text-[#4f5660] active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-zinc-100 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
+  const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
+    part.type === 'text' && !String(part.text || '').trim()
+  );
+  const shouldRenderAssistantErrorState = !isUser && !!messageErrorText && (
+    parts.length === 0 || hasOnlyBlankTextParts
+  );
 
   const avatarSize = compact ? 'w-7 h-7 text-xs' : 'w-8 h-8 text-sm';
   const avatar = isUser ? (
@@ -3877,10 +4122,14 @@ function ChatMessageBubbleInner({
 
   const headerHeight = compact ? 'h-7' : 'h-8';
   const bubble = (
-    <div className={`${bubbleClass} relative`} style={{ overflowWrap: 'anywhere' }}>
+    <div
+      className={`${bubbleClass} relative`}
+      data-process-output={hasProcessOutput ? 'true' : undefined}
+      style={{ overflowWrap: 'anywhere' }}
+    >
 
       {/* Empty / loading state */}
-      {parts.length === 0 && (
+      {(parts.length === 0 || shouldRenderAssistantErrorState) && (
         isUser ? (
           <div className="flex items-center gap-2 opacity-60">
             <div className="w-1.5 h-1.5 rounded-full bg-current animate-pulse" />
@@ -3936,7 +4185,7 @@ function ChatMessageBubbleInner({
             return true;
           };
           const isRenderableTextPart = (part: MessagePart): boolean => (
-            part.type === 'text' && !!getMessagePartDisplayText(part).trim()
+            part.type === 'text' && !!getMessagePartDisplayText(part, !isUser).trim()
           );
           const isRenderableDisplayPart = (part: MessagePart): boolean => {
             if (isIntermediateProcessPart(part)) return true;
@@ -3945,21 +4194,24 @@ function ChatMessageBubbleInner({
             if (part.type === 'file') return !!part.url;
             return false;
           };
-          const renderPart = (part: MessagePart, i: number) => (
+          const activeTailPart = isActive
+            ? [...displayParts].reverse().find(isRenderableDisplayPart)
+            : undefined;
+          const renderPart = (part: MessagePart, i: number, isVisible = true, processStep = false) => (
             // Spacing between consecutive parts is owned by this wrapper,
             // not by individual part components. Each part used to set its
             // own `mt-2 first:mt-0`, but since every part lives in its own
             // wrapper div, `first:` always matched and the gap collapsed
             // to zero between, e.g., a tool card and the next thinking
             // block, making them look glued together.
-            <div key={part.id || i} className="mt-2 first:mt-0">
+            <div key={part.id || i} className={processStep ? 'min-w-0' : 'mt-2 first:mt-0'}>
               {/* Text */}
               {part.type === 'text' && (() => {
                 const rawText = part.text || '';
                 const nodeRefMatch = isUser
                   ? rawText.match(/^@@node:([^|\n]+)\|([^\n]+)\n([\s\S]*)$/)
                   : null;
-                const partDisplayText = getMessagePartDisplayText(part);
+                const partDisplayText = getMessagePartDisplayText(part, !isUser);
                 if (!partDisplayText.trim()) return null;
                 const displayText = nodeRefMatch && partDisplayText === rawText ? nodeRefMatch[3] : partDisplayText;
                 const instructionLabel = isUser ? parseInstructionDisplayText(displayText) : null;
@@ -3979,10 +4231,22 @@ function ChatMessageBubbleInner({
                         <span className="text-[9px] text-gray-500 flex-shrink-0">{nodeRefMatch[2]}</span>
                       </div>
                     )}
-                    <StreamingMarkdown
-                      content={displayText}
-                      isStreaming={isActive && !isUser}
-                    />
+                    {processStep ? (
+                      <div
+                        data-testid="chat-process-text-step"
+                        className="min-w-0 py-1 text-sm leading-7 text-[#686e6c] dark:text-zinc-400"
+                      >
+                        <StreamingMarkdown
+                          content={displayText}
+                          isStreaming={isActive && !isUser}
+                        />
+                      </div>
+                    ) : (
+                      <StreamingMarkdown
+                        content={displayText}
+                        isStreaming={isActive && !isUser}
+                      />
+                    )}
                   </>
                 );
               })()}
@@ -3998,6 +4262,7 @@ function ChatMessageBubbleInner({
                   onReject={onQuestionReject && part.callID
                     ? () => onQuestionReject(part.callID!, pendingQuestions![part.callID!].requestId)
                     : undefined}
+                  processStep={processStep}
                 />
               )}
 
@@ -4006,8 +4271,39 @@ function ChatMessageBubbleInner({
                 const thinkingText = getRenderableThinkingText(part);
                 if (!thinkingText) return null;
                 const partKey = part.id || `reasoning-${i}`;
-                const isExpanded = getPartExpanded(partKey);
-                const isThinking = !isReasoningDone;
+                const isThinking = part === activeTailPart;
+                const isExpanded = isThinking || getPartExpanded(partKey);
+                if (processStep) {
+                  return (
+                    <div data-testid="chat-process-reasoning-step">
+                      <button
+                        type="button"
+                        aria-expanded={isExpanded}
+                        onClick={() => togglePart(partKey)}
+                        disabled={isThinking}
+                        className="flex min-h-7 w-full cursor-pointer items-center gap-2 text-left text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 disabled:cursor-default dark:text-zinc-400 dark:hover:text-zinc-200"
+                      >
+                        <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500">
+                          {isThinking ? (
+                            <Loader2 className="h-[15px] w-[15px] animate-spin" />
+                          ) : (
+                            <Brain className="h-[15px] w-[15px]" />
+                          )}
+                        </span>
+                        <span className="min-w-0">{t('chat.process.deepThinking')}</span>
+                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
+                      </button>
+                      {isExpanded && isVisible && (
+                        <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+                          <StreamingReasoningText
+                            content={thinkingText}
+                            isStreaming={isThinking}
+                          />
+                        </div>
+                      )}
+                    </div>
+                  );
+                }
                 return (
                   // Vertical spacing is provided by the parent part wrapper
                   // (see `otherParts.map` above); keep this container neutral
@@ -4040,9 +4336,12 @@ function ChatMessageBubbleInner({
                         )}
                       </div>
                     </button>
-                    {isExpanded && (
+                    {isExpanded && isVisible && (
                       <div className="mt-1 px-2.5 py-2 bg-zinc-50 rounded-md border border-zinc-200 text-[11px] text-zinc-500 whitespace-pre-wrap font-mono leading-relaxed max-h-52 overflow-y-auto">
-                        {thinkingText}
+                        <StreamingReasoningText
+                          content={thinkingText}
+                          isStreaming={isThinking}
+                        />
                       </div>
                     )}
                   </div>
@@ -4051,14 +4350,6 @@ function ChatMessageBubbleInner({
             </div>
           );
           const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
-            const reasoningCount = group.filter(({ part }) => part.type === 'reasoning' || part.type === 'thinking').length;
-            const toolCount = group.filter(({ part }) => part.type === 'tool').length;
-            const textCount = group.filter(({ part }) => part.type === 'text').length;
-            const summary = [
-              reasoningCount > 0 ? t('chat.process.reasoningCount', { count: reasoningCount }) : '',
-              toolCount > 0 ? t('chat.process.toolCount', { count: toolCount }) : '',
-              textCount > 0 ? t('chat.process.textCount', { count: textCount }) : '',
-            ].filter(Boolean).join(' · ');
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
             const hasStoredOpenState = !!processGroupOpenState
@@ -4074,27 +4365,24 @@ function ChatMessageBubbleInner({
                 onOpenChange={(open) => onProcessGroupOpenChange?.(processGroupKey, open)}
                 summary={(
                   <>
-                    <ListTree className="h-3.5 w-3.5 flex-shrink-0 text-zinc-400" />
-                    <span className="flex-shrink-0 font-semibold text-zinc-700">
+                    <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-[#8d9a95] dark:text-zinc-500">
+                      <Eye className="h-4 w-4" />
+                    </span>
+                    <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
                     </span>
-                    {summary && (
-                      <span className="min-w-0 truncate text-zinc-500">
-                        {summary}
-                      </span>
-                    )}
                   </>
                 )}
               >
-                <div className="border-t border-zinc-200/70 px-2.5 py-2">
-                  {group.map(({ part, index }) => renderPart(part, index))}
+                <div data-testid="chat-process-timeline" className="mt-3 grid gap-1 pl-1">
+                  {group.map(({ part, index }) => renderPart(part, index, effectiveProcessGroupOpen, true))}
                 </div>
               </ProcessGroupDetails>
             );
           };
           const renderDisplayParts = () => {
             if (!collapseIntermediateSteps || isUser) {
-              return displayParts.map(renderPart);
+              return displayParts.map((part, index) => renderPart(part, index));
             }
             const nodes: React.ReactNode[] = [];
             let processGroup: Array<{ part: MessagePart; index: number }> = [];
@@ -4216,11 +4504,14 @@ function ChatMessageBubbleInner({
       )}
     </div>
   );
+  const footerTimestamp = showTimestamp && message.timestamp
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    : null;
   const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
-    <div className="flex items-center justify-between mt-1.5">
-      {showTimestamp && message.timestamp
-        ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp)}</span>
-        : <span />}
+    <div className={`mt-1.5 flex items-center ${
+      isUser ? 'justify-between' : `justify-start${footerTimestamp ? ' gap-1.5' : ''}`
+    }`}>
+      {isUser && (footerTimestamp || <span />)}
       <div className={actionBarClass}>
         {isUser ? (
           <>
@@ -4268,6 +4559,7 @@ function ChatMessageBubbleInner({
           </>
         )}
       </div>
+      {!isUser && footerTimestamp}
     </div>
   ) : null;
 
@@ -4323,7 +4615,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-base font-semibold text-[#3f444a] dark:text-[#d7dee8]">
               {agentName}
             </span>
           </div>
@@ -4349,7 +4641,7 @@ function ChatMessageBubbleInner({
         {avatar}
         <div className="flex flex-col items-start flex-1 min-w-0">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
               {agentName}
             </span>
           </div>
@@ -4576,15 +4868,19 @@ function formatQuestionAnswerValue(question: QuestionItem, value: string, t: Tod
 
 function ChatQuestionResult({
   state,
+  actionLabel,
   statusLabel,
   statusIcon,
   statusIconColor,
+  processStep = false,
   t,
 }: {
   state: Partial<ToolState>;
+  actionLabel: string;
   statusLabel: string;
   statusIcon: React.ReactNode;
   statusIconColor: string;
+  processStep?: boolean;
   t: TodoTranslator;
 }) {
   const questions = readQuestionItems(state.input?.questions);
@@ -4610,6 +4906,67 @@ function ChatQuestionResult({
     ? 'bg-red-50 text-red-500'
     : 'bg-zinc-100 text-zinc-500';
   const firstQuestion = questions[0]?.header || questions[0]?.question || '';
+  const questionDetails = questions.map((question, index) => {
+    const answers = normalizeQuestionAnswer(rawAnswers[index]);
+    const displayAnswers = answers.length > 0
+      ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
+      : [t('chat.questionResult.unanswered')];
+    return (
+      <div
+        key={`${question.question}-${index}`}
+        className={`space-y-2 py-2 last:pb-0 ${processStep ? 'first:pt-0' : 'first:pt-2'}`}
+      >
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
+            {t('chat.questionResult.questionLabel')}
+          </span>
+          <div className="min-w-0">
+            {question.header && (
+              <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
+            )}
+            <div className="text-xs leading-5 text-zinc-700 dark:text-zinc-300">{question.question}</div>
+          </div>
+        </div>
+        <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
+          <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
+            {t('chat.questionResult.answerLabel')}
+          </span>
+          <div className="flex min-w-0 flex-wrap gap-1.5">
+            {displayAnswers.map((answer, answerIndex) => (
+              <span
+                key={`${answer}-${answerIndex}`}
+                className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
+              >
+                {answer}
+              </span>
+            ))}
+          </div>
+        </div>
+      </div>
+    );
+  });
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${statusIconColor}`}>
+            {statusIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{actionLabel}</span>
+          {firstQuestion && (
+            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {firstQuestion}
+            </span>
+          )}
+          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {questionDetails}
+        </div>
+      </details>
+    );
+  }
 
   return (
     <details className="group/tool rounded-lg bg-zinc-50 overflow-hidden">
@@ -4617,7 +4974,7 @@ function ChatQuestionResult({
         <span className={`${statusIconColor} flex-shrink-0 mt-0.5`}>{statusIcon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">question</span>
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{actionLabel}</span>
             {firstQuestion && (
               <span className="text-[11px] text-zinc-400 truncate min-w-0">
                 {firstQuestion}
@@ -4633,45 +4990,7 @@ function ChatQuestionResult({
         </div>
       </summary>
       <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {questions.map((question, index) => {
-          const answers = normalizeQuestionAnswer(rawAnswers[index]);
-          const displayAnswers = answers.length > 0
-            ? answers.map((answer) => formatQuestionAnswerValue(question, answer, t))
-            : [t('chat.questionResult.unanswered')];
-          return (
-            <div
-              key={`${question.question}-${index}`}
-              className="space-y-2 py-2 first:pt-2 last:pb-0"
-            >
-              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-                <span className="pt-0.5 text-[11px] font-medium text-zinc-400">
-                  {t('chat.questionResult.questionLabel')}
-                </span>
-                <div className="min-w-0">
-                  {question.header && (
-                    <div className="mb-0.5 text-[11px] font-medium text-zinc-500">{question.header}</div>
-                  )}
-                  <div className="text-xs leading-5 text-zinc-700">{question.question}</div>
-                </div>
-              </div>
-              <div className="grid grid-cols-[32px_minmax(0,1fr)] gap-2">
-                <span className={`pt-0.5 text-[11px] font-medium ${answerLabelClass}`}>
-                  {t('chat.questionResult.answerLabel')}
-                </span>
-                <div className="flex min-w-0 flex-wrap gap-1.5">
-                  {displayAnswers.map((answer, answerIndex) => (
-                    <span
-                      key={`${answer}-${answerIndex}`}
-                      className={`rounded-md border px-1.5 py-0.5 text-[11px] font-medium ${answerChipClass}`}
-                    >
-                      {answer}
-                    </span>
-                  ))}
-                </div>
-              </div>
-            </div>
-          );
-        })}
+        {questionDetails}
       </div>
     </details>
   );
@@ -4904,16 +5223,17 @@ export interface ChatToolPartProps {
   pendingQuestion?: PendingQuestion;
   onAnswer?: (answers: string[][]) => Promise<void>;
   onReject?: () => Promise<void>;
+  processStep?: boolean;
 }
 
-export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: ChatToolPartProps) {
+export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, processStep = false }: ChatToolPartProps) {
   const { t } = useTranslation('session');
   const toolName = part.tool || 'unknown';
 
   // Keep the delegate fallback narrow: many MCP tools also carry a generic
   // `category` field (for example wecom_mcp category="doc").
   if (shouldRenderDelegateTaskCard(part)) {
-    return <DelegateTaskCard part={part} />;
+    return <DelegateTaskCard part={part} processStep={processStep} />;
   }
 
   const state: Partial<ToolState> = part.state || {};
@@ -4963,20 +5283,56 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     : [];
   const showGenericToolPayload = toolName !== 'todo' && !isBashTool;
   const isTodoTool = toolName === 'todo';
+  const toolPresentation = resolveToolPresentation(toolName, state, t);
+  const hasToolInput = Boolean(state.input && Object.keys(state.input).length > 0);
+  const safeToolInput = hasToolInput
+    ? redactToolInput(state.input) as Record<string, unknown>
+    : undefined;
+  const showActionProgress = showGenericToolPayload
+    && !safeToolInput
+    && (status === 'pending' || status === 'running');
+  const actionProgressLabel = toolName === 'write'
+    ? t('chat.tool.progress.writingFile')
+    : toolName === 'edit' || toolName === 'apply_patch'
+      ? t('chat.tool.progress.editingFile')
+      : t('chat.tool.progress.working');
 
   // Reuse the shared helpers so the truncation rules stay in sync with the
   // delegate-task card and any other places that render tool input previews.
-  const inputSummary = state.input
+  const inputSummary = hasToolInput
     ? truncateToolDisplayText(
         toolName === 'todo'
           ? buildTodoSummary(state, t)
           : isBashTool
           ? buildBashHeaderSummary(state)
-          : buildToolInputSummary(state.input),
+          : buildToolInputSummary(safeToolInput || {}),
       )
     : '';
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
+  const semanticDetail = truncateToolDisplayText(toolPresentation.detail);
+  const fileOperationDisplayName = truncateToolDisplayText(getFileOperationDisplayName(toolName, state));
+  const toolDisplayName = toolPresentation.label;
+  const processStepLabel = isTodoTool
+    ? t('chat.tool.todoUpdated')
+    : toolPresentation.known
+      ? toolDisplayName
+      : config.label;
+  const processStepDetail = fileOperationDisplayName
+    || workflowHeaderSummary
+    || semanticDetail
+    || displayTitle
+    || inputSummary
+    || (toolPresentation.known ? '' : toolDisplayName);
+  const cardHeaderDetail = fileOperationDisplayName
+    || workflowHeaderSummary
+    || semanticDetail
+    || inputSummary
+    || displayTitle;
+  const processStepIcon = isTodoTool
+    ? <ListTree className="h-[15px] w-[15px]" />
+    : config.icon;
+  const processStepIconColor = isTodoTool ? 'text-slate-500' : config.iconColor;
   const statusBadgeClass = isTodoTool
     ? 'text-[11px] font-medium text-zinc-500'
     : `text-[11px] font-medium px-1.5 py-0.5 rounded-md ${config.pill}`;
@@ -4999,11 +5355,120 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
     return (
       <ChatQuestionResult
         state={state}
+        actionLabel={toolDisplayName}
         statusLabel={config.label}
         statusIcon={config.icon}
         statusIconColor={config.iconColor}
+        processStep={processStep}
         t={t}
       />
+    );
+  }
+
+  const toolDetails = (
+    <>
+      {isTodoTool && todoEntries.length > 0 && (
+        <div className="space-y-1.5">
+          <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
+            <span>{t('chat.tool.todoStages')}</span>
+            <span className="font-normal text-zinc-400">{todoEntries.length}</span>
+          </div>
+          <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+            {todoEntries.map((todo, index) => (
+              <div
+                key={todo.id || index}
+                className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
+              >
+                <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
+                  {todoStatusIcon(todo.status)}
+                </span>
+                <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
+                  {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
+                </span>
+                <span
+                  className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
+                >
+                  {todoStatusLabel(todo.status, t)}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {isBashTool && (
+        <ChatBashPayload state={state} t={t} />
+      )}
+
+      {showActionProgress && (
+        <div
+          data-testid="chat-tool-action-progress"
+          className="flex min-h-6 items-center gap-2 py-0.5 text-xs text-[#8d9390] dark:text-zinc-500"
+        >
+          <span className="inline-flex items-center gap-0.5" aria-hidden="true">
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:150ms]" />
+            <span className="h-1 w-1 animate-pulse rounded-full bg-current [animation-delay:300ms]" />
+          </span>
+          <span>{actionProgressLabel}</span>
+        </div>
+      )}
+
+      {showGenericToolPayload && safeToolInput && (
+        <details>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.inputParams')}
+          </summary>
+          <pre className="overflow-x-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-zinc-300">
+            {JSON.stringify(safeToolInput, null, 2)}
+          </pre>
+        </details>
+      )}
+
+      {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
+        <details open>
+          <summary className="mb-1 cursor-pointer text-[11px] font-medium text-zinc-500 transition-colors hover:text-zinc-700 dark:hover:text-zinc-300">
+            {t('chat.tool.outputResult')}
+          </summary>
+          <pre className="max-h-48 overflow-x-auto overflow-y-auto rounded-md bg-zinc-950 p-2 font-mono text-[11px] leading-relaxed text-green-400">
+            {formatToolPayload(state.output)}
+          </pre>
+        </details>
+      )}
+
+      {status === 'error' && state.error && (
+        <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
+          {state.error}
+        </div>
+      )}
+
+      {state.time?.start && state.time?.end && (
+        <div className="text-right text-[10px] text-zinc-400">
+          {((state.time.end - state.time.start) / 1000).toFixed(2)}s
+        </div>
+      )}
+    </>
+  );
+
+  if (processStep) {
+    return (
+      <details data-testid="chat-process-tool-step" className="group/tool min-w-0">
+        <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+          <span className={`inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center ${processStepIconColor}`}>
+            {processStepIcon}
+          </span>
+          <span className="min-w-0 flex-shrink-0">{processStepLabel}</span>
+          {processStepDetail && (
+            <span className="ml-0.5 min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {processStepDetail}
+            </span>
+          )}
+          <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/tool:rotate-180 dark:text-zinc-500" />
+        </summary>
+        <div className="mb-[9px] ml-2 mt-[3px] space-y-1.5 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+          {toolDetails}
+        </div>
+      </details>
     );
   }
 
@@ -5016,28 +5481,15 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         <span className={`${config.iconColor} flex-shrink-0 mt-0.5`}>{config.icon}</span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 min-w-0">
-            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolName.replace(/_/g, ' ')}</span>
-            {workflowHeaderSummary ? (
-              <span className="text-[11px] text-emerald-700 truncate min-w-0">
-                {workflowHeaderSummary}
+            <span className="font-medium text-zinc-700 text-xs whitespace-nowrap flex-shrink-0">{toolDisplayName}</span>
+            {cardHeaderDetail && (
+              <span
+                className={`text-[11px] truncate min-w-0 ${
+                  workflowHeaderSummary ? 'text-emerald-700' : 'text-zinc-400'
+                }`}
+              >
+                {cardHeaderDetail}
               </span>
-            ) : (
-              <>
-                {inputSummary && (
-                  <span
-                    className="text-[11px] text-zinc-400 font-mono truncate min-w-0"
-                  >
-                    {inputSummary}
-                  </span>
-                )}
-                {displayTitle && !inputSummary && (
-                  <span
-                    className="text-[11px] text-zinc-400 truncate min-w-0"
-                  >
-                    {displayTitle}
-                  </span>
-                )}
-              </>
             )}
           </div>
         </div>
@@ -5049,73 +5501,8 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject }: Chat
         </div>
       </summary>
 
-      <div className="border-t border-zinc-200/60 px-2.5 py-2 space-y-1.5 text-xs">
-        {isTodoTool && todoEntries.length > 0 && (
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between gap-3 text-[11px] font-medium text-zinc-500">
-              <span>{t('chat.tool.todoStages')}</span>
-              <span className="font-normal text-zinc-400">{todoEntries.length}</span>
-            </div>
-            <div className="divide-y divide-zinc-100">
-              {todoEntries.map((todo, index) => (
-                <div
-                  key={todo.id || index}
-                  className="grid grid-cols-[16px_minmax(0,1fr)_auto] items-start gap-2 py-1.5 text-[11px] first:pt-0 last:pb-0"
-                >
-                  <span className="mt-0.5 flex h-4 w-4 flex-shrink-0 items-center justify-center">
-                    {todoStatusIcon(todo.status)}
-                  </span>
-                  <span className={`min-w-0 leading-5 ${todoTextClass(todo.status)}`}>
-                    {todo.activeForm && todo.status === 'in_progress' ? todo.activeForm : todo.content}
-                  </span>
-                  <span
-                    className={`flex-shrink-0 whitespace-nowrap leading-5 ${todoStatusLabelClass(todo.status)}`}
-                  >
-                    {todoStatusLabel(todo.status, t)}
-                  </span>
-                </div>
-              ))}
-            </div>
-          </div>
-        )}
-
-        {isBashTool && (
-          <ChatBashPayload state={state} t={t} />
-        )}
-
-        {showGenericToolPayload && state.input && (
-          <details>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
-              {t('chat.tool.inputParams')}
-            </summary>
-            <pre className="p-2 bg-zinc-950 text-zinc-300 rounded-md text-[11px] overflow-x-auto font-mono leading-relaxed">
-              {JSON.stringify(state.input, null, 2)}
-            </pre>
-          </details>
-        )}
-
-        {showGenericToolPayload && status === 'completed' && state.output !== undefined && (
-          <details open>
-            <summary className="cursor-pointer text-[11px] text-zinc-500 font-medium hover:text-zinc-700 transition-colors mb-1">
-              {t('chat.tool.outputResult')}
-            </summary>
-            <pre className="p-2 bg-zinc-950 text-green-400 rounded-md text-[11px] overflow-x-auto max-h-48 overflow-y-auto font-mono leading-relaxed">
-              {formatToolPayload(state.output)}
-            </pre>
-          </details>
-        )}
-
-        {status === 'error' && state.error && (
-          <div className="px-2.5 py-1.5 bg-red-50 border border-red-100 rounded-md text-[11px] text-red-600">
-            {state.error}
-          </div>
-        )}
-
-        {state.time?.start && state.time?.end && (
-          <div className="text-zinc-400 text-right text-[10px]">
-            {((state.time.end - state.time.start) / 1000).toFixed(2)}s
-          </div>
-        )}
+      <div className="space-y-1.5 border-t border-zinc-200/60 px-2.5 py-2 text-xs">
+        {toolDetails}
       </div>
     </details>
   );

@@ -1,0 +1,63 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "soc_workspace_query",
+  "type": "tool",
+  "name": "Flocks SOC Workspace Query",
+  "description": "Query information from Flocks own SOC workspace pages, including dashboard, overview, alert lists, alert details, triage reports, and workflow status.",
+  "descriptionCn": "查询 Flocks 自身 SOC 工作区里的信息，包括 dashboard、overview、告警调查列表、告警详情、研判报告和工作流状态。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "integration",
+  "tags": [
+    "siem",
+    "ndr",
+    "integration"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "file-analysis"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/tools/python/soc_workspace_query"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "soc_workspace_query.py"
+  ],
+  "components": [],
+  "checksums": {}
+}

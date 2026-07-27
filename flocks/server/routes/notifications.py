@@ -26,13 +26,11 @@ router = APIRouter()
 async def list_active_notifications(
     request: Request,
     locale: str | None = None,
-    current_version: str | None = None,
 ) -> list[NotificationResponse]:
     user = require_user(request)
     return await NotificationService.list_active(
         user_id=user.id,
         locale=locale,
-        current_version=current_version,
     )
 
 

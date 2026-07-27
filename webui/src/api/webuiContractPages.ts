@@ -3,6 +3,7 @@ import client from './client';
 export interface WebUIContractPageListItem {
   id: string;
   title: string;
+  titleEn?: string | null;
   route: string;
   icon: string;
   order: number;
@@ -12,12 +13,14 @@ export interface WebUIContractPageListItem {
   buildStatus: 'idle' | 'building' | 'ready' | 'failed';
   workspaceId?: string | null;
   workspaceTitle?: string | null;
+  workspaceTitleEn?: string | null;
   workspaceRoute?: string | null;
 }
 
 export interface WebUIContractWorkspaceSection {
   id: string;
   label: string;
+  labelEn?: string | null;
   pageIds: string[];
   defaultPageId?: string | null;
   contentPadding?: 'comfortable' | 'none';
@@ -27,6 +30,7 @@ export interface WebUIContractWorkspaceSection {
 export interface WebUIContractWorkspaceListItem {
   id: string;
   title: string;
+  titleEn?: string | null;
   route: string;
   icon: string;
   order: number;
@@ -40,6 +44,7 @@ export interface WebUIContractWorkspaceListItem {
 export interface WebUIContractPageManifest {
   id: string;
   title: string;
+  titleEn?: string | null;
   route: string;
   icon: string;
   order: number;

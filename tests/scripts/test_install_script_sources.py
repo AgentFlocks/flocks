@@ -155,6 +155,10 @@ def test_main_bash_installer_uses_configured_default_sources_without_probing() -
     assert 'npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install' in script
     assert 'npm_config_registry="$NPM_REGISTRY" "$NPX_CMD" --yes @puppeteer/browsers install chrome@stable --path "$browser_dir"' in script
     assert 'npm_config_registry="$NPM_REGISTRY" "$NPM_CMD" install --global agent-browser' in script
+    assert 'write_install_profile()' in script
+    assert '"Language": "%s"' in script
+    assert 'write_install_profile' in script
+    assert "Failed to write install profile. Continuing with the default installer behavior." in script
     assert "FLOCKS_NODEJS_MANUAL_DOWNLOAD_URL" in script
     assert "https://nodejs.org/en/download" in script
     assert "nodejs_manual_download_hint" in script
@@ -201,6 +205,10 @@ def test_main_powershell_installer_uses_configured_default_sources_and_admin_pre
     assert "irm '$script:UvInstallPs1SecondaryFallbackUrl' | iex" in script
     assert 'function Assert-Administrator' in script
     assert 'Assert-Administrator' in script
+    assert 'function Write-InstallProfile' in script
+    assert '[ordered]@{ Language = $language }' in script
+    assert 'Write-InstallProfile' in script
+    assert "Failed to write install profile. Continuing with the default installer behavior." in script
 
 
 def test_windows_bootstrap_installers_detect_system32_and_fall_back_to_home() -> None:

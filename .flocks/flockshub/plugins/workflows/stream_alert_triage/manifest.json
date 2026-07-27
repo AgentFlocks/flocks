@@ -1,0 +1,68 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "stream_alert_triage",
+  "type": "workflow",
+  "name": "Stream Alert Triage",
+  "nameCn": "HTTP研判工作流",
+  "description": "Downstream alert triage workflow that writes triage results to SOC DB by default with optional JSONL output.",
+  "descriptionCn": "下游告警研判工作流，默认写入 SOC DB，并保留 JSONL 输出配置。",
+  "version": "1.0.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "homepage": "",
+  "category": "workflow-automation",
+  "tags": [
+    "siem",
+    "ndr",
+    "web-security"
+  ],
+  "useCases": [
+    "alert-triage",
+    "log-analysis",
+    "security-reporting"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "workflow",
+    "scheduled-task"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/workflows/stream_alert_triage"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": false,
+    "shell": false,
+    "filesystem": "read-write"
+  },
+  "risk": {
+    "level": "medium",
+    "reasons": []
+  },
+  "entrypoints": [
+    "workflow.json",
+    "workflow.md",
+    "guide.md",
+    "config.json"
+  ],
+  "components": [],
+  "checksums": {}
+}

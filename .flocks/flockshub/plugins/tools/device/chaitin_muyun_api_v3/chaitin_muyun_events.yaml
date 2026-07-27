@@ -1,0 +1,36 @@
+name: chaitin_muyun_events
+description: Chaitin Muyun security event query tool.
+description_cn: 长亭牧云安全事件查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_muyun_api
+version: "API 3.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - webshell_events
+        - malware_events
+        - bruteforce_events
+        - abnormal_login_events
+        - realtime_events
+        - test
+      description: |
+        事件类动作：
+        - webshell_events: 查询 WebShell 事件。
+        - malware_events: 查询恶意文件事件。
+        - bruteforce_events: 查询暴力破解事件。
+        - abnormal_login_events: 查询异常登录事件。
+        - realtime_events: 查询实时事件概览。
+    params:
+      type: object
+      description: JSON-RPC params 对象；建议显式传分页、时间和过滤条件。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_muyun.handler.py
+  function: events

@@ -1,0 +1,11 @@
+routes:
+  - method: GET
+    path: /stats
+    handler: handlers.get_stats
+    timeoutMs: 30000
+    description: Alert denoise and triage dashboard statistics
+  - method: GET
+    path: /activity
+    handler: handlers.get_activity
+    timeoutMs: 5000
+    description: Incremental alert denoise and triage activity

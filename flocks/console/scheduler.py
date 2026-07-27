@@ -61,6 +61,20 @@ class ConsoleSyncScheduler:
         await cls._maybe_sync_profile(now_ts)
 
     @classmethod
+    async def send_startup_heartbeat(cls) -> None:
+        """Send one heartbeat on every server start, regardless of interval."""
+        now_ts = int(time.time())
+        try:
+            result = await ConsoleLoginService.send_heartbeat()
+            await Storage.set(_HEARTBEAT_TS_KEY, now_ts, "number")
+            log.info("console.sync.startup_heartbeat.ok", {"at": now_ts, "result": result})
+        except ValueError:
+            # Not bound / invalid session is expected and should not spam logs.
+            return
+        except Exception as exc:
+            log.warning("console.sync.startup_heartbeat.failed", {"error": str(exc)})
+
+    @classmethod
     async def _maybe_send_heartbeat(cls, now_ts: int) -> None:
         raw_last = await Storage.get(_HEARTBEAT_TS_KEY)
         last_ts = int(raw_last) if raw_last else None

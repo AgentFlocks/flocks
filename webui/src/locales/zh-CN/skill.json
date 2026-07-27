@@ -65,8 +65,8 @@
   "installDialog": {
     "title": "安装技能",
     "sourceLabel": "来源",
-    "sourcePlaceholder": "输入来源，例如：\nclawhub:github\ngithub:owner/repo\nhttps://raw.githubusercontent.com/...\n/local/path/to/skill",
-    "sourceHint": "支持 clawhub、GitHub、URL、本地路径，以及未来的 safeskill: 来源",
+    "sourcePlaceholder": "输入来源，例如：\nclawhub:github\ngithub:owner/repo\nsafeskill://tbx/.../onesig-use@1.0.0\nhttps://raw.githubusercontent.com/...\n/local/path/to/skill",
+    "sourceHint": "支持 clawhub、GitHub、SafeSkill、URL 和本地路径来源",
     "scopeLabel": "安装范围",
     "scopeGlobal": "全局（~/.flocks/plugins/skills/）",
     "scopeProject": "当前项目（.flocks/plugins/skills/）",

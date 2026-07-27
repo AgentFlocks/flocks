@@ -29,13 +29,14 @@ import { hubAPI, type HubCatalogEntry, type HubPluginType } from '@/api/hub';
 
 type PluginView = 'installed' | 'marketplace';
 type ActionKind = 'install' | 'update' | 'uninstall';
-type PluginFamily = 'all' | 'agent' | 'skill' | 'mcp' | 'apiTool' | 'pythonTool' | 'generatedTool' | 'tool' | 'device' | 'workflow';
-type PluginSection = 'overview' | 'tools' | 'skills' | 'agents' | 'marketplace';
+type PluginFamily = 'all' | 'agent' | 'skill' | 'mcp' | 'apiTool' | 'pythonTool' | 'generatedTool' | 'tool' | 'device' | 'workflow' | 'webui' | 'component';
+type PluginSection = 'overview' | 'tools' | 'skills' | 'agents' | 'workflows' | 'marketplace';
 type PluginMode = 'assets' | 'discover';
 
 const ToolPage = lazy(() => import('@/pages/Tool'));
 const SkillPage = lazy(() => import('@/pages/Skill'));
 const AgentPage = lazy(() => import('@/pages/Agent'));
+const WorkflowPage = lazy(() => import('@/pages/Workflow'));
 const HubPage = lazy(() => import('@/pages/Hub'));
 
 interface PluginText {
@@ -103,6 +104,7 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tools: '工具',
       skills: '技能',
       agents: '智能体',
+      workflows: '工作流',
       marketplace: '发现插件',
     },
     sectionDescriptions: {
@@ -110,6 +112,7 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tools: '管理 MCP、API Tool、本地 Python Tool、设备工具等 Flocks 工具能力。',
       skills: '管理 Rex 和子 Agent 可加载的技能，包含启用、禁用、依赖安装和编辑。',
       agents: '管理子 Agent 配置、能力边界、工具白名单和创建入口。',
+      workflows: '管理工作流插件、运行配置与自动化编排。',
       marketplace: '从 Flocks Hub 浏览可安装插件，安装前查看 manifest、依赖、权限和文件内容。',
     },
     emptyTitle: '没有匹配的插件',
@@ -144,6 +147,8 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tool: '工具',
       device: '设备',
       workflow: '工作流',
+      webui: '界面插件',
+      component: '场景套件',
     },
     families: {
       all: '全部分类',
@@ -156,6 +161,8 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tool: '其他工具',
       device: '设备',
       workflow: '工作流',
+      webui: '界面插件',
+      component: '场景套件',
     },
     next: {
       agent: '创建会话或调整智能体配置',
@@ -163,6 +170,8 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tool: '测试工具或配置 API/MCP 服务',
       device: '设备接入保留为独立主入口，可在插件安装后添加设备实例并测试凭据',
       workflow: '打开工作流并运行验证',
+      webui: '在场景工作区中打开并验证界面',
+      component: '查看套件包含的插件并完成场景配置',
     },
     toast: {
       refreshed: '插件列表已刷新',
@@ -191,6 +200,7 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tools: 'Tools',
       skills: 'Skills',
       agents: 'Agents',
+      workflows: 'Workflows',
       marketplace: 'Discover',
     },
     sectionDescriptions: {
@@ -198,6 +208,7 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tools: 'Manage MCP, API Tool, local Python Tool, device tools, and other Flocks tool capabilities.',
       skills: 'Manage skills that Rex and sub-agents can load, including enablement, dependencies, and editing.',
       agents: 'Manage sub-agent configuration, boundaries, tool allowlists, and creation flows.',
+      workflows: 'Manage workflow plugins, run configuration, and automation orchestration.',
       marketplace: 'Browse Flocks Hub plugins and inspect manifests, dependencies, permissions, and files before installing.',
     },
     emptyTitle: 'No matching plugins',
@@ -232,6 +243,8 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tool: 'Tool',
       device: 'Device',
       workflow: 'Workflow',
+      webui: 'Web UI',
+      component: 'Scenario suite',
     },
     families: {
       all: 'All families',
@@ -244,6 +257,8 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tool: 'Other tools',
       device: 'Device',
       workflow: 'Workflow',
+      webui: 'Web UI',
+      component: 'Scenario suite',
     },
     next: {
       agent: 'Create a session or adjust agent settings',
@@ -251,6 +266,8 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
       tool: 'Test the tool or configure API/MCP services',
       device: 'Device Integration remains a primary entry. Add instances and test credentials there after installing plugins',
       workflow: 'Open the workflow and validate a run',
+      webui: 'Open and validate the UI in Scene Workspaces',
+      component: 'Review bundled plugins and finish scenario configuration',
     },
     toast: {
       refreshed: 'Plugin list refreshed',
@@ -260,9 +277,9 @@ const TEXT: Record<'zh' | 'en', PluginText> = {
   },
 };
 
-const TYPE_ORDER: HubPluginType[] = ['agent', 'skill', 'tool', 'device', 'workflow'];
-const FAMILY_ORDER: PluginFamily[] = ['agent', 'skill', 'mcp', 'apiTool', 'pythonTool', 'generatedTool', 'tool', 'device', 'workflow'];
-const ASSET_SECTION_ORDER: Array<Exclude<PluginSection, 'overview' | 'marketplace'>> = ['agents', 'skills', 'tools'];
+const TYPE_ORDER: HubPluginType[] = ['agent', 'skill', 'tool', 'device', 'workflow', 'webui', 'component'];
+const FAMILY_ORDER: PluginFamily[] = ['agent', 'skill', 'mcp', 'apiTool', 'pythonTool', 'generatedTool', 'tool', 'device', 'workflow', 'webui', 'component'];
+const ASSET_SECTION_ORDER: Array<Exclude<PluginSection, 'overview' | 'marketplace'>> = ['agents', 'skills', 'tools', 'workflows'];
 
 const TYPE_META: Record<HubPluginType, {
   icon: typeof Bot;
@@ -292,7 +309,17 @@ const TYPE_META: Record<HubPluginType, {
   workflow: {
     icon: Workflow,
     tone: 'bg-rose-50 text-rose-700 border-rose-200 dark:bg-rose-950/40 dark:text-rose-200 dark:border-rose-800',
-    href: '/workflows',
+    href: '/plugins/workflows',
+  },
+  webui: {
+    icon: Boxes,
+    tone: 'bg-sky-50 text-sky-700 border-sky-200 dark:bg-sky-950/40 dark:text-sky-200 dark:border-sky-800',
+    href: '/plugins/marketplace',
+  },
+  component: {
+    icon: Sparkles,
+    tone: 'bg-violet-50 text-violet-700 border-violet-200 dark:bg-violet-950/40 dark:text-violet-200 dark:border-violet-800',
+    href: '/plugins/marketplace',
   },
 };
 
@@ -312,7 +339,13 @@ function isZh(language: string) {
 }
 
 function resolvePluginSection(section?: string): PluginSection {
-  if (section === 'tools' || section === 'skills' || section === 'agents' || section === 'marketplace') {
+  if (
+    section === 'tools'
+    || section === 'skills'
+    || section === 'agents'
+    || section === 'workflows'
+    || section === 'marketplace'
+  ) {
     return section;
   }
   return 'agents';
@@ -359,6 +392,8 @@ function buildCounts(items: HubCatalogEntry[]) {
     tool: 0,
     device: 0,
     workflow: 0,
+    webui: 0,
+    component: 0,
   };
   items.forEach(item => {
     counts[item.type] += 1;
@@ -378,6 +413,8 @@ function buildFamilyCounts(items: HubCatalogEntry[]) {
     tool: 0,
     device: 0,
     workflow: 0,
+    webui: 0,
+    component: 0,
   };
   items.forEach(item => {
     counts[pluginFamily(item)] += 1;
@@ -825,6 +862,7 @@ function PluginSectionContent({ section }: { section: PluginSection }) {
   if (section === 'tools') return <ToolPage embedded />;
   if (section === 'skills') return <SkillPage embedded />;
   if (section === 'agents') return <AgentPage embedded />;
+  if (section === 'workflows') return <WorkflowPage embedded />;
   if (section === 'marketplace') return <HubPage embedded />;
   return null;
 }

@@ -1,0 +1,37 @@
+name: chaitin_safeline_waf_policy
+description: Chaitin SafeLine WAF ACL, rate-limit, and IP group read-only queries.
+description_cn: 长亭雷池 WAF 访问频率限制、ACL 和 IP 组只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_safeline_waf
+version: "1.0"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - acl_rules
+        - acl_templates
+        - ip_groups
+        - test
+      description: |
+        - acl_rules: GET /api/ACLRuleAPI，查询 ACL Rule。
+        - acl_templates: GET /api/ACLRuleTemplateAPI，查询访问频率限制规则。
+        - ip_groups: GET /api/IPGroupAPI，查询 IP 组。
+    query:
+      type: object
+      description: GET query 参数。
+    count:
+      type: integer
+      description: 分页数量。
+    offset:
+      type: integer
+      description: 分页偏移量。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_safeline_waf.handler.py
+  function: policy

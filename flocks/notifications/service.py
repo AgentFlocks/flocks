@@ -206,7 +206,6 @@ class NotificationService:
         *,
         user_id: str,
         locale: str | None = None,
-        current_version: str | None = None,
     ) -> list[NotificationResponse]:
         target_locale = _normalize_locale(locale)
         config_notifications = await cls._load_config_notifications()

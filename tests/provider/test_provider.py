@@ -132,6 +132,31 @@ def test_resolve_model_prefers_provider_specific_runtime_model(monkeypatch):
     assert resolved.capabilities.interleaved["field"] == "reasoning_content"
 
 
+def test_dynamic_openai_compatible_provider_prefers_max_completion_tokens(monkeypatch):
+    monkeypatch.setattr(Provider, "_providers", {})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    monkeypatch.setattr(
+        "flocks.config.config_writer.ConfigWriter.get_all_providers",
+        lambda: {
+            "custom-gpt5": {
+                "name": "Custom GPT5",
+                "npm": "@ai-sdk/openai-compatible",
+                "options": {"baseURL": "https://example.test/v1"},
+            }
+        },
+    )
+    monkeypatch.setattr(
+        "flocks.provider.credential.get_api_key",
+        lambda _provider_id: "test-key",
+    )
+
+    Provider._load_dynamic_providers()
+
+    provider = Provider._providers["custom-gpt5"]
+    assert provider.PREFER_MAX_COMPLETION_TOKENS is True
+
+
 def test_resolve_model_infers_interleaved_for_runtime_discovered_reasoning_model(monkeypatch):
     provider_model = SimpleNamespace(
         id="qwen3-max",
@@ -196,6 +221,7 @@ def test_resolve_model_does_not_infer_interleaved_for_non_reasoning_model(monkey
     [
         ("openai-compatible", "qwen3-235b-a22b-thinking", "https://api.example.com/v1", "reasoning_content"),
         ("openai-compatible", "kimi-k2-thinking-turbo", "https://api.example.com/v1", "reasoning_content"),
+        ("openai-compatible", "kimi-k3", "https://api.example.com/v1", "reasoning_content"),
         ("openai-compatible", "deepseek-v4-pro", "https://api.deepseek.com/v1", "reasoning_content"),
         ("openai-compatible", "glm-4.7", "https://api.example.com/v1", "reasoning_content"),
         ("openai-compatible", "minimax-m3", "https://api.example.com/v1", "reasoning_details"),

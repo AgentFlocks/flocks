@@ -4,11 +4,12 @@ service_id: tdp_api
 version: "3.3.10"
 integration_type: device
 description: >
-  TDP monitoring platform API for dashboard, threat investigation, asset risk,
-  log search, MDR analysis, and system status queries.
+  TDP monitoring platform API for dashboard, real-time threat monitoring,
+  threat investigation, asset risk, log search, MDR analysis, system status,
+  and custom rule management.
 description_cn: >
-  TDP 监测平台接口，提供监控看板、威胁调查、资产风险、日志检索、MDR、告警调查
-  研判和系统运行状态查询能力。
+  TDP 监测平台接口，提供监控看板、威胁实时监控、威胁调查、资产风险、日志检索、
+  MDR 告警研判、系统运行状态查询和自定义规则管理能力。
 docs_url: "https://agentflocks.github.io/flocks-docs/md/modules/devices/tdp-integration"
 auth:
   type: custom

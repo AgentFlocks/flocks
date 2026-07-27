@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import sys
+from argparse import Namespace
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable
@@ -46,6 +47,38 @@ def format_timestamp(value: Any) -> str:
 
 def resolve_auth_file() -> Path | None:
     return AUTH_STATE_FILE if AUTH_STATE_FILE.exists() else None
+
+
+def ensure_browser_auth_state(
+    *,
+    base_url: str,
+    login_path: str | None,
+    username: str | None,
+    password: str | None,
+    captcha_code: str | None,
+    force_refresh: bool,
+    debug: bool,
+) -> tuple[bool, str]:
+    from skyeye_auth import ensure_auth_state, _runtime_config
+
+    args = Namespace(
+        base_url=base_url,
+        username=username,
+        password=password,
+        auth_state=str(AUTH_STATE_FILE),
+        login_path=login_path or "",
+        captcha_path="",
+        captcha_code=captcha_code or "",
+        timeout=25,
+        max_captcha_retry=5,
+        no_ocr=False,
+        save_credentials=True,
+    )
+    cfg = _runtime_config(args)
+    result = ensure_auth_state(cfg, captcha_code=captcha_code or "", force_refresh=force_refresh)
+    if debug:
+        print_info(json.dumps(result, ensure_ascii=False))
+    return bool(result.get("success") or result.get("valid")), cfg.base_url
 
 
 def parse_pairs(pairs: Iterable[str]) -> dict[str, str]:
@@ -154,18 +187,57 @@ def common_log_options(func):
 @click.group()
 @click.option("--token", "-t", help="CSRF Token，或使用 SKYEYE_CSRF_TOKEN")
 @click.option("--base-url", "-u", help="平台地址，或使用 SKYEYE_BASE_URL")
+@click.option("--login-path", help="Login path for browser/CDP login")
+@click.option("--username", help="Username for browser/CDP login")
+@click.option("--password", help="Password for browser/CDP login")
+@click.option("--auto-login", is_flag=True, help="Use saved credentials to refresh browser auth-state")
+@click.option("--refresh-auth", is_flag=True, help="Force browser/CDP login before running the command")
+@click.option("--captcha-code", help="Captcha code; OCR is used when omitted")
 @click.option("--debug", "-d", is_flag=True, help="开启调试输出")
 @click.option("--table", "table_output", is_flag=True, help="输出格式化表格（默认为 JSON）")
 @click.pass_context
-def cli(ctx: click.Context, token: str, base_url: str, debug: bool, table_output: bool) -> None:
+def cli(
+    ctx: click.Context,
+    token: str | None,
+    base_url: str | None,
+    login_path: str | None,
+    username: str | None,
+    password: str | None,
+    auto_login: bool,
+    refresh_auth: bool,
+    captcha_code: str | None,
+    debug: bool,
+    table_output: bool,
+) -> None:
     """SkyEye CLI."""
     ctx.ensure_object(dict)
     actual_base_url = base_url or BASE_URL
-    auth_file = resolve_auth_file()
     actual_token = token or TOKEN
 
+    wants_browser_login = bool(username or password or auto_login or refresh_auth)
+    if wants_browser_login:
+        try:
+            ok, resolved_base_url = ensure_browser_auth_state(
+                base_url=actual_base_url,
+                login_path=login_path,
+                username=username,
+                password=password,
+                captcha_code=captcha_code,
+                force_refresh=refresh_auth,
+                debug=debug,
+            )
+            actual_base_url = resolved_base_url or actual_base_url
+            if not ok:
+                print_error("SkyEye 自动登录失败，请改用浏览器手动登录后保存 auth-state。")
+                sys.exit(1)
+        except Exception as exc:
+            print_error(f"SkyEye 自动登录失败: {exc}")
+            sys.exit(1)
+
+    auth_file = resolve_auth_file()
+
     if auth_file is None and not actual_token:
-        print_error("未提供认证信息。请提供 auth-state.json 或 SKYEYE_CSRF_TOKEN。")
+        print_error("未提供认证信息。请提供 auth-state.json、SKYEYE_CSRF_TOKEN，或使用 --auto-login/--username/--password。")
         sys.exit(1)
     if not actual_base_url:
         print_error("未提供平台地址。请设置 SKYEYE_BASE_URL 或使用 --base-url。")

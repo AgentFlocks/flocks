@@ -3,10 +3,16 @@
 import asyncio
 import json
 import os
+import platform
+import signal
 import socket
 import sys
 import time
+import traceback
+import urllib.error
+import urllib.parse
 import urllib.request
+import uuid
 from collections import deque
 from pathlib import Path
 
@@ -17,38 +23,14 @@ from . import _ipc as ipc
 from .utils import load_env_file
 
 
+FLOCKS_DEBUG_PROFILE_NAMES = (
+    "chrome-debug-profile",
+    "edge-debug-profile",
+    "chromium-debug-profile",
+    "brave-debug-profile",
+)
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
-NAME = os.environ.get("BU_NAME", "default")
-SOCK = ipc.sock_addr(NAME)
-LOG = str(ipc.log_path(NAME))
-PID = str(ipc.pid_path(NAME))
 BUF = 500
-PROFILES = [
-    Path.home() / "Library/Application Support/Google/Chrome",
-    Path.home() / "Library/Application Support/Comet",
-    Path.home() / "Library/Application Support/Arc/User Data",
-    Path.home() / "Library/Application Support/Microsoft Edge",
-    Path.home() / "Library/Application Support/Microsoft Edge Beta",
-    Path.home() / "Library/Application Support/Microsoft Edge Dev",
-    Path.home() / "Library/Application Support/Microsoft Edge Canary",
-    Path.home() / "Library/Application Support/BraveSoftware/Brave-Browser",
-    Path.home() / ".config/google-chrome",
-    Path.home() / ".config/chromium",
-    Path.home() / ".config/chromium-browser",
-    Path.home() / ".config/microsoft-edge",
-    Path.home() / ".config/microsoft-edge-beta",
-    Path.home() / ".config/microsoft-edge-dev",
-    Path.home() / ".var/app/org.chromium.Chromium/config/chromium",
-    Path.home() / ".var/app/com.google.Chrome/config/google-chrome",
-    Path.home() / ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
-    Path.home() / ".var/app/com.microsoft.Edge/config/microsoft-edge",
-    Path.home() / "AppData/Local/Google/Chrome/User Data",
-    Path.home() / "AppData/Local/Chromium/User Data",
-    Path.home() / "AppData/Local/Microsoft/Edge/User Data",
-    Path.home() / "AppData/Local/Microsoft/Edge Beta/User Data",
-    Path.home() / "AppData/Local/Microsoft/Edge Dev/User Data",
-    Path.home() / "AppData/Local/Microsoft/Edge SxS/User Data",
-]
 INTERNAL = INTERNAL_URL_PREFIXES
 MARKER = "🟢"
 
@@ -59,11 +41,83 @@ def _load_env() -> None:
             continue
         load_env_file(path)
 
+
 _load_env()
+
+NAME = ipc.runtime_paths().name
+SOCK = ipc.sock_addr(NAME)
+LOG = str(ipc.log_path(NAME))
+PID = str(ipc.pid_path(NAME))
+
+
+def profile_dirs(
+    system: str | None = None,
+    home: Path | None = None,
+    environ: dict[str, str] | None = None,
+) -> list[Path]:
+    """Return only the browser profile directories for the active OS."""
+    system = system or platform.system()
+    home = home or Path.home()
+    environ = os.environ if environ is None else environ
+    flocks_debug_profiles = [home / ".flocks" / name for name in FLOCKS_DEBUG_PROFILE_NAMES]
+    if system == "Darwin":
+        support = home / "Library/Application Support"
+        return [
+            *flocks_debug_profiles,
+            support / "Google/Chrome",
+            support / "Google/Chrome Canary",
+            support / "Comet",
+            support / "Arc/User Data",
+            support / "Microsoft Edge",
+            support / "Microsoft Edge Beta",
+            support / "Microsoft Edge Dev",
+            support / "Microsoft Edge Canary",
+            support / "BraveSoftware/Brave-Browser",
+            support / "Chromium",
+        ]
+    if system == "Windows":
+        local = Path(environ.get("LOCALAPPDATA", str(home / "AppData/Local"))).expanduser()
+        return [
+            *flocks_debug_profiles,
+            local / "Google/Chrome/User Data",
+            local / "Google/Chrome Beta/User Data",
+            local / "Google/Chrome Dev/User Data",
+            local / "Google/Chrome SxS/User Data",
+            local / "Chromium/User Data",
+            local / "Microsoft/Edge/User Data",
+            local / "Microsoft/Edge Beta/User Data",
+            local / "Microsoft/Edge Dev/User Data",
+            local / "Microsoft/Edge SxS/User Data",
+            local / "BraveSoftware/Brave-Browser/User Data",
+            local / "BraveSoftware/Brave-Browser-Beta/User Data",
+            local / "BraveSoftware/Brave-Browser-Nightly/User Data",
+        ]
+    return [
+        *flocks_debug_profiles,
+        home / ".config/google-chrome",
+        home / ".config/google-chrome-beta",
+        home / ".config/google-chrome-unstable",
+        home / ".config/chromium",
+        home / ".config/chromium-browser",
+        home / ".config/microsoft-edge",
+        home / ".config/microsoft-edge-beta",
+        home / ".config/microsoft-edge-dev",
+        home / ".config/BraveSoftware/Brave-Browser",
+        home / ".var/app/org.chromium.Chromium/config/chromium",
+        home / ".var/app/com.google.Chrome/config/google-chrome",
+        home / ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
+        home / ".var/app/com.microsoft.Edge/config/microsoft-edge",
+    ]
 
 
 def log(msg: str) -> None:
-    Path(LOG).open("a", encoding="utf-8").write(f"{msg}\n")
+    paths = ipc.runtime_paths(NAME)
+    try:
+        paths.ensure_root()
+        with paths.log.open("a", encoding="utf-8", errors="replace") as handle:
+            handle.write(f"{msg}\n")
+    except OSError:
+        print(msg, file=sys.stderr)
 
 
 async def _silent(coro) -> None:
@@ -71,6 +125,32 @@ async def _silent(coro) -> None:
         await coro
     except Exception:
         pass
+
+
+def _local_cdp_ws_url(port: int, devtools_path: str | None = None) -> str:
+    """Return a validated local browser WebSocket URL from profile metadata."""
+    try:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1) as response:
+            payload = json.loads(response.read())
+        if not isinstance(payload, dict):
+            raise ValueError("invalid CDP version response")
+        websocket_url = payload.get("webSocketDebuggerUrl")
+        if not isinstance(websocket_url, str) and devtools_path and devtools_path.startswith("/"):
+            websocket_url = f"ws://127.0.0.1:{port}{devtools_path}"
+        elif not isinstance(websocket_url, str):
+            raise ValueError("invalid webSocketDebuggerUrl")
+    except urllib.error.HTTPError:
+        if not devtools_path or not devtools_path.startswith("/"):
+            raise
+        websocket_url = f"ws://127.0.0.1:{port}{devtools_path}"
+    parsed = urllib.parse.urlparse(websocket_url)
+    if (
+        parsed.scheme not in {"ws", "wss"}
+        or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+        or parsed.port != port
+    ):
+        raise ValueError("invalid webSocketDebuggerUrl")
+    return websocket_url
 
 
 def get_ws_url() -> str:
@@ -90,40 +170,54 @@ def get_ws_url() -> str:
         raise RuntimeError(
             f"BU_CDP_URL={url} unreachable after 30s: {last_err} -- is the dedicated automation browser running?"
         )
-    for base in PROFILES:
+    profiles = profile_dirs()
+    profile_candidates = []
+    profile_errors = []
+    for base in profiles:
         try:
-            port, path = (base / "DevToolsActivePort").read_text().strip().split("\n", 1)
+            port, path = (
+                (base / "DevToolsActivePort").read_text(encoding="utf-8-sig", errors="replace").strip().split("\n", 1)
+            )
         except (FileNotFoundError, NotADirectoryError):
             continue
-        deadline = time.time() + 30
-        while True:
-            probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            probe.settimeout(1)
+        except ValueError:
+            profile_errors.append(f"{base}: invalid DevToolsActivePort")
+            continue
+        try:
+            port_number = int(port.strip())
+            if not 1 <= port_number <= 65535 or not path.strip():
+                raise ValueError
+        except ValueError:
+            profile_errors.append(f"{base}: invalid DevToolsActivePort")
+            continue
+        profile_candidates.append((base, port_number, path.strip()))
+
+    deadline = time.time() + 30
+    while profile_candidates:
+        for base, port, devtools_path in profile_candidates:
             try:
-                probe.connect(("127.0.0.1", int(port.strip())))
-                break
-            except OSError:
-                if time.time() >= deadline:
-                    raise RuntimeError(
-                        "The browser's remote-debugging page is open, but DevTools is not live yet on "
-                        f"127.0.0.1:{port.strip()} — if the browser opened a profile picker, choose your normal "
-                        "profile first, then tick the checkbox and click Allow if shown"
-                    )
-                time.sleep(1)
-            finally:
-                probe.close()
-        return f"ws://127.0.0.1:{port.strip()}{path.strip()}"
+                return _local_cdp_ws_url(port, devtools_path)
+            except (OSError, ValueError, json.JSONDecodeError) as error:
+                profile_errors.append(f"{base}: 127.0.0.1:{port} ({error})")
+        if time.time() >= deadline:
+            break
+        time.sleep(1)
     for probe_port in (9222, 9223):
         try:
-            with urllib.request.urlopen(f"http://127.0.0.1:{probe_port}/json/version", timeout=1) as response:
-                return json.loads(response.read())["webSocketDebuggerUrl"]
-        except (OSError, KeyError, ValueError):
+            return _local_cdp_ws_url(probe_port)
+        except (OSError, ValueError, json.JSONDecodeError):
             continue
+    if profile_errors:
+        details = "; ".join(dict.fromkeys(profile_errors))
+        raise RuntimeError(
+            "Chromium-based browser remote debugging is not reachable for any detected profile: "
+            f"{details} — for manual setup, start the browser with --remote-debugging-port and a non-default "
+            "--user-data-dir, then verify http://127.0.0.1:9222/json/version"
+        )
     raise RuntimeError(
         "DevToolsActivePort not found in "
-        f"{[str(path) for path in PROFILES]} — enable your browser's remote-debugging page "
-        "(for example chrome://inspect/#remote-debugging or edge://inspect/#remote-debugging), "
-        "or set BU_CDP_WS for a remote browser"
+        f"{[str(path) for path in profiles]} — start a Chromium-based browser with --remote-debugging-port and a non-default "
+        "--user-data-dir, or set BU_CDP_WS for a remote browser"
     )
 
 
@@ -134,14 +228,17 @@ def is_real_page(target: dict) -> bool:
 class Daemon:
     """Long-lived CDP client that serves simple JSON IPC requests."""
 
-    def __init__(self) -> None:
+    def __init__(self, name: str = NAME) -> None:
+        self.name = ipc.runtime_paths(name).name
+        self.instance_id = uuid.uuid4().hex
+        self.browser_kind = "cdp" if os.environ.get("BU_CDP_WS") or os.environ.get("BU_CDP_URL") else "local"
         self.cdp = None
         self.session = None
         self.target_id = None
         self.managed_tabs = {}
         self.events = deque(maxlen=BUF)
         self.dialog = None
-        self.stop = None
+        self.stop = asyncio.Event()
 
     async def _enable_session_domains(self) -> None:
         for domain in ("Page", "DOM", "Runtime", "Network"):
@@ -151,9 +248,9 @@ class Daemon:
                 log(f"enable {domain}: {error}")
 
     async def _attach_target(self, target_id: str) -> dict:
-        self.session = (
-            await self.cdp.send_raw("Target.attachToTarget", {"targetId": target_id, "flatten": True})
-        )["sessionId"]
+        self.session = (await self.cdp.send_raw("Target.attachToTarget", {"targetId": target_id, "flatten": True}))[
+            "sessionId"
+        ]
         self.target_id = target_id
         try:
             info = (await self.cdp.send_raw("Target.getTargetInfo", {"targetId": target_id}))["targetInfo"]
@@ -173,7 +270,6 @@ class Daemon:
         return await self._attach_target(pages[0]["targetId"])
 
     async def start(self) -> None:
-        self.stop = asyncio.Event()
         url = get_ws_url()
         log(f"connecting to {url}")
         self.cdp = CDPClient(url)
@@ -195,7 +291,9 @@ class Daemon:
                     f"{hint}"
                 ) from error
             raise RuntimeError(
-                f"CDP WS handshake failed: {error} -- click Allow in your browser if prompted, then retry"
+                f"CDP WS handshake failed: {error} -- restart your Chromium-based browser with "
+                "--remote-debugging-port and a non-default --user-data-dir, then verify "
+                "http://127.0.0.1:9222/json/version"
             )
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event
@@ -222,6 +320,15 @@ class Daemon:
 
     async def handle(self, req: dict) -> dict:
         meta = req.get("meta")
+        if meta == "ping":
+            return {
+                "pong": True,
+                "protocol_version": ipc.PROTOCOL_VERSION,
+                "name": self.name,
+                "pid": os.getpid(),
+                "instance_id": self.instance_id,
+                "browser_kind": self.browser_kind,
+            }
         if meta == "drain_events":
             output = list(self.events)
             self.events.clear()
@@ -322,27 +429,20 @@ class Daemon:
                     return {"result": await self.cdp.send_raw(method, params, session_id=self.session)}
             return {"error": msg}
 
-
-async def serve(daemon: Daemon) -> None:
-    async def handler(reader, writer):
+    async def close(self) -> None:
+        """Close the CDP client and its background tasks."""
+        if self.cdp is None:
+            return
         try:
-            line = await reader.readline()
-            if not line:
-                return
-            resp = await daemon.handle(json.loads(line))
-            writer.write((json.dumps(resp, default=str) + "\n").encode())
-            await writer.drain()
+            await self.cdp.stop()
         except Exception as error:
-            log(f"conn: {error}")
-            try:
-                writer.write((json.dumps({"error": str(error)}) + "\n").encode())
-                await writer.drain()
-            except Exception:
-                pass
+            log(f"CDP client stop failed: {error}")
         finally:
-            writer.close()
+            self.cdp = None
 
-    serve_task = asyncio.create_task(ipc.serve(NAME, handler))
+
+async def serve(daemon: Daemon, lock: ipc.DaemonLock) -> None:
+    serve_task = asyncio.create_task(ipc.serve(NAME, daemon.handle, lock))
     stop_task = asyncio.create_task(daemon.stop.wait())
     await asyncio.sleep(0.05)
     log(f"listening on {ipc.sock_addr(NAME)} (name={NAME})")
@@ -357,13 +457,24 @@ async def serve(daemon: Daemon) -> None:
                 await task
             except (asyncio.CancelledError, Exception):
                 pass
-        ipc.cleanup_endpoint(NAME)
 
 
-async def main() -> None:
+async def main(lock: ipc.DaemonLock) -> None:
     daemon = Daemon()
-    await daemon.start()
-    await serve(daemon)
+    loop = asyncio.get_running_loop()
+    for signal_number in (signal.SIGINT, signal.SIGTERM):
+        try:
+            loop.add_signal_handler(signal_number, daemon.stop.set)
+        except (NotImplementedError, RuntimeError, ValueError):
+            try:
+                signal.signal(signal_number, lambda _signum, _frame: loop.call_soon_threadsafe(daemon.stop.set))
+            except (OSError, RuntimeError, ValueError):
+                pass
+    try:
+        await daemon.start()
+        await serve(daemon, lock)
+    finally:
+        await daemon.close()
 
 
 def already_running() -> bool:
@@ -371,25 +482,57 @@ def already_running() -> bool:
         sock = ipc.connect(NAME, timeout=1.0)
         sock.close()
         return True
-    except (FileNotFoundError, ConnectionRefusedError, TimeoutError, socket.timeout, OSError):
+    except (
+        ipc.EndpointRecordError,
+        FileNotFoundError,
+        ConnectionRefusedError,
+        TimeoutError,
+        socket.timeout,
+        OSError,
+    ):
         return False
 
 
-if __name__ == "__main__":
-    if already_running():
-        print(f"daemon already running on {SOCK}", file=sys.stderr)
-        sys.exit(0)
-    Path(LOG).write_text("", encoding="utf-8")
-    Path(PID).write_text(str(os.getpid()), encoding="utf-8")
+def _configure_stdio() -> None:
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure:
+            reconfigure(encoding="utf-8", errors="replace")
+
+
+def _remove_own_pid() -> None:
+    path = ipc.pid_path(NAME)
     try:
-        asyncio.run(main())
+        recorded_pid = int(path.read_text(encoding="utf-8", errors="replace").strip())
+    except (FileNotFoundError, ValueError):
+        return
+    if recorded_pid == os.getpid():
+        path.unlink(missing_ok=True)
+
+
+if __name__ == "__main__":
+    _configure_stdio()
+    daemon_lock = ipc.DaemonLock(NAME)
+    owns_runtime = False
+    if not daemon_lock.acquire():
+        print(f"daemon startup already in progress for {NAME!r}", file=sys.stderr)
+        sys.exit(ipc.LOCK_BUSY_EXIT_CODE)
+    try:
+        if already_running():
+            print(f"daemon already running on {SOCK}", file=sys.stderr)
+            sys.exit(0)
+        log(f"--- starting browser daemon name={NAME} pid={os.getpid()} ---")
+        ipc.write_pid(NAME, os.getpid())
+        owns_runtime = True
+        asyncio.run(main(daemon_lock))
     except KeyboardInterrupt:
         pass
-    except Exception as error:
-        log(f"fatal: {error}")
+    except Exception:
+        traceback.print_exc()
+        log(f"fatal:\n{traceback.format_exc()}")
         sys.exit(1)
     finally:
-        try:
-            os.unlink(PID)
-        except FileNotFoundError:
-            pass
+        if owns_runtime:
+            _remove_own_pid()
+            ipc.cleanup_endpoint(NAME, daemon_lock)
+        daemon_lock.release()

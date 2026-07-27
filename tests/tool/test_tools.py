@@ -17,9 +17,11 @@ import json
 import os
 import tempfile
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List
+from unittest.mock import MagicMock
 
 # Import the tool system
 from flocks.tool import (
@@ -35,6 +37,8 @@ from flocks.tool import (
     ParameterType,
 )
 from flocks.tool.code import bash as bash_module
+import flocks.tool.file.glob as glob_module
+import flocks.tool.registry as registry_module
 import flocks.tool.system.question as question_module
 
 
@@ -579,6 +583,33 @@ class TestGlobTool:
         assert result.success
         assert "No files found" in result.output
 
+    @pytest.mark.asyncio
+    async def test_python_fallback_logs_info_once(self, monkeypatch, tool_context, temp_dir):
+        monkeypatch.setattr(glob_module, "_ripgrep_fallback_logged", False)
+        monkeypatch.setattr(glob_module, "find_ripgrep", lambda: None)
+        info_log = MagicMock()
+        warn_log = MagicMock()
+        monkeypatch.setattr(glob_module.log, "info", info_log)
+        monkeypatch.setattr(glob_module.log, "warn", warn_log)
+
+        for _ in range(2):
+            result = await glob_module.glob_tool(
+                tool_context,
+                pattern="*.txt",
+                path=temp_dir,
+            )
+            assert result.success
+
+        fallback_calls = [
+            call for call in info_log.call_args_list
+            if call.args and call.args[0] == "glob.ripgrep_not_found"
+        ]
+        assert len(fallback_calls) == 1
+        assert not any(
+            call.args and call.args[0] == "glob.ripgrep_not_found"
+            for call in warn_log.call_args_list
+        )
+
 
 # =============================================================================
 # P1 Tools Tests
@@ -890,6 +921,46 @@ class TestSampleTools:
         # Should return ISO format datetime
         assert "T" in result.output  # ISO format contains 'T'
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output_format", "scale"),
+        [("unix", 1), ("unix_ms", 1000)],
+    )
+    async def test_get_time_tool_timestamp_formats(
+        self,
+        tool_context,
+        output_format,
+        scale,
+    ):
+        """Test Unix timestamp output in seconds and milliseconds."""
+        ToolRegistry.init()
+        before = int(time.time() * scale)
+
+        result = await ToolRegistry.execute(
+            "get_time",
+            ctx=tool_context,
+            format=output_format,
+        )
+
+        after = int(time.time() * scale)
+        assert result.success
+        assert result.output.isdigit()
+        assert before <= int(result.output) <= after
+
+    @pytest.mark.asyncio
+    async def test_get_time_tool_rejects_invalid_format(self, tool_context):
+        """Test invalid output formats return a clear error."""
+        ToolRegistry.init()
+
+        result = await ToolRegistry.execute(
+            "get_time",
+            ctx=tool_context,
+            format="invalid",
+        )
+
+        assert not result.success
+        assert result.error == "format must be one of: iso, unix, unix_ms"
+
 
 # =============================================================================
 # ToolContext Tests
@@ -1030,8 +1101,13 @@ class TestErrorHandling:
     """Test error handling across tools"""
     
     @pytest.mark.asyncio
-    async def test_missing_required_parameter(self, tool_context):
+    async def test_missing_required_parameter(self, monkeypatch, tool_context):
         """Test error when required parameter is missing"""
+        warn_log = MagicMock()
+        error_log = MagicMock()
+        monkeypatch.setattr(registry_module.log, "warn", warn_log)
+        monkeypatch.setattr(registry_module.log, "error", error_log)
+
         result = await ToolRegistry.execute(
             "read",
             ctx=tool_context
@@ -1040,6 +1116,18 @@ class TestErrorHandling:
         
         assert not result.success
         assert "required" in result.error.lower() or "missing" in result.error.lower()
+        warn_log.assert_called_once_with(
+            "tool.execute.missing_param",
+            {
+                "tool": "read",
+                "missing": "filePath",
+                "provided": [],
+            },
+        )
+        assert not any(
+            call.args and call.args[0] == "tool.execute.missing_param"
+            for call in error_log.call_args_list
+        )
     
     @pytest.mark.asyncio
     async def test_nonexistent_tool(self, tool_context):

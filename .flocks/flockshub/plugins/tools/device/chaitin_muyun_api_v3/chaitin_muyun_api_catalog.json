@@ -1,0 +1,7787 @@
+{
+  "schema_version": 1,
+  "source": "长亭牧云api/openapi.json",
+  "rpc_endpoint": "/rpc",
+  "entries": [
+    {
+      "method": "AbnormalLoginEventService.CreateWhitelist",
+      "service": "AbnormalLoginEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.DeleteEvent",
+      "service": "AbnormalLoginEventService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选 ID 的事件",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.DeleteEventByHost",
+      "service": "AbnormalLoginEventService",
+      "operation": "DeleteEventByHost",
+      "kind": "mutation",
+      "description": "删除所选主机的事件",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.DeleteEventByLoginIP",
+      "service": "AbnormalLoginEventService",
+      "operation": "DeleteEventByLoginIP",
+      "kind": "mutation",
+      "description": "删除所选登陆 IP 的事件",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.EditEventComment",
+      "service": "AbnormalLoginEventService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.EditEventState",
+      "service": "AbnormalLoginEventService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选 ID 事件的处置状态",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.EditEventStateByHost",
+      "service": "AbnormalLoginEventService",
+      "operation": "EditEventStateByHost",
+      "kind": "mutation",
+      "description": "改变所选主机 ID 事件的处置状态",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.EditEventStateByLoginIP",
+      "service": "AbnormalLoginEventService",
+      "operation": "EditEventStateByLoginIP",
+      "kind": "mutation",
+      "description": "改变所选登陆 IP 事件的处置状态",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GenerateEventFirewallRule",
+      "service": "AbnormalLoginEventService",
+      "operation": "GenerateEventFirewallRule",
+      "kind": "mutation",
+      "description": "根据所选事件生成网络阻断规则",
+      "tags": [
+        "异常登陆"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GetEvent",
+      "service": "AbnormalLoginEventService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GetEventByHostList",
+      "service": "AbnormalLoginEventService",
+      "operation": "GetEventByHostList",
+      "kind": "readonly",
+      "description": "获取按主机聚合的事件列表",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GetEventByLoginIPList",
+      "service": "AbnormalLoginEventService",
+      "operation": "GetEventByLoginIPList",
+      "kind": "readonly",
+      "description": "获取按登陆 IP 聚合的事件列表",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GetEventList",
+      "service": "AbnormalLoginEventService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GetGeographicalLocation",
+      "service": "AbnormalLoginEventService",
+      "operation": "GetGeographicalLocation",
+      "kind": "readonly",
+      "description": "获取地理信息",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.GetWhitelist",
+      "service": "AbnormalLoginEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.MarkAsRead",
+      "service": "AbnormalLoginEventService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.ResetEventState",
+      "service": "AbnormalLoginEventService",
+      "operation": "ResetEventState",
+      "kind": "mutation",
+      "description": "reset the state of event to 'risky'",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.ResetEventStateByHost",
+      "service": "AbnormalLoginEventService",
+      "operation": "ResetEventStateByHost",
+      "kind": "mutation",
+      "description": "reset the state of event to 'risky'",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AbnormalLoginEventService.ResetEventStateByLoginIP",
+      "service": "AbnormalLoginEventService",
+      "operation": "ResetEventStateByLoginIP",
+      "kind": "mutation",
+      "description": "改变所选主机 ID 事件的处置状态",
+      "tags": [
+        "异常登录"
+      ]
+    },
+    {
+      "method": "AccountAuthService.BindCurrentUserOAuth",
+      "service": "AccountAuthService",
+      "operation": "BindCurrentUserOAuth",
+      "kind": "mutation",
+      "description": "绑定当前用户 Oauth",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.ConfirmCurrentUserFeitian",
+      "service": "AccountAuthService",
+      "operation": "ConfirmCurrentUserFeitian",
+      "kind": "mutation",
+      "description": "绑定当前用户 TOTP",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.ConfirmCurrentUserTotp",
+      "service": "AccountAuthService",
+      "operation": "ConfirmCurrentUserTotp",
+      "kind": "mutation",
+      "description": "绑定当前用户 TOTP",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.CreateAPIToken",
+      "service": "AccountAuthService",
+      "operation": "CreateAPIToken",
+      "kind": "mutation",
+      "description": "创建 API Token",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.CreateLoginToken",
+      "service": "AccountAuthService",
+      "operation": "CreateLoginToken",
+      "kind": "mutation",
+      "description": "使用 API Token 获取登录 Token",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.CreateRole",
+      "service": "AccountAuthService",
+      "operation": "CreateRole",
+      "kind": "mutation",
+      "description": "创建角色",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.CreateSessionToken",
+      "service": "AccountAuthService",
+      "operation": "CreateSessionToken",
+      "kind": "mutation",
+      "description": "创建会话 Token",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.CreateUser",
+      "service": "AccountAuthService",
+      "operation": "CreateUser",
+      "kind": "mutation",
+      "description": "创建用户",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.DeleteAPIToken",
+      "service": "AccountAuthService",
+      "operation": "DeleteAPIToken",
+      "kind": "mutation",
+      "description": "删除 API Token",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.DeleteCurrentUserTotp",
+      "service": "AccountAuthService",
+      "operation": "DeleteCurrentUserTotp",
+      "kind": "mutation",
+      "description": "解除绑定当前用户 TOTP",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.DeleteRole",
+      "service": "AccountAuthService",
+      "operation": "DeleteRole",
+      "kind": "mutation",
+      "description": "删除角色",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.DeleteUser",
+      "service": "AccountAuthService",
+      "operation": "DeleteUser",
+      "kind": "mutation",
+      "description": "删除用户",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditAPIToken",
+      "service": "AccountAuthService",
+      "operation": "EditAPIToken",
+      "kind": "mutation",
+      "description": "编辑 API Token",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditAPITokenEnable",
+      "service": "AccountAuthService",
+      "operation": "EditAPITokenEnable",
+      "kind": "mutation",
+      "description": "启用/禁用 API Token",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserCredential",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserCredential",
+      "kind": "mutation",
+      "description": "编辑当前用户登录凭证",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserIPPolicy",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserIPPolicy",
+      "kind": "mutation",
+      "description": "编辑当前用户 IP 访问规则",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserInfo",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserInfo",
+      "kind": "mutation",
+      "description": "编辑当前用户备注",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserLanguage",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserLanguage",
+      "kind": "mutation",
+      "description": "编辑当前用户语言",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserName",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserName",
+      "kind": "mutation",
+      "description": "编辑当前用户名",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserSessionExpireTime",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserSessionExpireTime",
+      "kind": "mutation",
+      "description": "编辑当前用户会话过期超时时间",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditCurrentUserTimezone",
+      "service": "AccountAuthService",
+      "operation": "EditCurrentUserTimezone",
+      "kind": "mutation",
+      "description": "编辑当前用户时区",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditRole",
+      "service": "AccountAuthService",
+      "operation": "EditRole",
+      "kind": "mutation",
+      "description": "编辑角色",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUser",
+      "service": "AccountAuthService",
+      "operation": "EditUser",
+      "kind": "mutation",
+      "description": "编辑用户信息",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserCredential",
+      "service": "AccountAuthService",
+      "operation": "EditUserCredential",
+      "kind": "mutation",
+      "description": "编辑用户登录凭证",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserEnable",
+      "service": "AccountAuthService",
+      "operation": "EditUserEnable",
+      "kind": "mutation",
+      "description": "启用/禁用用户",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserExpireTime",
+      "service": "AccountAuthService",
+      "operation": "EditUserExpireTime",
+      "kind": "mutation",
+      "description": "编辑用户过期时间",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserIPPolicy",
+      "service": "AccountAuthService",
+      "operation": "EditUserIPPolicy",
+      "kind": "mutation",
+      "description": "编辑用户 IP 访问规则",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserInfo",
+      "service": "AccountAuthService",
+      "operation": "EditUserInfo",
+      "kind": "mutation",
+      "description": "编辑用户备注",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserName",
+      "service": "AccountAuthService",
+      "operation": "EditUserName",
+      "kind": "mutation",
+      "description": "编辑用户名",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserRole",
+      "service": "AccountAuthService",
+      "operation": "EditUserRole",
+      "kind": "mutation",
+      "description": "编辑用户角色",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.EditUserSessionExpireTime",
+      "service": "AccountAuthService",
+      "operation": "EditUserSessionExpireTime",
+      "kind": "mutation",
+      "description": "编辑用户会话过期超时时间",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GenerateTotp",
+      "service": "AccountAuthService",
+      "operation": "GenerateTotp",
+      "kind": "mutation",
+      "description": "生成 TOTP 随机密码和链接",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetAPIToken",
+      "service": "AccountAuthService",
+      "operation": "GetAPIToken",
+      "kind": "readonly",
+      "description": "获取 API Token 信息",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetCurrentUserInfo",
+      "service": "AccountAuthService",
+      "operation": "GetCurrentUserInfo",
+      "kind": "readonly",
+      "description": "获取当前用户信息",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetCurrentUserOAuthBind",
+      "service": "AccountAuthService",
+      "operation": "GetCurrentUserOAuthBind",
+      "kind": "readonly",
+      "description": "获取当前用户 Oauth 绑定信息",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetCurrentUserOtpConfig",
+      "service": "AccountAuthService",
+      "operation": "GetCurrentUserOtpConfig",
+      "kind": "readonly",
+      "description": "获取当前用户 OTP 配置",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetCurrentUserPermission",
+      "service": "AccountAuthService",
+      "operation": "GetCurrentUserPermission",
+      "kind": "readonly",
+      "description": "获取当前用户权限",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetPermissionInfo",
+      "service": "AccountAuthService",
+      "operation": "GetPermissionInfo",
+      "kind": "readonly",
+      "description": "获取权限列表",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetRoleInfo",
+      "service": "AccountAuthService",
+      "operation": "GetRoleInfo",
+      "kind": "readonly",
+      "description": "获取角色详情",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetRoleList",
+      "service": "AccountAuthService",
+      "operation": "GetRoleList",
+      "kind": "readonly",
+      "description": "获取角色列表",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetSessionTokenExpire",
+      "service": "AccountAuthService",
+      "operation": "GetSessionTokenExpire",
+      "kind": "readonly",
+      "description": "获取会话 Token 过期时间",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetUserInfo",
+      "service": "AccountAuthService",
+      "operation": "GetUserInfo",
+      "kind": "readonly",
+      "description": "获取用户信息",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.GetUserList",
+      "service": "AccountAuthService",
+      "operation": "GetUserList",
+      "kind": "readonly",
+      "description": "获取用户列表",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.Logout",
+      "service": "AccountAuthService",
+      "operation": "Logout",
+      "kind": "mutation",
+      "description": "用户登出",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountAuthService.UnbindCurrentUserOAuth",
+      "service": "AccountAuthService",
+      "operation": "UnbindCurrentUserOAuth",
+      "kind": "mutation",
+      "description": "解绑当前用户 Oauth",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountNoAuthService.GetAvailableOAuth",
+      "service": "AccountNoAuthService",
+      "operation": "GetAvailableOAuth",
+      "kind": "readonly",
+      "description": "获取系统可用 Oauth 登录类型",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountNoAuthService.Login",
+      "service": "AccountNoAuthService",
+      "operation": "Login",
+      "kind": "mutation",
+      "description": "用户登录",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AccountNoAuthService.Mfa",
+      "service": "AccountNoAuthService",
+      "operation": "Mfa",
+      "kind": "mutation",
+      "description": "用户登录",
+      "tags": [
+        "用户管理"
+      ]
+    },
+    {
+      "method": "AdminAccountService.CreateUser",
+      "service": "AdminAccountService",
+      "operation": "CreateUser",
+      "kind": "mutation",
+      "description": "创建用户",
+      "tags": [
+        "后台：账号管理"
+      ]
+    },
+    {
+      "method": "AdminAccountService.DeleteUser",
+      "service": "AdminAccountService",
+      "operation": "DeleteUser",
+      "kind": "mutation",
+      "description": "删除用户",
+      "tags": [
+        "后台：账号管理"
+      ]
+    },
+    {
+      "method": "AdminAccountService.GetUserInfo",
+      "service": "AdminAccountService",
+      "operation": "GetUserInfo",
+      "kind": "readonly",
+      "description": "获取用户信息",
+      "tags": [
+        "后台：账号管理"
+      ]
+    },
+    {
+      "method": "AdminAccountService.ListUser",
+      "service": "AdminAccountService",
+      "operation": "ListUser",
+      "kind": "readonly",
+      "description": "用户列表",
+      "tags": [
+        "后台：账号管理"
+      ]
+    },
+    {
+      "method": "AdminAccountService.UpdateCurrentUser",
+      "service": "AdminAccountService",
+      "operation": "UpdateCurrentUser",
+      "kind": "mutation",
+      "description": "更新当前用户信息",
+      "tags": [
+        "后台：账号管理"
+      ]
+    },
+    {
+      "method": "AdminAccountService.UpdateUser",
+      "service": "AdminAccountService",
+      "operation": "UpdateUser",
+      "kind": "mutation",
+      "description": "更新用户信息",
+      "tags": [
+        "后台：账号管理"
+      ]
+    },
+    {
+      "method": "AdminAgentService.ApplyPackage",
+      "service": "AdminAgentService",
+      "operation": "ApplyPackage",
+      "kind": "mutation",
+      "description": "应用探针模块升级包",
+      "tags": [
+        "后台：探针管理"
+      ]
+    },
+    {
+      "method": "AdminAgentService.DeleteModule",
+      "service": "AdminAgentService",
+      "operation": "DeleteModule",
+      "kind": "mutation",
+      "description": "删除模块",
+      "tags": [
+        "后台：探针管理"
+      ]
+    },
+    {
+      "method": "AdminAgentService.GetAgentList",
+      "service": "AdminAgentService",
+      "operation": "GetAgentList",
+      "kind": "readonly",
+      "description": "获取探针列表",
+      "tags": [
+        "后台：探针管理"
+      ]
+    },
+    {
+      "method": "AdminAgentService.GetModuleDetail",
+      "service": "AdminAgentService",
+      "operation": "GetModuleDetail",
+      "kind": "readonly",
+      "description": "获取探针模块详情",
+      "tags": [
+        "后台：探针管理"
+      ]
+    },
+    {
+      "method": "AdminAgentService.GetModuleList",
+      "service": "AdminAgentService",
+      "operation": "GetModuleList",
+      "kind": "readonly",
+      "description": "获取探针模块列表",
+      "tags": [
+        "后台：探针管理"
+      ]
+    },
+    {
+      "method": "AdminStrategyService.GetLoginControlStrategy",
+      "service": "AdminStrategyService",
+      "operation": "GetLoginControlStrategy",
+      "kind": "readonly",
+      "description": "获取登陆控制策略",
+      "tags": [
+        "后台：策略管理"
+      ]
+    },
+    {
+      "method": "AdminStrategyService.GetSystemStrategy",
+      "service": "AdminStrategyService",
+      "operation": "GetSystemStrategy",
+      "kind": "readonly",
+      "description": "获取系统默认策略",
+      "tags": [
+        "后台：策略管理"
+      ]
+    },
+    {
+      "method": "AdminStrategyService.RestoreSystemStrategy",
+      "service": "AdminStrategyService",
+      "operation": "RestoreSystemStrategy",
+      "kind": "mutation",
+      "description": "恢复系统默认策略",
+      "tags": [
+        "后台：策略管理"
+      ]
+    },
+    {
+      "method": "AdminStrategyService.SetLoginControlStrategy",
+      "service": "AdminStrategyService",
+      "operation": "SetLoginControlStrategy",
+      "kind": "mutation",
+      "description": "设置安全登陆控制策略",
+      "tags": [
+        "后台：策略管理"
+      ]
+    },
+    {
+      "method": "AdminStrategyService.SetSystemStrategy",
+      "service": "AdminStrategyService",
+      "operation": "SetSystemStrategy",
+      "kind": "mutation",
+      "description": "设置系统默认策略",
+      "tags": [
+        "后台：策略管理"
+      ]
+    },
+    {
+      "method": "AgentCEService.CreateCmd",
+      "service": "AgentCEService",
+      "operation": "CreateCmd",
+      "kind": "mutation",
+      "description": "创建命令推送",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentCEService.DeleteCmd",
+      "service": "AgentCEService",
+      "operation": "DeleteCmd",
+      "kind": "mutation",
+      "description": "删除命令推送",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentCEService.GetCe",
+      "service": "AgentCEService",
+      "operation": "GetCe",
+      "kind": "readonly",
+      "description": "获取某个探针的命令推送执行详情",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentCEService.GetCmd",
+      "service": "AgentCEService",
+      "operation": "GetCmd",
+      "kind": "readonly",
+      "description": "获取某个命令推送的详情",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentCEService.ListCmd",
+      "service": "AgentCEService",
+      "operation": "ListCmd",
+      "kind": "readonly",
+      "description": "获取命令推送列表",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentCEService.RerunCe",
+      "service": "AgentCEService",
+      "operation": "RerunCe",
+      "kind": "mutation",
+      "description": "触发探针重新执行某个命令",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentCEService.RerunCmd",
+      "service": "AgentCEService",
+      "operation": "RerunCmd",
+      "kind": "mutation",
+      "description": "重新推送某条命令",
+      "tags": [
+        "命令推送"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.CopyFile",
+      "service": "AgentFileManageService",
+      "operation": "CopyFile",
+      "kind": "mutation",
+      "description": "复制探针文件",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.CreateDir",
+      "service": "AgentFileManageService",
+      "operation": "CreateDir",
+      "kind": "mutation",
+      "description": "创建探针目录",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.CreateFile",
+      "service": "AgentFileManageService",
+      "operation": "CreateFile",
+      "kind": "mutation",
+      "description": "创建探针文件",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.DelFile",
+      "service": "AgentFileManageService",
+      "operation": "DelFile",
+      "kind": "mutation",
+      "description": "删除探针文件",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.GetHostMaintenanceEnabled",
+      "service": "AgentFileManageService",
+      "operation": "GetHostMaintenanceEnabled",
+      "kind": "readonly",
+      "description": "获取业务运维功能是否启用",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.GetWindowsDrive",
+      "service": "AgentFileManageService",
+      "operation": "GetWindowsDrive",
+      "kind": "readonly",
+      "description": "获取 Windows 探针盘符的盘符项",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.ListDir",
+      "service": "AgentFileManageService",
+      "operation": "ListDir",
+      "kind": "readonly",
+      "description": "浏览探针文件",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentFileManageService.MoveFile",
+      "service": "AgentFileManageService",
+      "operation": "MoveFile",
+      "kind": "mutation",
+      "description": "移动探针文件",
+      "tags": [
+        "文件管理"
+      ]
+    },
+    {
+      "method": "AgentModuleService.GetAgentList",
+      "service": "AgentModuleService",
+      "operation": "GetAgentList",
+      "kind": "readonly",
+      "description": "获取探针列表",
+      "tags": [
+        "探针模块"
+      ]
+    },
+    {
+      "method": "AgentModuleService.OperateModule",
+      "service": "AgentModuleService",
+      "operation": "OperateModule",
+      "kind": "mutation",
+      "description": "操作探针模块",
+      "tags": [
+        "探针模块"
+      ]
+    },
+    {
+      "method": "AgentModuleService.SetLogConfig",
+      "service": "AgentModuleService",
+      "operation": "SetLogConfig",
+      "kind": "mutation",
+      "description": "设置日志配置",
+      "tags": [
+        "探针模块"
+      ]
+    },
+    {
+      "method": "AgentModuleService.SetOverload",
+      "service": "AgentModuleService",
+      "operation": "SetOverload",
+      "kind": "mutation",
+      "description": "设置自动休眠设置",
+      "tags": [
+        "探针模块"
+      ]
+    },
+    {
+      "method": "AgentModuleService.SetResourceLimit",
+      "service": "AgentModuleService",
+      "operation": "SetResourceLimit",
+      "kind": "mutation",
+      "description": "设置资源配额",
+      "tags": [
+        "探针模块"
+      ]
+    },
+    {
+      "method": "AgentService.GetAgentGroupTree",
+      "service": "AgentService",
+      "operation": "GetAgentGroupTree",
+      "kind": "readonly",
+      "description": "获取业务组",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "AlertConfigService.List",
+      "service": "AlertConfigService",
+      "operation": "List",
+      "kind": "readonly",
+      "description": "获取告警信息",
+      "tags": [
+        "告警配置"
+      ]
+    },
+    {
+      "method": "AlertConfigService.Update",
+      "service": "AlertConfigService",
+      "operation": "Update",
+      "kind": "mutation",
+      "description": "更新告警配置",
+      "tags": [
+        "告警配置"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.AddRule",
+      "service": "AntiRansomwareService",
+      "operation": "AddRule",
+      "kind": "mutation",
+      "description": "添加规则",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.DeleteEvent",
+      "service": "AntiRansomwareService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除规则",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.DeleteRule",
+      "service": "AntiRansomwareService",
+      "operation": "DeleteRule",
+      "kind": "mutation",
+      "description": "删除规则",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.DisposeEventList",
+      "service": "AntiRansomwareService",
+      "operation": "DisposeEventList",
+      "kind": "mutation",
+      "description": "处置事件，如阻断勒索进程、隔离勒索文件",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.EditEventComment",
+      "service": "AntiRansomwareService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.EditEventState",
+      "service": "AntiRansomwareService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.EditRule",
+      "service": "AntiRansomwareService",
+      "operation": "EditRule",
+      "kind": "mutation",
+      "description": "修改防护规则",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.EnableRule",
+      "service": "AntiRansomwareService",
+      "operation": "EnableRule",
+      "kind": "mutation",
+      "description": "获取规则列表",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.GetDecoyList",
+      "service": "AntiRansomwareService",
+      "operation": "GetDecoyList",
+      "kind": "readonly",
+      "description": "获取主机诱饵文件列表",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.GetEvent",
+      "service": "AntiRansomwareService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.GetEventList",
+      "service": "AntiRansomwareService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.GetHostList",
+      "service": "AntiRansomwareService",
+      "operation": "GetHostList",
+      "kind": "readonly",
+      "description": "获取主机防护状态列表",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.GetRule",
+      "service": "AntiRansomwareService",
+      "operation": "GetRule",
+      "kind": "readonly",
+      "description": "获取规则",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.GetRuleList",
+      "service": "AntiRansomwareService",
+      "operation": "GetRuleList",
+      "kind": "readonly",
+      "description": "获取规则列表",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "AntiRansomwareService.MarkAsRead",
+      "service": "AntiRansomwareService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "勒索防护"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.DeleteApplication",
+      "service": "ApplicationAssetService",
+      "operation": "DeleteApplication",
+      "kind": "mutation",
+      "description": "删除软件资产",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.GetApplication",
+      "service": "ApplicationAssetService",
+      "operation": "GetApplication",
+      "kind": "readonly",
+      "description": "获取软件详情信息",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.GetApplicationAssetList",
+      "service": "ApplicationAssetService",
+      "operation": "GetApplicationAssetList",
+      "kind": "readonly",
+      "description": "根据指定条件获取软件资产的列表",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.GetApplicationAssetListByApp",
+      "service": "ApplicationAssetService",
+      "operation": "GetApplicationAssetListByApp",
+      "kind": "readonly",
+      "description": "软件数据分组，根据指定条件获取应用资产的列表",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.GetApplicationAssetListByAppVersion",
+      "service": "ApplicationAssetService",
+      "operation": "GetApplicationAssetListByAppVersion",
+      "kind": "readonly",
+      "description": "软件版本号数据分组，根据指定条件获取软件资产的列表",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.GetApplicationAssetListByHost",
+      "service": "ApplicationAssetService",
+      "operation": "GetApplicationAssetListByHost",
+      "kind": "readonly",
+      "description": "主机分组，根据指定条件获取软件资产的列表",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.GetRefreshDateTime",
+      "service": "ApplicationAssetService",
+      "operation": "GetRefreshDateTime",
+      "kind": "readonly",
+      "description": "获取软件资产的上一次更新时间",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "ApplicationAssetService.StatApplicationByCategory",
+      "service": "ApplicationAssetService",
+      "operation": "StatApplicationByCategory",
+      "kind": "readonly",
+      "description": "软件类型数据分组，根据指定条件获取软件资产的列表",
+      "tags": [
+        "应用资产"
+      ]
+    },
+    {
+      "method": "AssetCertService.Get",
+      "service": "AssetCertService",
+      "operation": "Get",
+      "kind": "readonly",
+      "description": "获取主机证书详情",
+      "tags": [
+        "证书资产"
+      ]
+    },
+    {
+      "method": "AssetCertService.GetList",
+      "service": "AssetCertService",
+      "operation": "GetList",
+      "kind": "readonly",
+      "description": "获取主机证书信息",
+      "tags": [
+        "证书资产"
+      ]
+    },
+    {
+      "method": "AssetConfigService.CreateWebScanRule",
+      "service": "AssetConfigService",
+      "operation": "CreateWebScanRule",
+      "kind": "mutation",
+      "description": "创建 Web 自定义路径",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetConfigService.DeleteWebScanRule",
+      "service": "AssetConfigService",
+      "operation": "DeleteWebScanRule",
+      "kind": "mutation",
+      "description": "删除 Web 自定义路径",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetConfigService.ListAssetCollectConfig",
+      "service": "AssetConfigService",
+      "operation": "ListAssetCollectConfig",
+      "kind": "readonly",
+      "description": "获取资产采集设置",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetConfigService.ListWebScanRule",
+      "service": "AssetConfigService",
+      "operation": "ListWebScanRule",
+      "kind": "readonly",
+      "description": "获取 Web 自定义路径列表",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetConfigService.ResetAssetCollectConfig",
+      "service": "AssetConfigService",
+      "operation": "ResetAssetCollectConfig",
+      "kind": "mutation",
+      "description": "重置资产采集设置",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetConfigService.UpdateAssetCollectConfig",
+      "service": "AssetConfigService",
+      "operation": "UpdateAssetCollectConfig",
+      "kind": "mutation",
+      "description": "更新资产采集设置",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetConfigService.UpdateWebScanRule",
+      "service": "AssetConfigService",
+      "operation": "UpdateWebScanRule",
+      "kind": "mutation",
+      "description": "更新 Web 自定义路径",
+      "tags": [
+        "资产识别配置"
+      ]
+    },
+    {
+      "method": "AssetCrontabService.GetCrontabList",
+      "service": "AssetCrontabService",
+      "operation": "GetCrontabList",
+      "kind": "readonly",
+      "description": "获取任务计划列表",
+      "tags": [
+        "计划任务资产"
+      ]
+    },
+    {
+      "method": "AssetCrontabService.GetRefreshDateTime",
+      "service": "AssetCrontabService",
+      "operation": "GetRefreshDateTime",
+      "kind": "readonly",
+      "description": "获取资产的更新时间",
+      "tags": [
+        "计划任务资产"
+      ]
+    },
+    {
+      "method": "AssetEnvService.GetList",
+      "service": "AssetEnvService",
+      "operation": "GetList",
+      "kind": "readonly",
+      "description": "获取主机环境变量信息",
+      "tags": [
+        "环境变量资产"
+      ]
+    },
+    {
+      "method": "AssetModuleService.GetModule",
+      "service": "AssetModuleService",
+      "operation": "GetModule",
+      "kind": "readonly",
+      "description": "获取主机内核模块信息",
+      "tags": [
+        "内核模块"
+      ]
+    },
+    {
+      "method": "AssetModuleService.GetModuleList",
+      "service": "AssetModuleService",
+      "operation": "GetModuleList",
+      "kind": "readonly",
+      "description": "获取主机分区信息列表",
+      "tags": [
+        "内核模块"
+      ]
+    },
+    {
+      "method": "AssetModuleService.GetRefreshDateTime",
+      "service": "AssetModuleService",
+      "operation": "GetRefreshDateTime",
+      "kind": "readonly",
+      "description": "获取资产的更新时间",
+      "tags": [
+        "内核模块"
+      ]
+    },
+    {
+      "method": "AssetRegistryService.GetList",
+      "service": "AssetRegistryService",
+      "operation": "GetList",
+      "kind": "readonly",
+      "description": "获取主机注册表信息",
+      "tags": [
+        "注册表资产"
+      ]
+    },
+    {
+      "method": "AssetStartupService.GetList",
+      "service": "AssetStartupService",
+      "operation": "GetList",
+      "kind": "readonly",
+      "description": "获取主机启动项信息",
+      "tags": [
+        "启动项资产"
+      ]
+    },
+    {
+      "method": "AssetStartupService.GetRefreshDateTime",
+      "service": "AssetStartupService",
+      "operation": "GetRefreshDateTime",
+      "kind": "readonly",
+      "description": "获取启动项资产的更新时间",
+      "tags": [
+        "启动项资产"
+      ]
+    },
+    {
+      "method": "BackupService.CreateBackup",
+      "service": "BackupService",
+      "operation": "CreateBackup",
+      "kind": "mutation",
+      "description": "手动创建备份",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.DeleteHistory",
+      "service": "BackupService",
+      "operation": "DeleteHistory",
+      "kind": "mutation",
+      "description": "删除备份历史",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.GetConfig",
+      "service": "BackupService",
+      "operation": "GetConfig",
+      "kind": "readonly",
+      "description": "获取备份配置",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.GetHistory",
+      "service": "BackupService",
+      "operation": "GetHistory",
+      "kind": "readonly",
+      "description": "获取备份历史详情",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.GetRecovery",
+      "service": "BackupService",
+      "operation": "GetRecovery",
+      "kind": "readonly",
+      "description": "获取恢复历史详情",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.GetStatus",
+      "service": "BackupService",
+      "operation": "GetStatus",
+      "kind": "readonly",
+      "description": "获取备份恢复状态",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.ListHistory",
+      "service": "BackupService",
+      "operation": "ListHistory",
+      "kind": "readonly",
+      "description": "获取备份历史列表",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.RestoreByHistory",
+      "service": "BackupService",
+      "operation": "RestoreByHistory",
+      "kind": "mutation",
+      "description": "根据备份历史恢复",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BackupService.SetConfig",
+      "service": "BackupService",
+      "operation": "SetConfig",
+      "kind": "mutation",
+      "description": "更新备份配置",
+      "tags": [
+        "配置备份"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.BatchUpdateItem",
+      "service": "BaselineV2Service",
+      "operation": "BatchUpdateItem",
+      "kind": "mutation",
+      "description": "编辑导入的核查项",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CopyLogic",
+      "service": "BaselineV2Service",
+      "operation": "CopyLogic",
+      "kind": "mutation",
+      "description": "复制核查逻辑",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CreateCredential",
+      "service": "BaselineV2Service",
+      "operation": "CreateCredential",
+      "kind": "mutation",
+      "description": "添加凭证",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CreateItem",
+      "service": "BaselineV2Service",
+      "operation": "CreateItem",
+      "kind": "mutation",
+      "description": "导入新的核查项",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CreateLogic",
+      "service": "BaselineV2Service",
+      "operation": "CreateLogic",
+      "kind": "mutation",
+      "description": "快速新增核查逻辑",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CreateSet",
+      "service": "BaselineV2Service",
+      "operation": "CreateSet",
+      "kind": "mutation",
+      "description": "添加策略",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CreateTask",
+      "service": "BaselineV2Service",
+      "operation": "CreateTask",
+      "kind": "mutation",
+      "description": "新建核查任务",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.CreateWhitelist",
+      "service": "BaselineV2Service",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.DeleteCredential",
+      "service": "BaselineV2Service",
+      "operation": "DeleteCredential",
+      "kind": "mutation",
+      "description": "删除凭证",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.DeleteItem",
+      "service": "BaselineV2Service",
+      "operation": "DeleteItem",
+      "kind": "mutation",
+      "description": "删除导入的核查项",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.DeleteLogic",
+      "service": "BaselineV2Service",
+      "operation": "DeleteLogic",
+      "kind": "mutation",
+      "description": "删除核查逻辑",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.DeleteSet",
+      "service": "BaselineV2Service",
+      "operation": "DeleteSet",
+      "kind": "mutation",
+      "description": "删除策略",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.DeleteSubtask",
+      "service": "BaselineV2Service",
+      "operation": "DeleteSubtask",
+      "kind": "mutation",
+      "description": "删除核查子任务",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.DeleteTask",
+      "service": "BaselineV2Service",
+      "operation": "DeleteTask",
+      "kind": "mutation",
+      "description": "删除核查任务，将会连带删除子任务",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.EditLogic",
+      "service": "BaselineV2Service",
+      "operation": "EditLogic",
+      "kind": "mutation",
+      "description": "编辑核查逻辑",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.EditSubtaskState",
+      "service": "BaselineV2Service",
+      "operation": "EditSubtaskState",
+      "kind": "mutation",
+      "description": "修改子任务状态",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetAllTag",
+      "service": "BaselineV2Service",
+      "operation": "GetAllTag",
+      "kind": "readonly",
+      "description": "获取目前用户自定义的所有 Tag",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetCredentialList",
+      "service": "BaselineV2Service",
+      "operation": "GetCredentialList",
+      "kind": "readonly",
+      "description": "获取凭证列表",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetItemList",
+      "service": "BaselineV2Service",
+      "operation": "GetItemList",
+      "kind": "readonly",
+      "description": "获取导入的核查项详情",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetLogic",
+      "service": "BaselineV2Service",
+      "operation": "GetLogic",
+      "kind": "readonly",
+      "description": "获取核查逻辑详细信息，仅应该在用户选择好逻辑后，获取几个具体逻辑的详细信息",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetLogicList",
+      "service": "BaselineV2Service",
+      "operation": "GetLogicList",
+      "kind": "readonly",
+      "description": "获取核查逻辑列表",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetLogicTags",
+      "service": "BaselineV2Service",
+      "operation": "GetLogicTags",
+      "kind": "readonly",
+      "description": "获取核查逻辑的所有标签",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetSet",
+      "service": "BaselineV2Service",
+      "operation": "GetSet",
+      "kind": "readonly",
+      "description": "获取策略信息",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetSetList",
+      "service": "BaselineV2Service",
+      "operation": "GetSetList",
+      "kind": "readonly",
+      "description": "获取策略列表",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetSubtask",
+      "service": "BaselineV2Service",
+      "operation": "GetSubtask",
+      "kind": "readonly",
+      "description": "获取核查子任务详情",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetSubtaskList",
+      "service": "BaselineV2Service",
+      "operation": "GetSubtaskList",
+      "kind": "readonly",
+      "description": "获取核查子任务列表",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetTask",
+      "service": "BaselineV2Service",
+      "operation": "GetTask",
+      "kind": "readonly",
+      "description": "获取核查任务详情",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetTaskList",
+      "service": "BaselineV2Service",
+      "operation": "GetTaskList",
+      "kind": "readonly",
+      "description": "获取核查任务列表",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetTaskNameList",
+      "service": "BaselineV2Service",
+      "operation": "GetTaskNameList",
+      "kind": "readonly",
+      "description": "获取核查任务名称列表",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetTemplateLogic",
+      "service": "BaselineV2Service",
+      "operation": "GetTemplateLogic",
+      "kind": "readonly",
+      "description": "获取快速自定义核查逻辑详细信息，用于编辑快速自定义之前查询信息",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.GetWhitelistRequest",
+      "service": "BaselineV2Service",
+      "operation": "GetWhitelistRequest",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.StartSubtask",
+      "service": "BaselineV2Service",
+      "operation": "StartSubtask",
+      "kind": "mutation",
+      "description": "立即进行子任务核查，将会覆盖原有的子任务结果",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.StartTask",
+      "service": "BaselineV2Service",
+      "operation": "StartTask",
+      "kind": "mutation",
+      "description": "开始核查任务",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.StopTask",
+      "service": "BaselineV2Service",
+      "operation": "StopTask",
+      "kind": "mutation",
+      "description": "停止核查任务",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.UpdateCredential",
+      "service": "BaselineV2Service",
+      "operation": "UpdateCredential",
+      "kind": "mutation",
+      "description": "编辑凭证",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.UpdateItem",
+      "service": "BaselineV2Service",
+      "operation": "UpdateItem",
+      "kind": "mutation",
+      "description": "编辑导入的核查项",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.UpdateLogic",
+      "service": "BaselineV2Service",
+      "operation": "UpdateLogic",
+      "kind": "mutation",
+      "description": "编辑核查逻辑,目前编辑核查逻辑只能编辑其默认参数(json schema 的 default)",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.UpdateSet",
+      "service": "BaselineV2Service",
+      "operation": "UpdateSet",
+      "kind": "mutation",
+      "description": "更新策略",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BaselineV2Service.UpdateTask",
+      "service": "BaselineV2Service",
+      "operation": "UpdateTask",
+      "kind": "mutation",
+      "description": "修改任务绑定的核查策略或者任务绑定的探针",
+      "tags": [
+        "合规基线"
+      ]
+    },
+    {
+      "method": "BruteForceService.CreateWhitelist",
+      "service": "BruteForceService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.DeleteEvent",
+      "service": "BruteForceService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.EditEventComment",
+      "service": "BruteForceService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.EditEventState",
+      "service": "BruteForceService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.GenerateEventFirewallRule",
+      "service": "BruteForceService",
+      "operation": "GenerateEventFirewallRule",
+      "kind": "mutation",
+      "description": "根据所选事件生成网络阻断规则",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.GetEvent",
+      "service": "BruteForceService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.GetEventList",
+      "service": "BruteForceService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.GetEventSourceIP",
+      "service": "BruteForceService",
+      "operation": "GetEventSourceIP",
+      "kind": "readonly",
+      "description": "获取某事件的攻击源 IP",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.GetWhitelist",
+      "service": "BruteForceService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BruteForceService.MarkAsRead",
+      "service": "BruteForceService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "暴力破解"
+      ]
+    },
+    {
+      "method": "BusinessGroupService.CreateBusinessGroup",
+      "service": "BusinessGroupService",
+      "operation": "CreateBusinessGroup",
+      "kind": "mutation",
+      "description": "新建子业务组",
+      "tags": [
+        "业务组管理"
+      ]
+    },
+    {
+      "method": "BusinessGroupService.DeleteBusinessGroup",
+      "service": "BusinessGroupService",
+      "operation": "DeleteBusinessGroup",
+      "kind": "mutation",
+      "description": "删除业务组",
+      "tags": [
+        "业务组管理"
+      ]
+    },
+    {
+      "method": "BusinessGroupService.EditBusinessGroup",
+      "service": "BusinessGroupService",
+      "operation": "EditBusinessGroup",
+      "kind": "mutation",
+      "description": "编辑业务组",
+      "tags": [
+        "业务组管理"
+      ]
+    },
+    {
+      "method": "BusinessGroupService.GetBusinessGroupDetail",
+      "service": "BusinessGroupService",
+      "operation": "GetBusinessGroupDetail",
+      "kind": "readonly",
+      "description": "获取业务组详情",
+      "tags": [
+        "业务组管理"
+      ]
+    },
+    {
+      "method": "BusinessGroupService.GetBusinessGroupTree",
+      "service": "BusinessGroupService",
+      "operation": "GetBusinessGroupTree",
+      "kind": "readonly",
+      "description": "获取业务组列表",
+      "tags": [
+        "业务组管理"
+      ]
+    },
+    {
+      "method": "BusinessGroupService.GetBusinessGroupTreeByOrg",
+      "service": "BusinessGroupService",
+      "operation": "GetBusinessGroupTreeByOrg",
+      "kind": "readonly",
+      "description": "获取某机构的业务组列表",
+      "tags": [
+        "业务组管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.CreateRole",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "CreateRole",
+      "kind": "mutation",
+      "description": "创建角色",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.CreateUser",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "CreateUser",
+      "kind": "mutation",
+      "description": "创建用户",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.DeleteRole",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "DeleteRole",
+      "kind": "mutation",
+      "description": "删除角色",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.DeleteUser",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "DeleteUser",
+      "kind": "mutation",
+      "description": "删除用户",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.GetRole",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "GetRole",
+      "kind": "readonly",
+      "description": "获取角色",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.GetUserInfo",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "GetUserInfo",
+      "kind": "readonly",
+      "description": "获取用户信息详情",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.ListRole",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "ListRole",
+      "kind": "readonly",
+      "description": "获取角色列表",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.ListUser",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "ListUser",
+      "kind": "readonly",
+      "description": "获取用户列表",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.UpdateRole",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "UpdateRole",
+      "kind": "mutation",
+      "description": "更新角色",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.UpdateUser",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "UpdateUser",
+      "kind": "mutation",
+      "description": "更新用户",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudWalkerAccountAuthService.UpdateUserEnable",
+      "service": "CloudWalkerAccountAuthService",
+      "operation": "UpdateUserEnable",
+      "kind": "mutation",
+      "description": "启用/禁用用户",
+      "tags": [
+        "用户角色管理"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.ExternalLink",
+      "service": "CloudwalkerSettingService",
+      "operation": "ExternalLink",
+      "kind": "mutation",
+      "description": "外部连接",
+      "tags": [
+        "牧云设置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.ExternalLinkRedirect",
+      "service": "CloudwalkerSettingService",
+      "operation": "ExternalLinkRedirect",
+      "kind": "mutation",
+      "description": "外部连接重定向",
+      "tags": [
+        "牧云设置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.GetCurrentLanguage",
+      "service": "CloudwalkerSettingService",
+      "operation": "GetCurrentLanguage",
+      "kind": "readonly",
+      "description": "获取当前语言",
+      "tags": [
+        "牧云设置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.GetCurrentTime",
+      "service": "CloudwalkerSettingService",
+      "operation": "GetCurrentTime",
+      "kind": "readonly",
+      "description": "获取当前系统时间",
+      "tags": [
+        "系统配置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.GetDisabledFeature",
+      "service": "CloudwalkerSettingService",
+      "operation": "GetDisabledFeature",
+      "kind": "readonly",
+      "description": "获取被禁用的功能",
+      "tags": [
+        "系统配置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.GetInstallationInfo",
+      "service": "CloudwalkerSettingService",
+      "operation": "GetInstallationInfo",
+      "kind": "readonly",
+      "description": "获取安装信息",
+      "tags": [
+        "牧云设置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.GetProductInfo",
+      "service": "CloudwalkerSettingService",
+      "operation": "GetProductInfo",
+      "kind": "readonly",
+      "description": "获取产品信息",
+      "tags": [
+        "牧云设置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.GetPublicKey",
+      "service": "CloudwalkerSettingService",
+      "operation": "GetPublicKey",
+      "kind": "readonly",
+      "description": "获取服务端公钥",
+      "tags": [
+        "系统配置"
+      ]
+    },
+    {
+      "method": "CloudwalkerSettingService.SetProductInfo",
+      "service": "CloudwalkerSettingService",
+      "operation": "SetProductInfo",
+      "kind": "mutation",
+      "description": "设置产品相关信息",
+      "tags": [
+        "牧云设置"
+      ]
+    },
+    {
+      "method": "CrontabService.CreatePlan",
+      "service": "CrontabService",
+      "operation": "CreatePlan",
+      "kind": "mutation",
+      "description": "创建任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.CreateWeakPasswordPlan",
+      "service": "CrontabService",
+      "operation": "CreateWeakPasswordPlan",
+      "kind": "mutation",
+      "description": "创建弱口令任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.DeletePlan",
+      "service": "CrontabService",
+      "operation": "DeletePlan",
+      "kind": "mutation",
+      "description": "删除任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.EditPlan",
+      "service": "CrontabService",
+      "operation": "EditPlan",
+      "kind": "mutation",
+      "description": "修改任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.EditWeakPasswordPlan",
+      "service": "CrontabService",
+      "operation": "EditWeakPasswordPlan",
+      "kind": "mutation",
+      "description": "修改弱口令任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetPlan",
+      "service": "CrontabService",
+      "operation": "GetPlan",
+      "kind": "readonly",
+      "description": "获取任务计划详情",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetPlanList",
+      "service": "CrontabService",
+      "operation": "GetPlanList",
+      "kind": "readonly",
+      "description": "获取任务计划列表",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetPlanLog",
+      "service": "CrontabService",
+      "operation": "GetPlanLog",
+      "kind": "readonly",
+      "description": "获取任务计划日志",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetTaskResult",
+      "service": "CrontabService",
+      "operation": "GetTaskResult",
+      "kind": "readonly",
+      "description": "获取任务计划结果",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetWeakPasswordPlan",
+      "service": "CrontabService",
+      "operation": "GetWeakPasswordPlan",
+      "kind": "readonly",
+      "description": "获取弱口令任务计划详情",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetWeakPasswordPlanList",
+      "service": "CrontabService",
+      "operation": "GetWeakPasswordPlanList",
+      "kind": "readonly",
+      "description": "获取弱口令任务计划列表",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.GetWeakPasswordTaskConfig",
+      "service": "CrontabService",
+      "operation": "GetWeakPasswordTaskConfig",
+      "kind": "readonly",
+      "description": "获取弱口令任务默认配置",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.RetryTaskByPlan",
+      "service": "CrontabService",
+      "operation": "RetryTaskByPlan",
+      "kind": "mutation",
+      "description": "重试任务计划中的失败的任务",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.SetPlanEnablement",
+      "service": "CrontabService",
+      "operation": "SetPlanEnablement",
+      "kind": "mutation",
+      "description": "设置任务计划自动执行",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.StartPlan",
+      "service": "CrontabService",
+      "operation": "StartPlan",
+      "kind": "mutation",
+      "description": "手动开始任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "CrontabService.StopPlan",
+      "service": "CrontabService",
+      "operation": "StopPlan",
+      "kind": "mutation",
+      "description": "手动停止执行中的任务计划",
+      "tags": [
+        "任务计划"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.CreateAbnormalLoginRule",
+      "service": "DetectionRuleService",
+      "operation": "CreateAbnormalLoginRule",
+      "kind": "mutation",
+      "description": "创建异常登陆检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.CreateHoneypotRule",
+      "service": "DetectionRuleService",
+      "operation": "CreateHoneypotRule",
+      "kind": "mutation",
+      "description": "创建蜜罐诱捕检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.CreateNetworkAuditRule",
+      "service": "DetectionRuleService",
+      "operation": "CreateNetworkAuditRule",
+      "kind": "mutation",
+      "description": "创建网络异常检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.CreateSensitiveFileRule",
+      "service": "DetectionRuleService",
+      "operation": "CreateSensitiveFileRule",
+      "kind": "mutation",
+      "description": "创建敏感文件检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.CreateSensitivePortRule",
+      "service": "DetectionRuleService",
+      "operation": "CreateSensitivePortRule",
+      "kind": "mutation",
+      "description": "创建敏感端口检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.CreateSuspiciousOperationRule",
+      "service": "DetectionRuleService",
+      "operation": "CreateSuspiciousOperationRule",
+      "kind": "mutation",
+      "description": "创建可疑命令检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.DeleteAbnormalLoginRule",
+      "service": "DetectionRuleService",
+      "operation": "DeleteAbnormalLoginRule",
+      "kind": "mutation",
+      "description": "删除异常登陆检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.DeleteHoneypotRule",
+      "service": "DetectionRuleService",
+      "operation": "DeleteHoneypotRule",
+      "kind": "mutation",
+      "description": "删除蜜罐诱捕检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.DeleteNetworkAuditRule",
+      "service": "DetectionRuleService",
+      "operation": "DeleteNetworkAuditRule",
+      "kind": "mutation",
+      "description": "删除网络异常检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.DeleteSensitiveFileRule",
+      "service": "DetectionRuleService",
+      "operation": "DeleteSensitiveFileRule",
+      "kind": "mutation",
+      "description": "删除敏感文件检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.DeleteSensitivePortRule",
+      "service": "DetectionRuleService",
+      "operation": "DeleteSensitivePortRule",
+      "kind": "mutation",
+      "description": "删除敏感端口检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.DeleteSuspiciousOperationRule",
+      "service": "DetectionRuleService",
+      "operation": "DeleteSuspiciousOperationRule",
+      "kind": "mutation",
+      "description": "删除可疑命令检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.EnablementAbnormalLoginRule",
+      "service": "DetectionRuleService",
+      "operation": "EnablementAbnormalLoginRule",
+      "kind": "mutation",
+      "description": "启禁用异常登录检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.EnablementHoneypotRule",
+      "service": "DetectionRuleService",
+      "operation": "EnablementHoneypotRule",
+      "kind": "mutation",
+      "description": "启禁用蜜罐诱捕检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.EnablementNetworkAuditRule",
+      "service": "DetectionRuleService",
+      "operation": "EnablementNetworkAuditRule",
+      "kind": "mutation",
+      "description": "启禁用网络异常检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.EnablementSensitiveFileRule",
+      "service": "DetectionRuleService",
+      "operation": "EnablementSensitiveFileRule",
+      "kind": "mutation",
+      "description": "启禁用敏感文件检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.EnablementSensitivePortRule",
+      "service": "DetectionRuleService",
+      "operation": "EnablementSensitivePortRule",
+      "kind": "mutation",
+      "description": "启禁用敏感端口检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.EnablementSuspiciousOperationRule",
+      "service": "DetectionRuleService",
+      "operation": "EnablementSuspiciousOperationRule",
+      "kind": "mutation",
+      "description": "启禁用可疑命令检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.GetBruteForceAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "GetBruteForceAdvCfg",
+      "kind": "readonly",
+      "description": "获取暴力破解高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.GetHoneypotRule",
+      "service": "DetectionRuleService",
+      "operation": "GetHoneypotRule",
+      "kind": "readonly",
+      "description": "获取蜜罐诱捕检测规则详情",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.GetMaliciousFileAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "GetMaliciousFileAdvCfg",
+      "kind": "readonly",
+      "description": "获取恶意文件高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.GetNetworkAuditAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "GetNetworkAuditAdvCfg",
+      "kind": "readonly",
+      "description": "获取网络异常高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.GetSuspiciousOperationAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "GetSuspiciousOperationAdvCfg",
+      "kind": "readonly",
+      "description": "获取可疑命令高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.GetWebshellAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "GetWebshellAdvCfg",
+      "kind": "readonly",
+      "description": "获取 Webshell 高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.ListAbnormalLoginRule",
+      "service": "DetectionRuleService",
+      "operation": "ListAbnormalLoginRule",
+      "kind": "readonly",
+      "description": "获取异常登陆检测规则列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.ListHoneypotRule",
+      "service": "DetectionRuleService",
+      "operation": "ListHoneypotRule",
+      "kind": "readonly",
+      "description": "获取蜜罐诱捕检测规则列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.ListNetworkAuditRule",
+      "service": "DetectionRuleService",
+      "operation": "ListNetworkAuditRule",
+      "kind": "readonly",
+      "description": "获取网络异常检测规则列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.ListSensitiveFileRule",
+      "service": "DetectionRuleService",
+      "operation": "ListSensitiveFileRule",
+      "kind": "readonly",
+      "description": "获取敏感文件检测规则列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.ListSensitivePortRule",
+      "service": "DetectionRuleService",
+      "operation": "ListSensitivePortRule",
+      "kind": "readonly",
+      "description": "获取敏感端口检测规则列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.ListSuspiciousOperationRule",
+      "service": "DetectionRuleService",
+      "operation": "ListSuspiciousOperationRule",
+      "kind": "readonly",
+      "description": "获取可疑命令检测规则列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.SetBruteForceAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "SetBruteForceAdvCfg",
+      "kind": "mutation",
+      "description": "设置暴力破解高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.SetMaliciousFileAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "SetMaliciousFileAdvCfg",
+      "kind": "mutation",
+      "description": "设置恶意文件高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.SetNetworkAuditAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "SetNetworkAuditAdvCfg",
+      "kind": "mutation",
+      "description": "设置网络异常高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.SetSuspiciousOperationAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "SetSuspiciousOperationAdvCfg",
+      "kind": "mutation",
+      "description": "设置可疑命令高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.SetWebshellAdvCfg",
+      "service": "DetectionRuleService",
+      "operation": "SetWebshellAdvCfg",
+      "kind": "mutation",
+      "description": "设置 Webshell 高级配置",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.UpdateAbnormalLoginRule",
+      "service": "DetectionRuleService",
+      "operation": "UpdateAbnormalLoginRule",
+      "kind": "mutation",
+      "description": "更新异常登陆检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.UpdateHoneypotRule",
+      "service": "DetectionRuleService",
+      "operation": "UpdateHoneypotRule",
+      "kind": "mutation",
+      "description": "更新蜜罐诱捕检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.UpdateNetworkAuditRule",
+      "service": "DetectionRuleService",
+      "operation": "UpdateNetworkAuditRule",
+      "kind": "mutation",
+      "description": "更新网络异常检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.UpdateSensitiveFileRule",
+      "service": "DetectionRuleService",
+      "operation": "UpdateSensitiveFileRule",
+      "kind": "mutation",
+      "description": "更新敏感文件检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.UpdateSensitivePortRule",
+      "service": "DetectionRuleService",
+      "operation": "UpdateSensitivePortRule",
+      "kind": "mutation",
+      "description": "更新敏感端口检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DetectionRuleService.UpdateSuspiciousOperationRule",
+      "service": "DetectionRuleService",
+      "operation": "UpdateSuspiciousOperationRule",
+      "kind": "mutation",
+      "description": "更新可疑命令检测规则",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "DockerContainerService.GetContainer",
+      "service": "DockerContainerService",
+      "operation": "GetContainer",
+      "kind": "readonly",
+      "description": "获取Docker容器资产详情",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerContainerService.GetContainerList",
+      "service": "DockerContainerService",
+      "operation": "GetContainerList",
+      "kind": "readonly",
+      "description": "获取Docker容器资产列表",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerContainerService.StatContainer",
+      "service": "DockerContainerService",
+      "operation": "StatContainer",
+      "kind": "readonly",
+      "description": "获取Docker容器统计结果",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerImageService.GetImage",
+      "service": "DockerImageService",
+      "operation": "GetImage",
+      "kind": "readonly",
+      "description": "获取Docker镜像资产详情",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerImageService.GetImageList",
+      "service": "DockerImageService",
+      "operation": "GetImageList",
+      "kind": "readonly",
+      "description": "获取Docker镜像资产列表",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerImageService.StatImage",
+      "service": "DockerImageService",
+      "operation": "StatImage",
+      "kind": "readonly",
+      "description": "获取Docker镜像统计",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerNetworkService.GetNetwork",
+      "service": "DockerNetworkService",
+      "operation": "GetNetwork",
+      "kind": "readonly",
+      "description": "获取Docker网络资产详情",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerNetworkService.GetNetworkList",
+      "service": "DockerNetworkService",
+      "operation": "GetNetworkList",
+      "kind": "readonly",
+      "description": "获取Docker网络资产列表",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "DockerNetworkService.StatNetwork",
+      "service": "DockerNetworkService",
+      "operation": "StatNetwork",
+      "kind": "readonly",
+      "description": "获取Docker网络资产列表",
+      "tags": [
+        "Docker资产"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.CreateWhitelist",
+      "service": "ElevationProcessEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.DeleteEvent",
+      "service": "ElevationProcessEventService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.EditEventComment",
+      "service": "ElevationProcessEventService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.EditEventState",
+      "service": "ElevationProcessEventService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.GetEvent",
+      "service": "ElevationProcessEventService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.GetEventList",
+      "service": "ElevationProcessEventService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.GetEventListByExename",
+      "service": "ElevationProcessEventService",
+      "operation": "GetEventListByExename",
+      "kind": "readonly",
+      "description": "返回按进程聚合的事件列表",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.GetEventListByHost",
+      "service": "ElevationProcessEventService",
+      "operation": "GetEventListByHost",
+      "kind": "readonly",
+      "description": "返回按主机聚合的事件列表",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.GetEventListByOriginEffectUser",
+      "service": "ElevationProcessEventService",
+      "operation": "GetEventListByOriginEffectUser",
+      "kind": "readonly",
+      "description": "返回按原有效用户聚合的事件列表",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.GetWhitelist",
+      "service": "ElevationProcessEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.MarkAsRead",
+      "service": "ElevationProcessEventService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.ProcessKill",
+      "service": "ElevationProcessEventService",
+      "operation": "ProcessKill",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByExename",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByExename",
+      "kind": "readonly",
+      "description": "获取按进程名聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByHost",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByLevel",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByLevel",
+      "kind": "readonly",
+      "description": "获取按事件风险等级聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByOriginEffectUser",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByOriginEffectUser",
+      "kind": "readonly",
+      "description": "获取按提权原有效用户聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByState",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByState",
+      "kind": "readonly",
+      "description": "获取按处置状态聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByTime",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "获取按事件发生时间聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "ElevationProcessEventService.StatEventByType",
+      "service": "ElevationProcessEventService",
+      "operation": "StatEventByType",
+      "kind": "readonly",
+      "description": "获取按提权类型聚合的统计结果",
+      "tags": [
+        "本地提权"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.CancelIgnoreEventTask",
+      "service": "EmergencyVulnService",
+      "operation": "CancelIgnoreEventTask",
+      "kind": "mutation",
+      "description": "取消忽略漏洞事件",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.CreateEventTask",
+      "service": "EmergencyVulnService",
+      "operation": "CreateEventTask",
+      "kind": "mutation",
+      "description": "漏洞应急事件复测",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.CreateVulnTask",
+      "service": "EmergencyVulnService",
+      "operation": "CreateVulnTask",
+      "kind": "mutation",
+      "description": "创建漏洞应急扫描任务",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.GetVulnInfo",
+      "service": "EmergencyVulnService",
+      "operation": "GetVulnInfo",
+      "kind": "readonly",
+      "description": "漏洞详细信息",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.IgnoreEventTask",
+      "service": "EmergencyVulnService",
+      "operation": "IgnoreEventTask",
+      "kind": "mutation",
+      "description": "忽略漏洞事件",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.ListVuln",
+      "service": "EmergencyVulnService",
+      "operation": "ListVuln",
+      "kind": "readonly",
+      "description": "漏洞应急列表页",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EmergencyVulnService.ListVulnEvent",
+      "service": "EmergencyVulnService",
+      "operation": "ListVulnEvent",
+      "kind": "readonly",
+      "description": "漏洞应急事件列表页",
+      "tags": [
+        "漏洞应急"
+      ]
+    },
+    {
+      "method": "EndpointService.ApplyConfig",
+      "service": "EndpointService",
+      "operation": "ApplyConfig",
+      "kind": "mutation",
+      "description": "应用配置变更响应",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.EditAgentConfig",
+      "service": "EndpointService",
+      "operation": "EditAgentConfig",
+      "kind": "mutation",
+      "description": "修改探针连接配置",
+      "tags": [
+        "Endpoint"
+      ]
+    },
+    {
+      "method": "EndpointService.EditAgentPort",
+      "service": "EndpointService",
+      "operation": "EditAgentPort",
+      "kind": "mutation",
+      "description": "修改探针端口配置参数",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.EditServerAddress",
+      "service": "EndpointService",
+      "operation": "EditServerAddress",
+      "kind": "mutation",
+      "description": "修改服务端地址（当前仅用于判断连接方式）",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.EditWebPort",
+      "service": "EndpointService",
+      "operation": "EditWebPort",
+      "kind": "mutation",
+      "description": "修改服务端端口配置参数",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.GetServerAddress",
+      "service": "EndpointService",
+      "operation": "GetServerAddress",
+      "kind": "readonly",
+      "description": "获取服务端地址（当前仅用于判断连接方式）",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.GetWebConfig",
+      "service": "EndpointService",
+      "operation": "GetWebConfig",
+      "kind": "readonly",
+      "description": "获取web管理配置参数",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.ListServerCert",
+      "service": "EndpointService",
+      "operation": "ListServerCert",
+      "kind": "readonly",
+      "description": "获取证书列表参数",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "EndpointService.SwitchServerCert",
+      "service": "EndpointService",
+      "operation": "SwitchServerCert",
+      "kind": "mutation",
+      "description": "切换服务端证书参数",
+      "tags": [
+        "其他系统设置"
+      ]
+    },
+    {
+      "method": "FileDisposalService.Isolation",
+      "service": "FileDisposalService",
+      "operation": "Isolation",
+      "kind": "mutation",
+      "description": "文件隔离或者文件信任",
+      "tags": [
+        "FileIsolation"
+      ]
+    },
+    {
+      "method": "FileDisposalService.ListEvent",
+      "service": "FileDisposalService",
+      "operation": "ListEvent",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "FileIsolation"
+      ]
+    },
+    {
+      "method": "FirewallService.CreateRule",
+      "service": "FirewallService",
+      "operation": "CreateRule",
+      "kind": "mutation",
+      "description": "添加规则",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.DeleteEvent",
+      "service": "FirewallService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.DeleteRule",
+      "service": "FirewallService",
+      "operation": "DeleteRule",
+      "kind": "mutation",
+      "description": "删除规则",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.GetEventList",
+      "service": "FirewallService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.GetFirewallGlobalConfig",
+      "service": "FirewallService",
+      "operation": "GetFirewallGlobalConfig",
+      "kind": "readonly",
+      "description": "获取防火墙全局配置",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.GetRule",
+      "service": "FirewallService",
+      "operation": "GetRule",
+      "kind": "readonly",
+      "description": "获取规则列表",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.SetFirewallGlobalConfig",
+      "service": "FirewallService",
+      "operation": "SetFirewallGlobalConfig",
+      "kind": "mutation",
+      "description": "设置防火墙全局配置",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FirewallService.UpdateRule",
+      "service": "FirewallService",
+      "operation": "UpdateRule",
+      "kind": "mutation",
+      "description": "修改规则",
+      "tags": [
+        "防火墙"
+      ]
+    },
+    {
+      "method": "FullCommandService.Delete",
+      "service": "FullCommandService",
+      "operation": "Delete",
+      "kind": "mutation",
+      "description": "删除命令",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "FullCommandService.EditEventComment",
+      "service": "FullCommandService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "FullCommandService.Get",
+      "service": "FullCommandService",
+      "operation": "Get",
+      "kind": "readonly",
+      "description": "获取命令详情",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "FullCommandService.GetList",
+      "service": "FullCommandService",
+      "operation": "GetList",
+      "kind": "readonly",
+      "description": "获取命令列表",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "FullCommandService.GetListByHost",
+      "service": "FullCommandService",
+      "operation": "GetListByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的事件列表",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "FullCommandService.GetListByNetApp",
+      "service": "FullCommandService",
+      "operation": "GetListByNetApp",
+      "kind": "readonly",
+      "description": "获取按网络应用聚合的事件列表",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "FullCommandService.GetListBySSHClientIP",
+      "service": "FullCommandService",
+      "operation": "GetListBySSHClientIP",
+      "kind": "readonly",
+      "description": "获取按SSH登录聚合的事件列表",
+      "tags": [
+        "全量命令"
+      ]
+    },
+    {
+      "method": "HoneypotService.CreateWhitelist",
+      "service": "HoneypotService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.DeleteEvent",
+      "service": "HoneypotService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选 ID 的事件",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.DeleteEventByHoneypot",
+      "service": "HoneypotService",
+      "operation": "DeleteEventByHoneypot",
+      "kind": "mutation",
+      "description": "删除所选蜜罐名的事件",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.DeleteEventByHost",
+      "service": "HoneypotService",
+      "operation": "DeleteEventByHost",
+      "kind": "mutation",
+      "description": "删除所选主机 ID 的事件",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.DeleteEventBySrcIP",
+      "service": "HoneypotService",
+      "operation": "DeleteEventBySrcIP",
+      "kind": "mutation",
+      "description": "删除所选源 IP 的事件",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.EditEventComment",
+      "service": "HoneypotService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.EditState",
+      "service": "HoneypotService",
+      "operation": "EditState",
+      "kind": "mutation",
+      "description": "改变所选 ID 事件的处置状态",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.EditStateByHoneypot",
+      "service": "HoneypotService",
+      "operation": "EditStateByHoneypot",
+      "kind": "mutation",
+      "description": "改变所选蜜罐名事件的处置状态",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.EditStateByHost",
+      "service": "HoneypotService",
+      "operation": "EditStateByHost",
+      "kind": "mutation",
+      "description": "改变所选主机 ID 事件的处置状态",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.EditStateBySrcIP",
+      "service": "HoneypotService",
+      "operation": "EditStateBySrcIP",
+      "kind": "mutation",
+      "description": "改变所选源 IP 事件的处置状态",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.GetEvent",
+      "service": "HoneypotService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.GetWhitelist",
+      "service": "HoneypotService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.List",
+      "service": "HoneypotService",
+      "operation": "List",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.ListByHoneypot",
+      "service": "HoneypotService",
+      "operation": "ListByHoneypot",
+      "kind": "readonly",
+      "description": "获取按蜜罐名聚合的事件列表",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.ListByHost",
+      "service": "HoneypotService",
+      "operation": "ListByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的事件列表",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.ListBySrcIP",
+      "service": "HoneypotService",
+      "operation": "ListBySrcIP",
+      "kind": "readonly",
+      "description": "获取按源 IP 聚合的事件列表",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.MarkAsRead",
+      "service": "HoneypotService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HoneypotService.StatEvent",
+      "service": "HoneypotService",
+      "operation": "StatEvent",
+      "kind": "readonly",
+      "description": "获取按多种视角聚合的事件统计信息",
+      "tags": [
+        "蜜罐诱捕"
+      ]
+    },
+    {
+      "method": "HostAssetService.AddAttributes",
+      "service": "HostAssetService",
+      "operation": "AddAttributes",
+      "kind": "mutation",
+      "description": "增加主机属性字段",
+      "tags": [
+        "主机属性"
+      ]
+    },
+    {
+      "method": "HostAssetService.BatchEditHostAttribute",
+      "service": "HostAssetService",
+      "operation": "BatchEditHostAttribute",
+      "kind": "mutation",
+      "description": "批量编辑主机属性信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.CountHost",
+      "service": "HostAssetService",
+      "operation": "CountHost",
+      "kind": "readonly",
+      "description": "获取主机资产数量",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.DeleteAttributes",
+      "service": "HostAssetService",
+      "operation": "DeleteAttributes",
+      "kind": "mutation",
+      "description": "删除主机属性字段",
+      "tags": [
+        "主机属性"
+      ]
+    },
+    {
+      "method": "HostAssetService.DeleteHost",
+      "service": "HostAssetService",
+      "operation": "DeleteHost",
+      "kind": "mutation",
+      "description": "卸载探针",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.DisableHost",
+      "service": "HostAssetService",
+      "operation": "DisableHost",
+      "kind": "mutation",
+      "description": "停用探针",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.EditAgentComment",
+      "service": "HostAssetService",
+      "operation": "EditAgentComment",
+      "kind": "mutation",
+      "description": "修改主机备注",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.EditAgentOrg",
+      "service": "HostAssetService",
+      "operation": "EditAgentOrg",
+      "kind": "mutation",
+      "description": "修改主机机构",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.EditAttributes",
+      "service": "HostAssetService",
+      "operation": "EditAttributes",
+      "kind": "mutation",
+      "description": "编辑主机属性字段",
+      "tags": [
+        "主机属性"
+      ]
+    },
+    {
+      "method": "HostAssetService.EditHostAttribute",
+      "service": "HostAssetService",
+      "operation": "EditHostAttribute",
+      "kind": "mutation",
+      "description": "编辑主机属性信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GenerateInstallCommand",
+      "service": "HostAssetService",
+      "operation": "GenerateInstallCommand",
+      "kind": "mutation",
+      "description": "生成探针安装命令",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.GenerateInstallInstaller",
+      "service": "HostAssetService",
+      "operation": "GenerateInstallInstaller",
+      "kind": "mutation",
+      "description": "生成探针安装包",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAgentCloneConfig",
+      "service": "HostAssetService",
+      "operation": "GetAgentCloneConfig",
+      "kind": "readonly",
+      "description": "获取探针克隆配置",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAgentConfig",
+      "service": "HostAssetService",
+      "operation": "GetAgentConfig",
+      "kind": "readonly",
+      "description": "获取探针配置",
+      "tags": [
+        "探针模块"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAgentInfo",
+      "service": "HostAssetService",
+      "operation": "GetAgentInfo",
+      "kind": "readonly",
+      "description": "获取探针信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAllHostTag",
+      "service": "HostAssetService",
+      "operation": "GetAllHostTag",
+      "kind": "readonly",
+      "description": "获取所有已有标签",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAntiUninstallConfig",
+      "service": "HostAssetService",
+      "operation": "GetAntiUninstallConfig",
+      "kind": "readonly",
+      "description": "获取探针防卸载配置",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAssetOverView",
+      "service": "HostAssetService",
+      "operation": "GetAssetOverView",
+      "kind": "readonly",
+      "description": "获取主机上的资产的统计信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetAttributes",
+      "service": "HostAssetService",
+      "operation": "GetAttributes",
+      "kind": "readonly",
+      "description": "获取主机属性字段",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetEventList",
+      "service": "HostAssetService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取入侵检测事件信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetEventOverView",
+      "service": "HostAssetService",
+      "operation": "GetEventOverView",
+      "kind": "readonly",
+      "description": "获取主机上的资产的统计信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetFileState",
+      "service": "HostAssetService",
+      "operation": "GetFileState",
+      "kind": "readonly",
+      "description": "获取文件状态",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostAssetList",
+      "service": "HostAssetService",
+      "operation": "GetHostAssetList",
+      "kind": "readonly",
+      "description": "获取主机资产列表信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostAttribute",
+      "service": "HostAssetService",
+      "operation": "GetHostAttribute",
+      "kind": "readonly",
+      "description": "获取主机属性信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostBusinessInfo",
+      "service": "HostAssetService",
+      "operation": "GetHostBusinessInfo",
+      "kind": "readonly",
+      "description": "获取业务组信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostEnviron",
+      "service": "HostAssetService",
+      "operation": "GetHostEnviron",
+      "kind": "readonly",
+      "description": "获取主机资产环境变量",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostInfoDetail",
+      "service": "HostAssetService",
+      "operation": "GetHostInfoDetail",
+      "kind": "readonly",
+      "description": "获取主机资产的详情信息, 包含软件信息，硬件信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostLog",
+      "service": "HostAssetService",
+      "operation": "GetHostLog",
+      "kind": "readonly",
+      "description": "获取探针端获取日志，默认忽略离线探针，默认超时时间为1min.",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostPhysicalInfo",
+      "service": "HostAssetService",
+      "operation": "GetHostPhysicalInfo",
+      "kind": "readonly",
+      "description": "获取主机资产物理信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostPprof",
+      "service": "HostAssetService",
+      "operation": "GetHostPprof",
+      "kind": "readonly",
+      "description": "探针端获取日志，默认忽略离线探针，默认超时时间为 1 min.",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetHostView",
+      "service": "HostAssetService",
+      "operation": "GetHostView",
+      "kind": "readonly",
+      "description": "获取主机信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetRiskOverView",
+      "service": "HostAssetService",
+      "operation": "GetRiskOverView",
+      "kind": "readonly",
+      "description": "获取主机上的资产的统计信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetScore",
+      "service": "HostAssetService",
+      "operation": "GetScore",
+      "kind": "readonly",
+      "description": "获取主机分数",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.GetUninstallCommand",
+      "service": "HostAssetService",
+      "operation": "GetUninstallCommand",
+      "kind": "readonly",
+      "description": "获取离线卸载 token",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.MultiEditTags",
+      "service": "HostAssetService",
+      "operation": "MultiEditTags",
+      "kind": "mutation",
+      "description": "更新主机的标签",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.RemoteInstallCancel",
+      "service": "HostAssetService",
+      "operation": "RemoteInstallCancel",
+      "kind": "mutation",
+      "description": "取消远程安装操作",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.RemoteInstallCurrent",
+      "service": "HostAssetService",
+      "operation": "RemoteInstallCurrent",
+      "kind": "mutation",
+      "description": "获取当前任务信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.RemoteInstallStart",
+      "service": "HostAssetService",
+      "operation": "RemoteInstallStart",
+      "kind": "mutation",
+      "description": "开始远程安装任务",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.RemoteInstallStatus",
+      "service": "HostAssetService",
+      "operation": "RemoteInstallStatus",
+      "kind": "mutation",
+      "description": "获取远程安装的状态信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.RepairHost",
+      "service": "HostAssetService",
+      "operation": "RepairHost",
+      "kind": "mutation",
+      "description": "修复探针",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.RestartHost",
+      "service": "HostAssetService",
+      "operation": "RestartHost",
+      "kind": "mutation",
+      "description": "重启探针",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.SetAgentCloneConfig",
+      "service": "HostAssetService",
+      "operation": "SetAgentCloneConfig",
+      "kind": "mutation",
+      "description": "设置探针克隆配置",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.SetAntiUninstallConfig",
+      "service": "HostAssetService",
+      "operation": "SetAntiUninstallConfig",
+      "kind": "mutation",
+      "description": "设置探针防卸载开关",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostAssetService.SetGroup",
+      "service": "HostAssetService",
+      "operation": "SetGroup",
+      "kind": "mutation",
+      "description": "修改主机业务组",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatAgentState",
+      "service": "HostAssetService",
+      "operation": "StatAgentState",
+      "kind": "readonly",
+      "description": "获取按 探针状态 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatAgentVersion",
+      "service": "HostAssetService",
+      "operation": "StatAgentVersion",
+      "kind": "readonly",
+      "description": "获取按 探针版本 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatCpuCore",
+      "service": "HostAssetService",
+      "operation": "StatCpuCore",
+      "kind": "readonly",
+      "description": "获取按 cpu核数 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatCpuUsage",
+      "service": "HostAssetService",
+      "operation": "StatCpuUsage",
+      "kind": "readonly",
+      "description": "获取按 CPU 用量 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatHostCountByTime",
+      "service": "HostAssetService",
+      "operation": "StatHostCountByTime",
+      "kind": "readonly",
+      "description": "获取按 探针安装时间 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatMemSize",
+      "service": "HostAssetService",
+      "operation": "StatMemSize",
+      "kind": "readonly",
+      "description": "获取按 内存大小 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatMemUsage",
+      "service": "HostAssetService",
+      "operation": "StatMemUsage",
+      "kind": "readonly",
+      "description": "获取按 内存使用量 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatOsReleaseName",
+      "service": "HostAssetService",
+      "operation": "StatOsReleaseName",
+      "kind": "readonly",
+      "description": "获取按 操作系统发行版本名称 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.StatTag",
+      "service": "HostAssetService",
+      "operation": "StatTag",
+      "kind": "readonly",
+      "description": "获取按 主机特征(用户自定的) 聚合的主机分布",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.UpdateHostInfoDetail",
+      "service": "HostAssetService",
+      "operation": "UpdateHostInfoDetail",
+      "kind": "mutation",
+      "description": "立即更新主机详情信息。包含软件信息，硬件信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostAssetService.UpgradeHost",
+      "service": "HostAssetService",
+      "operation": "UpgradeHost",
+      "kind": "mutation",
+      "description": "升级探针",
+      "tags": [
+        "探针管理"
+      ]
+    },
+    {
+      "method": "HostDiscoveryService.DeleteHost",
+      "service": "HostDiscoveryService",
+      "operation": "DeleteHost",
+      "kind": "mutation",
+      "description": "删除未知主机资产",
+      "tags": [
+        "未知资产发现"
+      ]
+    },
+    {
+      "method": "HostDiscoveryService.ListHost",
+      "service": "HostDiscoveryService",
+      "operation": "ListHost",
+      "kind": "readonly",
+      "description": "获取未知主机资产信息",
+      "tags": [
+        "未知资产发现"
+      ]
+    },
+    {
+      "method": "HostNicAssetService.GetHostNic",
+      "service": "HostNicAssetService",
+      "operation": "GetHostNic",
+      "kind": "readonly",
+      "description": "获取主机网卡信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.GetHostPartition",
+      "service": "HostPartitionAssetService",
+      "operation": "GetHostPartition",
+      "kind": "readonly",
+      "description": "获取主机分区信息",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.GetNetworkStorageFileSystem",
+      "service": "HostPartitionAssetService",
+      "operation": "GetNetworkStorageFileSystem",
+      "kind": "readonly",
+      "description": "获取所有主机网络存储文件系统",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.GetNetworkStoragePartition",
+      "service": "HostPartitionAssetService",
+      "operation": "GetNetworkStoragePartition",
+      "kind": "readonly",
+      "description": "获取主机网络存储分区信息",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.GetNetworkStoragePartitionByFileSystem",
+      "service": "HostPartitionAssetService",
+      "operation": "GetNetworkStoragePartitionByFileSystem",
+      "kind": "readonly",
+      "description": "获取主机网络存储分区信息，通过文件系统聚合",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.GetNetworkStoragePartitionByHost",
+      "service": "HostPartitionAssetService",
+      "operation": "GetNetworkStoragePartitionByHost",
+      "kind": "readonly",
+      "description": "获取主机网络存储分区信息，通过主机聚合",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.GetNetworkStoragePartitionByMountPoint",
+      "service": "HostPartitionAssetService",
+      "operation": "GetNetworkStoragePartitionByMountPoint",
+      "kind": "readonly",
+      "description": "获取主机网络存储分区信息，通过挂载点聚合",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostPartitionAssetService.SetNetworkStorageScanEnablement",
+      "service": "HostPartitionAssetService",
+      "operation": "SetNetworkStorageScanEnablement",
+      "kind": "mutation",
+      "description": "设置主机网络存储分区资产扫描启用状态",
+      "tags": [
+        "分区资产"
+      ]
+    },
+    {
+      "method": "HostRouteAssetService.GetHostRoute",
+      "service": "HostRouteAssetService",
+      "operation": "GetHostRoute",
+      "kind": "readonly",
+      "description": "获取主机路由资产信息",
+      "tags": [
+        "主机资产"
+      ]
+    },
+    {
+      "method": "LighterManagerService.Apply",
+      "service": "LighterManagerService",
+      "operation": "Apply",
+      "kind": "mutation",
+      "description": "应用lighter升级包",
+      "tags": [
+        "lighter模块"
+      ]
+    },
+    {
+      "method": "LighterManagerService.GetLatestVersion",
+      "service": "LighterManagerService",
+      "operation": "GetLatestVersion",
+      "kind": "readonly",
+      "description": "获取最新的 lighter 版本",
+      "tags": [
+        "lighter模块"
+      ]
+    },
+    {
+      "method": "LighterManagerService.Upgrade",
+      "service": "LighterManagerService",
+      "operation": "Upgrade",
+      "kind": "mutation",
+      "description": "更新 lighter",
+      "tags": [
+        "lighter 管理"
+      ]
+    },
+    {
+      "method": "LogCollectService.CreateLogCollect",
+      "service": "LogCollectService",
+      "operation": "CreateLogCollect",
+      "kind": "mutation",
+      "description": "创建日志采集",
+      "tags": [
+        "日志采集"
+      ]
+    },
+    {
+      "method": "LogCollectService.DeleteLogCollect",
+      "service": "LogCollectService",
+      "operation": "DeleteLogCollect",
+      "kind": "mutation",
+      "description": "删除日志采集规则",
+      "tags": [
+        "日志采集"
+      ]
+    },
+    {
+      "method": "LogCollectService.EnablementLogCollect",
+      "service": "LogCollectService",
+      "operation": "EnablementLogCollect",
+      "kind": "mutation",
+      "description": "启禁用日志采集规则",
+      "tags": [
+        "日志采集"
+      ]
+    },
+    {
+      "method": "LogCollectService.GetLogCollectInfo",
+      "service": "LogCollectService",
+      "operation": "GetLogCollectInfo",
+      "kind": "readonly",
+      "description": "获取日志采集信息",
+      "tags": [
+        "日志采集"
+      ]
+    },
+    {
+      "method": "LogCollectService.ListLogCollect",
+      "service": "LogCollectService",
+      "operation": "ListLogCollect",
+      "kind": "readonly",
+      "description": "获取日志采集列表",
+      "tags": [
+        "日志采集"
+      ]
+    },
+    {
+      "method": "LogCollectService.UpdateLogCollect",
+      "service": "LogCollectService",
+      "operation": "UpdateLogCollect",
+      "kind": "mutation",
+      "description": "更新日志采集",
+      "tags": [
+        "日志采集"
+      ]
+    },
+    {
+      "method": "MalwareEventService.CreateWhitelist",
+      "service": "MalwareEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.DeleteEvent",
+      "service": "MalwareEventService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.DeleteLibrary",
+      "service": "MalwareEventService",
+      "operation": "DeleteLibrary",
+      "kind": "mutation",
+      "description": "删除规则匹配引擎库",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.EditEventComment",
+      "service": "MalwareEventService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.EditEventState",
+      "service": "MalwareEventService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.GetCredibleEngineVersion",
+      "service": "MalwareEventService",
+      "operation": "GetCredibleEngineVersion",
+      "kind": "readonly",
+      "description": "获取可信引擎库版本",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.GetEvent",
+      "service": "MalwareEventService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.GetEventList",
+      "service": "MalwareEventService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.GetLibraryList",
+      "service": "MalwareEventService",
+      "operation": "GetLibraryList",
+      "kind": "readonly",
+      "description": "获取规则匹配引擎库列表",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.GetMalwareEngineVersion",
+      "service": "MalwareEventService",
+      "operation": "GetMalwareEngineVersion",
+      "kind": "readonly",
+      "description": "获取恶意文件检测引擎版本",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.GetWhitelist",
+      "service": "MalwareEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.IsolateTask",
+      "service": "MalwareEventService",
+      "operation": "IsolateTask",
+      "kind": "readonly",
+      "description": "恶意文件\"隔离\"操作任务",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.MarkAsRead",
+      "service": "MalwareEventService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.ProcessKill",
+      "service": "MalwareEventService",
+      "operation": "ProcessKill",
+      "kind": "mutation",
+      "description": "进程阻断",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.RetestEvent",
+      "service": "MalwareEventService",
+      "operation": "RetestEvent",
+      "kind": "mutation",
+      "description": "恶意文件快速复测",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.StatEventByFileType",
+      "service": "MalwareEventService",
+      "operation": "StatEventByFileType",
+      "kind": "readonly",
+      "description": "获取按文件类型聚合的统计结果",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.StatEventByState",
+      "service": "MalwareEventService",
+      "operation": "StatEventByState",
+      "kind": "readonly",
+      "description": "获取按状态聚合的统计结果",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MalwareEventService.TrustTask",
+      "service": "MalwareEventService",
+      "operation": "TrustTask",
+      "kind": "mutation",
+      "description": "恶意文件 信任 操作任务",
+      "tags": [
+        "恶意文件"
+      ]
+    },
+    {
+      "method": "MessageQueueService.GetNsqSummary",
+      "service": "MessageQueueService",
+      "operation": "GetNsqSummary",
+      "kind": "readonly",
+      "description": "获取nsq消息",
+      "tags": [
+        "Nsq"
+      ]
+    },
+    {
+      "method": "MimicryService.DeleteEvent",
+      "service": "MimicryService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "MimicryService"
+      ]
+    },
+    {
+      "method": "MimicryService.ListEvent",
+      "service": "MimicryService",
+      "operation": "ListEvent",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "MimicryService"
+      ]
+    },
+    {
+      "method": "MimicryService.StopMimicry",
+      "service": "MimicryService",
+      "operation": "StopMimicry",
+      "kind": "mutation",
+      "description": "停止拟态防护",
+      "tags": [
+        "MimicryService"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.CreateWhitelist",
+      "service": "NetworkAuditEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.DeleteEvent",
+      "service": "NetworkAuditEventService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.EditEventComment",
+      "service": "NetworkAuditEventService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.EditEventState",
+      "service": "NetworkAuditEventService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.GetEvent",
+      "service": "NetworkAuditEventService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.GetEventList",
+      "service": "NetworkAuditEventService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.GetEventListByHost",
+      "service": "NetworkAuditEventService",
+      "operation": "GetEventListByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.GetEventListByProcessName",
+      "service": "NetworkAuditEventService",
+      "operation": "GetEventListByProcessName",
+      "kind": "readonly",
+      "description": "获取按进程名聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.GetEventListByTarget",
+      "service": "NetworkAuditEventService",
+      "operation": "GetEventListByTarget",
+      "kind": "readonly",
+      "description": "获取按目标网络地址统计的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.GetWhitelist",
+      "service": "NetworkAuditEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.MarkAsRead",
+      "service": "NetworkAuditEventService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.ProcessKill",
+      "service": "NetworkAuditEventService",
+      "operation": "ProcessKill",
+      "kind": "mutation",
+      "description": "进程阻断",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.StatEventByHost",
+      "service": "NetworkAuditEventService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.StatEventByLevelState",
+      "service": "NetworkAuditEventService",
+      "operation": "StatEventByLevelState",
+      "kind": "readonly",
+      "description": "获取按风险等级与处置状态聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.StatEventByProcessName",
+      "service": "NetworkAuditEventService",
+      "operation": "StatEventByProcessName",
+      "kind": "readonly",
+      "description": "获取按进程名聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.StatEventByTarget",
+      "service": "NetworkAuditEventService",
+      "operation": "StatEventByTarget",
+      "kind": "readonly",
+      "description": "获取按目标地址聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.StatEventByTimeState",
+      "service": "NetworkAuditEventService",
+      "operation": "StatEventByTimeState",
+      "kind": "readonly",
+      "description": "获取按事件发生时间聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkAuditEventService.StatEventByType",
+      "service": "NetworkAuditEventService",
+      "operation": "StatEventByType",
+      "kind": "readonly",
+      "description": "获取按网络外连类型聚合的事件列表",
+      "tags": [
+        "网络审计"
+      ]
+    },
+    {
+      "method": "NetworkRejectService.DeleteEvent",
+      "service": "NetworkRejectService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "NetworkReject"
+      ]
+    },
+    {
+      "method": "NetworkRejectService.ListEvent",
+      "service": "NetworkRejectService",
+      "operation": "ListEvent",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "NetworkReject"
+      ]
+    },
+    {
+      "method": "NetworkRejectService.ReleaseReject",
+      "service": "NetworkRejectService",
+      "operation": "ReleaseReject",
+      "kind": "mutation",
+      "description": "解除阻断",
+      "tags": [
+        "NetworkReject"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.CreateRule",
+      "service": "NonWhiteProcessService",
+      "operation": "CreateRule",
+      "kind": "mutation",
+      "description": "创建命令白名单规则",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.DeleteEvent",
+      "service": "NonWhiteProcessService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.DeleteRule",
+      "service": "NonWhiteProcessService",
+      "operation": "DeleteRule",
+      "kind": "mutation",
+      "description": "删除命令白名单规则",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.EditEventComment",
+      "service": "NonWhiteProcessService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "更新事件备注",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.EditEventState",
+      "service": "NonWhiteProcessService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "编辑事件状态",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.GetEventDetail",
+      "service": "NonWhiteProcessService",
+      "operation": "GetEventDetail",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.GetEventList",
+      "service": "NonWhiteProcessService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.GetEventListByCmdline",
+      "service": "NonWhiteProcessService",
+      "operation": "GetEventListByCmdline",
+      "kind": "readonly",
+      "description": "根据进程cmdline聚合事件列表",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.GetEventListByHost",
+      "service": "NonWhiteProcessService",
+      "operation": "GetEventListByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的事件列表",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.GetEventListByName",
+      "service": "NonWhiteProcessService",
+      "operation": "GetEventListByName",
+      "kind": "readonly",
+      "description": "根据进程名称聚合事件列",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.ListRule",
+      "service": "NonWhiteProcessService",
+      "operation": "ListRule",
+      "kind": "readonly",
+      "description": "获取命令白名单规则",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.MarkAsRead",
+      "service": "NonWhiteProcessService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.UpdateRule",
+      "service": "NonWhiteProcessService",
+      "operation": "UpdateRule",
+      "kind": "mutation",
+      "description": "更新命令白名单规则",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "NonWhiteProcessService.WhiteEvent",
+      "service": "NonWhiteProcessService",
+      "operation": "WhiteEvent",
+      "kind": "mutation",
+      "description": "加白事件",
+      "tags": [
+        "命令白名单"
+      ]
+    },
+    {
+      "method": "OrganizationService.CreateOrg",
+      "service": "OrganizationService",
+      "operation": "CreateOrg",
+      "kind": "mutation",
+      "description": "创建机构",
+      "tags": [
+        "后台：机构管理"
+      ]
+    },
+    {
+      "method": "OrganizationService.DeleteOrg",
+      "service": "OrganizationService",
+      "operation": "DeleteOrg",
+      "kind": "mutation",
+      "description": "删除机构",
+      "tags": [
+        "后台：机构管理"
+      ]
+    },
+    {
+      "method": "OrganizationService.GetOrgInfo",
+      "service": "OrganizationService",
+      "operation": "GetOrgInfo",
+      "kind": "readonly",
+      "description": "获取机构信息",
+      "tags": [
+        "后台：机构管理"
+      ]
+    },
+    {
+      "method": "OrganizationService.ListOrg",
+      "service": "OrganizationService",
+      "operation": "ListOrg",
+      "kind": "readonly",
+      "description": "用户列表",
+      "tags": [
+        "后台：机构管理"
+      ]
+    },
+    {
+      "method": "OrganizationService.ListOrgWithBizGroup",
+      "service": "OrganizationService",
+      "operation": "ListOrgWithBizGroup",
+      "kind": "readonly",
+      "description": "用户列表",
+      "tags": [
+        "后台：机构管理"
+      ]
+    },
+    {
+      "method": "OrganizationService.UpdateOrg",
+      "service": "OrganizationService",
+      "operation": "UpdateOrg",
+      "kind": "mutation",
+      "description": "更新机构",
+      "tags": [
+        "后台：机构管理"
+      ]
+    },
+    {
+      "method": "PackageService.ApplyPackage",
+      "service": "PackageService",
+      "operation": "ApplyPackage",
+      "kind": "mutation",
+      "description": "应用升级包",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.BatchApplyPackage",
+      "service": "PackageService",
+      "operation": "BatchApplyPackage",
+      "kind": "mutation",
+      "description": "批量应用升级包",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.CancelDownload",
+      "service": "PackageService",
+      "operation": "CancelDownload",
+      "kind": "mutation",
+      "description": "取消下载",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.DeletePackage",
+      "service": "PackageService",
+      "operation": "DeletePackage",
+      "kind": "mutation",
+      "description": "删除升级包",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.DownloadPackage",
+      "service": "PackageService",
+      "operation": "DownloadPackage",
+      "kind": "mutation",
+      "description": "下载升级包",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetAllModules",
+      "service": "PackageService",
+      "operation": "GetAllModules",
+      "kind": "readonly",
+      "description": "获取所有模块",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetApplyHistory",
+      "service": "PackageService",
+      "operation": "GetApplyHistory",
+      "kind": "readonly",
+      "description": "获取历史更新记录",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetDownloadResult",
+      "service": "PackageService",
+      "operation": "GetDownloadResult",
+      "kind": "readonly",
+      "description": "获取升级包下载结果",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetLatestPackages",
+      "service": "PackageService",
+      "operation": "GetLatestPackages",
+      "kind": "readonly",
+      "description": "获取最近的升级包",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetModules",
+      "service": "PackageService",
+      "operation": "GetModules",
+      "kind": "readonly",
+      "description": "获取模块",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetOverview",
+      "service": "PackageService",
+      "operation": "GetOverview",
+      "kind": "readonly",
+      "description": "获取版本信息",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetPackage",
+      "service": "PackageService",
+      "operation": "GetPackage",
+      "kind": "readonly",
+      "description": "获取升级包信息",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.GetProxyHost",
+      "service": "PackageService",
+      "operation": "GetProxyHost",
+      "kind": "readonly",
+      "description": "获取代理主机信息",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.ListPackages",
+      "service": "PackageService",
+      "operation": "ListPackages",
+      "kind": "readonly",
+      "description": "获取升级包列表",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PackageService.UpsertProxyHost",
+      "service": "PackageService",
+      "operation": "UpsertProxyHost",
+      "kind": "mutation",
+      "description": "更新插入代理",
+      "tags": [
+        "产品更新"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.CreateWhitelist",
+      "service": "PatchInfoEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "创建事件加白规则",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.DelPatchInfoEvent",
+      "service": "PatchInfoEventService",
+      "operation": "DelPatchInfoEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.GetPatchInfoEvent",
+      "service": "PatchInfoEventService",
+      "operation": "GetPatchInfoEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.GetPatchInfoEventList",
+      "service": "PatchInfoEventService",
+      "operation": "GetPatchInfoEventList",
+      "kind": "readonly",
+      "description": "获取补丁风险列表",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.GetPatchInfoEventListByHost",
+      "service": "PatchInfoEventService",
+      "operation": "GetPatchInfoEventListByHost",
+      "kind": "readonly",
+      "description": "获取按 主机 聚合的事件列表",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.GetPatchInfoEventListByPatchInfo",
+      "service": "PatchInfoEventService",
+      "operation": "GetPatchInfoEventListByPatchInfo",
+      "kind": "readonly",
+      "description": "获取按 补丁信息 聚合的事件列表",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.GetWhitelist",
+      "service": "PatchInfoEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.InstallPatchInfo",
+      "service": "PatchInfoEventService",
+      "operation": "InstallPatchInfo",
+      "kind": "mutation",
+      "description": "安装补丁",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.RetestPatchInfo",
+      "service": "PatchInfoEventService",
+      "operation": "RetestPatchInfo",
+      "kind": "mutation",
+      "description": "复测补丁",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.StatPatchInfoEventByHost",
+      "service": "PatchInfoEventService",
+      "operation": "StatPatchInfoEventByHost",
+      "kind": "readonly",
+      "description": "返回按 主机 聚合的统计视图",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.StatPatchInfoEventByLevelPatchState",
+      "service": "PatchInfoEventService",
+      "operation": "StatPatchInfoEventByLevelPatchState",
+      "kind": "readonly",
+      "description": "返回按 补丁处置状态 聚合的统计视图",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.StatPatchInfoEventByPatchInfo",
+      "service": "PatchInfoEventService",
+      "operation": "StatPatchInfoEventByPatchInfo",
+      "kind": "readonly",
+      "description": "返回按 补丁信息 聚合的统计视图",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.StatPatchInfoEventByTime",
+      "service": "PatchInfoEventService",
+      "operation": "StatPatchInfoEventByTime",
+      "kind": "readonly",
+      "description": "返回按 时间 聚合的统计视图",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.UpdatePatchInfoEventComment",
+      "service": "PatchInfoEventService",
+      "operation": "UpdatePatchInfoEventComment",
+      "kind": "mutation",
+      "description": "修改事件备注",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoEventService.UpdatePatchInfoEventPatchState",
+      "service": "PatchInfoEventService",
+      "operation": "UpdatePatchInfoEventPatchState",
+      "kind": "mutation",
+      "description": "编辑状态",
+      "tags": [
+        "补丁风险"
+      ]
+    },
+    {
+      "method": "PatchInfoService.EditCustomSolution",
+      "service": "PatchInfoService",
+      "operation": "EditCustomSolution",
+      "kind": "mutation",
+      "description": "修改补丁修复方案",
+      "tags": [
+        "补丁管理"
+      ]
+    },
+    {
+      "method": "PatchInfoService.GetPatchInfo",
+      "service": "PatchInfoService",
+      "operation": "GetPatchInfo",
+      "kind": "readonly",
+      "description": "获取补丁详情",
+      "tags": [
+        "补丁管理"
+      ]
+    },
+    {
+      "method": "PatchInfoService.GetPatchInfoList",
+      "service": "PatchInfoService",
+      "operation": "GetPatchInfoList",
+      "kind": "readonly",
+      "description": "获取补丁风险列表",
+      "tags": [
+        "补丁管理"
+      ]
+    },
+    {
+      "method": "PortAssetService.DeletePort",
+      "service": "PortAssetService",
+      "operation": "DeletePort",
+      "kind": "mutation",
+      "description": "删除端口资产",
+      "tags": [
+        "端口资产"
+      ]
+    },
+    {
+      "method": "PortAssetService.GetPortAssetList",
+      "service": "PortAssetService",
+      "operation": "GetPortAssetList",
+      "kind": "readonly",
+      "description": "获取端口资产列表",
+      "tags": [
+        "端口资产"
+      ]
+    },
+    {
+      "method": "PortAssetService.GetPortAssetListByCmd",
+      "service": "PortAssetService",
+      "operation": "GetPortAssetListByCmd",
+      "kind": "readonly",
+      "description": "进程名数据分组，按照指定条件获取端口资产",
+      "tags": [
+        "端口资产"
+      ]
+    },
+    {
+      "method": "PortAssetService.GetPortAssetListByProtocolIPPort",
+      "service": "PortAssetService",
+      "operation": "GetPortAssetListByProtocolIPPort",
+      "kind": "readonly",
+      "description": "监听端口协议数据分组，按照指定要求获取端口",
+      "tags": [
+        "端口资产"
+      ]
+    },
+    {
+      "method": "PortAssetService.GetPortAssetListByProtocolPort",
+      "service": "PortAssetService",
+      "operation": "GetPortAssetListByProtocolPort",
+      "kind": "readonly",
+      "description": "监听端口数据分组，按照指定要求获取端口",
+      "tags": [
+        "端口资产"
+      ]
+    },
+    {
+      "method": "PortAssetService.StatPort",
+      "service": "PortAssetService",
+      "operation": "StatPort",
+      "kind": "readonly",
+      "description": "表示端口开放情况",
+      "tags": [
+        "端口资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.GetProcess",
+      "service": "ProcessAssetService",
+      "operation": "GetProcess",
+      "kind": "readonly",
+      "description": "获取进程资产详情",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.GetProcessList",
+      "service": "ProcessAssetService",
+      "operation": "GetProcessList",
+      "kind": "readonly",
+      "description": "获取主机上进程资产列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.GetProcessListByHost",
+      "service": "ProcessAssetService",
+      "operation": "GetProcessListByHost",
+      "kind": "readonly",
+      "description": "主机数据分组，按照指定条件获取进程资产列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.GetProcessListByName",
+      "service": "ProcessAssetService",
+      "operation": "GetProcessListByName",
+      "kind": "readonly",
+      "description": "进程名数据分组，按照指定信息获取主机上进程资产列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.GetProcessListByPath",
+      "service": "ProcessAssetService",
+      "operation": "GetProcessListByPath",
+      "kind": "readonly",
+      "description": "获取主机上进程列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.GetRefreshDateTime",
+      "service": "ProcessAssetService",
+      "operation": "GetRefreshDateTime",
+      "kind": "readonly",
+      "description": "获取进程资产的更新时间",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.Refresh",
+      "service": "ProcessAssetService",
+      "operation": "Refresh",
+      "kind": "mutation",
+      "description": "更新进程资产",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.StatProcessByEffectiveUser",
+      "service": "ProcessAssetService",
+      "operation": "StatProcessByEffectiveUser",
+      "kind": "readonly",
+      "description": "有效用户数据分组下，按照指定条件返回进程资产列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.StatProcessBySafety",
+      "service": "ProcessAssetService",
+      "operation": "StatProcessBySafety",
+      "kind": "readonly",
+      "description": "进程安全性数据分组下，按照指定条件返回进程资产列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.StatProcessByStatus",
+      "service": "ProcessAssetService",
+      "operation": "StatProcessByStatus",
+      "kind": "readonly",
+      "description": "进程状态数据分组下，按照指定条件返回进程资产列表",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessAssetService.WhitelistProcess",
+      "service": "ProcessAssetService",
+      "operation": "WhitelistProcess",
+      "kind": "mutation",
+      "description": "给进程加白名单",
+      "tags": [
+        "进程资产"
+      ]
+    },
+    {
+      "method": "ProcessKillService.DeleteEvent",
+      "service": "ProcessKillService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "NetworkReject"
+      ]
+    },
+    {
+      "method": "ProcessKillService.ListEvent",
+      "service": "ProcessKillService",
+      "operation": "ListEvent",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "NetworkReject"
+      ]
+    },
+    {
+      "method": "ReportService.CopyReport",
+      "service": "ReportService",
+      "operation": "CopyReport",
+      "kind": "mutation",
+      "description": "复制报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.CopyTemplate",
+      "service": "ReportService",
+      "operation": "CopyTemplate",
+      "kind": "mutation",
+      "description": "复制模板",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.CreateReport",
+      "service": "ReportService",
+      "operation": "CreateReport",
+      "kind": "mutation",
+      "description": "添加报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.CreateTemplate",
+      "service": "ReportService",
+      "operation": "CreateTemplate",
+      "kind": "mutation",
+      "description": "创建模板",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.DeleteReport",
+      "service": "ReportService",
+      "operation": "DeleteReport",
+      "kind": "mutation",
+      "description": "删除报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.DeleteReportHistory",
+      "service": "ReportService",
+      "operation": "DeleteReportHistory",
+      "kind": "mutation",
+      "description": "删除历史报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.DeleteTemplate",
+      "service": "ReportService",
+      "operation": "DeleteTemplate",
+      "kind": "mutation",
+      "description": "删除模板",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.EditReport",
+      "service": "ReportService",
+      "operation": "EditReport",
+      "kind": "mutation",
+      "description": "编辑报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.EditTemplate",
+      "service": "ReportService",
+      "operation": "EditTemplate",
+      "kind": "mutation",
+      "description": "编辑模板",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.GenerateReport",
+      "service": "ReportService",
+      "operation": "GenerateReport",
+      "kind": "mutation",
+      "description": "生成报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.GetReport",
+      "service": "ReportService",
+      "operation": "GetReport",
+      "kind": "readonly",
+      "description": "获取报告详情",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.GetReportGeneratingInfo",
+      "service": "ReportService",
+      "operation": "GetReportGeneratingInfo",
+      "kind": "readonly",
+      "description": "生成报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.GetTemplate",
+      "service": "ReportService",
+      "operation": "GetTemplate",
+      "kind": "readonly",
+      "description": "获取模板",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.GetTemplateTree",
+      "service": "ReportService",
+      "operation": "GetTemplateTree",
+      "kind": "readonly",
+      "description": "获取模板树",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.GetTemplateTypes",
+      "service": "ReportService",
+      "operation": "GetTemplateTypes",
+      "kind": "readonly",
+      "description": "获取模板类型",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.ListReport",
+      "service": "ReportService",
+      "operation": "ListReport",
+      "kind": "readonly",
+      "description": "获取报告列表",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.ListReportHistory",
+      "service": "ReportService",
+      "operation": "ListReportHistory",
+      "kind": "readonly",
+      "description": "查阅历史报告",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "ReportService.ListTemplate",
+      "service": "ReportService",
+      "operation": "ListTemplate",
+      "kind": "readonly",
+      "description": "获取模板列表",
+      "tags": [
+        "报告管理"
+      ]
+    },
+    {
+      "method": "RevshellEventService.CreateWhitelist",
+      "service": "RevshellEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.DeleteEvent",
+      "service": "RevshellEventService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.EditEventComment",
+      "service": "RevshellEventService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.EditEventState",
+      "service": "RevshellEventService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.GenerateEventFirewallRule",
+      "service": "RevshellEventService",
+      "operation": "GenerateEventFirewallRule",
+      "kind": "mutation",
+      "description": "根据所选事件生成网络阻断规则",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.GetEvent",
+      "service": "RevshellEventService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.GetEventByHostList",
+      "service": "RevshellEventService",
+      "operation": "GetEventByHostList",
+      "kind": "readonly",
+      "description": "获取按主机 ID 聚合的事件列表",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.GetEventByRemoteAddrList",
+      "service": "RevshellEventService",
+      "operation": "GetEventByRemoteAddrList",
+      "kind": "readonly",
+      "description": "获取按远程 IP 聚合的事件列表",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.GetEventList",
+      "service": "RevshellEventService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.GetWhitelist",
+      "service": "RevshellEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.MarkAsRead",
+      "service": "RevshellEventService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.ProcessKill",
+      "service": "RevshellEventService",
+      "operation": "ProcessKill",
+      "kind": "mutation",
+      "description": "删除所选的事件",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.StatEventByAsset",
+      "service": "RevshellEventService",
+      "operation": "StatEventByAsset",
+      "kind": "readonly",
+      "description": "返回反弹shell最多的主机 top n ( n = 10 default )",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.StatEventByCmdline",
+      "service": "RevshellEventService",
+      "operation": "StatEventByCmdline",
+      "kind": "readonly",
+      "description": "返回反弹shell最多的cmdline top n ( n = 5 default )",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.StatEventByRemoteAddr",
+      "service": "RevshellEventService",
+      "operation": "StatEventByRemoteAddr",
+      "kind": "readonly",
+      "description": "返回反弹shell最多的远程地址 top n ( n = 10 default )",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.StatEventByState",
+      "service": "RevshellEventService",
+      "operation": "StatEventByState",
+      "kind": "readonly",
+      "description": "返回处置事件状态分布的统计信息",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.StatEventByTime",
+      "service": "RevshellEventService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "返回反弹shell按时间的趋势 top n ( n = 10 default )",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "RevshellEventService.StatEventByUname",
+      "service": "RevshellEventService",
+      "operation": "StatEventByUname",
+      "kind": "readonly",
+      "description": "返回反弹shell最多的User Name( 按shell权限 ) top n ( n = 5 default )",
+      "tags": [
+        "反弹 Shell"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.GenerateInstallCommand",
+      "service": "ScoutAgentApiService",
+      "operation": "GenerateInstallCommand",
+      "kind": "mutation",
+      "description": "生成探针安装命令",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.GetAgentList",
+      "service": "ScoutAgentApiService",
+      "operation": "GetAgentList",
+      "kind": "readonly",
+      "description": "获取探针列表",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.SetCollectionRange",
+      "service": "ScoutAgentApiService",
+      "operation": "SetCollectionRange",
+      "kind": "mutation",
+      "description": "设置采集范围",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.SetKafkaAddrRange",
+      "service": "ScoutAgentApiService",
+      "operation": "SetKafkaAddrRange",
+      "kind": "mutation",
+      "description": "设置 kafka 地址",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.SetResourceLimit",
+      "service": "ScoutAgentApiService",
+      "operation": "SetResourceLimit",
+      "kind": "mutation",
+      "description": "设置资源配额",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.TestKafka",
+      "service": "ScoutAgentApiService",
+      "operation": "TestKafka",
+      "kind": "mutation",
+      "description": "测试 kafka",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.Uninstall",
+      "service": "ScoutAgentApiService",
+      "operation": "Uninstall",
+      "kind": "mutation",
+      "description": "卸载采集探针",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "ScoutAgentApiService.Upgrade",
+      "service": "ScoutAgentApiService",
+      "operation": "Upgrade",
+      "kind": "mutation",
+      "description": "更新采集探针",
+      "tags": [
+        "采集探针"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.DeleteEvent",
+      "service": "SecurityCheckService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除安全基线",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.EditEventComment",
+      "service": "SecurityCheckService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.EditEventState",
+      "service": "SecurityCheckService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "修改安全基线事件状态",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.GetEvent",
+      "service": "SecurityCheckService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取安全基线事件详情",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.GetEventList",
+      "service": "SecurityCheckService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "安全基线事件列表",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.GetEventListByHost",
+      "service": "SecurityCheckService",
+      "operation": "GetEventListByHost",
+      "kind": "readonly",
+      "description": "根据Host筛选条件获取安全基线事件列表",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.GetEventListByItemID",
+      "service": "SecurityCheckService",
+      "operation": "GetEventListByItemID",
+      "kind": "readonly",
+      "description": "根据风险筛选条件获取安全基线事件列表",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.GetPluginList",
+      "service": "SecurityCheckService",
+      "operation": "GetPluginList",
+      "kind": "readonly",
+      "description": "获取检测插件更新状态",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.RetestEvent",
+      "service": "SecurityCheckService",
+      "operation": "RetestEvent",
+      "kind": "mutation",
+      "description": "复测安全基线事件",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.StatEventByHost",
+      "service": "SecurityCheckService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "高风险主机",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.StatEventByItem",
+      "service": "SecurityCheckService",
+      "operation": "StatEventByItem",
+      "kind": "readonly",
+      "description": "高频风险",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.StatEventByLevelState",
+      "service": "SecurityCheckService",
+      "operation": "StatEventByLevelState",
+      "kind": "readonly",
+      "description": "时间状态分布",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.StatEventByTags",
+      "service": "SecurityCheckService",
+      "operation": "StatEventByTags",
+      "kind": "readonly",
+      "description": "风险特征分布",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityCheckService.StatEventByTime",
+      "service": "SecurityCheckService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "风险发生趋势",
+      "tags": [
+        "安全基线"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.CreateSecurityStrategy",
+      "service": "SecurityStrategyService",
+      "operation": "CreateSecurityStrategy",
+      "kind": "mutation",
+      "description": "添加安全策略",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.DeleteSecurityStrategy",
+      "service": "SecurityStrategyService",
+      "operation": "DeleteSecurityStrategy",
+      "kind": "mutation",
+      "description": "删除安全策略",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.GetSecurityStrategyDetail",
+      "service": "SecurityStrategyService",
+      "operation": "GetSecurityStrategyDetail",
+      "kind": "readonly",
+      "description": "获取安全策略详情",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.GetSecurityStrategyTree",
+      "service": "SecurityStrategyService",
+      "operation": "GetSecurityStrategyTree",
+      "kind": "readonly",
+      "description": "获取安全策略树",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.ListSecurityStrategy",
+      "service": "SecurityStrategyService",
+      "operation": "ListSecurityStrategy",
+      "kind": "readonly",
+      "description": "获取安全策略列表",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.SetGroupStrategy",
+      "service": "SecurityStrategyService",
+      "operation": "SetGroupStrategy",
+      "kind": "mutation",
+      "description": "设置业务组的安全策略",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SecurityStrategyService.UpdateSecurityStrategy",
+      "service": "SecurityStrategyService",
+      "operation": "UpdateSecurityStrategy",
+      "kind": "mutation",
+      "description": "更新安全策略",
+      "tags": [
+        "入侵检测配置"
+      ]
+    },
+    {
+      "method": "SensitiveFileService.DeleteEvent",
+      "service": "SensitiveFileService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除敏感文件事件",
+      "tags": [
+        "敏感文件"
+      ]
+    },
+    {
+      "method": "SensitiveFileService.EditEventComment",
+      "service": "SensitiveFileService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "敏感文件"
+      ]
+    },
+    {
+      "method": "SensitiveFileService.EditEventState",
+      "service": "SensitiveFileService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "修改敏感文件事件状态",
+      "tags": [
+        "敏感文件"
+      ]
+    },
+    {
+      "method": "SensitiveFileService.GetEvent",
+      "service": "SensitiveFileService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取敏感文件事件详情",
+      "tags": [
+        "敏感文件"
+      ]
+    },
+    {
+      "method": "SensitiveFileService.GetEventList",
+      "service": "SensitiveFileService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取敏感文件事件列表",
+      "tags": [
+        "敏感文件"
+      ]
+    },
+    {
+      "method": "SensitiveFileService.ResetEventState",
+      "service": "SensitiveFileService",
+      "operation": "ResetEventState",
+      "kind": "mutation",
+      "description": "重置事件状态为 'risky'",
+      "tags": [
+        "敏感文件"
+      ]
+    },
+    {
+      "method": "SensitivePortService.CreateWhitelist",
+      "service": "SensitivePortService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.DeleteEvent",
+      "service": "SensitivePortService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除敏感端口事件",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.EditEventComment",
+      "service": "SensitivePortService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.EditEventState",
+      "service": "SensitivePortService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "修改敏感端口事件状态",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.GetEvent",
+      "service": "SensitivePortService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.GetEventList",
+      "service": "SensitivePortService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取敏感端口事件列表",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.GetHostViewEventList",
+      "service": "SensitivePortService",
+      "operation": "GetHostViewEventList",
+      "kind": "readonly",
+      "description": "获取敏感端口事件列表(主机视角)",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.GetPortViewEventList",
+      "service": "SensitivePortService",
+      "operation": "GetPortViewEventList",
+      "kind": "readonly",
+      "description": "获取敏感端口事件列表(端口视角)",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.GetProcessViewEventList",
+      "service": "SensitivePortService",
+      "operation": "GetProcessViewEventList",
+      "kind": "readonly",
+      "description": "获取敏感端口事件列表(进程视角)",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.GetWhitelist",
+      "service": "SensitivePortService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.RetestEvent",
+      "service": "SensitivePortService",
+      "operation": "RetestEvent",
+      "kind": "mutation",
+      "description": "复测事件",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.StatEventByCmd",
+      "service": "SensitivePortService",
+      "operation": "StatEventByCmd",
+      "kind": "readonly",
+      "description": "敏感进程分布",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.StatEventByHost",
+      "service": "SensitivePortService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "敏感端口分布-主机维度",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.StatEventByPort",
+      "service": "SensitivePortService",
+      "operation": "StatEventByPort",
+      "kind": "readonly",
+      "description": "敏感端口分布",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.StatEventByState",
+      "service": "SensitivePortService",
+      "operation": "StatEventByState",
+      "kind": "readonly",
+      "description": "事件状态分布",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "SensitivePortService.StatEventByTime",
+      "service": "SensitivePortService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "事件时间分布",
+      "tags": [
+        "敏感端口"
+      ]
+    },
+    {
+      "method": "StatisticsService.GetEventOverview",
+      "service": "StatisticsService",
+      "operation": "GetEventOverview",
+      "kind": "readonly",
+      "description": "获取事件描述",
+      "tags": [
+        "态势感知"
+      ]
+    },
+    {
+      "method": "StatisticsService.GetHostScore",
+      "service": "StatisticsService",
+      "operation": "GetHostScore",
+      "kind": "readonly",
+      "description": "获取主机得分与事件概况",
+      "tags": [
+        "态势感知"
+      ]
+    },
+    {
+      "method": "StatisticsService.GetScanTime",
+      "service": "StatisticsService",
+      "operation": "GetScanTime",
+      "kind": "readonly",
+      "description": "获取最近一次扫描任务完成时间",
+      "tags": [
+        "态势感知"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.CreateWhitelist",
+      "service": "SuspiciousOperationService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.DeleteEvent",
+      "service": "SuspiciousOperationService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.EditEventComment",
+      "service": "SuspiciousOperationService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.EditEventState",
+      "service": "SuspiciousOperationService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "编辑事件状态",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetEvent",
+      "service": "SuspiciousOperationService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取命令详情",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetEventList",
+      "service": "SuspiciousOperationService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取命令列表",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetEventListByHost",
+      "service": "SuspiciousOperationService",
+      "operation": "GetEventListByHost",
+      "kind": "readonly",
+      "description": "返回按 主机 聚合的可疑操作列表",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetEventListByNetApp",
+      "service": "SuspiciousOperationService",
+      "operation": "GetEventListByNetApp",
+      "kind": "readonly",
+      "description": "返回按 网络应用 聚合的可疑操作列表",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetEventListByRuleName",
+      "service": "SuspiciousOperationService",
+      "operation": "GetEventListByRuleName",
+      "kind": "readonly",
+      "description": "返回按 规则 聚合的可疑操作列表",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetEventListBySSHClientIP",
+      "service": "SuspiciousOperationService",
+      "operation": "GetEventListBySSHClientIP",
+      "kind": "readonly",
+      "description": "返回按 SSH登录 聚合的可疑操作列表",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.GetWhitelist",
+      "service": "SuspiciousOperationService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.MarkAsRead",
+      "service": "SuspiciousOperationService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.ProcessKill",
+      "service": "SuspiciousOperationService",
+      "operation": "ProcessKill",
+      "kind": "mutation",
+      "description": "进程阻断",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.StatEventByHost",
+      "service": "SuspiciousOperationService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "返回按 主机 聚合的统计视图",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.StatEventByLevelState",
+      "service": "SuspiciousOperationService",
+      "operation": "StatEventByLevelState",
+      "kind": "readonly",
+      "description": "返回按 风险级别类型 聚合的统计视图",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.StatEventByNetApp",
+      "service": "SuspiciousOperationService",
+      "operation": "StatEventByNetApp",
+      "kind": "readonly",
+      "description": "返回按 网络应用 聚合的统计视图",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.StatEventByRuleName",
+      "service": "SuspiciousOperationService",
+      "operation": "StatEventByRuleName",
+      "kind": "readonly",
+      "description": "返回按 规则名称 聚合的统计视图",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.StatEventBySSHClientIP",
+      "service": "SuspiciousOperationService",
+      "operation": "StatEventBySSHClientIP",
+      "kind": "readonly",
+      "description": "返回按 SSH登录地址 聚合的统计视图",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "SuspiciousOperationService.StatEventByTime",
+      "service": "SuspiciousOperationService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "返回按 创建日期 聚合的统计视图",
+      "tags": [
+        "可疑命令"
+      ]
+    },
+    {
+      "method": "TamperProofService.AddRule",
+      "service": "TamperProofService",
+      "operation": "AddRule",
+      "kind": "mutation",
+      "description": "添加规则",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.DeleteEventList",
+      "service": "TamperProofService",
+      "operation": "DeleteEventList",
+      "kind": "mutation",
+      "description": "删除事件",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.DeleteRuleList",
+      "service": "TamperProofService",
+      "operation": "DeleteRuleList",
+      "kind": "mutation",
+      "description": "删除规则",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.DisableHostList",
+      "service": "TamperProofService",
+      "operation": "DisableHostList",
+      "kind": "mutation",
+      "description": "关闭多个主机的文件防篡改功能",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.EditEventListRead",
+      "service": "TamperProofService",
+      "operation": "EditEventListRead",
+      "kind": "mutation",
+      "description": "将多个事件置为已读或未读",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.EditRule",
+      "service": "TamperProofService",
+      "operation": "EditRule",
+      "kind": "mutation",
+      "description": "修改防篡改规则",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.EditRuleEnable",
+      "service": "TamperProofService",
+      "operation": "EditRuleEnable",
+      "kind": "mutation",
+      "description": "修改防篡改规则",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.EnableHostList",
+      "service": "TamperProofService",
+      "operation": "EnableHostList",
+      "kind": "mutation",
+      "description": "开启多个主机的文件防篡改功能",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetEventDetails",
+      "service": "TamperProofService",
+      "operation": "GetEventDetails",
+      "kind": "readonly",
+      "description": "事件的详情",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetEventList",
+      "service": "TamperProofService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "文件篡改事件的列表",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetHostList",
+      "service": "TamperProofService",
+      "operation": "GetHostList",
+      "kind": "readonly",
+      "description": "开启文件防篡改的主机列表",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetMaxNum",
+      "service": "TamperProofService",
+      "operation": "GetMaxNum",
+      "kind": "readonly",
+      "description": "获取最大文件防篡改探针授权数量",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetModuleList",
+      "service": "TamperProofService",
+      "operation": "GetModuleList",
+      "kind": "readonly",
+      "description": "文件防篡改模块的列表",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetRule",
+      "service": "TamperProofService",
+      "operation": "GetRule",
+      "kind": "readonly",
+      "description": "获取单个文件防篡改规则",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.GetRuleList",
+      "service": "TamperProofService",
+      "operation": "GetRuleList",
+      "kind": "readonly",
+      "description": "文件防篡改规则的列表",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.Install",
+      "service": "TamperProofService",
+      "operation": "Install",
+      "kind": "mutation",
+      "description": "给主机安装防篡改模块",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "TamperProofService.Uninstall",
+      "service": "TamperProofService",
+      "operation": "Uninstall",
+      "kind": "mutation",
+      "description": "给主机拆卸防篡改模块",
+      "tags": [
+        "TamperProof"
+      ]
+    },
+    {
+      "method": "ThreatOverviewService.GetProcessedEventInfo",
+      "service": "ThreatOverviewService",
+      "operation": "GetProcessedEventInfo",
+      "kind": "readonly",
+      "description": "事件处置情况",
+      "tags": [
+        "威胁事件"
+      ]
+    },
+    {
+      "method": "ThreatOverviewService.ListEventDetectedTrendInfo",
+      "service": "ThreatOverviewService",
+      "operation": "ListEventDetectedTrendInfo",
+      "kind": "readonly",
+      "description": "事件发生趋势",
+      "tags": [
+        "威胁事件"
+      ]
+    },
+    {
+      "method": "ThreatOverviewService.ListEventTypeDistInfo",
+      "service": "ThreatOverviewService",
+      "operation": "ListEventTypeDistInfo",
+      "kind": "readonly",
+      "description": "事件类型分布",
+      "tags": [
+        "威胁事件"
+      ]
+    },
+    {
+      "method": "ThreatOverviewService.ListGetRiskyHostInfo",
+      "service": "ThreatOverviewService",
+      "operation": "ListGetRiskyHostInfo",
+      "kind": "readonly",
+      "description": "高风险主机",
+      "tags": [
+        "威胁事件"
+      ]
+    },
+    {
+      "method": "ThreatOverviewService.ListRealTimeEvents",
+      "service": "ThreatOverviewService",
+      "operation": "ListRealTimeEvents",
+      "kind": "readonly",
+      "description": "获取事件描述",
+      "tags": [
+        "威胁事件"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetUserAuthorizedKeys",
+      "service": "UserAssetService",
+      "operation": "GetUserAuthorizedKeys",
+      "kind": "readonly",
+      "description": "获取用户公钥信息",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetUserList",
+      "service": "UserAssetService",
+      "operation": "GetUserList",
+      "kind": "readonly",
+      "description": "根据指定条件获取用户资产列表",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetUserListByUsername",
+      "service": "UserAssetService",
+      "operation": "GetUserListByUsername",
+      "kind": "readonly",
+      "description": "用户名数据分组，根据指定的条件获取用户资产列表",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetWindowsDomainUserList",
+      "service": "UserAssetService",
+      "operation": "GetWindowsDomainUserList",
+      "kind": "readonly",
+      "description": "获取 windows 域用户列表",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetWindowsDomainUserListByDomain",
+      "service": "UserAssetService",
+      "operation": "GetWindowsDomainUserListByDomain",
+      "kind": "readonly",
+      "description": "获取 windows 域用户列表，按域聚合",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetWindowsUserList",
+      "service": "UserAssetService",
+      "operation": "GetWindowsUserList",
+      "kind": "readonly",
+      "description": "获取 windows 用户列表",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetWindowsUserListByHost",
+      "service": "UserAssetService",
+      "operation": "GetWindowsUserListByHost",
+      "kind": "readonly",
+      "description": "获取 windows 用户列表，按主机聚合",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetWindowsUserListByUserName",
+      "service": "UserAssetService",
+      "operation": "GetWindowsUserListByUserName",
+      "kind": "readonly",
+      "description": "取 windows 用户列表，按用户名聚合",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.GetWindowsUserListByUsername",
+      "service": "UserAssetService",
+      "operation": "GetWindowsUserListByUsername",
+      "kind": "readonly",
+      "description": "获取 windows 域用户列表，按用户名聚合",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "UserAssetService.StatUser",
+      "service": "UserAssetService",
+      "operation": "StatUser",
+      "kind": "readonly",
+      "description": "用户统计信息",
+      "tags": [
+        "用户资产"
+      ]
+    },
+    {
+      "method": "VulnInfoService.GetVulnInfo",
+      "service": "VulnInfoService",
+      "operation": "GetVulnInfo",
+      "kind": "readonly",
+      "description": "敏感端口事件导出",
+      "tags": [
+        "漏洞情报"
+      ]
+    },
+    {
+      "method": "VulnInfoService.ListVulnInfo",
+      "service": "VulnInfoService",
+      "operation": "ListVulnInfo",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "漏洞情报"
+      ]
+    },
+    {
+      "method": "VulnInfoService.StatVulnInfoByLevel",
+      "service": "VulnInfoService",
+      "operation": "StatVulnInfoByLevel",
+      "kind": "readonly",
+      "description": "漏洞级别分布",
+      "tags": [
+        "漏洞情报"
+      ]
+    },
+    {
+      "method": "VulnInfoService.TrendVulnInfo",
+      "service": "VulnInfoService",
+      "operation": "TrendVulnInfo",
+      "kind": "readonly",
+      "description": "漏洞公布时间趋势",
+      "tags": [
+        "漏洞情报"
+      ]
+    },
+    {
+      "method": "VulnService.CreateWhitelist",
+      "service": "VulnService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.DeleteVuln",
+      "service": "VulnService",
+      "operation": "DeleteVuln",
+      "kind": "mutation",
+      "description": "根据漏洞 ID 删除漏洞",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.EditEventComment",
+      "service": "VulnService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.EditVulnState",
+      "service": "VulnService",
+      "operation": "EditVulnState",
+      "kind": "mutation",
+      "description": "修改漏洞事件状态",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetVuln",
+      "service": "VulnService",
+      "operation": "GetVuln",
+      "kind": "readonly",
+      "description": "获取漏洞事件详情",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetVulnByAppList",
+      "service": "VulnService",
+      "operation": "GetVulnByAppList",
+      "kind": "readonly",
+      "description": "根据影响软件返回漏洞事件列表",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetVulnByHostList",
+      "service": "VulnService",
+      "operation": "GetVulnByHostList",
+      "kind": "readonly",
+      "description": "根据主机返回漏洞事件列表",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetVulnByVulnList",
+      "service": "VulnService",
+      "operation": "GetVulnByVulnList",
+      "kind": "readonly",
+      "description": "根据漏洞筛选调教返回漏洞事件列表",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetVulnList",
+      "service": "VulnService",
+      "operation": "GetVulnList",
+      "kind": "readonly",
+      "description": "获取通用漏洞事件列表",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetVulnTypes",
+      "service": "VulnService",
+      "operation": "GetVulnTypes",
+      "kind": "readonly",
+      "description": "获取漏洞类型",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.GetWhitelist",
+      "service": "VulnService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.RetestVuln",
+      "service": "VulnService",
+      "operation": "RetestVuln",
+      "kind": "mutation",
+      "description": "根据漏洞事件 ID 列表进行复测",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.StatVulnByAV",
+      "service": "VulnService",
+      "operation": "StatVulnByAV",
+      "kind": "readonly",
+      "description": "漏洞的攻击途径分布",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.StatVulnByLevelState",
+      "service": "VulnService",
+      "operation": "StatVulnByLevelState",
+      "kind": "readonly",
+      "description": "返回按 风险级别类型 聚合的统计视图",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.StatVulnByTag",
+      "service": "VulnService",
+      "operation": "StatVulnByTag",
+      "kind": "readonly",
+      "description": "漏洞的标签分布",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.StatVulnByTime",
+      "service": "VulnService",
+      "operation": "StatVulnByTime",
+      "kind": "readonly",
+      "description": "返回按 时间 聚合的统计视图",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "VulnService.StatVulnProcessByTime",
+      "service": "VulnService",
+      "operation": "StatVulnProcessByTime",
+      "kind": "readonly",
+      "description": "根据时间汇总漏洞处理详情",
+      "tags": [
+        "通用漏洞"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.CreateDict",
+      "service": "WeakPasswdService",
+      "operation": "CreateDict",
+      "kind": "mutation",
+      "description": "创建弱口令字典",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.CreateWhitelist",
+      "service": "WeakPasswdService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.Delete",
+      "service": "WeakPasswdService",
+      "operation": "Delete",
+      "kind": "mutation",
+      "description": "删除弱口令事件",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.DeleteDict",
+      "service": "WeakPasswdService",
+      "operation": "DeleteDict",
+      "kind": "mutation",
+      "description": "删除弱口令字典",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.DictList",
+      "service": "WeakPasswdService",
+      "operation": "DictList",
+      "kind": "mutation",
+      "description": "弱口令字典列表",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.EditDict",
+      "service": "WeakPasswdService",
+      "operation": "EditDict",
+      "kind": "mutation",
+      "description": "修改弱口令字典",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.EditEventComment",
+      "service": "WeakPasswdService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.EditState",
+      "service": "WeakPasswdService",
+      "operation": "EditState",
+      "kind": "mutation",
+      "description": "修改弱口令事件状态",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.EnableDict",
+      "service": "WeakPasswdService",
+      "operation": "EnableDict",
+      "kind": "mutation",
+      "description": "启用弱口令字典",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.Get",
+      "service": "WeakPasswdService",
+      "operation": "Get",
+      "kind": "readonly",
+      "description": "获取弱口令事件详情",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.GetAggEventList",
+      "service": "WeakPasswdService",
+      "operation": "GetAggEventList",
+      "kind": "readonly",
+      "description": "获取数据分组后弱口令事件列表",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.GetDict",
+      "service": "WeakPasswdService",
+      "operation": "GetDict",
+      "kind": "readonly",
+      "description": "获取弱口令字典详情",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.GetWhitelist",
+      "service": "WeakPasswdService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.HistoryList",
+      "service": "WeakPasswdService",
+      "operation": "HistoryList",
+      "kind": "mutation",
+      "description": "弱口令事件变更记录",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.List",
+      "service": "WeakPasswdService",
+      "operation": "List",
+      "kind": "readonly",
+      "description": "弱口令事件列表",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.ListByHost",
+      "service": "WeakPasswdService",
+      "operation": "ListByHost",
+      "kind": "readonly",
+      "description": "根据Host筛选条件获取弱口令事件列表",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.ListByPlan",
+      "service": "WeakPasswdService",
+      "operation": "ListByPlan",
+      "kind": "readonly",
+      "description": "根据PlanId筛选条件获取弱口令事件列表",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.ListByService",
+      "service": "WeakPasswdService",
+      "operation": "ListByService",
+      "kind": "readonly",
+      "description": "根据服务筛选条件获取弱口令事件列表",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.RetestEvent",
+      "service": "WeakPasswdService",
+      "operation": "RetestEvent",
+      "kind": "mutation",
+      "description": "复测弱口令事件",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByHost",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "高风险主机",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByPassword",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByPassword",
+      "kind": "readonly",
+      "description": "高风险密码",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByService",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByService",
+      "kind": "readonly",
+      "description": "弱口令服务类型分布",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByState",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByState",
+      "kind": "readonly",
+      "description": "弱口令事件状态分布",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByTime",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "弱口令事件发生趋势",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByType",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByType",
+      "kind": "readonly",
+      "description": "弱口令事件状态分布",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WeakPasswdService.StatEventByUsername",
+      "service": "WeakPasswdService",
+      "operation": "StatEventByUsername",
+      "kind": "readonly",
+      "description": "高风险用户名",
+      "tags": [
+        "弱口令检测"
+      ]
+    },
+    {
+      "method": "WebshellEventService.CreateWhitelist",
+      "service": "WebshellEventService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "生成白名单规则",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.DeleteEvent",
+      "service": "WebshellEventService",
+      "operation": "DeleteEvent",
+      "kind": "mutation",
+      "description": "删除所选事件",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.EditEventComment",
+      "service": "WebshellEventService",
+      "operation": "EditEventComment",
+      "kind": "mutation",
+      "description": "改变所选事件备注",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.EditEventState",
+      "service": "WebshellEventService",
+      "operation": "EditEventState",
+      "kind": "mutation",
+      "description": "改变所选事件的处置状态",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.EditMimicryConfig",
+      "service": "WebshellEventService",
+      "operation": "EditMimicryConfig",
+      "kind": "mutation",
+      "description": "用来修改全局拟态防御的配置",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetEvent",
+      "service": "WebshellEventService",
+      "operation": "GetEvent",
+      "kind": "readonly",
+      "description": "获取事件详情",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetEventByHostList",
+      "service": "WebshellEventService",
+      "operation": "GetEventByHostList",
+      "kind": "readonly",
+      "description": "根据主机获取事件列表",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetEventList",
+      "service": "WebshellEventService",
+      "operation": "GetEventList",
+      "kind": "readonly",
+      "description": "获取事件列表",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetEventListByFileName",
+      "service": "WebshellEventService",
+      "operation": "GetEventListByFileName",
+      "kind": "readonly",
+      "description": "根据文件名获取事件列表",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetEventListByFilePath",
+      "service": "WebshellEventService",
+      "operation": "GetEventListByFilePath",
+      "kind": "readonly",
+      "description": "根据文件路径获取事件列表",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetEventListByWebshellType",
+      "service": "WebshellEventService",
+      "operation": "GetEventListByWebshellType",
+      "kind": "readonly",
+      "description": "根据Webshell 类型获取事件列表",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetFile",
+      "service": "WebshellEventService",
+      "operation": "GetFile",
+      "kind": "readonly",
+      "description": "获取 Webshell 文件内容",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetMimicryConfig",
+      "service": "WebshellEventService",
+      "operation": "GetMimicryConfig",
+      "kind": "readonly",
+      "description": "用来换取拟态防御全局配置",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetOverview",
+      "service": "WebshellEventService",
+      "operation": "GetOverview",
+      "kind": "readonly",
+      "description": "获取 Webshell 概述信息",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.GetWhitelist",
+      "service": "WebshellEventService",
+      "operation": "GetWhitelist",
+      "kind": "readonly",
+      "description": "获取白名单规则",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.IsolateWebshell",
+      "service": "WebshellEventService",
+      "operation": "IsolateWebshell",
+      "kind": "readonly",
+      "description": "用来隔离主机上的 Webshell",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.MarkAsRead",
+      "service": "WebshellEventService",
+      "operation": "MarkAsRead",
+      "kind": "mutation",
+      "description": "标记事件为已读",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.RetestEvent",
+      "service": "WebshellEventService",
+      "operation": "RetestEvent",
+      "kind": "mutation",
+      "description": "触发一个探针端任务用来检测 Webshell 是否仍然存在",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.StatEventByFileName",
+      "service": "WebshellEventService",
+      "operation": "StatEventByFileName",
+      "kind": "readonly",
+      "description": "获取按文件名聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.StatEventByHost",
+      "service": "WebshellEventService",
+      "operation": "StatEventByHost",
+      "kind": "readonly",
+      "description": "获取按主机聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.StatEventByIsolateState",
+      "service": "WebshellEventService",
+      "operation": "StatEventByIsolateState",
+      "kind": "readonly",
+      "description": "获取按 Webshell 隔离状态聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.StatEventByLevel",
+      "service": "WebshellEventService",
+      "operation": "StatEventByLevel",
+      "kind": "readonly",
+      "description": "获取按风险等级与处置状态聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.StatEventByTime",
+      "service": "WebshellEventService",
+      "operation": "StatEventByTime",
+      "kind": "readonly",
+      "description": "获取按事件发生事件聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.StatEventByWebshellType",
+      "service": "WebshellEventService",
+      "operation": "StatEventByWebshellType",
+      "kind": "readonly",
+      "description": "获取按 Webshell 类型聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.TestMimicryToken",
+      "service": "WebshellEventService",
+      "operation": "TestMimicryToken",
+      "kind": "mutation",
+      "description": "测试拟态防御服务平台token,如果是401说明token不正确,500说明token正确",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebshellEventService.TrendWebshell",
+      "service": "WebshellEventService",
+      "operation": "TrendWebshell",
+      "kind": "readonly",
+      "description": "获取按事件发现日期（年，月，日）聚合的统计结果",
+      "tags": [
+        "WebShell"
+      ]
+    },
+    {
+      "method": "WebsiteAssetService.GetWebsite",
+      "service": "WebsiteAssetService",
+      "operation": "GetWebsite",
+      "kind": "readonly",
+      "description": "获取站点资产详情",
+      "tags": [
+        "网站资产"
+      ]
+    },
+    {
+      "method": "WebsiteAssetService.GetWebsiteList",
+      "service": "WebsiteAssetService",
+      "operation": "GetWebsiteList",
+      "kind": "readonly",
+      "description": "获取站点资产列表",
+      "tags": [
+        "网站资产"
+      ]
+    },
+    {
+      "method": "WhitelistService.CreateWhitelist",
+      "service": "WhitelistService",
+      "operation": "CreateWhitelist",
+      "kind": "mutation",
+      "description": "创建事件加白规则",
+      "tags": [
+        "事件加白规则"
+      ]
+    },
+    {
+      "method": "WhitelistService.DeleteWhitelist",
+      "service": "WhitelistService",
+      "operation": "DeleteWhitelist",
+      "kind": "mutation",
+      "description": "删除事件加白规则",
+      "tags": [
+        "事件加白规则"
+      ]
+    },
+    {
+      "method": "WhitelistService.EnablementWhitelist",
+      "service": "WhitelistService",
+      "operation": "EnablementWhitelist",
+      "kind": "mutation",
+      "description": "启禁用事件加白规则",
+      "tags": [
+        "事件加白规则"
+      ]
+    },
+    {
+      "method": "WhitelistService.ListWhitelist",
+      "service": "WhitelistService",
+      "operation": "ListWhitelist",
+      "kind": "readonly",
+      "description": "获取事件加白规则列表",
+      "tags": [
+        "事件加白规则"
+      ]
+    },
+    {
+      "method": "WhitelistService.UpdateWhitelist",
+      "service": "WhitelistService",
+      "operation": "UpdateWhitelist",
+      "kind": "mutation",
+      "description": "更新事件加白规则",
+      "tags": [
+        "事件加白规则"
+      ]
+    }
+  ]
+}

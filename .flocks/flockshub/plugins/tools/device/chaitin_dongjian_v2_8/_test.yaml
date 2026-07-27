@@ -1,0 +1,59 @@
+schema_version: 1
+provider: chaitin_dongjian_api
+
+connectivity:
+  tool: chaitin_dongjian_projects
+  params:
+    action: project_list
+    limit: 1
+    offset: 0
+
+fixtures:
+  chaitin_dongjian_projects:
+    - label: List projects
+      label_cn: 查询组织单位列表
+      tags: [smoke]
+      params:
+        action: project_list
+        limit: 10
+        offset: 0
+      assert:
+        success: true
+
+  chaitin_dongjian_tasks:
+    - label: Filter scan task instances
+      label_cn: 筛选任务实例
+      tags: [task]
+      params:
+        action: xprocess_filter
+        body:
+          limit: 10
+          offset: 0
+
+  chaitin_dongjian_results:
+    - label: Filter vulnerabilities
+      label_cn: 筛选漏洞资产
+      tags: [vulnerability]
+      params:
+        action: vuln_filter
+        body:
+          limit: 10
+          offset: 0
+
+  chaitin_dongjian_api_readonly:
+    - label: Show API catalog
+      label_cn: 查看 API 目录
+      tags: [api]
+      params:
+        action: api_catalog
+      assert:
+        success: true
+
+  chaitin_dongjian_api_mutation:
+    - label: Show API catalog before confirmed mutation
+      label_cn: 变更调用前查看 API 目录
+      tags: [api, mutation]
+      params:
+        action: api_catalog
+      assert:
+        success: true

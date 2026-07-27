@@ -53,16 +53,18 @@ def _write_contract_sqlite(db_path: Path, records: list[dict[str, Any]]) -> None
         CREATE TABLE records (
             id TEXT PRIMARY KEY,
             record_date TEXT NOT NULL,
+            event_time INTEGER,
             record_json TEXT NOT NULL
         )
         """
     )
     connection.executemany(
-        "INSERT INTO records (id, record_date, record_json) VALUES (?, ?, ?)",
+        "INSERT INTO records (id, record_date, event_time, record_json) VALUES (?, ?, ?, ?)",
         [
             (
                 str(record.get("id") or index),
                 str(record.get("record_date") or "2026-06-25"),
+                int(record.get("event_time") or record.get("time") or 0),
                 json.dumps(record, ensure_ascii=False),
             )
             for index, record in enumerate(records, start=1)
@@ -306,6 +308,46 @@ def test_query_can_use_sqlite_json_driver(tmp_path: Path, monkeypatch: pytest.Mo
     assert response.body["summary"]["totalRaw"] == 2
     assert [item["id"] for item in response.body["items"]] == ["allowed"]
     assert response.body["items"][0]["entityId"] == "record:allowed"
+
+
+def test_query_can_filter_sqlite_json_driver_by_event_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    store = _store(tmp_path, monkeypatch)
+    db_path = tmp_path / "contract_records.db"
+    _write_contract_sqlite(
+        db_path,
+        [
+            _contract_record(id="early", time=1000),
+            _contract_record(id="middle", time=2000),
+            _contract_record(id="late", time=3000),
+        ],
+    )
+    runtime = OperationRuntime(
+        plugins=(
+            _plugin(
+                store,
+                adapter_kind="builtin-sqlite-json",
+                source_root=db_path,
+                driver_options={
+                    "table": "records",
+                    "recordColumn": "record_json",
+                    "dateColumn": "record_date",
+                    "eventTimeColumn": "event_time",
+                },
+            ),
+        ),
+    )
+
+    response = runtime.execute(
+        page_id=PAGE_ID,
+        contract_id=CONTRACT_ID,
+        operation_name="list",
+        payload={"params": {"startTime": 1500, "endTime": 2500, "limit": 10}},
+        principal=AuthUser(id="u1", username="alice", role="admin"),
+    )
+
+    assert response.body["summary"]["totalRaw"] == 1
+    assert response.body["summary"]["filteredUnique"] == 1
+    assert [item["id"] for item in response.body["items"]] == ["middle"]
 
 
 def test_query_rejects_page_supplied_binding_or_idempotency_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):

@@ -19,6 +19,12 @@ def _load_workflow() -> dict:
     return json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
 
 
+def test_workflow_exposes_chinese_name() -> None:
+    workflow = _load_workflow()
+
+    assert workflow["nameCn"] == "批量主机快速巡检工作流"
+
+
 def test_inspect_host_extracts_verdict_into_lightweight_result(tmp_path: Path) -> None:
     workflow = _load_workflow()
     inspect_host = next(node for node in workflow["nodes"] if node["id"] == "inspect_host")

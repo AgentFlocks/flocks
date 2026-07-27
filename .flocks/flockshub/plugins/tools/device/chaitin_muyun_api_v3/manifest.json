@@ -1,0 +1,71 @@
+{
+  "schemaVersion": "hub.plugin.v1",
+  "id": "chaitin_muyun_api_v3",
+  "type": "device",
+  "name": "Chaitin Muyun",
+  "description": "Chaitin Muyun host security platform JSON-RPC API 3.0 integration.",
+  "descriptionCn": "长亭牧云主机安全平台 API 3.0 接入。",
+  "version": "3.0",
+  "author": "Flocks Team",
+  "license": "MIT",
+  "category": "integration",
+  "tags": [
+    "edr",
+    "hids",
+    "vulnerability",
+    "integration"
+  ],
+  "useCases": [
+    "integration",
+    "incident-response",
+    "vulnerability-management"
+  ],
+  "domains": [
+    "security-ops"
+  ],
+  "capabilities": [
+    "device-integration",
+    "json-rpc-api"
+  ],
+  "trust": "official",
+  "source": {
+    "kind": "bundled",
+    "path": "plugins/tools/device/chaitin_muyun_api_v3"
+  },
+  "compatibility": {
+    "flocks": ">=0.8.0",
+    "os": [
+      "darwin",
+      "linux",
+      "windows"
+    ]
+  },
+  "dependencies": {
+    "skills": [],
+    "tools": [],
+    "python": [],
+    "external": []
+  },
+  "permissions": {
+    "tools": [],
+    "network": true,
+    "shell": false,
+    "filesystem": "none"
+  },
+  "risk": {
+    "level": "low",
+    "reasons": []
+  },
+  "entrypoints": [
+    "_provider.yaml",
+    "_test.yaml",
+    "chaitin_muyun.handler.py",
+    "chaitin_muyun_api_catalog.json",
+    "chaitin_muyun_assets.yaml",
+    "chaitin_muyun_events.yaml",
+    "chaitin_muyun_risk.yaml",
+    "chaitin_muyun_api_readonly.yaml",
+    "chaitin_muyun_api_mutation.yaml"
+  ],
+  "checksums": {}
+}

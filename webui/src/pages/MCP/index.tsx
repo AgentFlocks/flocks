@@ -119,7 +119,7 @@ function ServersTab() {
     setSelectedServer(server);
   };
 
-  if (loading) return <div className="flex items-center justify-center h-64"><LoadingSpinner /></div>;
+  if (loading) return <div className="flex items-center justify-center h-64"><LoadingSpinner delayMs={180} /></div>;
   if (error) return (
     <div className="flex items-center justify-center h-64">
       <div className="text-center">
@@ -290,7 +290,7 @@ function CatalogTab() {
     }
   };
 
-  if (loading) return <div className="flex items-center justify-center h-64"><LoadingSpinner /></div>;
+  if (loading) return <div className="flex items-center justify-center h-64"><LoadingSpinner delayMs={180} /></div>;
 
   return (
     <div className="flex gap-6 flex-1 overflow-hidden">

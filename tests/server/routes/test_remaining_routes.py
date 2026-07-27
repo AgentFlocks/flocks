@@ -5,10 +5,11 @@ Remaining route tests: Workflow, Provider, Task, Config, Permission
 from __future__ import annotations
 
 import asyncio
+import json
 from pathlib import Path
 
 import pytest
-from fastapi import status
+from fastapi import HTTPException, status
 from httpx import AsyncClient
 from unittest.mock import AsyncMock
 
@@ -508,6 +509,274 @@ class TestConfigRoutes:
             f"No expected keys found. Got: {list(data.keys())}"
         )
 
+    @pytest.mark.asyncio
+    async def test_null_allow_from_deletes_existing_channel_field(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """channels.<id>.allowFrom=null removes the persisted allowlist."""
+        from flocks.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "flocks.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "channels": {
+                        "slack": {
+                            "enabled": False,
+                            "allowFrom": ["U123"],
+                        }
+                    }
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        async def fake_get_config():
+            return {}
+
+        monkeypatch.setattr(config_routes, "get_config", fake_get_config)
+
+        await config_routes.update_config(
+            {"channels": {"slack": {"enabled": False, "allowFrom": None}}}
+        )
+
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert "allowFrom" not in saved["channels"]["slack"]
+        assert saved["channels"]["slack"]["dmPolicy"] == "open"
+
+    @pytest.mark.asyncio
+    async def test_slack_allow_from_save_sets_dm_policy_allowlist(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Slack allowFrom must also enable DM allowlist enforcement."""
+        from flocks.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "flocks.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text("{}", encoding="utf-8")
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        async def fake_get_config():
+            return {}
+
+        monkeypatch.setattr(config_routes, "get_config", fake_get_config)
+
+        await config_routes.update_config(
+            {"channels": {"slack": {"enabled": False, "allowFrom": ["U123"]}}}
+        )
+
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert saved["channels"]["slack"]["allowFrom"] == ["U123"]
+        assert saved["channels"]["slack"]["dmPolicy"] == "allowlist"
+
+    @pytest.mark.asyncio
+    async def test_invalid_patch_does_not_delete_channel_allow_from(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        """A failing PATCH must not relax persisted channel allowlists."""
+        from flocks.server.routes import config as config_routes
+
+        config_file = tmp_path / "config" / "flocks.json"
+        config_file.parent.mkdir(parents=True)
+        config_file.write_text(
+            json.dumps(
+                {
+                    "share": "manual",
+                    "channels": {
+                        "slack": {
+                            "enabled": False,
+                            "allowFrom": ["U123"],
+                        }
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(config_routes.Config, "get_config_file", lambda: config_file)
+
+        with pytest.raises(HTTPException) as exc:
+            await config_routes.update_config(
+                {
+                    "share": "invalid-mode",
+                    "channels": {"slack": {"allowFrom": None}},
+                }
+            )
+
+        assert exc.value.status_code == status.HTTP_400_BAD_REQUEST
+        saved = json.loads(config_file.read_text(encoding="utf-8"))
+        assert saved["channels"]["slack"]["allowFrom"] == ["U123"]
+
+    @pytest.mark.asyncio
+    async def test_tool_failure_preference_defaults_on_and_updates_only_its_section(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        from flocks.config.config import Config
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        Config._global_config = None
+        Config._cached_config = None
+        ConfigWriter._write_raw({"theme": "dark"})
+
+        resp = await client.get("/api/config/tool-failure")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": True}
+
+        resp = await client.patch(
+            "/api/config/tool-failure",
+            json={"disableOnRepeatedFailure": False},
+        )
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": False}
+        assert ConfigWriter._read_raw() == {
+            "theme": "dark",
+            "toolFailure": {"disableOnRepeatedFailure": False},
+        }
+
+        resp = await client.get("/api/config/tool-failure")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {"disableOnRepeatedFailure": False}
+
+        resp = await client.patch("/api/config/tool-failure", json={})
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_CONTENT
+
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_and_updates(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """UI display-name endpoints expose only the visible product name."""
+        from flocks.config.config import Config
+        from flocks.server.routes import config as config_routes
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: False)
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Flocks",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme SOC  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Acme SOC",
+            "configuredDisplayName": "Acme SOC",
+            "faviconUrl": None,
+        }
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme SOC"
+
+        svg = b'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 16 16"></svg>'
+        resp = await client.post(
+            "/api/config/ui/favicon",
+            files={"file": ("favicon.svg", svg, "image/svg+xml")},
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        data = resp.json()
+        assert data["displayName"] == "Acme SOC"
+        assert data["faviconUrl"].startswith("/api/config/ui-favicon?v=")
+
+        favicon_resp = await client.get(data["faviconUrl"])
+        assert favicon_resp.status_code == status.HTTP_200_OK
+        assert favicon_resp.content == svg
+        assert (tmp_path / "config" / "assets" / "favicon.svg").is_file()
+
+        resp = await client.delete("/api/config/ui/favicon")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["faviconUrl"] is None
+
+    @pytest.mark.asyncio
+    async def test_ui_display_defaults_to_flockspro_when_pro_is_enabled(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+    ):
+        """Empty display-name config falls back to the active product edition."""
+        from flocks.config.config import Config
+        from flocks.server.routes import config as config_routes
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        monkeypatch.setattr(config_routes, "_is_flockspro_enabled", lambda: True)
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.get("/api/config/ui-display")
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json() == {
+            "displayName": "Flocks Pro",
+            "configuredDisplayName": None,
+            "faviconUrl": None,
+        }
+
+        resp = await client.patch("/api/config/ui", json={"displayName": "  Acme Pro  "})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Acme Pro"
+        assert resp.json()["configuredDisplayName"] == "Acme Pro"
+
+        resp = await client.patch("/api/config/ui", json={"displayName": ""})
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["displayName"] == "Flocks Pro"
+        assert resp.json()["configuredDisplayName"] is None
+
+    @pytest.mark.parametrize(
+        "svg",
+        [
+            b'<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><image href="https://example.com/x.png"/></svg>',
+            b'<svg xmlns="http://www.w3.org/2000/svg"><path fill="url(https://example.com/g)"/></svg>',
+            '<svg xmlns="http://www.w3.org/2000/svg"></svg>'.encode("utf-16"),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_ui_favicon_rejects_unsafe_svg(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch,
+        svg: bytes,
+    ):
+        """SVG favicons are accepted only when they fit the safe favicon subset."""
+        from flocks.config.config import Config
+
+        monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(tmp_path / "config"))
+        Config._global_config = None
+        Config._cached_config = None
+
+        resp = await client.post(
+            "/api/config/ui/favicon",
+            files={"file": ("favicon.svg", svg, "image/svg+xml")},
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert not (tmp_path / "config" / "assets" / "favicon.svg").exists()
+
+        display_resp = await client.get("/api/config/ui-display")
+        assert display_resp.status_code == status.HTTP_200_OK
+        assert display_resp.json()["faviconUrl"] is None
+
 
 # ===========================================================================
 # Permission routes
@@ -547,6 +816,7 @@ class TestPermissionRoutes:
     async def test_permission_routes_preserve_request_created_time(self, client: AsyncClient, monkeypatch: pytest.MonkeyPatch):
         """List/detail routes should expose the stored permission request timestamp."""
         from flocks.permission.next import PermissionRequestInfo
+        from flocks.session.session import SessionInfo
 
         info = PermissionRequestInfo(
             id="perm_time_test",
@@ -566,6 +836,17 @@ class TestPermissionRoutes:
         monkeypatch.setattr(
             "flocks.server.routes.permission.PermissionNext.get_pending_info",
             AsyncMock(return_value=info),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.permission.Session.get_by_id",
+            AsyncMock(return_value=SessionInfo(
+                id="ses_time_test",
+                project_id="test",
+                directory="/tmp",
+                title="Permission route test",
+                owner_user_id="api-token-service",
+                owner_username="api-token-service",
+            )),
         )
 
         list_resp = await client.get("/permission")

@@ -1,0 +1,83 @@
+name: sangfor_atrust_identity
+description: Sangfor aTrust OpenAPI V3 identity, organization, role, auth-server, and directory read-only queries.
+description_cn: 深信服 aTrust OpenAPI V3 用户、组织架构、角色、认证服务器和用户目录只读查询工具。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_atrust
+version: "3"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - user_list
+        - user_by_id
+        - user_by_name
+        - user_by_external_id
+        - group_list
+        - group_by_id
+        - group_by_full_path
+        - group_by_external_id
+        - role_list
+        - role_by_id
+        - role_by_name
+        - role_by_external_id
+        - auth_server_list
+        - auth_server_detail
+        - user_directory_list
+        - user_directory_detail
+        - test
+      description: |
+        身份类只读动作：
+        - user_list: POST /api/v3/user/queryAll，查询用户列表。
+        - user_by_id/name/external_id: GET /api/v3/user/queryBy*，查询用户详情。
+        - group_list: POST /api/v3/group/queryAll，查询组织架构列表。
+        - group_by_id/full_path/external_id: GET /api/v3/group/queryBy*，查询组织架构详情。
+        - role_list: POST /api/v3/role/queryAll，查询角色列表。
+        - role_by_id/name/external_id: GET /api/v3/role/queryBy*，查询角色详情。
+        - auth_server_list/detail: GET /api/v1/authServer/queryAll 或 /query。
+        - user_directory_list/detail: GET /api/v1/userDirectory/queryAll 或 /query。
+    id:
+      type: string
+      description: 用户、组织架构、角色、认证服务器或用户目录 ID。
+    name:
+      type: string
+      description: 名称。
+    externalId:
+      type: string
+      description: 外部 ID。
+    fullPath:
+      type: string
+      description: 组织架构完整路径。
+    directoryDomain:
+      type: string
+      description: 用户目录唯一标识，本地用户目录通常为 local。
+    pageSize:
+      type: integer
+      description: 分页大小。
+    pageIndex:
+      type: integer
+      description: 分页页码，从 1 开始。
+    fuzzyMatch:
+      type: string
+      description: 用户列表模糊匹配关键词。
+    searchByPath:
+      type: string
+      description: 根据组织架构路径精确搜索用户。
+    recursive:
+      type: integer
+      description: 根据组织架构搜索时是否递归，1 递归，0 不递归。
+    query:
+      type: object
+      description: GET query string 参数。
+    body:
+      type: object
+      description: POST JSON body；传入后会优先使用该对象。
+  required:
+    - action
+handler:
+  type: script
+  script_file: sangfor_atrust.handler.py
+  function: identity

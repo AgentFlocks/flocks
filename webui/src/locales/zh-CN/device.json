@@ -1,6 +1,6 @@
 {
   "pageTitle": "设备接入",
-  "pageDescription": "配置安全设备 API 连接，使 Flocks 能够直接调用和控制这些设备",
+  "pageDescription": "配置安全设备 API 连接，使 Agent 能够直接调用和控制这些设备",
 
   "status": {
     "disabled": "已禁用",
@@ -41,7 +41,7 @@
 
   "empty": {
     "noDevices": "暂无已接入的设备",
-    "noDevicesHint": "添加设备后，Flocks Agent 即可调用对应工具",
+    "noDevicesHint": "添加设备后，Agent 即可调用对应工具",
     "addNow": "立即添加设备",
     "roomEmpty": "此机房暂无设备",
     "roomEmptyHint": "点击「添加设备」将设备接入此机房"

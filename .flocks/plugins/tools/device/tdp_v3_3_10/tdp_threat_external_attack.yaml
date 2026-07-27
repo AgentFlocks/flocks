@@ -1,4 +1,4 @@
-name: tdp_threat_inbound_attack
+name: tdp_threat_external_attack
 description: >
   查询 TDP 外部攻击相关数据，当前提供外部攻击严重性分布统计。优先使用顶层语义化参数，
   例如严重级别、攻击结果、级联资产组和关键词；`condition` 仅作为高级兼容入口。

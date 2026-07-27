@@ -48,6 +48,17 @@ def test_public_registry_reads_lazy_initialize_once(monkeypatch: pytest.MonkeyPa
 
 
 @pytest.mark.asyncio
+async def test_init_async_runs_lazy_initialization(monkeypatch: pytest.MonkeyPatch) -> None:
+    tool = _make_tool()
+    init_calls = _patch_lazy_init(monkeypatch, tool)
+
+    await ToolRegistry.init_async()
+
+    assert ToolRegistry.get(tool.info.name) is tool
+    assert init_calls == ["init"]
+
+
+@pytest.mark.asyncio
 async def test_execute_lazy_initializes_registry(monkeypatch: pytest.MonkeyPatch) -> None:
     tool = _make_tool()
     init_calls = _patch_lazy_init(monkeypatch, tool)

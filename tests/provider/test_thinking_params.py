@@ -47,6 +47,7 @@ import pytest
 
 from flocks.provider import model_catalog
 from flocks.provider import options as provider_options
+from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 
 DEEPSEEK_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
 GLM_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled", "clear_thinking": False}}
@@ -98,6 +99,10 @@ def _expected_generic_chat_extra_body(
         return GLM_THINKING_EXTRA_BODY
     if "mimo" in model_lower:
         return MIMO_THINKING_EXTRA_BODY
+    if is_kimi_k3_model(model_id):
+        return {"reasoning_effort": "max"}
+    if is_kimi_k27_code_model(model_id):
+        return KIMI_THINKING_EXTRA_BODY
     if "kimi" in model_lower:
         return KIMI_THINKING_EXTRA_BODY
     if "minimax" in model_lower or provider_lower == "minimax":
@@ -247,7 +252,7 @@ class TestGLM5TraceReplay:
             ("threatbook-io-llm", "minimax-m2.7", "reasoning_details", {"reasoning_split": True}),
             ("threatbook-io-llm", "minimax-m3", "reasoning_details", {"reasoning_split": True}),
             ("minimax", "minimax-m2.5", "reasoning_details", {"reasoning_split": True}),
-            ("deepseek", "deepseek-reasoner", "reasoning_content", DEEPSEEK_THINKING_EXTRA_BODY),
+            ("deepseek", "deepseek-v4-pro", "reasoning_content", DEEPSEEK_THINKING_EXTRA_BODY),
             ("stepfun", "step-3.5-flash", "reasoning_content", {"enable_thinking": True}),
         ],
     )
@@ -312,26 +317,6 @@ class TestDispatchShape:
         assert not hasattr(provider_options, "_openai_base_thinking_shape"), (
             "_openai_base_thinking_shape should be removed; generic_chat "
             "interleaved emits extra_body inline"
-        )
-
-    def test_deepseek_v3_is_not_auto_thinking_model(self) -> None:
-        """``deepseek-chat`` (V3) must not inherit thinking params from a
-        broad ``deepseek`` substring.
-        """
-        catalog = model_catalog.get_raw_catalog()
-        v3_entry = catalog.get("deepseek", {}).get("models", {}).get("deepseek-chat")
-        assert v3_entry is not None, "deepseek-chat missing from catalog"
-        assert v3_entry.get("capabilities", {}).get("interleaved") is None, (
-            "deepseek-chat now declares interleaved in catalog — remove the "
-            "series-token assertion and let the catalog coverage test pin it"
-        )
-
-        options = provider_options.build_provider_options(
-            "deepseek", "deepseek-chat", resolve_max_tokens=False,
-        )
-        assert "extra_body" not in options, (
-            "deepseek-chat does not declare interleaved in catalog and should "
-            f"not be auto-enabled by a broad deepseek token. options={options!r}"
         )
 
     def test_explicit_reasoning_toggle_propagates(self) -> None:
@@ -457,6 +442,9 @@ class TestDispatchShape:
             ("qwen3-7b-uncatalogued", {"enable_thinking": True}),
             ("glm-5-uncatalogued", GLM_THINKING_EXTRA_BODY),
             ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k2.7-code", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k2.7-code-highspeed", KIMI_THINKING_EXTRA_BODY),
+            ("kimi-k3", {"reasoning_effort": "max"}),
             ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
             ("minimax-m4-uncatalogued", {"reasoning_split": True}),
             ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),
@@ -485,10 +473,19 @@ class TestDispatchShape:
             f"emitted {expected_extra_body}. options={options!r}"
         )
 
+    def test_kimi_k27_dispatch_does_not_match_unknown_suffix(self) -> None:
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k2.7-code-future",
+            reasoning_enabled=False,
+            resolve_max_tokens=False,
+        )
+
+        assert "extra_body" not in options
+
     @pytest.mark.parametrize(
         "provider_id,model_id,expected_extra_body",
         [
-            ("deepseek", "deepseek-reasoner", DEEPSEEK_THINKING_EXTRA_BODY),
             ("deepseek", "deepseek-v4-flash", DEEPSEEK_THINKING_EXTRA_BODY),
             ("minimax", "minimax-m3", {"reasoning_split": True}),
             ("stepfun", "step-3.5-flash", {"enable_thinking": True}),

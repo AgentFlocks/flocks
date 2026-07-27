@@ -295,3 +295,65 @@ class TestMcpClientCrossLoopSubmission:
         assert cancelled.is_set() is True
         assert client._owner_task is None
         assert client._command_queue is None
+
+
+class TestMcpClientOwnerFailure:
+    @pytest.mark.asyncio
+    async def test_call_tool_fails_when_owner_exits_during_request(self):
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        client._connected = True
+        client._owner_loop = asyncio.get_running_loop()
+        client._command_queue = asyncio.Queue()
+
+        async def failing_owner() -> None:
+            await client._command_queue.get()
+            raise RuntimeError("HTTP 504 from https://example.com/mcp")
+
+        owner_task = asyncio.create_task(failing_owner())
+        owner_task.add_done_callback(client._handle_owner_task_done)
+        client._owner_task = owner_task
+
+        with pytest.raises(RuntimeError, match="HTTP 504"):
+            await asyncio.wait_for(
+                client.call_tool("demo_tool", {"value": "x"}),
+                timeout=1.0,
+            )
+
+    @pytest.mark.asyncio
+    async def test_call_tool_cancels_response_when_caller_is_cancelled(self):
+        client = McpClient(
+            name="demo",
+            server_type="remote",
+            url="https://example.com/mcp",
+        )
+        client._connected = True
+        client._owner_loop = asyncio.get_running_loop()
+        client._command_queue = asyncio.Queue()
+        command_seen = asyncio.get_running_loop().create_future()
+
+        async def blocked_owner() -> None:
+            command = await client._command_queue.get()
+            command_seen.set_result(command)
+            await asyncio.Future()
+
+        owner_task = asyncio.create_task(blocked_owner())
+        client._owner_task = owner_task
+
+        try:
+            call_task = asyncio.create_task(client.call_tool("demo_tool", {}))
+            command = await asyncio.wait_for(command_seen, timeout=1.0)
+            call_task.cancel()
+
+            with pytest.raises(asyncio.CancelledError):
+                await call_task
+
+            assert command.response is not None
+            assert command.response.cancelled() is True
+        finally:
+            owner_task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await owner_task

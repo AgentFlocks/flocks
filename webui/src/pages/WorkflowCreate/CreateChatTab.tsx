@@ -11,12 +11,14 @@ import {
   ChatModelPicker,
   useChatAgentOptions,
   useChatModelOptions,
+  type ChatModelOption,
 } from '@/components/common/ChatPromptSelectors';
 import ChatGuideDock, { type ChatGuideAction } from '@/components/common/ChatGuideDock';
 import GuidedCreatePanel from '@/components/common/GuidedCreatePanel';
 import { useSessionChat } from '@/hooks/useSessionChat';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { workflowAPI, Workflow } from '@/api/workflow';
+import client from '@/api/client';
 import type { ImagePartData } from '@/utils/imageUpload';
 
 const FALLBACK_POLL_MS = 10_000;
@@ -84,11 +86,15 @@ export default function CreateChatTab({
   const {
     groupedOptions: groupedChatModelOptions,
     loading: loadingChatModels,
+    effectiveModelOption,
+    modelPickerAutoOption,
+    selectModelKey,
+    selectedModelAuto,
     selectedModelOption,
     selectedPromptModel,
-    setSelectedModelKey,
-  } = useChatModelOptions();
-  const supportsVision = selectedModelOption?.supportsVision ?? defaultSupportsVision;
+    setSelectedModelAuto,
+  } = useChatModelOptions({ enableAuto: true });
+  const supportsVision = effectiveModelOption?.supportsVision ?? defaultSupportsVision;
   const exampleActions = useMemo(() => (
     (Array.isArray(exampleQuestions) ? exampleQuestions : []).map((question, index) => ({
       label: Array.isArray(exampleQuestionLabels) && exampleQuestionLabels[index]
@@ -106,10 +112,54 @@ export default function CreateChatTab({
   const { sessionId, error, createAndSend, retry } = useSessionChat({
     title: t('create.chat.sessionTitle'),
     category: 'workflow',
+    modelAuto: selectedModelAuto,
     contextMessage: t('create.chat.contextMessage'),
     welcomeMessage: t('create.chat.welcomeMessage'),
     initialSessionId,
   });
+
+  useEffect(() => {
+    setSelectedModelAuto(false);
+    if (!initialSessionId) return;
+    let cancelled = false;
+    client.get(`/api/session/${initialSessionId}`)
+      .then((response) => {
+        if (cancelled) return;
+        setSelectedModelAuto(Boolean(response.data?.model_auto));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setSelectedModelAuto(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [initialSessionId, setSelectedModelAuto]);
+
+  const handleSelectModel = useCallback((option: ChatModelOption) => {
+    selectModelKey(option.key);
+    if (!sessionId) return;
+    client.patch(`/api/session/${sessionId}`, {
+      provider: option.providerID,
+      model: option.modelID,
+      model_pinned: true,
+      model_auto: false,
+    }).catch((err) => {
+      console.warn('[WorkflowCreate] failed to pin workflow chat model', err);
+    });
+  }, [selectModelKey, sessionId]);
+
+  const handleSelectAuto = useCallback(() => {
+    if (!modelPickerAutoOption || modelPickerAutoOption.disabled) return;
+    modelPickerAutoOption.onSelect();
+    if (!sessionId) return;
+    client.patch(`/api/session/${sessionId}`, {
+      model_auto: true,
+      model_pinned: false,
+    }).catch((err) => {
+      console.warn('[WorkflowCreate] failed to enable Auto for workflow chat', err);
+    });
+  }, [modelPickerAutoOption, sessionId]);
 
   const knownIdsRef = useRef<Set<string>>(new Set());
   const snapshotStartedAtRef = useRef<number | null>(null);
@@ -132,8 +182,8 @@ export default function CreateChatTab({
       const freshBoundary = Math.max(creationStartedAt ?? 0, snapshotStartedAt) - 500;
       snapshotStartedAtRef.current = snapshotStartedAt;
       try {
-        const snap = await workflowAPI.list();
-        knownIdsRef.current = new Set((snap.data as Workflow[])
+        const snap = await workflowAPI.listSummaries();
+        knownIdsRef.current = new Set(snap.data
           .filter((w) => {
             const createdAt = Number(w.createdAt ?? 0);
             return !(createdAt > 0 && createdAt >= freshBoundary);
@@ -182,8 +232,8 @@ export default function CreateChatTab({
       return;
     }
     try {
-      const res = await workflowAPI.list();
-      const workflows: Workflow[] = res.data;
+      const res = await workflowAPI.listSummaries();
+      const workflows = res.data;
       const sortedWorkflows = [...workflows].sort((a, b) => Number(b.createdAt ?? 0) - Number(a.createdAt ?? 0));
       const startedAt = Math.max(creationStartedAt ?? 0, snapshotStartedAtRef.current ?? 0);
       const freshCandidates = sortedWorkflows.filter((w) => {
@@ -192,10 +242,10 @@ export default function CreateChatTab({
         return !(startedAt > 0 && createdAt > 0 && createdAt < startedAt - 500);
       });
       if (freshCandidates.length === 1) {
-        attachCreatedWorkflow(freshCandidates[0]);
+        await attachCreatedWorkflowById(freshCandidates[0].id);
       }
     } catch { /* ignore */ }
-  }, [attachCreatedWorkflow, creationStartedAt, snapshotReady]);
+  }, [attachCreatedWorkflowById, creationStartedAt, snapshotReady]);
 
   useEffect(() => {
     if (!snapshotReady) return;
@@ -250,10 +300,11 @@ export default function CreateChatTab({
         imageParts,
         agent: agentOverride || WORKFLOW_CHAT_AGENT_NAME,
         model: modelOverride === undefined ? selectedPromptModel : modelOverride,
+        modelAuto: selectedModelAuto,
         displayText: options?.displayText,
       });
     },
-    [createAndSend, selectedPromptModel],
+    [createAndSend, selectedModelAuto, selectedPromptModel],
   );
 
   const handleWelcomeGuidePrompt = useCallback(
@@ -292,8 +343,9 @@ export default function CreateChatTab({
       agentName={WORKFLOW_CHAT_AGENT_NAME}
       mentionAgents={workflowChatAgents}
       supportsVision={supportsVision}
-      contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
+      contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
       model={selectedPromptModel}
+      modelAuto={selectedModelAuto}
       onStreamingDone={handleStreamingDone}
       onSSEEvent={handleSSEEvent}
       onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
@@ -324,7 +376,10 @@ export default function CreateChatTab({
           groupedOptions={groupedChatModelOptions}
           loading={loadingChatModels}
           selectedModelOption={selectedModelOption}
-          onSelectModel={(option) => setSelectedModelKey(option.key)}
+          onSelectModel={handleSelectModel}
+          autoOption={modelPickerAutoOption
+            ? { ...modelPickerAutoOption, onSelect: handleSelectAuto }
+            : undefined}
         />
       }
       conversationBottomSlot={({ sendPrompt, sending, streaming }) => (

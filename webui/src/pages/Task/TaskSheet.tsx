@@ -21,7 +21,7 @@ import PillGroup from '@/components/common/PillGroup';
 import { useTaskExecutionsByScheduler } from '@/hooks/useTasks';
 import { describeCron, CRON_PRESETS, formatDuration, formatTime } from './helpers';
 import { agentAPI, Agent } from '@/api/agent';
-import { workflowAPI, Workflow } from '@/api/workflow';
+import { workflowAPI, WorkflowSummary } from '@/api/workflow';
 import { getAgentDisplayDescription } from '@/utils/agentDisplay';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import { StatusBadge } from './components';
@@ -106,7 +106,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
 
   const [loading, setLoading] = useState(false);
   const [agents, setAgents] = useState<Agent[]>([]);
-  const [workflows, setWorkflows] = useState<Workflow[]>([]);
+  const [workflows, setWorkflows] = useState<WorkflowSummary[]>([]);
   const guideGroups = useMemo(() => {
     const scope = isEdit ? 'taskSheet.edit' : 'taskSheet.create';
     const name = formData.title || task?.title || t('taskSheet.entityType');
@@ -132,7 +132,7 @@ export default function TaskSheet({ task, defaultScheduleKind = 'recurring', onC
 
   useEffect(() => {
     agentAPI.list().then((res) => setAgents(res.data.filter((a) => !a.hidden))).catch(() => {});
-    workflowAPI.list({ status: 'active' }).then((res) => setWorkflows(res.data)).catch(() => {});
+    workflowAPI.listSummaries({ status: 'active' }).then((res) => setWorkflows(res.data)).catch(() => {});
   }, []);
 
   const isImmediate = formData.scheduleKind === 'immediate';
@@ -332,7 +332,7 @@ interface TaskFormContentProps {
   isRunOnce: boolean;
   effectiveCron: string;
   agents: Agent[];
-  workflows: Workflow[];
+  workflows: WorkflowSummary[];
 }
 
 function TaskFormContent({

@@ -1,0 +1,59 @@
+name: chaitin_dongjian_api_readonly
+description: Chaitin Dongjian documented read-only REST caller.
+description_cn: 长亭洞鉴文档内只读 REST 调用工具。使用 api_catalog 查看已收录 API，再用 rest_call_readonly 调用 kind=readonly 的 method/path。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: chaitin_dongjian_api
+version: "2.8"
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      enum:
+        - api_catalog
+        - rest_call_readonly
+        - project_list
+        - project_filter
+        - template_list
+        - plan_filter
+        - plan_detail
+        - plugin_filter
+        - engine_filter
+        - xprocess_filter
+        - xprocess_detail
+        - xprocess_progress
+        - result_filter
+        - result_detail
+        - website_filter
+        - host_filter
+        - service_filter
+        - domain_filter
+        - vuln_filter
+        - vuln_detail
+        - auditlog_filter
+        - report_filter
+        - system_info_mgmt
+        - system_services
+        - test
+    method:
+      type: string
+      description: rest_call_readonly 使用的 HTTP 方法。
+    path:
+      type: string
+      description: REST 路径，例如 /project/ 或 /xprocess/{id}/。
+    path_params:
+      type: object
+      description: '路径参数，例如 {"id": 1}。'
+    query:
+      type: object
+      description: Query string 参数。
+    body:
+      description: JSON body。
+  required:
+    - action
+handler:
+  type: script
+  script_file: chaitin_dongjian.handler.py
+  function: api_readonly
