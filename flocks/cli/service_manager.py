@@ -313,6 +313,8 @@ def get_node_major_version() -> int | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError:
         return None
@@ -513,6 +515,8 @@ def _windows_tasklist_process_name(pid: int) -> str | None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -886,6 +890,8 @@ def _process_list_pids() -> list[int]:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     else:
         completed = subprocess.run(
@@ -2105,6 +2111,8 @@ def _run_windows_netstat(port: int) -> str:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return ""

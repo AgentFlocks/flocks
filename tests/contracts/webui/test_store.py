@@ -109,6 +109,40 @@ def test_list_pages_scans_user_and_project_roots_with_user_priority(tmp_path):
     assert store.page_dir("project-page").is_relative_to(project_root)
 
 
+def test_list_pages_skips_installer_scratch_dirs(tmp_path):
+    """Pages that exist only under the Hub installer's ``.<name>.<rand>`` /
+    ``.<name>.bak`` scratch dirs must never surface as real pages.
+
+    Reproduces the Windows WinError 5 aftermath where a failed atomic swap
+    left the SOC pages' manifests stuck inside scratch dirs while the real
+    install was incomplete.
+    """
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_page(user_root, "real-page", "Real Page")
+    # Manifests stranded in leftover scratch/backup dirs (no real install).
+    _write_page_at(user_root, ".soc_ui.abc123/soc_overview", "soc-overview", "Stranded Overview")
+    _write_page_at(user_root, ".soc_ui.bak/soc_dashboard", "soc-dashboard", "Stranded Dashboard")
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+
+    pages = store.list_pages()
+    assert [page.id for page in pages] == ["real-page"]
+    assert pages[0].title == "Real Page"
+
+
+def test_list_workspaces_skips_installer_scratch_dirs(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_workspace(user_root, "real_ws", "Real Workspace")
+    # A workspace manifest stranded under a scratch dir must be ignored.
+    _write_workspace(user_root / ".soc_ui.abc123", "soc_ui", "Stranded Workspace")
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+
+    workspaces = store.list_workspaces()
+    assert [workspace.id for workspace in workspaces] == ["real_ws"]
+    assert workspaces[0].title == "Real Workspace"
+
+
 def test_grouped_page_directory_uses_manifest_id_for_lookup(tmp_path):
     user_root = tmp_path / "user" / "contracts" / "webui"
     _write_workspace(user_root, "scene_workspace", "场景工作区")

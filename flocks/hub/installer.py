@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import shutil
+import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Awaitable, Callable
 
@@ -97,17 +99,64 @@ def _remove_path(path: Path) -> None:
         path.unlink()
 
 
+def _purge_stale_scratch(parent: Path, name: str) -> None:
+    """Remove leftover ``.<name>.<rand>`` / ``.<name>.bak`` staging dirs.
+
+    A failed atomic swap (see :func:`_replace_prepared_path`) can leave
+    scratch and backup dirs behind next to *parent*/*name*. They are never
+    valid installs, but on Windows a lingering ``.<name>.bak`` blocks the
+    next swap, so we clear both before staging a fresh copy.
+    """
+    if not parent.is_dir():
+        return
+    for entry in parent.iterdir():
+        stale = entry.name.startswith(f".{name}.") or entry.name == f".{name}.bak"
+        if not stale:
+            continue
+        try:
+            if entry.is_dir() and not entry.is_symlink():
+                shutil.rmtree(entry, ignore_errors=True)
+            else:
+                entry.unlink()
+        except OSError:
+            pass
+
+
+def _replace_with_retry(src: Path, dst: Path) -> None:
+    """``src.replace(dst)`` with a Windows access-denied backoff.
+
+    On Windows an antivirus scan or a directory watcher (e.g. the WebUI
+    page watcher over ``~/.flocks/plugins/contracts/webui``) can hold a
+    transient handle on the freshly written tree, making the atomic swap
+    fail with ``PermissionError`` (WinError 5 / 32). Elsewhere the rename
+    is atomic and never needs retrying.
+    """
+    if sys.platform != "win32":
+        src.replace(dst)
+        return
+    delay = 0.1
+    for attempt in range(6):
+        try:
+            src.replace(dst)
+            return
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(delay)
+            delay = min(delay * 2, 1.0)
+
+
 def _replace_prepared_path(prepared: Path, dst: Path) -> Path | None:
     backup: Path | None = None
     if dst.exists() or dst.is_symlink():
         backup = dst.parent / f".{dst.name}.bak"
         _remove_path(backup)
-        dst.replace(backup)
+        _replace_with_retry(dst, backup)
     try:
-        prepared.replace(dst)
+        _replace_with_retry(prepared, dst)
     except Exception:
         if backup is not None and (backup.exists() or backup.is_symlink()):
-            backup.replace(dst)
+            _replace_with_retry(backup, dst)
         raise
     return backup
 
@@ -124,12 +173,13 @@ def _commit_replacement(backup: Path | None) -> None:
 def _rollback_replacement(dst: Path, backup: Path | None) -> None:
     _remove_path(dst)
     if backup is not None and (backup.exists() or backup.is_symlink()):
-        backup.replace(dst)
+        _replace_with_retry(backup, dst)
 
 
 def _copy_package(src: Path, dst: Path, *, retain_backup: bool = False) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
+    _purge_stale_scratch(parent, dst.name)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
@@ -218,6 +268,7 @@ def _copy_webui_package_with_build(
 ) -> Path | None:
     parent = dst.parent
     parent.mkdir(parents=True, exist_ok=True)
+    _purge_stale_scratch(parent, dst.name)
     tmp = Path(tempfile.mkdtemp(prefix=f".{dst.name}.", dir=str(parent)))
     try:
         _copy_package_contents(src, tmp)
