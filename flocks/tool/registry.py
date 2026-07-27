@@ -1698,16 +1698,43 @@ class ToolRegistry:
         if "get_time" not in cls._tools:
             @cls.register_function(
                 name="get_time",
-                description="Get current date and time",
+                description="Get current date and time in ISO 8601 or Unix timestamp format",
                 category=ToolCategory.SYSTEM,
                 native=True,
-                parameters=[]
+                parameters=[
+                    ToolParameter(
+                        name="format",
+                        type=ParameterType.STRING,
+                        description=(
+                            "Output format: 'iso' for ISO 8601, 'unix' for Unix seconds, "
+                            "or 'unix_ms' for Unix milliseconds. Defaults to 'iso'."
+                        ),
+                        required=False,
+                        default="iso",
+                        enum=["iso", "unix", "unix_ms"],
+                    )
+                ]
             )
-            async def get_time(ctx: ToolContext) -> ToolResult:
+            async def get_time(ctx: ToolContext, format: str = "iso") -> ToolResult:
                 from datetime import datetime
+
+                if format not in {"iso", "unix", "unix_ms"}:
+                    return ToolResult(
+                        success=False,
+                        error="format must be one of: iso, unix, unix_ms",
+                    )
+
+                now = datetime.now()
+                if format == "unix":
+                    output = str(int(now.timestamp()))
+                elif format == "unix_ms":
+                    output = str(int(now.timestamp() * 1000))
+                else:
+                    output = now.isoformat()
+
                 return ToolResult(
                     success=True,
-                    output=datetime.now().isoformat()
+                    output=output,
                 )
 
     @classmethod
