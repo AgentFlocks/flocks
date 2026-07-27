@@ -1,6 +1,7 @@
 import { useCallback, useLayoutEffect, useRef, useState } from 'react';
 
 import { sessionApi, type QueuedPrompt } from '@/api/session';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
 export interface EnqueuePromptPayload {
   parts: Array<Record<string, unknown>>;
@@ -8,6 +9,7 @@ export interface EnqueuePromptPayload {
   model?: Record<string, unknown>;
   variant?: string;
   displayText?: string;
+  executionMode?: SessionExecutionMode;
 }
 
 export function useSessionPromptQueue(sessionId?: string | null) {
