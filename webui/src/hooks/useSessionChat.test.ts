@@ -140,7 +140,10 @@ describe('useSessionChat.createAndSend — image forwarding', () => {
     expect(mockPost.mock.calls.some(([url]) => url === '/api/session')).toBe(false);
     expect(mockPost).toHaveBeenCalledWith(
       '/api/session/existing-session/prompt_async',
-      { parts: [{ type: 'text', text: 'continue' }] },
+      {
+        executionMode: 'build',
+        parts: [{ type: 'text', text: 'continue' }],
+      },
     );
   });
 });
@@ -196,7 +199,10 @@ describe('useSessionChat — Auto session creation', () => {
     });
     expect(mockPost).toHaveBeenCalledWith(
       `/api/session/${SESSION_ID}/prompt_async`,
-      { parts: [{ type: 'text', text: 'hello' }] },
+      {
+        executionMode: 'build',
+        parts: [{ type: 'text', text: 'hello' }],
+      },
     );
   });
 
@@ -222,7 +228,31 @@ describe('useSessionChat — Auto session creation', () => {
     );
     expect(mockPost).toHaveBeenCalledWith(
       '/api/session/existing-session/prompt_async',
-      { parts: [{ type: 'text', text: 'continue' }] },
+      {
+        executionMode: 'build',
+        parts: [{ type: 'text', text: 'continue' }],
+      },
+    );
+  });
+
+  it('sends the selected execution mode with the turn', async () => {
+    const { result } = renderHook(() =>
+      useSessionChat({ title: 'Plan chat', initialSessionId: 'existing-session' }),
+    );
+
+    await act(async () => {
+      await result.current.createAndSend({
+        text: 'inspect the implementation',
+        executionMode: 'plan',
+      });
+    });
+
+    expect(mockPost).toHaveBeenCalledWith(
+      '/api/session/existing-session/prompt_async',
+      {
+        executionMode: 'plan',
+        parts: [{ type: 'text', text: 'inspect the implementation' }],
+      },
     );
   });
 });

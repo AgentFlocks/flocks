@@ -31,6 +31,7 @@ from flocks.session.session import (
     is_model_auto_session_category,
 )
 from flocks.session.policy import SessionPolicy
+from flocks.session.execution_mode import SessionExecutionMode
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.utils.monitor import get_monitor
@@ -1948,6 +1949,11 @@ class PromptRequest(BaseModel):
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool settings (deprecated)")
     system: Optional[str] = Field(None, description="System prompt override")
     variant: Optional[str] = Field(None, description="Model variant")
+    execution_mode: SessionExecutionMode = Field(
+        SessionExecutionMode.BUILD,
+        alias="executionMode",
+        description="Execution mode for this user turn",
+    )
 
 
 class UserMessageInfo(BaseModel):
@@ -1976,6 +1982,7 @@ class UserMessageInfo(BaseModel):
     tools: Optional[Dict[str, bool]] = None
     variant: Optional[str] = None
     compacted: Optional[bool] = None
+    executionMode: SessionExecutionMode = SessionExecutionMode.BUILD
 
 
 class AssistantMessageInfo(BaseModel):
@@ -2132,6 +2139,11 @@ async def _message_to_response_info(msg: Any, *, cwd: str) -> MessageInfo:
             agent=getattr(msg, "agent", None) or DEFAULT_AGENT,
             model=model_info,
             compacted=getattr(msg, "compacted", None),
+            executionMode=getattr(
+                msg,
+                "executionMode",
+                SessionExecutionMode.BUILD,
+            ),
         )
 
     tokens_raw = getattr(msg, "tokens", None)
@@ -2901,6 +2913,25 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
     working_directory = await _resolve_session_working_directory(session)
+    _validate_execution_mode_request(request)
+    if request.execution_mode == SessionExecutionMode.GOAL:
+        from flocks.session.goal import GoalManager
+
+        objective = _extract_text_from_parts(request.parts).strip()
+        state = await GoalManager.set_goal(sessionID, objective)
+        await publish_event("session.goal.updated", {
+            "sessionID": sessionID,
+            "status": state.status,
+            "objective": state.objective,
+            "reason": state.last_reason,
+        })
+        request = request.model_copy(update={
+            "parts": _replace_text_parts(
+                request.parts,
+                GoalManager.goal_prompt(state.objective),
+            ),
+            "display_text": request.display_text or objective,
+        })
     
     log.info("session.message.send.processing", {
         "sessionID": sessionID,
@@ -3363,6 +3394,7 @@ async def _process_session_message(
             time={"created": now_ms},
             agent=agent_name,
             model={"providerID": provider_id, "modelID": model_id},
+            executionMode=request.execution_mode,
             part_id=user_part_id,
             part_metadata=display_metadata,
             synthetic=True if _is_no_reply else None,
@@ -3379,6 +3411,7 @@ async def _process_session_message(
             "time": {"created": now_ms},
             "agent": agent_name,
             "model": {"providerID": provider_id, "modelID": model_id},
+            "executionMode": request.execution_mode.value,
         }
     })
     _part_event: dict = {
@@ -3804,6 +3837,32 @@ def _extract_text_from_parts(parts: List[Dict[str, Any]]) -> str:
     return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
 
 
+def _validate_execution_mode_request(request: PromptRequest) -> None:
+    if request.execution_mode != SessionExecutionMode.GOAL:
+        return
+    objective = _extract_text_from_parts(request.parts).strip()
+    if not objective:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Goal mode requires a non-empty text objective",
+        )
+    if any(part.get("type") != "text" for part in request.parts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Goal mode does not support attachments",
+        )
+
+
+def _event_text_for_execution_mode(
+    parts: List[Dict[str, Any]],
+    execution_mode: SessionExecutionMode,
+) -> str:
+    text = _extract_text_from_parts(parts)
+    if execution_mode == SessionExecutionMode.GOAL:
+        return f"/goal {text.strip()}"
+    return text
+
+
 def _replace_text_parts(
     parts: Optional[List[Dict[str, Any]]],
     text: str,
@@ -3909,7 +3968,7 @@ def _event_from_queued_prompt(item, working_directory: str):
     return UserInputEvent(
         source_type="webui",
         sessionID=item.sessionID,
-        text=_extract_text_from_parts(item.parts),
+        text=_event_text_for_execution_mode(item.parts, item.executionMode),
         parts=[dict(part) for part in item.parts],
         agent=item.agent,
         model=item.model,
@@ -3923,6 +3982,7 @@ def _event_from_queued_prompt(item, working_directory: str):
         mockReply=item.mockReply,
         tools=item.tools,
         system=item.system,
+        executionMode=item.executionMode,
         working_directory=working_directory,
     )
 
@@ -4059,13 +4119,14 @@ def _build_prompt_request_from_event(event, prompt_text: str, display_text: Opti
         noReply=event.no_reply,
         tools=event.tools,
         system=event.system,
+        execution_mode=event.execution_mode,
     )
 
 
 async def _dispatch_sse_input(sessionID: str, session, event, working_directory: str) -> None:
     import time as _time
 
-    from flocks.input.dispatcher import dispatch_user_input
+    from flocks.input.dispatcher import dispatch_user_input, parse_slash_command
     from flocks.input.output import SSEOutputSink
     from flocks.server.routes.event import publish_event
     from flocks.session.message import Message, MessageRole
@@ -4095,6 +4156,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 id=user_msg_id,
                 time={"created": now_ms},
                 agent=message_agent,
+                executionMode=event.execution_mode,
                 **({"model": model_info} if model_info else {}),
                 part_id=user_part_id,
             ),
@@ -4107,6 +4169,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "role": "user",
                 "time": {"created": now_ms},
                 "agent": message_agent,
+                "executionMode": event.execution_mode.value,
                 **({"model": model_info} if model_info else {}),
             }
         })
@@ -4184,6 +4247,18 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+        parsed = parse_slash_command(output_event.text, output_event.metadata)
+        if parsed is not None and parsed.canonical_name == "goal":
+            from flocks.session.goal import GoalManager
+
+            state = await GoalManager.get(sessionID)
+            if state is not None:
+                await publish_event("session.goal.updated", {
+                    "sessionID": sessionID,
+                    "status": state.status,
+                    "objective": state.objective,
+                    "reason": state.last_reason,
+                })
         request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
         await _process_session_message(
             sessionID,
@@ -4234,18 +4309,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         session_control=_run_session_control,
         clear_history=_clear_history,
     )
-    result = await dispatch_user_input(event, sink)
-    if result.command_name == "goal" and result.action == "llm":
-        from flocks.session.goal import GoalManager
-
-        state = await GoalManager.get(sessionID)
-        if state is not None:
-            await publish_event("session.goal.updated", {
-                "sessionID": sessionID,
-                "status": state.status,
-                "objective": state.objective,
-                "reason": state.last_reason,
-            })
+    await dispatch_user_input(event, sink)
 
 
 class PromptQueueUpdateRequest(BaseModel):
@@ -4260,6 +4324,7 @@ async def _enqueue_prompt_request(
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
+    _validate_execution_mode_request(request)
     if expected_generation is None:
         expected_generation = Session.lifecycle_generation(session_id)
     await _require_agent_usable_for_chat(request.agent)
@@ -4279,6 +4344,7 @@ async def _enqueue_prompt_request(
             mock_reply=request.mockReply,
             tools=request.tools,
             system=request.system,
+            execution_mode=request.execution_mode,
         ),
         expected_generation=expected_generation,
     )
@@ -4430,6 +4496,7 @@ async def send_session_message_async(
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
     working_directory = await _resolve_session_working_directory(session)
+    _validate_execution_mode_request(request)
     await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
@@ -4437,21 +4504,33 @@ async def send_session_message_async(
         "directory": working_directory,
     })
 
+    event_text = _event_text_for_execution_mode(
+        request.parts,
+        request.execution_mode,
+    )
+    event_display_text = request.display_text
+    if request.execution_mode == SessionExecutionMode.GOAL:
+        event_display_text = (
+            event_display_text
+            or _extract_text_from_parts(request.parts).strip()
+        )
+
     event = UserInputEvent(
         source_type="webui",
         sessionID=sessionID,
-        text=_extract_text_from_parts(request.parts),
+        text=event_text,
         parts=[dict(part) for part in request.parts],
         agent=request.agent,
         model=request.model.model_dump(by_alias=True) if request.model else None,
         variant=request.variant,
         metadata={"_sessionLifecycleGeneration": lifecycle_generation},
-        display_text=request.display_text,
+        display_text=event_display_text,
         messageID=request.messageID,
         noReply=request.noReply,
         mockReply=request.mockReply,
         tools=request.tools,
         system=request.system,
+        executionMode=request.execution_mode,
         working_directory=working_directory,
     )
 
