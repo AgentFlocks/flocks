@@ -438,6 +438,7 @@ describe('SessionPage session actions menu', () => {
     expect(tasksToggle).toContainElement(tasksHeading);
     expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'createTaskSession' })).not.toBeInTheDocument();
 
     await user.click(tasksToggle);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
@@ -605,20 +606,6 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByText('Task 7')).toBeInTheDocument();
     expect(screen.getByText('Task 8')).toBeInTheDocument();
     expect(loadMore).not.toHaveBeenCalled();
-  });
-
-  it('creates a new session from the tasks row', async () => {
-    const user = userEvent.setup();
-    renderSessionPage();
-
-    await screen.findByText('tasksSection');
-    await user.click(screen.getByRole('button', { name: 'createTaskSession' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/session', {
-        title: 'New Session',
-      });
-    });
   });
 
   it('collapses the projects section and restores it after remounting', async () => {
@@ -1167,7 +1154,7 @@ describe('SessionPage session actions menu', () => {
 
     const projectRow = (await screen.findByText('Shared Labs')).closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' })).toBeDisabled();
+    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
     await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
     expect(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.copyPathAction' })).toBeInTheDocument();
     expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'shareAction' })).not.toBeInTheDocument();
@@ -1260,19 +1247,10 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('creates a session from a specific project row', async () => {
-    const user = userEvent.setup();
+  it('does not show a create-session button on a project row', async () => {
     const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
     client.get.mockResolvedValue({
       data: [currentProject, { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' }],
-    });
-    client.post.mockResolvedValue({
-      data: {
-        ...secondSession,
-        id: 'session-labs',
-        projectID: 'prj_project2',
-        title: 'New Session',
-      },
     });
 
     renderSessionPage();
@@ -1280,18 +1258,7 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/session', {
-        title: 'New Session',
-        projectID: 'prj_project2',
-      });
-    });
-    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'session-labs',
-      projectID: 'prj_project2',
-    }));
+    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
   });
 
   it('opens the actions menu for a session item', async () => {

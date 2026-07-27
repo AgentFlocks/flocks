@@ -793,13 +793,11 @@ export default function SessionPage() {
         worktree: '',
         sessions: taskSessions,
         sessionCount: taskSessions.length,
-        pathStatus: 'available' as const,
       };
     },
     [projects, sessions, t],
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
-  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
   const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
   const visibleTaskSessions = taskSessionsCollapsedToFirstPage
     ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
@@ -1211,10 +1209,6 @@ export default function SessionPage() {
       setCreating(false);
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
-
-  const handleCreateSessionInProject = useCallback((projectId: string) => {
-    void handleCreateSession(projectId);
-  }, [handleCreateSession]);
 
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     const previousModelKey = selectedModelKey;
@@ -1998,21 +1992,6 @@ export default function SessionPage() {
                             />
                           )}
                         </button>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleCreateSessionInProject(group.id);
-                          }}
-                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
-                          className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
-                            isSelectedProject ? 'opacity-100' : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
-                          }`}
-                          title={t('createSessionInProject', { project: group.label })}
-                          aria-label={t('createSessionInProject', { project: group.label })}
-                        >
-                          {creating && isSelectedProject ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-                        </button>
                         {persistedProject && (
                           <button
                             type="button"
@@ -2178,21 +2157,6 @@ export default function SessionPage() {
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void handleCreateSession(TASK_SESSION_GROUP_ID);
-                      }}
-                      disabled={creating || taskSessionGroup.pathStatus !== 'available'}
-                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
-                      title={t('createTaskSession')}
-                      aria-label={t('createTaskSession')}
-                    >
-                      {creating && taskGroupSelected
-                        ? <Loader2 className="h-3 w-3 animate-spin" />
-                        : <Plus className="h-3 w-3" />}
                     </button>
                   </div>
                   {!taskGroupCollapsed && (
