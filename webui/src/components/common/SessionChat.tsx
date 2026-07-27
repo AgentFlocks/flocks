@@ -34,7 +34,7 @@ import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
-import { redactToolInput, resolveToolPresentation } from './toolPresentation';
+import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
@@ -1730,6 +1730,7 @@ export default function SessionChat({
   const {
     messages,
     loading,
+    error: messagesError,
     refetch,
     addMessage,
     updateMessage,
@@ -1819,7 +1820,6 @@ export default function SessionChat({
           setGoalBanner(null);
           setDismissedGoalKey('');
           clearMessages();
-          refetch();
           void refreshContextUsage({ clear: true });
           return;
         case 'session-status':
@@ -3207,6 +3207,21 @@ export default function SessionChat({
               delayMs={180}
               className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
             />
+          </div>
+        ) : messagesError && messages.length === 0 ? (
+          <div className="flex min-h-40 items-center justify-center px-6" role="alert">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">
+                {t('chat.loadFailed')}
+              </span>
+              <button
+                type="button"
+                onClick={() => void refetch()}
+                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                {t('chat.retry')}
+              </button>
+            </div>
           </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
@@ -5259,18 +5274,21 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
   const semanticDetail = truncateToolDisplayText(toolPresentation.detail);
+  const fileOperationDisplayName = truncateToolDisplayText(getFileOperationDisplayName(toolName, state));
   const toolDisplayName = toolPresentation.label;
   const processStepLabel = isTodoTool
     ? t('chat.tool.todoUpdated')
     : toolPresentation.known
       ? toolDisplayName
       : config.label;
-  const processStepDetail = workflowHeaderSummary
+  const processStepDetail = fileOperationDisplayName
+    || workflowHeaderSummary
     || semanticDetail
     || displayTitle
     || inputSummary
     || (toolPresentation.known ? '' : toolDisplayName);
-  const cardHeaderDetail = workflowHeaderSummary
+  const cardHeaderDetail = fileOperationDisplayName
+    || workflowHeaderSummary
     || semanticDetail
     || inputSummary
     || displayTitle;

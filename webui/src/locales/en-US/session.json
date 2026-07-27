@@ -106,6 +106,8 @@
     "placeholderStreaming": "AI is processing, please wait...",
     "placeholderNodeRef": "Describe the change intent for node {{nodeId}}...",
     "emptyText": "No execution records",
+    "loadFailed": "Failed to load messages",
+    "retry": "Retry",
     "suggestions": "Example questions",
     "stopTitle": "Stop execution",
     "contextUsageTitle": "Context used: {{used}} / {{total}} ({{percent}}%)",

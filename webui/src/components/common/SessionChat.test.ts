@@ -55,6 +55,8 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   const value = ({
   'chat.placeholder': '请输入消息',
   'chat.emptyText': '暂无消息',
+  'chat.loadFailed': '消息加载失败',
+  'chat.retry': '重试',
   'chat.sending': '发送中...',
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
@@ -267,6 +269,7 @@ beforeEach(() => {
   useSessionMessagesMock.mockReturnValue({
     messages: [],
     loading: false,
+    error: null,
     refetch: vi.fn(),
     addMessage: vi.fn(),
     updateMessage: vi.fn(),
@@ -397,6 +400,7 @@ function mockStatefulSessionMessages() {
     return {
       messages,
       loading: false,
+      error: null,
       refetch: vi.fn(),
       addMessage: (message: Message) => setMessages((prev) => [...prev, message]),
       updateMessage: upsertMessage,
@@ -404,6 +408,7 @@ function mockStatefulSessionMessages() {
       removeMessage: (messageId: string) => setMessages((prev) => prev.filter(
         (message) => message.id !== messageId,
       )),
+      clearMessages: () => setMessages([]),
       replaceMessageText: vi.fn(),
       markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
         (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
@@ -412,6 +417,120 @@ function mockStatefulSessionMessages() {
     };
   });
 }
+
+describe('SessionChat message loading state', () => {
+  it('renders a retry action instead of an empty conversation after loading fails', async () => {
+    const user = userEvent.setup();
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      error: 'server unavailable',
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    expect(screen.getByRole('alert')).toHaveTextContent('消息加载失败');
+    expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '重试' }));
+    expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('ChatToolPart file operation titles', () => {
+  it('shows only the filename in the header while preserving the full path in details', () => {
+    const fullPath = '/Users/example/.flocks/workspace/outputs/2026-07-24/gold_price_retrieval_plan.md';
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-write-file',
+        type: 'tool',
+        tool: 'write',
+        state: {
+          status: 'completed',
+          input: { filePath: fullPath, content: '# Plan' },
+          output: 'Wrote file successfully.',
+          title: fullPath,
+        },
+      } as Message['parts'][number],
+    }));
+
+    const header = container.querySelector('summary');
+    expect(header).toHaveTextContent('gold_price_retrieval_plan.md');
+    expect(header).not.toHaveTextContent(fullPath);
+    expect(container).toHaveTextContent(fullPath);
+  });
+
+  it('handles Windows-style file paths in file tool headers', () => {
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-read-file',
+        type: 'tool',
+        tool: 'read_file',
+        state: {
+          status: 'completed',
+          input: { path: 'C:\\workspace\\reports\\summary.txt' },
+          output: 'summary',
+        },
+      } as Message['parts'][number],
+    }));
+
+    expect(container.querySelector('summary')).toHaveTextContent('summary.txt');
+  });
+
+  it('shows only the first filename and file count for multi-file patches', () => {
+    const firstPath = '/repo/src/a.ts';
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-apply-patch',
+        type: 'tool',
+        tool: 'apply_patch',
+        state: {
+          status: 'completed',
+          input: {
+            patchText: [
+              '*** Begin Patch',
+              `*** Update File: ${firstPath}`,
+              '*** Add File: /repo/src/b.ts',
+              '*** End Patch',
+            ].join('\n'),
+          },
+          output: 'Done!',
+        },
+      } as Message['parts'][number],
+    }));
+
+    const header = container.querySelector('summary');
+    expect(header).toHaveTextContent('a.ts +1');
+    expect(header).not.toHaveTextContent(firstPath);
+    expect(container).toHaveTextContent(firstPath);
+  });
+
+  it('does not change summaries for non-file tools', () => {
+    const { container } = render(React.createElement(ChatToolPart, {
+      part: {
+        id: 'tool-custom',
+        type: 'tool',
+        tool: 'custom_tool',
+        state: {
+          status: 'completed',
+          input: { path: '/api/v1/incidents' },
+          output: 'ok',
+        },
+      } as Message['parts'][number],
+    }));
+
+    expect(container.querySelector('summary')).toHaveTextContent('path=/api/v1/incidents');
+  });
+});
 
 describe('dedupeUploadedDocumentAttachments', () => {
   it('keeps the latest successful document for a workspace path', () => {
@@ -1141,7 +1260,7 @@ describe('SessionChat standalone thinking indicator', () => {
     }
   });
 
-  it('clears local messages before refetching after session.cleared', () => {
+  it('clears local messages without refetching after session.cleared', () => {
     const clearMessages = vi.fn();
     const refetch = vi.fn();
     useSessionMessagesMock.mockReturnValue({
@@ -1167,10 +1286,7 @@ describe('SessionChat standalone thinking indicator', () => {
     });
 
     expect(clearMessages).toHaveBeenCalledOnce();
-    expect(refetch).toHaveBeenCalledOnce();
-    expect(clearMessages.mock.invocationCallOrder[0]).toBeLessThan(
-      refetch.mock.invocationCallOrder[0],
-    );
+    expect(refetch).not.toHaveBeenCalled();
   });
 
   it('removes an intermediate assistant when message.removed arrives', () => {
@@ -2984,7 +3100,8 @@ describe('ChatToolPart semantic tool presentation', () => {
 
     summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
     expect(summary).toHaveTextContent('写入文件');
-    expect(summary).toHaveTextContent('/repo/report.md');
+    expect(summary).toHaveTextContent('report.md');
+    expect(summary).not.toHaveTextContent('/repo/report.md');
     expect(screen.getByText('输入参数')).toBeInTheDocument();
     expect(screen.queryByTestId('chat-tool-action-progress')).not.toBeInTheDocument();
   });
@@ -3032,7 +3149,8 @@ describe('ChatToolPart semantic tool presentation', () => {
 
     const summary = screen.getByTestId('chat-process-tool-step').querySelector('summary');
     expect(summary).toHaveTextContent('读取文件');
-    expect(summary).toHaveTextContent('/repo/webui/src/components/common/SessionChat.tsx · 5200');
+    expect(summary).toHaveTextContent('SessionChat.tsx');
+    expect(summary).not.toHaveTextContent('/repo/webui/src/components/common/SessionChat.tsx');
     expect(summary).not.toHaveTextContent('已完成');
     expect(summary).not.toHaveTextContent('filePath=');
   });

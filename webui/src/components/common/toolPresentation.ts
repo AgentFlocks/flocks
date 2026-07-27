@@ -113,6 +113,17 @@ const ACTION_LABEL_KEYS: Record<string, Record<string, string>> = {
 
 const SENSITIVE_KEY_PATTERN =
   /(?:api[_-]?key|password|passwd|token|secret|authorization|credential|private[_-]?key|access[_-]?key|cookie)/i;
+const FILE_OPERATION_TOOL_NAMES = new Set([
+  'read',
+  'write',
+  'edit',
+  'apply_patch',
+  'read_file',
+  'write_file',
+  'edit_file',
+  'create_file',
+  'delete_file',
+]);
 
 function stringValue(
   input: Record<string, unknown>,
@@ -147,15 +158,49 @@ function workflowName(value: unknown): string {
   return lastSegment.replace(/\.json$/i, '');
 }
 
-function patchDetail(value: unknown): string {
-  if (typeof value !== 'string') return '';
-  const paths = Array.from(
+function patchPaths(value: unknown): string[] {
+  if (typeof value !== 'string') return [];
+  return Array.from(
     value.matchAll(/^\*\*\* (?:Add|Update|Delete) File:\s*(.+)$/gm),
     (match) => match[1]?.trim(),
   ).filter((path): path is string => Boolean(path));
+}
+
+function patchDetail(value: unknown): string {
+  const paths = patchPaths(value);
   if (paths.length === 0) return '';
   if (paths.length === 1) return paths[0];
   return `${paths[0]} +${paths.length - 1}`;
+}
+
+function fileName(value: string): string {
+  const normalized = value.trim().replace(/[\\/]+$/g, '');
+  if (!normalized) return '';
+  return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
+
+export function getFileOperationDisplayName(
+  toolName: string,
+  state: Partial<ToolState>,
+): string {
+  if (!FILE_OPERATION_TOOL_NAMES.has(toolName)) return '';
+
+  if (toolName === 'apply_patch') {
+    const paths = patchPaths(state.input?.patchText);
+    if (paths.length > 0) {
+      const firstFileName = fileName(paths[0]);
+      return paths.length === 1 ? firstFileName : `${firstFileName} +${paths.length - 1}`;
+    }
+  }
+
+  const path = stringValue(
+    state.input || {},
+    'filePath',
+    'filepath',
+    'file_path',
+    'path',
+  ) || (typeof state.title === 'string' ? state.title : '');
+  return fileName(path);
 }
 
 function resolveLabelKey(toolName: string, input: Record<string, unknown>): string | undefined {

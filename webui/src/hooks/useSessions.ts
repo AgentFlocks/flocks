@@ -654,9 +654,13 @@ export function useSessionMessages(sessionId?: string) {
       setMessages(prev => prev.filter((message) => message.id !== messageId));
     },
     clearMessages: () => {
+      requestIdRef.current += 1;
       provisionalMessageIdsRef.current.clear();
       messageMutationVersionsRef.current.clear();
+      mutationVersionRef.current = 0;
       setMessages([]);
+      setError(null);
+      setLoading(false);
     },
     replaceMessageText: (messageId: string, partId: string, text: string) => {
       markMessageMutation(messageId);
