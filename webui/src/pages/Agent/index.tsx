@@ -112,13 +112,6 @@ export default function AgentPage({ embedded = false }: AgentPageProps = {}) {
 
       {/* Toolbar — mirrors the Skill page toolbar style */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-2">
-        {embedded && primaryAgents[0] && (
-          <PrimaryAgentToolbarItem
-            agent={primaryAgents[0]}
-            displayLang={i18n.language}
-            onClick={() => setEditingAgent(primaryAgents[0])}
-          />
-        )}
         {!embedded && (
           <span className="text-xs text-gray-400 select-none">
             {t('totalCount', { total: primaryAgents.length + subAgents.length })}
@@ -151,7 +144,7 @@ export default function AgentPage({ embedded = false }: AgentPageProps = {}) {
           scrollbar is absent, preventing the layout shift that occurs when filters
           toggle between many results (scrollbar visible) and few results (no bar). */}
       <div className="flex-1 overflow-y-auto px-4 py-4 space-y-6" style={{ scrollbarGutter: 'stable' }}>
-        {agents.length === 0 ? (
+        {(embedded ? subAgents.length === 0 : primaryAgents.length + subAgents.length === 0) ? (
           <EmptyState
             icon={<Bot className="w-16 h-16" />}
             title={t('emptyState.title')}
@@ -474,48 +467,6 @@ function AgentSection({
         />
       )}
     </div>
-  );
-}
-
-// ============================================================================
-// Primary Agent Toolbar Entry
-// ============================================================================
-
-function PrimaryAgentToolbarItem({
-  agent,
-  displayLang,
-  onClick,
-}: Pick<AgentCardProps, 'agent' | 'displayLang' | 'onClick'>) {
-  const { t } = useTranslation('agent');
-  const displayName = getAgentDisplayName(agent, displayLang);
-  const displayDesc = getAgentDisplayDescription(agent, displayLang);
-
-  return (
-    <button
-      type="button"
-      onClick={onClick}
-      className="group flex min-w-0 max-w-[720px] items-center gap-2 rounded-lg border border-gray-200 bg-slate-50/60 px-2.5 py-1.5 text-left transition-colors hover:border-gray-300 hover:bg-white"
-      title={displayDesc || displayName}
-    >
-      <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md bg-white text-slate-500 ring-1 ring-gray-200">
-        <Bot className="h-3.5 w-3.5" />
-      </span>
-      <span className="min-w-0">
-        <span className="flex min-w-0 items-center gap-1.5">
-          <span className="truncate text-xs font-semibold text-gray-900">{displayName}</span>
-          <span className="rounded border border-blue-100 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium leading-none text-blue-600">
-            {t('badge.native')}
-          </span>
-        </span>
-        <span className="block truncate text-[11px] leading-4 text-gray-500">
-          {displayDesc || t('common:empty.noDescription')}
-        </span>
-      </span>
-      <span className="ml-1 inline-flex shrink-0 items-center gap-1 rounded-md px-1.5 py-1 text-[11px] font-medium text-gray-500 transition-colors group-hover:bg-white group-hover:text-slate-700">
-        <Pencil className="h-3 w-3" />
-        {t('badge.edit')}
-      </span>
-    </button>
   );
 }
 

@@ -72,6 +72,23 @@ function makeAgent(overrides: Record<string, unknown>) {
 }
 
 describe('AgentPage cards', () => {
+  it('插件管理嵌入模式仅展示子 Agent', () => {
+    mockUseAgents.mockReturnValue({
+      agents: [
+        makeAgent({ name: 'rex', nameCn: 'Rex 主智能体', mode: 'primary', native: true }),
+        makeAgent({ name: 'analyst', nameCn: '分析智能体', delegatable: true }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    render(<AgentPage embedded />);
+
+    expect(screen.queryByText('Rex 主智能体')).not.toBeInTheDocument();
+    expect(screen.getByText('分析智能体')).toBeInTheDocument();
+  });
+
   it('使用与工作流卡片一致的纯色扁平样式', () => {
     mockUseAgents.mockReturnValue({
       agents: [
