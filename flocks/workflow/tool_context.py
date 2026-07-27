@@ -129,9 +129,9 @@ async def cleanup_workflow_tool_context(tool_context: Optional[ToolContext]) -> 
 
         await Session.delete(session.project_id, session.id)
 
-        # Session.delete is intentionally a soft delete. Trigger parents without
-        # child tasks are implementation details, so remove their residual rows
-        # to keep high-frequency trigger traffic storage-bounded.
+        # Session.delete removes the persisted task data but retains a tombstone.
+        # Trigger parents without child tasks are implementation details, so
+        # remove that residual row to keep high-frequency traffic storage-bounded.
         from flocks.storage.storage import Storage
 
         await Storage.delete(f"session:{session.project_id}:{session.id}")

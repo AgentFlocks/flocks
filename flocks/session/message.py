@@ -467,6 +467,25 @@ class Message:
             task.cancel()
 
     @classmethod
+    async def quiesce_parts(cls, session_id: str, *, persist: bool) -> None:
+        """Stop a delayed parts flush, optionally persisting its latest cache."""
+        task = cls._parts_flush_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        async with _session_locks.get(session_id):
+            if persist and session_id in cls._parts_cache:
+                if cls._parts_storage_format.get(session_id) == "legacy":
+                    await cls._persist_parts(session_id)
+                else:
+                    for message_id in list(cls._parts_cache[session_id]):
+                        await cls._persist_parts(session_id, message_id=message_id)
+
+    @classmethod
     def _cache_token(cls, session_id: str) -> tuple[int, int]:
         return cls._cache_epoch, cls._session_cache_generations.get(session_id, 0)
 

@@ -76,6 +76,8 @@ async def _list_project_summaries(user: AuthUser, search: Optional[str]) -> List
                 shared_project_ids=shared_project_ids,
             ):
                 continue
+            if session.status != "active":
+                continue
             metadata = session.metadata if isinstance(session.metadata, dict) else {}
             if metadata.get("hideFromSessionManager"):
                 continue
@@ -285,31 +287,39 @@ async def unshare_project_local(project_id: str, request: Request):
 
 @router.delete("/{project_id}", response_model=bool, summary="Delete project")
 async def delete_project(project_id: str, request: Request):
-    """Remove a project and its sessions while preserving project files."""
+    """Archive project tasks and hide the project while preserving project files."""
 
     user = require_user(request)
     try:
-        if await Project.get(project_id, owner_id=user.id) is None:
-            raise ValueError(f"Project {project_id} not found")
+        async with Project.lifecycle_lock(project_id):
+            if await Project.get(project_id, owner_id=user.id) is None:
+                raise ValueError(f"Project {project_id} not found")
 
-        project_sessions = [
-            session
-            for session in await Session.list_all_unfiltered()
-            if session.project_id == project_id
-        ]
-        if any(not SessionPolicy.can_delete(session, user) for session in project_sessions):
-            raise HTTPException(
-                status_code=403,
-                detail="Only session owners can delete project sessions",
-            )
+            project_sessions = [
+                session
+                for session in await Session.list_all_unfiltered()
+                if session.project_id == project_id
+            ]
+            if any(not SessionPolicy.can_delete(session, user) for session in project_sessions):
+                raise HTTPException(
+                    status_code=403,
+                    detail="Only session owners can delete project sessions",
+                )
 
-        from flocks.server.routes.session import delete_session_for_user
+            root_sessions = [
+                session
+                for session in project_sessions
+                if session.parent_id is None
+            ]
+            if project_sessions and not root_sessions:
+                raise ProjectDeletionError("Project sessions do not contain a restorable root task")
 
-        for session in project_sessions:
-            if await Session.get(project_id, session.id) is not None:
-                await delete_session_for_user(session.id, user)
+            from flocks.server.routes.session import archive_session_for_user
 
-        return await Project.delete(project_id, owner_id=user.id)
+            for session in root_sessions:
+                await archive_session_for_user(session.id, user)
+
+            return await Project.delete(project_id, owner_id=user.id)
     except ProjectDeletionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

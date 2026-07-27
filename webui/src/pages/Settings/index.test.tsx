@@ -53,6 +53,10 @@ vi.mock('@/pages/AuditLogs', () => ({
   default: () => <div>audit logs page</div>,
 }));
 
+vi.mock('./ArchivedDataPanel', () => ({
+  default: () => <div>archived data page</div>,
+}));
+
 vi.mock('@/pages/FlocksproUpgrade', () => ({
   default: () => <div>flocks pro page</div>,
 }));
@@ -204,6 +208,16 @@ describe('SettingsPage', () => {
     expect(await screen.findByText('audit logs page')).toBeInTheDocument();
     expect(screen.getAllByRole('link', { name: 'auditLogs' })[0]).toHaveAttribute('href', '/settings/audit-logs');
     expect(flocksproUsersApi.hasCapability).toHaveBeenCalled();
+  });
+
+  it('renders archived data management for local users', async () => {
+    renderSettings('/settings/archived-data');
+
+    expect(await screen.findByText('archived data page')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'archivedData' })[0]).toHaveAttribute(
+      'href',
+      '/settings/archived-data',
+    );
   });
 
   it('hides audit logs when Flocks Pro capability is unavailable', async () => {

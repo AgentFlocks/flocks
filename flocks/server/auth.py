@@ -12,13 +12,17 @@ from typing import Optional
 from fastapi import HTTPException, Request, Response, status
 from starlette.requests import HTTPConnection
 
-from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
+from flocks.auth.context import (
+    API_TOKEN_SERVICE_USER_ID,
+    AuthUser,
+    reset_current_auth_user,
+    set_current_auth_user,
+)
 from flocks.auth.service import AuthService
 from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
-API_TOKEN_SERVICE_USER_ID = "api-token-service"
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({

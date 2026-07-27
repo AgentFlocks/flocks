@@ -37,6 +37,7 @@ const {
     post: vi.fn(),
   },
   sessionApi: {
+    archive: vi.fn(),
     delete: vi.fn(),
     get: vi.fn(),
     getMessages: vi.fn(),
@@ -371,6 +372,7 @@ describe('SessionPage session actions menu', () => {
         parts: [{ id: 'part-1', type: 'text', text: 'hello export' }],
       },
     ]);
+    sessionApi.archive.mockResolvedValue({ id: 'session-1', status: 'archived' });
     sessionApi.delete.mockResolvedValue(true);
 
     vi.stubGlobal('confirm', vi.fn(() => true));
@@ -1297,7 +1299,7 @@ describe('SessionPage session actions menu', () => {
     expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'deleteAction' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'archiveAction' })).toBeInTheDocument();
   });
 
   it('shows a compact relative session timestamp and keeps the actions trigger background-free', async () => {
@@ -1457,20 +1459,35 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('Blob', OriginalBlob);
   });
 
-  it('deletes a session from the actions menu', async () => {
+  it('archives a session from the actions menu', async () => {
     const user = userEvent.setup();
 
     renderSessionPage();
 
     await screen.findByText('Original Session');
     await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'deleteAction' }));
+    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
 
     await waitFor(() => {
-      expect(sessionApi.delete).toHaveBeenCalledWith('session-1');
+      expect(sessionApi.archive).toHaveBeenCalledWith('session-1');
     });
     expect(removeSession).toHaveBeenCalledWith('session-1');
-    expect(global.confirm).toHaveBeenCalledWith('confirmDelete');
+    expect(global.confirm).toHaveBeenCalledWith('confirmArchive');
+  });
+
+  it('keeps a successful archive successful when project-count refresh fails', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await waitFor(() => expect(client.get).toHaveBeenCalled());
+    client.get.mockRejectedValueOnce(new Error('project refresh failed'));
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('archiveSuccess'));
+    expect(removeSession).toHaveBeenCalledWith('session-1');
+    expect(toast.error).not.toHaveBeenCalledWith('archiveFailed', expect.anything());
   });
 
   it('does not auto-attach any session on first load without history', () => {

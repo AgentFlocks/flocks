@@ -1,3 +1,5 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from typer.testing import CliRunner
 
@@ -84,6 +86,30 @@ async def test_delete_session_resolves_project_from_session(monkeypatch) -> None
 
 
 @pytest.mark.asyncio
+async def test_delete_session_confirmation_calls_out_permanent_deletion(monkeypatch) -> None:
+    session = _build_session(project_id="proj_delete_prompt", title="Delete Forever")
+    prompts: list[str] = []
+
+    async def fake_get_by_id(_session_id: str):
+        return session
+
+    def fake_confirm(prompt: str, *, default: bool):
+        prompts.append(prompt)
+        assert default is False
+        return False
+
+    monkeypatch.setattr(session_cmd.Storage, "init", _noop_storage_init)
+    monkeypatch.setattr(session_cmd.Session, "get_by_id", fake_get_by_id)
+    monkeypatch.setattr(session_cmd.typer, "confirm", fake_confirm)
+
+    await session_cmd._delete_session(session.id, None, force=False)
+
+    assert prompts == [
+        "Permanently delete session 'Delete Forever' and all of its messages and history?"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_archive_session_resolves_project_from_session(monkeypatch) -> None:
     session = _build_session(project_id="proj_archive")
 
@@ -105,7 +131,9 @@ async def test_archive_session_resolves_project_from_session(monkeypatch) -> Non
 
 @pytest.mark.asyncio
 async def test_restore_session_resolves_project_from_session(monkeypatch) -> None:
-    session = _build_session(project_id="proj_restore")
+    session = _build_session(project_id="proj_restore").model_copy(
+        update={"owner_user_id": "usr_cli"}
+    )
 
     async def fake_get_by_id(session_id: str):
         assert session_id == session.id
@@ -119,5 +147,9 @@ async def test_restore_session_resolves_project_from_session(monkeypatch) -> Non
     monkeypatch.setattr(session_cmd.Storage, "init", _noop_storage_init)
     monkeypatch.setattr(session_cmd.Session, "get_by_id", fake_get_by_id)
     monkeypatch.setattr(session_cmd.Session, "unarchive", fake_unarchive)
+    restore_project = AsyncMock(return_value=None)
+    monkeypatch.setattr(session_cmd.Project, "restore", restore_project)
 
     await session_cmd._restore_session(session.id, None)
+
+    restore_project.assert_awaited_once_with(session.project_id, owner_id="usr_cli")

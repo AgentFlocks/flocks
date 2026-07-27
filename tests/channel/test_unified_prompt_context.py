@@ -257,7 +257,7 @@ class TestChannelSessionOwnerPropagation:
         assert captured["owner_username"] == "admin"
 
     @pytest.mark.asyncio
-    async def test_create_session_stays_ownerless_without_local_accounts(self):
+    async def test_create_session_uses_system_owner_without_local_accounts(self):
         captured = {}
 
         class _StubSession:
@@ -277,8 +277,8 @@ class TestChannelSessionOwnerPropagation:
             )
 
         assert sid == "ses_ownerless"
-        assert "owner_user_id" not in captured
-        assert "owner_username" not in captured
+        assert captured["owner_user_id"] == "api-token-service"
+        assert captured["owner_username"] == "api-token-service"
         list_users.assert_not_awaited()
 
     @pytest.mark.asyncio

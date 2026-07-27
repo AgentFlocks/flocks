@@ -40,8 +40,8 @@ Use `action` to choose the operation:
   model, provider, and memory_enabled. For requests like "change this session to
   gpt-5" or "update the session model", use action=update with model, and set
   provider too when the user specifies one.
-- delete: soft-delete a session and its child sessions; requires session_id and
-  confirmation.
+- delete: permanently delete a session, its child sessions, messages, and
+  history; requires session_id and confirmation. This cannot be restored.
 - archive: archive or restore a session; requires session_id. Set archive=false
   to restore an archived session to active.
 """
@@ -221,7 +221,11 @@ async def session_manage(
             permission="session_manage",
             patterns=[f"delete:{session_id}"],
             always=[],
-            metadata={"action": "delete", "session_id": session_id},
+            metadata={
+                "action": "permanent_delete",
+                "session_id": session_id,
+                "destructive": True,
+            },
         )
         return await _session_delete_impl(ctx, session_id=session_id)
     if action == "archive":
@@ -482,7 +486,7 @@ async def _session_delete_impl(ctx: ToolContext, session_id: str) -> ToolResult:
 
     return ToolResult(
         success=True,
-        output=f"Session '{session_id}'（{session.title}）已删除",
+        output=f"Session '{session_id}'（{session.title}）已永久删除",
     )
 
 
@@ -513,9 +517,26 @@ async def _session_archive_impl(
     if not session:
         return ToolResult(success=False, error=f"未找到 session '{session_id}'")
 
+    if archive is not False and session_id == ctx.session_id:
+        return ToolResult(
+            success=False,
+            error="不能在当前会话的工具调用尚未结束时归档自身，请从工作台归档该会话",
+        )
+    if archive is False and getattr(session, "parent_id", None) is not None:
+        return ToolResult(
+            success=False,
+            error="只能从根任务恢复完整任务树",
+        )
+
     try:
         if archive is False:
-            ok = await Session.unarchive(session.project_id, session_id)
+            from flocks.project.project import Project
+
+            async with Project.lifecycle_lock(session.project_id):
+                owner_user_id = getattr(session, "owner_user_id", None)
+                if owner_user_id:
+                    await Project.restore(session.project_id, owner_id=owner_user_id)
+                ok = await Session.unarchive(session.project_id, session_id)
             action = "取消归档"
         else:
             ok = await Session.archive(session.project_id, session_id)

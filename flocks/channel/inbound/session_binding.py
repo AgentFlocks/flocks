@@ -86,8 +86,7 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     ``Session.create`` cannot infer the owner from ``current_auth_user``.
     When an existing channel session is being replaced, preserve its owner.
     Otherwise, attach new channel sessions to the local admin if one exists.
-    Installs without local accounts remain ownerless for backward-compatible
-    no-login operation.
+    Installs without local accounts use the explicit system identity.
     """
     owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
     owner_username = getattr(source_session, "owner_username", None) if source_session else None
@@ -103,7 +102,12 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
         from flocks.auth.service import AuthService
 
         if not await AuthService.has_users():
-            return {}
+            from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+
+            return {
+                "owner_user_id": API_TOKEN_SERVICE_USER_ID,
+                "owner_username": API_TOKEN_SERVICE_USER_ID,
+            }
         users = await AuthService.list_users()
     except Exception as exc:
         log.warn("channel.owner.resolve_failed", {"error": str(exc)})

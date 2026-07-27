@@ -29,6 +29,8 @@
   "settingsPreferences": "Preferences",
   "settingsPreferencesDescription": "Adjust workspace display, language, theme, and tool failure handling.",
   "settingsGroupPreferences": "Preferences",
+  "settingsGroupData": "Data Management",
+  "archivedData": "Archived Tasks",
   "settingsGroupSystem": "Account & System",
   "settingsGroupIntegrations": "Models & Channels",
   "displayName": "Workspace Name",

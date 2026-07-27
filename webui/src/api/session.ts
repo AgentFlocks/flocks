@@ -82,6 +82,7 @@ export interface SessionListParams {
   start?: number;
   search?: string;
   category?: string;
+  status?: 'active' | 'archived' | 'all';
 }
 
 export interface SessionMessagePage {
@@ -132,10 +133,26 @@ export const sessionApi = {
   },
 
   /**
-   * 删除会话
+   * 永久删除会话（普通工作台应使用 archive）
    */
   delete: async (sessionId: string) => {
     const response = await client.delete(`/api/session/${sessionId}`);
+    return response.data;
+  },
+
+  /**
+   * 归档会话并保留全部持久化数据
+   */
+  archive: async (sessionId: string): Promise<SessionResponse> => {
+    const response = await client.post(`/api/session/${sessionId}/archive`);
+    return response.data;
+  },
+
+  /**
+   * 恢复已归档会话
+   */
+  restore: async (sessionId: string): Promise<SessionResponse> => {
+    const response = await client.post(`/api/session/${sessionId}/restore`);
     return response.data;
   },
 

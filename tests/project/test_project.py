@@ -115,7 +115,7 @@ async def test_update_renames_registered_project(project_root):
 
 
 @pytest.mark.asyncio
-async def test_delete_only_removes_registry_entry(project_root):
+async def test_delete_soft_removes_registry_entry_and_restore_preserves_identity(project_root):
     labs = project_root / "labs"
     labs.mkdir()
     created = await Project.create(owner_id="user-1", name="Labs", worktree=str(labs))
@@ -126,7 +126,33 @@ async def test_delete_only_removes_registry_entry(project_root):
     assert result is True
     assert labs.exists()
     assert await Project.get(created.id, owner_id="user-1") is None
+    assert await Project.list(owner_id="user-1") == []
+    assert Project.registered_project_names()[created.id] == "Labs"
+    registry = json.loads(Project.registry_path("user-1").read_text(encoding="utf-8"))
+    assert registry["projects"][0]["id"] == created.id
+    assert registry["projects"][0]["removedAt"] > 0
     storage_delete.assert_not_awaited()
+
+    restored = await Project.restore(created.id, owner_id="user-1")
+
+    assert restored is not None
+    assert restored.id == created.id
+    assert restored.name == "Labs"
+    assert [project.id for project in await Project.list(owner_id="user-1")] == [created.id]
+
+
+@pytest.mark.asyncio
+async def test_restore_removed_project_requires_original_directory(project_root):
+    labs = project_root / "labs"
+    labs.mkdir()
+    created = await Project.create(owner_id="user-1", name="Labs", worktree=str(labs))
+    await Project.delete(created.id, owner_id="user-1")
+    labs.rmdir()
+
+    with pytest.raises(ProjectDeletionError, match="directory is unavailable"):
+        await Project.restore(created.id, owner_id="user-1")
+
+    assert await Project.get(created.id, owner_id="user-1") is None
 
 
 @pytest.mark.asyncio

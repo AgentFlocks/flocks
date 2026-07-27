@@ -148,6 +148,7 @@ class ProjectRegistryEntry(BaseModel):
     updated_at: int = Field(alias="updatedAt")
     owner_user_id: Optional[str] = Field(None, alias="ownerUserID")
     shared_local: bool = Field(False, alias="sharedLocal")
+    removed_at: Optional[int] = Field(None, alias="removedAt")
 
 
 class ProjectRegistry(BaseModel):
@@ -163,6 +164,7 @@ class Project:
     """User-scoped registry of explicitly created projects."""
 
     _lock = asyncio.Lock()
+    _lifecycle_locks: ClassVar[Dict[str, asyncio.Lock]] = {}
     _session_stats_cache: ClassVar[
         Dict[Tuple[str, str], Tuple[float, Dict[str, Tuple[int, int, Optional[int]]]]]
     ] = {}
@@ -171,6 +173,12 @@ class Project:
     @staticmethod
     def _now_ms() -> int:
         return int(datetime.now().timestamp() * 1000)
+
+    @classmethod
+    def lifecycle_lock(cls, project_id: str) -> asyncio.Lock:
+        """Serialize session creation, project removal, and restoration per project."""
+
+        return cls._lifecycle_locks.setdefault(project_id, asyncio.Lock())
 
     @staticmethod
     def _flocks_root() -> Path:
@@ -416,6 +424,8 @@ class Project:
                 )
 
                 for entry in registry.projects:
+                    if entry.removed_at is not None:
+                        continue
                     if cls._normalized_worktree(entry.worktree) == normalized_worktree:
                         raise ProjectPathConflictError(cls._entry_to_info(entry))
 
@@ -424,10 +434,35 @@ class Project:
                     raise ValueError("Project name cannot be empty")
                 if normalized_name.casefold() in _RESERVED_PROJECT_NAMES:
                     raise ProjectNameConflictError("Project name is reserved")
-                if any(entry.name.strip().casefold() == normalized_name.casefold() for entry in registry.projects):
+                if any(
+                    entry.removed_at is None
+                    and entry.name.strip().casefold() == normalized_name.casefold()
+                    for entry in registry.projects
+                ):
                     raise ProjectNameConflictError(f"Project name '{normalized_name}' already exists")
 
                 now = cls._now_ms()
+                removed_entry = next(
+                    (
+                        entry
+                        for entry in registry.projects
+                        if entry.removed_at is not None
+                        and cls._normalized_worktree(entry.worktree) == normalized_worktree
+                    ),
+                    None,
+                )
+                if removed_entry is not None:
+                    removed_entry.name = normalized_name
+                    removed_entry.worktree = normalized_worktree
+                    removed_entry.owner_user_id = owner_id
+                    removed_entry.shared_local = False
+                    removed_entry.removed_at = None
+                    removed_entry.updated_at = now
+                    cls._write_registry(owner_id, registry)
+                    cls.invalidate_session_stats(owner_id)
+                    log.info("project.restored", {"id": removed_entry.id})
+                    return cls._entry_to_info(removed_entry)
+
                 project_id = f"prj_{uuid.uuid4()}"
                 entry = ProjectRegistryEntry(
                     id=project_id,
@@ -450,12 +485,20 @@ class Project:
         owner_id: str,
     ) -> List[ProjectInfo]:
         registry = await cls.ensure_registry(owner_id)
-        projects = [cls._entry_to_info(entry) for entry in registry.projects]
+        projects = [
+            cls._entry_to_info(entry)
+            for entry in registry.projects
+            if entry.removed_at is None
+        ]
         projects.sort(key=lambda item: item.time.updated, reverse=True)
         return projects
 
     @classmethod
-    def _all_registry_entries(cls) -> List[ProjectRegistryEntry]:
+    def _all_registry_entries(
+        cls,
+        *,
+        include_removed: bool = False,
+    ) -> List[ProjectRegistryEntry]:
         """Return valid entries across local user registries."""
 
         registry_dir = cls._flocks_root() / "projects"
@@ -465,7 +508,11 @@ class Project:
         for path in registry_dir.glob("*.json"):
             registry = cls._read_registry_file(path)
             if registry is not None:
-                entries.extend(registry.projects)
+                entries.extend(
+                    entry
+                    for entry in registry.projects
+                    if include_removed or entry.removed_at is None
+                )
         return entries
 
     @classmethod
@@ -505,7 +552,12 @@ class Project:
         if not owner_id or not project_id or project_id == DEFAULT_PROJECT_ID:
             return False
         registry = cls._read_registry(owner_id)
-        return any(entry.id == project_id and entry.shared_local for entry in registry.projects)
+        return any(
+            entry.id == project_id
+            and entry.removed_at is None
+            and entry.shared_local
+            for entry in registry.projects
+        )
 
     @classmethod
     async def set_local_shared(
@@ -522,7 +574,14 @@ class Project:
         async with cls._lock:
             with _registry_cross_process_lock(cls.registry_path(owner_id)):
                 registry = cls._read_registry(owner_id)
-                entry = next((item for item in registry.projects if item.id == project_id), None)
+                entry = next(
+                    (
+                        item
+                        for item in registry.projects
+                        if item.id == project_id and item.removed_at is None
+                    ),
+                    None,
+                )
                 if entry is None:
                     raise ValueError(f"Project {project_id} not found")
                 entry.owner_user_id = owner_id
@@ -544,7 +603,14 @@ class Project:
         owner_id: str,
     ) -> Optional[ProjectInfo]:
         registry = await cls.ensure_registry(owner_id)
-        entry = next((item for item in registry.projects if item.id == project_id), None)
+        entry = next(
+            (
+                item
+                for item in registry.projects
+                if item.id == project_id and item.removed_at is None
+            ),
+            None,
+        )
         return cls._entry_to_info(entry) if entry else None
 
     @classmethod
@@ -562,11 +628,20 @@ class Project:
         async with cls._lock:
             with _registry_cross_process_lock(cls.registry_path(owner_id)):
                 registry = cls._read_registry(owner_id)
-                entry = next((item for item in registry.projects if item.id == project_id), None)
+                entry = next(
+                    (
+                        item
+                        for item in registry.projects
+                        if item.id == project_id and item.removed_at is None
+                    ),
+                    None,
+                )
                 if entry is None:
                     raise ValueError(f"Project {project_id} not found")
                 if any(
-                    item.id != project_id and item.name.strip().casefold() == normalized_name.casefold()
+                    item.id != project_id
+                    and item.removed_at is None
+                    and item.name.strip().casefold() == normalized_name.casefold()
                     for item in registry.projects
                 ):
                     raise ProjectNameConflictError(f"Project name '{normalized_name}' already exists")
@@ -580,26 +655,93 @@ class Project:
 
     @classmethod
     async def delete(cls, project_id: str, *, owner_id: str) -> bool:
-        """Remove a project registration without changing sessions or files."""
+        """Hide a project registration while preserving metadata for restoration."""
 
         if project_id == DEFAULT_PROJECT_ID:
             raise ProjectDeletionError("The default project cannot be deleted")
         async with cls._lock:
             with _registry_cross_process_lock(cls.registry_path(owner_id)):
                 registry = cls._read_registry(owner_id)
-                remaining = [entry for entry in registry.projects if entry.id != project_id]
-                if len(remaining) == len(registry.projects):
+                entry = next(
+                    (
+                        item
+                        for item in registry.projects
+                        if item.id == project_id and item.removed_at is None
+                    ),
+                    None,
+                )
+                if entry is None:
                     raise ValueError(f"Project {project_id} not found")
-                registry.projects = remaining
+                now = cls._now_ms()
+                entry.removed_at = now
+                entry.updated_at = now
+                entry.shared_local = False
                 cls._write_registry(owner_id, registry)
             cls.invalidate_session_stats(owner_id)
-            log.info("project.deleted", {"id": project_id})
+            log.info("project.removed", {"id": project_id})
             return True
+
+    @classmethod
+    async def restore(
+        cls,
+        project_id: str,
+        *,
+        owner_id: str,
+    ) -> Optional[ProjectInfo]:
+        """Restore a soft-removed project when its original directory is usable."""
+
+        if project_id == DEFAULT_PROJECT_ID:
+            return None
+        async with cls._lock:
+            with _registry_cross_process_lock(cls.registry_path(owner_id)):
+                registry = cls._read_registry(owner_id)
+                entry = next((item for item in registry.projects if item.id == project_id), None)
+                if entry is None:
+                    return None
+                if entry.removed_at is None:
+                    return cls._entry_to_info(entry)
+                if cls._path_status(entry.worktree) != "available":
+                    raise ProjectDeletionError(
+                        f"Project '{entry.name}' directory is unavailable; the archived task was not restored"
+                    )
+
+                normalized_worktree = cls.validate_worktree(
+                    entry.worktree,
+                    create_if_missing=False,
+                )
+                for other in registry.projects:
+                    if other.id == entry.id or other.removed_at is not None:
+                        continue
+                    if cls._normalized_worktree(other.worktree) == normalized_worktree:
+                        raise ProjectPathConflictError(cls._entry_to_info(other))
+                    if other.name.strip().casefold() == entry.name.strip().casefold():
+                        raise ProjectNameConflictError(
+                            f"Project name '{entry.name}' already exists"
+                        )
+
+                entry.worktree = normalized_worktree
+                entry.owner_user_id = owner_id
+                entry.shared_local = False
+                entry.removed_at = None
+                entry.updated_at = cls._now_ms()
+                cls._write_registry(owner_id, registry)
+            cls.invalidate_session_stats(owner_id)
+            log.info("project.restored", {"id": project_id})
+            return cls._entry_to_info(entry)
 
     @classmethod
     def registered_project_ids(cls, owner_id: str) -> set[str]:
         registry = cls._read_registry(owner_id)
-        return {entry.id for entry in registry.projects}
+        return {entry.id for entry in registry.projects if entry.removed_at is None}
+
+    @classmethod
+    def registered_project_names(cls) -> Dict[str, str]:
+        """Return project display names across local user registries."""
+
+        return {
+            entry.id: entry.name
+            for entry in cls._all_registry_entries(include_removed=True)
+        }
 
     @classmethod
     def effective_project_id(cls, owner_id: str, stored_project_id: Optional[str]) -> str:

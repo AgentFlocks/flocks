@@ -7,6 +7,7 @@ export interface Session {
   id: string;
   slug: string;
   projectID: string;
+  projectName?: string;
   effectiveProjectID?: string;
   directory: string;
   parentID?: string;
@@ -18,6 +19,7 @@ export interface Session {
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  status?: 'active' | 'archived';
   provider?: string;
   model?: string;
   model_pinned?: boolean;
