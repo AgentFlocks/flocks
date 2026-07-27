@@ -102,6 +102,65 @@ class TestArchiveUnarchive:
         assert restored_child is not None and restored_child.status == "active"
 
     @pytest.mark.asyncio
+    async def test_archive_and_unarchive_preserve_prompt_queues(self):
+        from flocks.session.interaction_queue import InteractionQueue
+
+        parent = await _create(project_id="proj_arch_queue", title="Parent")
+        child = await Session.create(
+            project_id=parent.project_id,
+            directory=parent.directory,
+            title="Child",
+            parent_id=parent.id,
+        )
+        queued_text = {
+            parent.id: ["1", "11", "2", "22", "3"],
+            child.id: ["child-1", "child-2"],
+        }
+
+        try:
+            before = {}
+            for queued_session_id, prompts in queued_text.items():
+                for prompt in prompts:
+                    await InteractionQueue.enqueue(
+                        queued_session_id,
+                        parts=[{"type": "text", "text": prompt}],
+                    )
+                before[queued_session_id] = [
+                    item.model_dump()
+                    for item in await InteractionQueue.list(queued_session_id)
+                ]
+
+            assert await Session.archive(parent.project_id, parent.id) is True
+            for queued_session_id in queued_text:
+                assert await InteractionQueue.pop_next(queued_session_id) is None
+                assert [
+                    item.model_dump()
+                    for item in await InteractionQueue.list(queued_session_id)
+                ] == before[queued_session_id]
+
+            assert await Session.unarchive(parent.project_id, parent.id) is True
+            for queued_session_id, prompts in queued_text.items():
+                restored = await InteractionQueue.list(queued_session_id)
+                assert [item.model_dump() for item in restored] == before[queued_session_id]
+                assert [
+                    item.parts[0]["text"]
+                    for item in restored
+                ] == prompts
+                first = await InteractionQueue.pop_next(queued_session_id)
+                assert first is not None
+                assert first.id == before[queued_session_id][0]["id"]
+                assert [
+                    item.id
+                    for item in await InteractionQueue.list(queued_session_id)
+                ] == [
+                    item["id"]
+                    for item in before[queued_session_id][1:]
+                ]
+        finally:
+            await InteractionQueue.clear(parent.id)
+            await InteractionQueue.clear(child.id)
+
+    @pytest.mark.asyncio
     async def test_archive_is_idempotent_and_preserves_first_timestamp(self):
         session = await _create(project_id="proj_arch_idempotent")
 
@@ -321,6 +380,19 @@ class TestArchiveUnarchive:
         reloaded_tool = next(part for part in reloaded_parts if part.id == tool_part.id)
         assert isinstance(reloaded_tool, ToolPart)
         assert reloaded_tool.state.status == "pending"
+
+    @pytest.mark.asyncio
+    async def test_permanent_delete_clears_prompt_queue(self):
+        from flocks.session.interaction_queue import InteractionQueue
+
+        session = await _create(project_id="proj_delete_queue")
+        await InteractionQueue.enqueue(
+            session.id,
+            parts=[{"type": "text", "text": "discard on delete"}],
+        )
+
+        assert await Session.delete(session.project_id, session.id) is True
+        assert await InteractionQueue.list(session.id) == []
 
     @pytest.mark.asyncio
     async def test_permanent_delete_removes_tree_data_in_one_mutation(

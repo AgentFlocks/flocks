@@ -898,6 +898,7 @@ class Session:
         sessions: List[SessionInfo],
         *,
         timeout_s: float = 5.0,
+        clear_prompt_queue: bool = True,
     ) -> bool:
         """Stop persisted and in-memory work before committing archive state."""
         from flocks.session.interaction_queue import InteractionQueue
@@ -908,7 +909,8 @@ class Session:
         for session_id in session_ids:
             SessionLoop.abort(session_id)
             SessionRunner.cancel(session_id)
-            await InteractionQueue.clear(session_id)
+            if clear_prompt_queue:
+                await InteractionQueue.clear(session_id)
             try:
                 from flocks.server.routes.question import reject_session_questions
 
@@ -982,9 +984,19 @@ class Session:
         )
         if not sessions:
             return False
+        prompt_queue_paused = False
+        archive_committed = False
         try:
             if any(session.status != "archived" for session in sessions):
-                if not await cls._stop_session_tree_for_archive(sessions):
+                from flocks.session.interaction_queue import InteractionQueue
+
+                prompt_queue_paused = True
+                for session in sessions:
+                    await InteractionQueue.pause(session.id)
+                if not await cls._stop_session_tree_for_archive(
+                    sessions,
+                    clear_prompt_queue=False,
+                ):
                     return False
             for session in sessions:
                 await Message.quiesce_parts(session.id, persist=True)
@@ -1024,6 +1036,7 @@ class Session:
                 for session in changed:
                     cls._id_index[session.id] = f"session:{session.project_id}:{session.id}"
                     cls._sync_list_cache(session)
+            archive_committed = True
 
             try:
                 from flocks.session.session_loop import SessionLoop
@@ -1052,6 +1065,11 @@ class Session:
             })
             return True
         finally:
+            if prompt_queue_paused and not archive_committed:
+                from flocks.session.interaction_queue import InteractionQueue
+
+                for session in sessions:
+                    await InteractionQueue.resume(session.id)
             await cls._end_lifecycle_transition(sessions)
     
     @classmethod
@@ -1103,6 +1121,11 @@ class Session:
                 for session in changed:
                     cls._id_index[session.id] = f"session:{session.project_id}:{session.id}"
                     cls._sync_list_cache(session)
+
+            from flocks.session.interaction_queue import InteractionQueue
+
+            for session in sessions:
+                await InteractionQueue.resume(session.id)
 
             log.info("session.unarchived", {
                 "id": session_id,

@@ -47,6 +47,7 @@ class InteractionQueue:
 
     _queues: Dict[str, List[QueuedPrompt]] = {}
     _locks: Dict[str, asyncio.Lock] = {}
+    _paused: set[str] = set()
 
     @classmethod
     def _lock_for(cls, session_id: str) -> asyncio.Lock:
@@ -137,6 +138,8 @@ class InteractionQueue:
     @classmethod
     async def pop_next(cls, session_id: str) -> Optional[QueuedPrompt]:
         async with cls._lock_for(session_id):
+            if session_id in cls._paused:
+                return None
             queue = cls._queues.get(session_id, [])
             if not queue:
                 return None
@@ -163,6 +166,18 @@ class InteractionQueue:
     async def clear(cls, session_id: str) -> None:
         async with cls._lock_for(session_id):
             cls._queues.pop(session_id, None)
+            cls._paused.discard(session_id)
+
+    @classmethod
+    async def pause(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            if cls._queues.get(session_id):
+                cls._paused.add(session_id)
+
+    @classmethod
+    async def resume(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            cls._paused.discard(session_id)
 
     @classmethod
     def _find_locked(cls, session_id: str, item_id: str) -> QueuedPrompt:
