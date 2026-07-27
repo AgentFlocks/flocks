@@ -256,6 +256,11 @@ def _build_command_guidance_section() -> str:
 
 Use `flocks --help` to inspect Flocks CLI commands and usage.
 run_slash_command tool with help command to get the latest slash command guidance.
+
+### Safe Flocks Restart
+
+When you need to restart the running Flocks service yourself, use `flocks restart --server-only`.
+永远不要直接执行 `flocks restart`，这将会导致你杀死自己并且无法自启动。
 </Command_Guidance>"""
 
 

@@ -1112,6 +1112,40 @@ def test_restart_all_stops_then_starts_daemon(monkeypatch) -> None:
     assert call_order == ["stop", "start"]
 
 
+def test_restart_server_requests_backend_restart(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+    status = _supervisor_status(_supervisor_status_payload())
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(
+        service_manager,
+        "request_restart_backend",
+        lambda **_kwargs: calls.append("backend") or status,
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_print_status_payload",
+        lambda *_args, **_kwargs: calls.append("status"),
+    )
+
+    service_manager.restart_server(console)
+
+    assert calls == ["backend", "status"]
+
+
+def test_restart_server_requires_running_supervisor(monkeypatch) -> None:
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+
+    with pytest.raises(service_manager.ServiceError, match="请执行 `flocks restart` 进行全量重启"):
+        service_manager.restart_server(DummyConsole())
+
+
 def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: Path) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
