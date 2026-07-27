@@ -80,7 +80,7 @@ describe('ArchivedDataPanel', () => {
 
     const restoreButton = screen.getByRole('button', { name: 'archivedData.restore' });
     expect(restoreButton).toHaveTextContent('archivedData.restore');
-    expect(restoreButton).toHaveClass('text-sm', 'font-normal');
+    expect(restoreButton).toHaveClass('text-sm', 'font-normal', 'text-blue-600', 'hover:text-blue-700');
     expect(screen.getByRole('button', { name: 'archivedData.delete' })).toHaveClass('text-sm', 'font-normal');
     await user.click(restoreButton);
 

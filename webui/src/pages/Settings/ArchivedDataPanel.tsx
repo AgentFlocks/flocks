@@ -276,7 +276,7 @@ export default function ArchivedDataPanel() {
                       disabled={!canManage || restoring}
                       aria-label={t('archivedData.restore')}
                       title={t('archivedData.restore')}
-                      className="text-sm font-normal text-zinc-600 transition-colors hover:text-zinc-950 disabled:opacity-40 dark:text-zinc-300 dark:hover:text-zinc-50"
+                      className="text-sm font-normal text-blue-600 transition-colors hover:text-blue-700 disabled:opacity-40 dark:text-blue-300 dark:hover:text-blue-200"
                     >
                       {t('archivedData.restore')}
                     </button>
