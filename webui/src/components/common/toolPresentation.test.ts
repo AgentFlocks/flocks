@@ -4,6 +4,7 @@ import enSession from '@/locales/en-US/session.json';
 import zhSession from '@/locales/zh-CN/session.json';
 
 import {
+  getFileOperationDisplayName,
   redactToolInput,
   resolveToolPresentation,
   type ToolPresentationTranslator,
@@ -151,6 +152,21 @@ describe('resolveToolPresentation', () => {
       label: 'custom plugin action',
       detail: '',
     });
+  });
+});
+
+describe('getFileOperationDisplayName', () => {
+  it('uses the first filename and changed-file count for apply_patch', () => {
+    expect(getFileOperationDisplayName('apply_patch', {
+      input: {
+        patchText: [
+          '*** Begin Patch',
+          '*** Update File: /repo/src/a.ts',
+          '*** Add File: C:\\repo\\src\\b.ts',
+          '*** End Patch',
+        ].join('\n'),
+      },
+    })).toBe('a.ts +1');
   });
 });
 

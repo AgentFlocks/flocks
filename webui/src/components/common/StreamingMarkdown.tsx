@@ -265,7 +265,7 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
             if (!isBlock) {
               return (
                 <code
-                  className="bg-gray-100 text-gray-800 px-1 py-0.5 rounded text-[0.85em] font-mono"
+                  className="rounded-md bg-zinc-100/80 px-1.5 py-0.5 font-mono text-[0.85em] font-normal text-zinc-700 dark:bg-white/[0.07] dark:text-zinc-200"
                   {...props}
                 >
                   {children}

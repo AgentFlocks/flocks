@@ -34,7 +34,7 @@ import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
 import { useToast } from './Toast';
 import { buildRunWorkflowHeaderSummary } from './toolStageSummary';
-import { redactToolInput, resolveToolPresentation } from './toolPresentation';
+import { getFileOperationDisplayName, redactToolInput, resolveToolPresentation } from './toolPresentation';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 import { workspaceAPI } from '@/api/workspace';
 import { formatSmartTime } from '@/utils/time';
@@ -564,18 +564,18 @@ function ContextUsageRing({
   return (
     <div
       ref={wrapperRef}
-      className="relative inline-flex h-6 w-6 shrink-0 items-center justify-center"
+      className="relative inline-flex h-6 shrink-0 items-center justify-center"
     >
       <button
         type="button"
-        className="relative inline-flex h-6 w-6 items-center justify-center rounded-full transition-colors hover:bg-zinc-200/60 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500"
+        className="relative inline-flex h-6 items-center gap-1 rounded-md px-1 text-[10px] font-medium tabular-nums text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-700 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-sky-500 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
         title={title}
         aria-label={title}
         aria-haspopup="menu"
         aria-expanded={open}
         onClick={() => setOpen((value) => !value)}
       >
-        <svg className="absolute inset-0 h-6 w-6 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
+        <svg className="h-5 w-5 shrink-0 -rotate-90" viewBox="0 0 24 24" aria-hidden="true">
           <circle cx="12" cy="12" r={radius} fill="none" strokeWidth="2" className="stroke-zinc-200 dark:stroke-zinc-800" />
           <circle
             cx="12"
@@ -589,6 +589,7 @@ function ContextUsageRing({
             strokeDashoffset={strokeDashoffset}
           />
         </svg>
+        <span aria-hidden="true">{clamped}%</span>
       </button>
 
       {open && (
@@ -824,7 +825,9 @@ export function getMessageBubbleClassName({
   isEditing: boolean;
 }): string {
   if (!isUser) {
-    return 'w-full max-w-full min-w-0 bg-transparent py-1 text-sm text-[#34393e] break-words dark:text-zinc-100';
+    const typographyClass = compact ? 'text-sm' : 'text-[15px]';
+
+    return `w-full max-w-full min-w-0 bg-transparent py-1 ${typographyClass} text-[#34393e] break-words dark:text-zinc-100`;
   }
 
   if (compact) {
@@ -835,7 +838,7 @@ export function getMessageBubbleClassName({
 
   const widthClass = isEditing ? 'w-full' : 'w-auto';
 
-  return `${widthClass} min-w-0 max-w-full px-5 py-4 rounded-[24px] text-sm break-words shadow-sm border border-black/[0.07] bg-zinc-50 text-[#30343a] dark:border-white/[0.08] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
+  return `${widthClass} min-w-0 max-w-full px-5 py-3 rounded-[18px] text-sm break-words shadow-sm border border-black/[0.09] bg-zinc-50 text-[#30343a] dark:border-white/[0.10] dark:bg-[#303842] dark:text-zinc-50 dark:shadow-none`;
 }
 
 export function getInstructionDisplayBubbleClassName(compact: boolean): string {
@@ -1730,6 +1733,7 @@ export default function SessionChat({
   const {
     messages,
     loading,
+    error: messagesError,
     refetch,
     addMessage,
     updateMessage,
@@ -1819,7 +1823,6 @@ export default function SessionChat({
           setGoalBanner(null);
           setDismissedGoalKey('');
           clearMessages();
-          refetch();
           void refreshContextUsage({ clear: true });
           return;
         case 'session-status':
@@ -3208,6 +3211,21 @@ export default function SessionChat({
               className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
             />
           </div>
+        ) : messagesError && messages.length === 0 ? (
+          <div className="flex min-h-40 items-center justify-center px-6" role="alert">
+            <div className="flex flex-col items-center gap-3 text-center">
+              <span className="text-sm text-zinc-500 dark:text-zinc-400">
+                {t('chat.loadFailed')}
+              </span>
+              <button
+                type="button"
+                onClick={() => void refetch()}
+                className="rounded-lg border border-zinc-200 bg-white px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-50 dark:border-zinc-700 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                {t('chat.retry')}
+              </button>
+            </div>
+          </div>
         ) : messages.length === 0 ? (
           welcomeContent ? (
             typeof welcomeContent === 'function' ? (
@@ -3492,7 +3510,7 @@ export default function SessionChat({
                     : isStreaming
                       ? 'border-zinc-200 bg-zinc-50 dark:border-zinc-800 dark:bg-zinc-900/70'
                       : pageCanvas && !compact
-                        ? 'border-black/[0.07] bg-zinc-50 hover:border-black/[0.11] focus-within:border-black/[0.11] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.08] dark:bg-[#303842] dark:hover:border-white/[0.13] dark:focus-within:border-white/[0.14] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
+                        ? 'border-black/[0.09] bg-zinc-50 hover:border-black/[0.14] focus-within:border-black/[0.14] focus-within:bg-white focus-within:ring-4 focus-within:ring-black/[0.025] dark:border-white/[0.10] dark:bg-[#303842] dark:hover:border-white/[0.16] dark:focus-within:border-white/[0.16] dark:focus-within:bg-[#343d48] dark:focus-within:ring-white/[0.03]'
                         : 'border-zinc-200 bg-zinc-50 hover:border-zinc-300 focus-within:border-zinc-300 focus-within:bg-white focus-within:ring-4 focus-within:ring-zinc-100 dark:border-zinc-800 dark:bg-zinc-900/70 dark:hover:border-zinc-700 dark:focus-within:border-zinc-700 dark:focus-within:bg-zinc-900 dark:focus-within:ring-zinc-800/60'
               }`}
             >
@@ -3661,7 +3679,7 @@ export default function SessionChat({
                             ? t('chat.placeholderNodeRef', { nodeId: nodeRef.id })
                             : effectivePlaceholder
                     }
-                    className={`w-full resize-none outline-none bg-transparent text-sm placeholder-zinc-400 dark:placeholder-zinc-600 ${
+                    className={`w-full resize-none bg-transparent text-sm outline-none placeholder:text-[#7b838e] dark:placeholder:text-[#9aa7b4] ${
                       sending ? 'text-zinc-400 cursor-not-allowed dark:text-zinc-500' : 'text-zinc-900 dark:text-zinc-100'
                     }`}
                     style={{
@@ -3948,11 +3966,11 @@ function ProcessGroupDetails({
     <details
       open={effectiveOpen}
       data-testid="chat-process-group"
-      className="group/process mt-2 w-full first:mt-0 text-[#6f757c] dark:text-zinc-400"
+      className="group/process mt-2 w-full first:mt-0 text-[#626874] dark:text-[#aab4bf]"
     >
       <summary
         onClick={handleSummaryClick}
-        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-semibold transition-colors hover:text-zinc-900 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden"
+        className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium transition-colors hover:text-zinc-900 dark:hover:text-zinc-100 [&::-webkit-details-marker]:hidden"
       >
         {summary}
         <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/process:rotate-180 dark:text-zinc-500" />
@@ -4042,12 +4060,12 @@ function ChatMessageBubbleInner({
   const bubbleClass = instructionDisplayLabel
     ? getInstructionDisplayBubbleClassName(compact)
     : hasProcessOutput
-      ? 'w-full max-w-full min-w-0 break-words text-sm text-zinc-700 dark:text-zinc-200'
+      ? `w-full max-w-full min-w-0 break-words ${compact ? 'text-sm' : 'text-[15px]'} text-[#34393e] dark:text-zinc-100`
       : getMessageBubbleClassName({ compact, isUser, isEditing });
   const messageGroupClass = getMessageGroupClassName({ compact, isUser, isEditing });
   const actionBarClass = `flex items-center gap-1.5`;
   const editingActionBarClass = getEditingActionBarClassName();
-  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-gray-400 transition-colors duration-150 hover:bg-white hover:text-gray-700 active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-zinc-500 dark:hover:bg-white/[0.08] dark:hover:text-zinc-200 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
+  const iconButtonClass = 'group/action relative inline-flex h-6 w-6 items-center justify-center rounded-full border border-transparent bg-transparent text-[#8b929d] transition-colors duration-150 hover:bg-white hover:text-[#4f5660] active:bg-white focus-visible:bg-white focus-visible:outline-none disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-zinc-100 dark:active:bg-white/[0.08] dark:focus-visible:bg-white/[0.08]';
   const tooltipClass = 'pointer-events-none absolute bottom-full left-1/2 z-10 mb-1.5 -translate-x-1/2 whitespace-nowrap rounded-md bg-gray-900 px-2 py-1 text-[11px] font-medium text-white opacity-0 shadow-sm transition-opacity duration-150 group-hover/action:opacity-100';
   const messageErrorText = isUser ? '' : getMessageErrorText(message);
   const hasOnlyBlankTextParts = parts.length > 0 && parts.every((part) =>
@@ -4453,7 +4471,7 @@ function ChatMessageBubbleInner({
     </div>
   );
   const footerTimestamp = showTimestamp && message.timestamp
-    ? <span className="text-[11px] text-zinc-400 select-none">{formatSmartTime(message.timestamp, i18n.language)}</span>
+    ? <span className="select-none text-[11px] text-[#8b929d] dark:text-[#9aa7b4]">{formatSmartTime(message.timestamp, i18n.language)}</span>
     : null;
   const footer = !compact && showActions && parts.length > 0 && !isEditing ? (
     <div className={`mt-1.5 flex items-center ${
@@ -4563,7 +4581,7 @@ function ChatMessageBubbleInner({
         </div>
         <div className="flex w-full min-w-0 flex-col items-start">
           <div className={`flex items-center gap-2 ${headerHeight}`}>
-            <span className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">
+            <span className="text-base font-semibold text-[#3f444a] dark:text-[#d7dee8]">
               {agentName}
             </span>
           </div>
@@ -5259,18 +5277,21 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
   const displayTitle = state.title ? truncateToolDisplayText(state.title) : '';
   const workflowHeaderSummary = truncateToolDisplayText(buildRunWorkflowHeaderSummary(toolName, state, t));
   const semanticDetail = truncateToolDisplayText(toolPresentation.detail);
+  const fileOperationDisplayName = truncateToolDisplayText(getFileOperationDisplayName(toolName, state));
   const toolDisplayName = toolPresentation.label;
   const processStepLabel = isTodoTool
     ? t('chat.tool.todoUpdated')
     : toolPresentation.known
       ? toolDisplayName
       : config.label;
-  const processStepDetail = workflowHeaderSummary
+  const processStepDetail = fileOperationDisplayName
+    || workflowHeaderSummary
     || semanticDetail
     || displayTitle
     || inputSummary
     || (toolPresentation.known ? '' : toolDisplayName);
-  const cardHeaderDetail = workflowHeaderSummary
+  const cardHeaderDetail = fileOperationDisplayName
+    || workflowHeaderSummary
     || semanticDetail
     || inputSummary
     || displayTitle;

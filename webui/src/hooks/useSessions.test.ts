@@ -926,6 +926,58 @@ describe('updateMessagePart scheduling', () => {
     expect(result.current.messages).toEqual([]);
   });
 
+  it('keeps messages empty when a request started before clear resolves late', async () => {
+    const pendingRequest = deferred<any>();
+    vi.mocked(client.get).mockReturnValueOnce(pendingRequest.promise);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    expect(result.current.loading).toBe(true);
+
+    act(() => {
+      result.current.clearMessages();
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+
+    await act(async () => {
+      pendingRequest.resolve({
+        data: [{
+          info: {
+            id: 'msg-deleted-before-response',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [{ id: 'part-deleted-before-response', type: 'text', text: 'stale' }],
+        }],
+      });
+      await pendingRequest.promise;
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('resets a previous loading error when messages are cleared', async () => {
+    vi.mocked(client.get).mockRejectedValueOnce(new Error('storage unavailable'));
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    expect(result.current.error).toBe('storage unavailable');
+
+    act(() => {
+      result.current.clearMessages();
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(client.get).toHaveBeenCalledOnce();
+  });
+
 });
 
 describe('useSessions list loading', () => {

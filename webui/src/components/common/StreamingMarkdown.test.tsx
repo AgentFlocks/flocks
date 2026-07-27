@@ -330,4 +330,18 @@ describe('StreamingMarkdown', () => {
     expect(paragraph?.querySelectorAll('br')).toHaveLength(2);
     expect(paragraph?.textContent).toBe('first line\nsecond line\nthird line');
   });
+
+  it('renders inline code as a lightweight chip', () => {
+    const { container } = render(
+      <StreamingMarkdown content={'Saved to `.flocks/plans/plan.md`.'} isStreaming={false} />,
+    );
+
+    expect(container.querySelector('code')).toHaveClass(
+      'rounded-md',
+      'bg-zinc-100/80',
+      'font-normal',
+      'text-zinc-700',
+    );
+    expect(container.querySelector('code')).not.toHaveClass('font-semibold');
+  });
 });
