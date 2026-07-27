@@ -3957,6 +3957,126 @@ describe('streaming activity helpers', () => {
   });
 });
 
+describe('SessionChat SSE reconnect recovery', () => {
+  async function renderStreamingSession(onStreamingDone = vi.fn()) {
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-1',
+          finish: null,
+          parts: [{
+            id: 'tool-1',
+            type: 'tool',
+            tool: 'bash',
+            state: {
+              status: 'error',
+              error: 'Interrupted by server restart',
+            },
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+      onStreamingDone,
+    }));
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    });
+    clientGetMock.mockClear();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+
+    return { onStreamingDone, refetch };
+  }
+
+  it('clears streaming after reconnect when the restarted server reports the session idle', async () => {
+    const { onStreamingDone, refetch } = await renderStreamingSession();
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    });
+    expect(refetch).toHaveBeenCalled();
+    expect(onStreamingDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps streaming after reconnect while a long-running session is still busy', async () => {
+    const { onStreamingDone } = await renderStreamingSession();
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale idle response after a newer busy event arrives', async () => {
+    let resolveStatus: ((value: { data: Record<string, unknown> }) => void) | undefined;
+    const { onStreamingDone } = await renderStreamingSession();
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => {
+          resolveStatus = resolve;
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+    await waitFor(() => {
+      expect(resolveStatus).toBeDefined();
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+      resolveStatus?.({ data: {} });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+  });
+});
+
 describe('SessionChat fallback polling', () => {
   it('reconciles pending questions while the session is busy', async () => {
     vi.useFakeTimers();
