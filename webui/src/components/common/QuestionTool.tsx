@@ -23,6 +23,8 @@ export type QuestionType = 'choice' | 'text' | 'number' | 'file' | 'confirm' | '
 export interface QuestionOption {
   label?: string;
   description?: string;
+  /** Show a text input and submit both the option label and entered text. */
+  allowText?: boolean;
   [key: string]: unknown;
 }
 
@@ -95,10 +97,14 @@ function optionDescription(opt: QuestionOption | string): string {
   return '';
 }
 
+function optionAllowsText(opt: QuestionOption | string): boolean {
+  return typeof opt !== 'string' && opt.allowText === true;
+}
+
 const CUSTOM_CHOICE_PREFIX = '__flocks_custom_choice__:';
 
 function isCustomChoiceLabel(label: string): boolean {
-  return /^(其他|其它|自定义|补充|调整计划)|\b(other|custom|feedback)\b|请补充|补充说明|type your answer/i.test(label.trim());
+  return /^(其他|其它|自定义|补充)|\b(other|custom|feedback)\b|请补充|补充说明|type your answer/i.test(label.trim());
 }
 
 function customChoiceValue(text: string): string {
@@ -187,22 +193,26 @@ function ChoiceInput({
     .map(opt => ({
       label: optionLabel(opt),
       description: optionDescription(opt),
+      allowText: optionAllowsText(opt),
       custom: false,
     }))
     .filter(opt => opt.label);
-  const hasProvidedCustomOption = visibleOptions.some(opt => isCustomChoiceLabel(opt.label));
+  const hasProvidedCustomOption = visibleOptions.some(
+    opt => opt.allowText || isCustomChoiceLabel(opt.label),
+  );
   const options = shouldOfferCustomChoice(q) && !hasProvidedCustomOption
     ? [
         ...visibleOptions,
         {
           label: t('question.customAnswer'),
           description: t('question.textPlaceholder'),
+          allowText: false,
           custom: true,
         },
       ]
     : visibleOptions.map(opt => ({
         ...opt,
-        custom: isCustomChoiceLabel(opt.label),
+        custom: opt.allowText || isCustomChoiceLabel(opt.label),
       }));
   const customSelected = hasCustomChoice(answer);
   const customText = customChoiceText(answer);
@@ -213,7 +223,15 @@ function ChoiceInput({
       onChange([label]);
     }
   };
-  const toggleCustom = () => {
+  const toggleCustom = (label: string, preserveLabel: boolean) => {
+    if (preserveLabel) {
+      onChange(
+        customSelected && answer.includes(label)
+          ? []
+          : [label, customChoiceValue(customText)],
+      );
+      return;
+    }
     if (multiple) {
       if (customSelected) {
         onChange(answer.filter(value => !isCustomChoiceValue(value)));
@@ -224,8 +242,12 @@ function ChoiceInput({
     }
     onChange(customSelected ? [] : [customChoiceValue(customText)]);
   };
-  const setCustomText = (text: string) => {
+  const setCustomText = (label: string, preserveLabel: boolean, text: string) => {
     const nextCustom = customChoiceValue(text);
+    if (preserveLabel) {
+      onChange([label, nextCustom]);
+      return;
+    }
     if (multiple) {
       const withoutCustom = answer.filter(value => !isCustomChoiceValue(value));
       onChange([...withoutCustom, nextCustom]);
@@ -244,11 +266,17 @@ function ChoiceInput({
         {options.map(opt => {
           const label = opt.label;
           const desc = opt.description;
-          const selected = opt.custom ? customSelected : answer.includes(label);
+          const selected = opt.custom
+            ? customSelected && (!opt.allowText || answer.includes(label))
+            : answer.includes(label);
           return (
             <div key={label}>
               <button
-                onClick={() => (opt.custom ? toggleCustom() : toggle(label))}
+                onClick={() => (
+                  opt.custom
+                    ? toggleCustom(label, opt.allowText)
+                    : toggle(label)
+                )}
                 disabled={disabled}
                 className={`w-full text-left rounded-lg border px-3 py-2 text-sm transition-all flex items-start gap-2.5 ${
                   selected
@@ -287,7 +315,7 @@ function ChoiceInput({
                   <TextInput
                     q={{ ...q, type: 'text', placeholder: q.placeholder || t('question.textPlaceholder'), multiline: q.multiline ?? true }}
                     answer={[customText]}
-                    onChange={(value) => setCustomText(value[0] ?? '')}
+                    onChange={(value) => setCustomText(label, opt.allowText, value[0] ?? '')}
                     disabled={disabled}
                     compact={compact}
                   />

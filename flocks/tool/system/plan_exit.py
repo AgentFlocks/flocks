@@ -104,6 +104,7 @@ async def plan_exit_tool(ctx: ToolContext) -> ToolResult:
                     {
                         "label": CONTINUE_PLANNING,
                         "description": "Stay in Plan and describe what should be changed.",
+                        "allowText": True,
                     },
                 ],
                 "multiple": False,

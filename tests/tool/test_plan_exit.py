@@ -112,7 +112,14 @@ async def test_plan_exit_returns_continue_planning_feedback(
         return ToolResult(
             success=True,
             output="feedback",
-            metadata={"answers": [["Keep the public API unchanged."]]},
+            metadata={
+                "answers": [
+                    [
+                        plan_exit.CONTINUE_PLANNING,
+                        "Keep the public API unchanged.",
+                    ]
+                ]
+            },
         )
 
     monkeypatch.setattr(plan_exit, "question_tool", provide_feedback)

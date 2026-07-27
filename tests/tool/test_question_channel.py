@@ -21,6 +21,14 @@ def test_normalize_question_option_accepts_common_llm_shapes() -> None:
         "label": "Only descriptive text",
         "description": "",
     }
+    assert normalize_question_option({
+        "label": "调整计划",
+        "allowText": True,
+    }) == {
+        "label": "调整计划",
+        "description": "",
+        "allowText": True,
+    }
     assert normalize_question_option({"label": ""}) is None
 
 

@@ -207,7 +207,10 @@ describe('QuestionTool', () => {
           custom: false,
           options: [
             '开始实施',
-            '调整计划',
+            {
+              label: '调整计划',
+              allowText: true,
+            },
           ],
         }]}
         onAnswer={onAnswer}
@@ -218,7 +221,9 @@ describe('QuestionTool', () => {
     await user.type(screen.getByRole('textbox'), 'Keep the public API unchanged.');
     await user.click(screen.getByRole('button', { name: /确认/ }));
 
-    expect(onAnswer).toHaveBeenCalledWith([['Keep the public API unchanged.']]);
+    expect(onAnswer).toHaveBeenCalledWith([
+      ['调整计划', 'Keep the public API unchanged.'],
+    ]);
   });
 
   it('falls back to text input when a choice question has no visible options', async () => {
