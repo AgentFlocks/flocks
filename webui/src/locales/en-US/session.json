@@ -48,6 +48,24 @@
   "restoringTask": "Restoring task",
   "noAgents": "No agents available",
   "smartAssistant": "AI Smart Assistant",
+  "executionMode": {
+    "title": "Execution mode",
+    "hint": "Controls how Rex handles the next turn",
+    "options": {
+      "build": {
+        "label": "Build",
+        "description": "Use Rex's full tools to complete the task"
+      },
+      "plan": {
+        "label": "Plan",
+        "description": "Research and produce an implementation plan"
+      },
+      "goal": {
+        "label": "Goal",
+        "description": "Start a persistent goal, then return to Build"
+      }
+    }
+  },
   "agentPicker": {
     "title": "Choose Chat Agent",
     "hint": "New chats start with Rex; type @Agent to route one message",

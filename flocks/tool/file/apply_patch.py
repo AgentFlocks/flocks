@@ -293,7 +293,12 @@ async def apply_patch_tool(
         )
     
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
-    if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
+    sandbox_read_only = (
+        isinstance(sandbox, dict)
+        and sandbox.get("workspace_access") == "ro"
+    )
+    execution_mode = ctx.extra.get("execution_mode") if ctx.extra else None
+    if sandbox_read_only and execution_mode != "plan":
         return ToolResult(
             success=False,
             error=(
@@ -396,6 +401,25 @@ async def apply_patch_tool(
             return ToolResult(
                 success=False,
                 error=f"Failed to process hunk for {hunk.path}: {str(e)}"
+            )
+
+    if sandbox_read_only:
+        from flocks.session.execution_mode import is_plan_file_edit
+
+        if not all(
+            is_plan_file_edit(execution_mode, ctx, change["filePath"])
+            and (
+                not change.get("movePath")
+                or is_plan_file_edit(execution_mode, ctx, change["movePath"])
+            )
+            for change in file_changes
+        ):
+            return ToolResult(
+                success=False,
+                error=(
+                    "Patch is blocked in sandbox read-only workspace mode. "
+                    "Only the current session plan file may be changed in Plan mode."
+                ),
             )
     
     # Request permission

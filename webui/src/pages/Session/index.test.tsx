@@ -139,6 +139,8 @@ vi.mock('@/components/common/SessionChat', () => ({
     onSSEEvent,
     agentName,
     model,
+    executionMode,
+    onExecutionModeAccepted,
     supportsVision,
     contextWindowTokens,
     display,
@@ -153,6 +155,8 @@ vi.mock('@/components/common/SessionChat', () => ({
     initialMessage?: string | null;
     initialDisplayText?: string | null;
     model?: { providerID: string; modelID: string } | null;
+    executionMode?: 'build' | 'plan' | 'goal';
+    onExecutionModeAccepted?: (mode: 'build' | 'plan' | 'goal') => void;
     supportsVision?: boolean;
     contextWindowTokens?: number | null;
     hideInput?: boolean;
@@ -170,6 +174,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       agentOverride?: string,
       modelOverride?: unknown,
       options?: { displayText?: string },
+      executionModeOverride?: 'build' | 'plan' | 'goal',
     ) => Promise<unknown> | unknown;
     onSSEEvent?: (event: { type: string; properties?: Record<string, unknown> }) => void;
   }) {
@@ -180,6 +185,7 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-agent-name={agentName ?? ''}
         data-mention-agents={(mentionAgents ?? []).map((a) => a.name).join(',')}
         data-model={model ? `${model.providerID}/${model.modelID}` : ''}
+        data-execution-mode={executionMode ?? ''}
         data-supports-vision={String(Boolean(supportsVision))}
         data-context-window={contextWindowTokens ?? ''}
         data-collapse-intermediate={String(Boolean(display?.collapseIntermediateSteps))}
@@ -196,8 +202,24 @@ vi.mock('@/components/common/SessionChat', () => ({
           typeof welcomeContent === 'function' ? welcomeContent(setInput) : welcomeContent
         ) : null}
         <div data-testid="mock-chat-input">{input}</div>
-        <button type="button" onClick={() => void onCreateAndSend?.('hello from empty session', [], agentName)}>
+        <button
+          type="button"
+          onClick={() => void onCreateAndSend?.(
+            'hello from empty session',
+            [],
+            agentName,
+            undefined,
+            undefined,
+            executionMode,
+          )}
+        >
           mock-create-and-send
+        </button>
+        <button
+          type="button"
+          onClick={() => executionMode && onExecutionModeAccepted?.(executionMode)}
+        >
+          mock-accept-mode
         </button>
         <button
           type="button"
@@ -207,6 +229,19 @@ vi.mock('@/components/common/SessionChat', () => ({
           })}
         >
           mock-session-updated
+        </button>
+        <button
+          type="button"
+          onClick={() => onSSEEvent?.({
+            type: 'session.execution_mode.changed',
+            properties: {
+              sessionID: sessionId,
+              executionMode: 'build',
+              reason: 'plan-approved',
+            },
+          })}
+        >
+          mock-plan-approved
         </button>
       </div>
     );
@@ -374,6 +409,94 @@ describe('SessionPage session actions menu', () => {
     sessionApi.delete.mockResolvedValue(true);
 
     vi.stubGlobal('confirm', vi.fn(() => true));
+  });
+
+  it('renders Build before the Agent selector by default', async () => {
+    renderSessionPage();
+
+    const modeButton = await screen.findByRole('button', { name: 'executionMode.title' });
+    const agentButton = screen.getByRole('button', { name: /Rex/i });
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+    expect(
+      modeButton.compareDocumentPosition(agentButton)
+      & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+  });
+
+  it('persists Plan per session', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    const modeButton = await screen.findByRole('button', { name: 'executionMode.title' });
+    await user.click(modeButton);
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.plan.label/,
+    }));
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
+    expect(localStorage.getItem('flocks:session-execution-mode:session-1')).toBe('plan');
+  });
+
+  it('restores a persisted session execution mode', async () => {
+    localStorage.setItem('flocks:session-execution-mode:session-1', 'plan');
+    renderSessionPage('/sessions?session=session-1');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
+    });
+  });
+
+  it('switches an approved Plan to Build from the session event', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.plan.label/,
+    }));
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'plan');
+
+    await user.click(screen.getByRole('button', { name: 'mock-plan-approved' }));
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+    expect(localStorage.getItem('flocks:session-execution-mode:session-1')).toBeNull();
+  });
+
+  it('resets Goal to Build after the prompt is accepted', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.goal.label/,
+    }));
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'goal');
+
+    await user.click(screen.getByRole('button', { name: 'mock-accept-mode' }));
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
+    expect(localStorage.getItem('flocks:session-execution-mode:session-1')).toBeNull();
+  });
+
+  it('promotes a draft Plan mode when the first message creates a session', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.plan.label/,
+    }));
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.objectContaining({ executionMode: 'plan' }),
+      );
+    });
+    expect(localStorage.getItem('flocks:session-execution-mode:session-2')).toBe('plan');
+    expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
   });
 
   it('keeps the workbench visible and shows a page refresh state while sessions load', () => {

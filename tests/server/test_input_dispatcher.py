@@ -289,6 +289,63 @@ class TestDispatchUserInput:
 
 class TestSessionRoutesUseDispatcher:
     @pytest.mark.asyncio
+    async def test_goal_mode_publishes_active_goal_before_llm(self, monkeypatch):
+        from flocks.input.events import UserInputEvent
+        from flocks.server.routes import session as session_routes
+
+        order = []
+        goal_state = SimpleNamespace(
+            status="active",
+            objective="fix tests",
+            last_reason=None,
+        )
+
+        async def publish(event_type, _properties):
+            if event_type == "session.goal.updated":
+                order.append("goal")
+
+        async def process(*_args, **_kwargs):
+            order.append("llm")
+
+        monkeypatch.setattr(
+            "flocks.command.direct.GoalManager.set_goal",
+            AsyncMock(return_value=goal_state),
+        )
+        monkeypatch.setattr(
+            "flocks.command.direct.GoalManager.goal_prompt",
+            MagicMock(return_value="goal prompt"),
+        )
+        monkeypatch.setattr(
+            "flocks.session.goal.GoalManager.get",
+            AsyncMock(return_value=goal_state),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            publish,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_process_session_message",
+            process,
+        )
+
+        await session_routes._dispatch_sse_input(
+            "ses_goal_mode",
+            SimpleNamespace(id="ses_goal_mode"),
+            UserInputEvent(
+                source_type="webui",
+                sessionID="ses_goal_mode",
+                text="/goal fix tests",
+                parts=[{"type": "text", "text": "fix tests"}],
+                display_text="fix tests",
+                executionMode="goal",
+            ),
+            "/tmp/project",
+        )
+
+        assert order == ["goal", "llm"]
+
+    @pytest.mark.asyncio
     async def test_prompt_async_routes_through_dispatcher(self, monkeypatch):
         from flocks.server.routes import session as session_routes
 

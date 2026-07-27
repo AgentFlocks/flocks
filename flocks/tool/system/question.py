@@ -107,7 +107,7 @@ def _first_non_empty_string(data: Dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
-def normalize_question_option(opt: Any) -> Optional[Dict[str, str]]:
+def normalize_question_option(opt: Any) -> Optional[Dict[str, Any]]:
     """Normalize LLM-produced choice options into the UI's label/description shape."""
     if isinstance(opt, str):
         label = opt.strip()
@@ -123,7 +123,13 @@ def normalize_question_option(opt: Any) -> Optional[Dict[str, str]]:
         label, description = description, ""
     if not label:
         return None
-    return {"label": label, "description": description}
+    normalized: Dict[str, Any] = {
+        "label": label,
+        "description": description,
+    }
+    if opt.get("allowText") is True:
+        normalized["allowText"] = True
+    return normalized
 
 
 def _format_channel_question_text(questions: List[Dict[str, Any]]) -> str:
@@ -296,6 +302,13 @@ async def default_question_handler(
                                         "properties": {
                                             "label": {"type": "string"},
                                             "description": {"type": "string"},
+                                            "allowText": {
+                                                "type": "boolean",
+                                                "description": (
+                                                    "Show a text input for this option and "
+                                                    "return both its label and entered text."
+                                                ),
+                                            },
                                         },
                                         "required": ["label"],
                                         "additionalProperties": False,
