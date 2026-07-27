@@ -671,6 +671,10 @@ describe('getMessageBubbleClassName', () => {
 
     expect(className).toContain('w-auto');
     expect(className.split(' ')).not.toContain('w-full');
+    expect(className).toContain('rounded-[18px]');
+    expect(className).toContain('py-3');
+    expect(className).not.toContain('rounded-[24px]');
+    expect(className).not.toContain('py-4');
   });
 
   it('expands editing user bubbles to full width in full layout', () => {
@@ -692,6 +696,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('w-full');
+    expect(className).toContain('text-[15px]');
   });
 
   it('fills the fixed compact assistant message column', () => {
@@ -739,7 +744,7 @@ describe('getMessageBubbleClassName', () => {
     });
 
     expect(className).toContain('bg-zinc-50');
-    expect(className).toContain('border-black/[0.07]');
+    expect(className).toContain(compact ? 'border-black/[0.07]' : 'border-black/[0.09]');
     expect(className).not.toContain('bg-sky-50');
     expect(className).not.toContain('border-sky-100');
   });
@@ -1951,7 +1956,8 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
-    expect(processGroup.querySelector('summary')).toHaveClass('text-sm');
+    expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
+    expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
     expect(processGroup.className).not.toContain('rounded-lg');
     expect(processGroup.closest('[data-process-output="true"]')?.className).not.toContain('bg-white');
     expect(screen.getByText('已读取当前 workflow.md。')).toBeInTheDocument();
@@ -3212,7 +3218,7 @@ describe('ChatToolPart semantic tool presentation', () => {
 });
 
 describe('ChatMessageBubble session typography', () => {
-  it('uses the outer navigation font size for the agent label', () => {
+  it('gives the full-layout agent label a clear heading level', () => {
     render(React.createElement(ChatMessageBubble, {
       message: makeMessage({
         id: 'assistant-agent-label',
@@ -3223,9 +3229,10 @@ describe('ChatMessageBubble session typography', () => {
           text: '已加载技能。',
         } as any],
       }),
+      compact: false,
     }));
 
-    expect(screen.getByText('Rex')).toHaveClass('text-sm');
+    expect(screen.getByText('Rex')).toHaveClass('text-base', 'font-semibold', 'text-[#3f444a]');
   });
 });
 
@@ -3253,7 +3260,8 @@ describe('ChatMessageBubble footer layout', () => {
 
     expect(footer).toHaveClass('justify-start', 'gap-1.5');
     expect(footer?.children[0]).toBe(actionGroup);
-    expect(footer?.children[1]).toHaveClass('text-[11px]');
+    expect(footer?.children[1]).toHaveClass('text-[11px]', 'text-[#8b929d]');
+    expect(regenerateButton).toHaveClass('text-[#8b929d]');
     expect(regenerateButton).toHaveClass(
       'border-transparent',
       'bg-transparent',
@@ -3447,7 +3455,9 @@ describe('SessionChat context usage popover', () => {
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
 
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
-    expect(contextButton).toHaveClass('h-6', 'w-6');
+    expect(contextButton).toHaveClass('h-6');
+    expect(contextButton).not.toHaveClass('w-6');
+    expect(contextButton).toHaveTextContent('12%');
     await user.click(contextButton);
 
     expect(screen.getByText('System prompt')).toBeInTheDocument();
