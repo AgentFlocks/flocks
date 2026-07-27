@@ -209,6 +209,8 @@ class SessionRetry:
     def is_connection_error(error: Dict[str, Any]) -> bool:
         """Return True for provider/model connection failures."""
         data = error.get("data", {})
+        if data.get("isConnectionError") is True:
+            return True
         message = data.get("message") or error.get("message", "")
         if not isinstance(message, str):
             return False

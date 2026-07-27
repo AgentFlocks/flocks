@@ -46,7 +46,11 @@ const subscribers = new Set<(state: VisionState) => void>();
 
 function allowsBuiltInVision(modelId: string): boolean {
   const lowered = modelId.toLowerCase();
-  return lowered.includes('qwen3.6-plus') || lowered.includes('kimi-k2.6');
+  return (
+    lowered.includes('qwen3.6-plus')
+    || lowered.includes('kimi-k2.6')
+    || lowered.includes('kimi-k2.7-code')
+  );
 }
 
 function visionSupportFromDefinition(

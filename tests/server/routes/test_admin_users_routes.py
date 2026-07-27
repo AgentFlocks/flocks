@@ -96,3 +96,16 @@ async def test_admin_routes_delete_user_not_allowed(client: AsyncClient):
 
     response = await client.delete(f"/api/admin/users/{user_id}")
     assert response.status_code == 404, response.text
+
+
+@pytest.mark.asyncio
+async def test_service_owner_username_is_reserved():
+    from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+    from flocks.auth.service import AuthService
+
+    with pytest.raises(ValueError, match="系统保留"):
+        await AuthService._create_user_internal(
+            username=API_TOKEN_SERVICE_USER_ID,
+            password="Password123!",
+            role="member",
+        )

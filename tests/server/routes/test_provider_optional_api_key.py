@@ -32,6 +32,8 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr("flocks.security.get_secret_manager", lambda: fake_secrets)
     monkeypatch.setattr(provider_routes.Provider, "_ensure_initialized", MagicMock())
     monkeypatch.setattr(provider_routes.Provider, "get", lambda _pid: runtime_provider)
+    clear_config_cache = MagicMock()
+    monkeypatch.setattr(provider_routes.Config, "clear_cache", clear_config_cache)
 
     # Pretend the provider already exists in flocks.json so set_provider_credentials
     # follows the "update existing" path and never calls add_provider() with real
@@ -58,10 +60,30 @@ def patched_runtime(monkeypatch: pytest.MonkeyPatch):
         lambda _provider: {},
     )
 
-    return {"secrets": fake_secrets, "provider": runtime_provider}
+    return {
+        "secrets": fake_secrets,
+        "provider": runtime_provider,
+        "clear_config_cache": clear_config_cache,
+    }
 
 
 class TestOptionalApiKey:
+    @pytest.mark.asyncio
+    async def test_saving_credentials_invalidates_resolved_config_cache(
+        self, patched_runtime
+    ):
+        """The next request must not reapply a secret cached before this update."""
+        result = await provider_routes.set_provider_credentials(
+            "custom-local-gateway",
+            provider_routes.ProviderCredentialRequest(
+                api_key="new-secret",
+                base_url="http://127.0.0.1:8317/v1",
+            ),
+        )
+
+        assert result["success"] is True
+        patched_runtime["clear_config_cache"].assert_called_once_with()
+
     @pytest.mark.asyncio
     async def test_openai_compatible_accepts_empty_api_key(self, patched_runtime):
         """openai-compatible: empty api_key -> success, placeholder persisted."""

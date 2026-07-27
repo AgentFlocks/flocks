@@ -8,6 +8,7 @@ Ported from original cli/cmd/session.ts
 import asyncio
 import json
 import os
+from functools import cache
 from typing import Optional
 
 import typer
@@ -76,9 +77,13 @@ async def _list_sessions(
     all_sessions = await Session.list_all()
 
     if project_filter == "":
-        result = await Project.from_directory(os.getcwd())
-        current_project_id = result["project"].id
-        all_sessions = [s for s in all_sessions if s.project_id == current_project_id]
+        resolve_worktree = cache(Project.worktree_for_directory)
+        current_worktree = resolve_worktree(os.getcwd())
+        all_sessions = [
+            session
+            for session in all_sessions
+            if session.directory and resolve_worktree(session.directory) == current_worktree
+        ]
     elif project_filter:
         all_sessions = [s for s in all_sessions if s.project_id == project_filter]
 
@@ -203,21 +208,20 @@ async def _show_session(session_id: str, project_id: Optional[str]):
 
 @session_app.command("delete")
 def session_delete(
-    session_id: str = typer.Argument(..., help="Session ID to delete"),
+    session_id: str = typer.Argument(..., help="Session ID to permanently delete"),
     project: Optional[str] = typer.Option(
         None, "-p", "--project",
         help="Project ID (uses current project if not specified)"
     ),
     force: bool = typer.Option(
         False, "-f", "--force",
-        help="Skip confirmation prompt"
+        help="Skip permanent deletion confirmation"
     ),
 ):
     """
-    Delete a session
-    
-    This performs a soft delete. The session data is marked as deleted
-    but not permanently removed from storage.
+    Permanently delete a session and its persisted history.
+
+    This operation cannot be restored.
     """
     asyncio.run(_delete_session(session_id, project, force))
 
@@ -236,7 +240,7 @@ async def _delete_session(session_id: str, project_id: Optional[str], force: boo
     # Confirm deletion
     if not force:
         confirm = typer.confirm(
-            f"Delete session '{session.title}'?",
+            f"Permanently delete session '{session.title}' and all of its messages and history?",
             default=False
         )
         if not confirm:
@@ -247,7 +251,7 @@ async def _delete_session(session_id: str, project_id: Optional[str], force: boo
     success = await Session.delete(project_id, session_id)
     
     if success:
-        console.print(f"[green]Deleted session: {session_id}[/green]")
+        console.print(f"[green]Permanently deleted session: {session_id}[/green]")
     else:
         console.print(f"[red]Failed to delete session: {session_id}[/red]")
         raise typer.Exit(1)
@@ -312,9 +316,16 @@ async def _restore_session(session_id: str, project_id: Optional[str]):
         console.print(f"[red]Failed to restore session (not found or not archived): {session_id}[/red]")
         raise typer.Exit(1)
 
-    project_id, _ = resolved
+    project_id, session = resolved
+    if session.parent_id is not None:
+        console.print(f"[red]Restore the root session for this session tree: {session_id}[/red]")
+        raise typer.Exit(1)
 
-    success = await Session.unarchive(project_id, session_id)
+    success = await Session.restore(
+        project_id,
+        session_id,
+        project_owner_id=session.owner_user_id,
+    )
     
     if success:
         console.print(f"[green]Restored session: {session_id}[/green]")

@@ -111,6 +111,9 @@ export const providerAPI = {
   getCredentials: (id: string) =>
     client.get<ProviderCredentials>(`/api/provider/${id}/credentials`),
 
+  revealCredentials: (id: string) =>
+    client.post<ProviderCredentials>(`/api/provider/${id}/credentials/reveal`),
+
   setCredentials: (id: string, credentials: ProviderCredentialInput) =>
     client.post<{ success: boolean; message: string }>(`/api/provider/${id}/credentials`, credentials),
 
@@ -246,6 +249,7 @@ export const defaultModelAPI = {
   /** Delete default model for a type */
   delete: (modelType: string) =>
     client.delete(`/api/default-model/${modelType}`),
+
 };
 
 // ==================== Usage API ====================

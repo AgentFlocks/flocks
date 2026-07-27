@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import textwrap
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -779,6 +780,43 @@ class TestProjectLevelAgentScan:
 
         assert "custom-agent" in result
         assert result["custom-agent"].native is False
+
+    def test_user_plugin_agent_wins_over_project_bundle(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ):
+        user_agents_dir = tmp_path / "user_plugins" / "agents"
+        project_dir = tmp_path / "project"
+        project_agents_dir = project_dir / ".flocks" / "plugins" / "agents"
+        self._write_agent(user_agents_dir, "shared-agent")
+        self._write_agent(project_agents_dir, "shared-agent")
+        (user_agents_dir / "shared-agent" / "agent.yaml").write_text(
+            "name: shared-agent\ndescription: user customization\nmode: subagent\n",
+            encoding="utf-8",
+        )
+        (project_agents_dir / "shared-agent" / "agent.yaml").write_text(
+            "name: shared-agent\ndescription: project bundle\nmode: subagent\n",
+            encoding="utf-8",
+        )
+
+        info_log = MagicMock()
+        warn_log = MagicMock()
+        monkeypatch.setattr(_factory_module, "_PLUGIN_AGENTS_DIR", user_agents_dir)
+        monkeypatch.setattr(_factory_module.log, "info", info_log)
+        monkeypatch.setattr(_factory_module.log, "warn", warn_log)
+        monkeypatch.chdir(project_dir)
+
+        result = scan_and_load()
+
+        assert result["shared-agent"].description == "user customization"
+        assert any(
+            call.args and call.args[0] == "agent.factory.lower_priority_skipped"
+            for call in info_log.call_args_list
+        )
+        assert not any(
+            call.args and call.args[0] == "agent.factory.name_conflict"
+            and call.args[1].get("name") == "shared-agent"
+            for call in warn_log.call_args_list
+        )
 
 
 # ===========================================================================

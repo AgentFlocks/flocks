@@ -344,6 +344,15 @@ describe('QueuedSection', () => {
         sessionId: 'ses-task-1',
         live: true,
         hideInput: true,
+        display: {
+          compact: false,
+          fullWidth: true,
+          pageCanvas: true,
+          showTimestamp: true,
+          collapseIntermediateSteps: true,
+          processGroupsDefaultOpen: false,
+          processGroupsOpenWhileActive: true,
+        },
       }),
     );
   });

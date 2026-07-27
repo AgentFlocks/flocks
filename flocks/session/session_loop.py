@@ -13,6 +13,7 @@ Ported from original SessionPrompt.loop() pattern.
 """
 
 import asyncio
+import hashlib
 import inspect
 import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable
@@ -21,7 +22,11 @@ from datetime import datetime
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
-from flocks.session.session import Session, SessionInfo
+from flocks.session.session import (
+    Session,
+    SessionInfo,
+    is_model_auto_session_category,
+)
 from flocks.session.message import Message, MessageInfo, MessageRole
 from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
 from flocks.session.core.task_utils import fire_and_forget
@@ -47,6 +52,26 @@ log = Log.create(service="session.loop")
 
 MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
+
+
+@dataclass(frozen=True)
+class RuntimeModel:
+    """Concrete provider/model candidate used by Auto failover."""
+
+    provider_id: str
+    model_id: str
+
+
+@dataclass
+class AutoFailoverCooldown:
+    """Process-local Hermes-style starting candidate cooldown."""
+
+    model: RuntimeModel
+    primary: RuntimeModel
+    expires_at: float
+    reason: str
 
 
 @dataclass
@@ -81,6 +106,16 @@ class LoopContext:
     # is what the upstream will actually bill us for on the next turn
     # (matches the "observed value wins" rule from docs/design/context-compaction-v2.md §B3).
     last_observed_prompt_tokens: int = 0
+    auto_failover: bool = False
+    # Entrypoint authorization is separate from persisted model_auto. Only a
+    # WebUI message route may set this bit; non-WebUI entrypoints use the default.
+    auto_failover_allowed: bool = False
+    model_candidates: List[RuntimeModel] = field(default_factory=list)
+    candidate_index: int = 0
+    turn_user_id: Optional[str] = None
+    turn_additional_context: Optional[str] = None
+    stop_hook_active: bool = False
+    session_start_pending: bool = False
 
     @property
     def trace_step(self) -> int:
@@ -120,6 +155,8 @@ class LoopResult:
     action: str  # "stop", "continue", "compact", "error", "queued"
     last_message: Optional[MessageInfo] = None
     error: Optional[str] = None
+    provider_id: Optional[str] = None
+    model_id: Optional[str] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -137,6 +174,209 @@ class SessionLoop:
     
     # Active loop contexts by session ID
     _active_loops: Dict[str, LoopContext] = {}
+    _auto_failover_cooldowns: Dict[str, AutoFailoverCooldown] = {}
+
+    @classmethod
+    def clear_auto_failover_state(cls, session_id: str) -> None:
+        """Clear process-local routing state when WebUI Auto is disabled."""
+        cls._auto_failover_cooldowns.pop(session_id, None)
+
+    @classmethod
+    async def validate_runtime_model(
+        cls,
+        provider_id: str,
+        model_id: str,
+        *,
+        config: Optional[Any] = None,
+    ) -> tuple[bool, str]:
+        """Validate a configured LLM candidate without a network health probe."""
+        from flocks.config.config import Config
+        from flocks.provider.model_manager import get_model_manager
+        from flocks.provider.types import ModelType
+
+        Provider._ensure_initialized()
+        config = config or await Config.get()
+        if provider_id in (getattr(config, "disabled_providers", None) or []):
+            return False, "provider_disabled"
+        enabled_providers = getattr(config, "enabled_providers", None) or []
+        if enabled_providers and provider_id not in enabled_providers:
+            return False, "provider_disabled"
+        try:
+            await Provider.apply_config(config, provider_id=provider_id)
+        except Exception as exc:
+            log.warn("session.model.candidate_config_failed", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "error": str(exc),
+            })
+            return False, "provider_config_error"
+
+        provider = Provider.get(provider_id)
+        if provider is None:
+            return False, "provider_not_found"
+
+        definition = get_model_manager().get_model(provider_id, model_id)
+        if definition is None:
+            return False, "model_not_found"
+        if getattr(definition, "model_type", None) != ModelType.LLM:
+            return False, "not_llm"
+
+        setting = get_model_manager().get_setting(provider_id, model_id)
+        if setting is not None and not setting.enabled:
+            return False, "model_disabled"
+        if not provider.is_configured():
+            return False, "provider_not_configured"
+        return True, "available"
+
+    @classmethod
+    async def _build_model_candidates(
+        cls,
+        primary: RuntimeModel,
+        *,
+        route_seed: str,
+        preferred: Optional[RuntimeModel] = None,
+    ) -> List[RuntimeModel]:
+        """Build a stable per-turn primary, same-provider, cross-provider chain."""
+        from flocks.config.config import Config
+        from flocks.provider.model_manager import get_model_manager
+        from flocks.provider.types import ModelType
+
+        config = await Config.get()
+        await Provider.apply_config(config)
+        definitions = get_model_manager().list_models(
+            model_type=ModelType.LLM,
+            enabled_only=True,
+        )
+        discovered = {
+            RuntimeModel(definition.provider_id, definition.id)
+            for definition in definitions
+        }
+        discovered.discard(primary)
+
+        same_provider: List[RuntimeModel] = []
+        other_providers: List[RuntimeModel] = []
+        for candidate in sorted(
+            discovered,
+            key=lambda item: (item.provider_id, item.model_id),
+        ):
+            available, reason = await cls.validate_runtime_model(
+                candidate.provider_id,
+                candidate.model_id,
+                config=config,
+            )
+            if not available:
+                log.debug("session.model.fallback_skipped", {
+                    "provider_id": candidate.provider_id,
+                    "model_id": candidate.model_id,
+                    "reason": reason,
+                })
+                continue
+
+            if candidate.provider_id == primary.provider_id:
+                same_provider.append(candidate)
+            else:
+                other_providers.append(candidate)
+
+        candidates = [primary]
+        for tier, pool in (
+            ("same_provider", same_provider),
+            ("other_provider", other_providers),
+        ):
+            if not pool:
+                continue
+            selected = (
+                preferred
+                if preferred is not None and preferred in pool
+                else cls._stable_candidate_choice(pool, route_seed, tier)
+            )
+            candidates.append(selected)
+        return candidates
+
+    @staticmethod
+    def _stable_candidate_choice(
+        candidates: List[RuntimeModel],
+        route_seed: str,
+        tier: str,
+    ) -> RuntimeModel:
+        """Choose pseudo-randomly without Python's process-randomized hash()."""
+        ordered = sorted(
+            candidates,
+            key=lambda item: (item.provider_id, item.model_id),
+        )
+        digest = hashlib.sha256(
+            f"{route_seed}\0{tier}".encode("utf-8")
+        ).digest()
+        index = int.from_bytes(digest[:8], "big") % len(ordered)
+        return ordered[index]
+
+    @classmethod
+    async def validate_auto_configuration(cls) -> tuple[bool, str]:
+        """Validate that a newly selected Auto mode has a usable chain."""
+        from flocks.config.config import Config
+
+        default_llm = await Config.resolve_default_llm()
+        if not default_llm:
+            return False, "default_model_missing"
+        primary = RuntimeModel(
+            default_llm["provider_id"],
+            default_llm["model_id"],
+        )
+        available, reason = await cls.validate_runtime_model(
+            primary.provider_id,
+            primary.model_id,
+        )
+        if not available:
+            return False, f"primary_{reason}"
+        return True, "available"
+
+    @classmethod
+    def _active_cooldown_model(
+        cls,
+        session_id: str,
+        primary: RuntimeModel,
+    ) -> Optional[RuntimeModel]:
+        """Return a still-valid cooldown target for the current primary."""
+        cooldown = cls._auto_failover_cooldowns.get(session_id)
+        if cooldown is None:
+            return None
+        if cooldown.expires_at <= time.monotonic() or cooldown.primary != primary:
+            cls._auto_failover_cooldowns.pop(session_id, None)
+            return None
+        return cooldown.model
+
+    @classmethod
+    def _cooldown_candidate_index(
+        cls,
+        session_id: str,
+        candidates: List[RuntimeModel],
+    ) -> int:
+        if not candidates:
+            return 0
+        cooldown_model = cls._active_cooldown_model(session_id, candidates[0])
+        if cooldown_model is None:
+            return 0
+        try:
+            return candidates.index(cooldown_model)
+        except ValueError:
+            cls._auto_failover_cooldowns.pop(session_id, None)
+            return 0
+
+    @classmethod
+    def _select_candidate(cls, ctx: LoopContext, index: int) -> None:
+        candidate = ctx.model_candidates[index]
+        ctx.candidate_index = index
+        ctx.provider_id = candidate.provider_id
+        ctx.model_id = candidate.model_id
+        ctx.session.provider = candidate.provider_id
+        ctx.session.model = candidate.model_id
+        # Prompt and model-capability caches are keyed in most places, but a
+        # fresh dict makes the runtime rebuild guarantee explicit. The tool
+        # loop guard is turn state rather than model state, so it must survive
+        # a provider switch to keep repeated-tool protection effective.
+        tool_loop_guard = ctx.runner_static_cache.get("tool_loop_guard")
+        ctx.runner_static_cache.clear()
+        if tool_loop_guard is not None:
+            ctx.runner_static_cache["tool_loop_guard"] = tool_loop_guard
     
     @classmethod
     def is_running(cls, session_id: str) -> bool:
@@ -268,7 +508,7 @@ class SessionLoop:
         _session_id: str,
         post_messages: List[MessageInfo],
         current_user_id: str,
-        last_message: Optional[MessageInfo],
+        _last_message: Optional[MessageInfo],
     ) -> Optional[MessageInfo]:
         if not post_messages:
             return None
@@ -283,11 +523,11 @@ class SessionLoop:
             return None
         if newest_user.id <= current_user_id:
             return None
-        if last_message is None:
-            return newest_user
-        if newest_user.id > last_message.id:
-            return newest_user
-        return None
+        # A fallback assistant is created after a user message that arrived
+        # while the primary model was running. Its newer ID must not make that
+        # user message look handled; the current turn's user ID is the stable
+        # boundary for queued work.
+        return newest_user
     
     @classmethod
     async def run(
@@ -297,6 +537,8 @@ class SessionLoop:
         model_id: Optional[str] = None,
         agent_name: Optional[str] = None,
         callbacks: Optional[LoopCallbacks] = None,
+        working_directory: Optional[str] = None,
+        auto_failover: bool = False,
     ) -> LoopResult:
         """
         Run session loop
@@ -326,6 +568,15 @@ class SessionLoop:
         # next iteration once it finishes the current step.
         if cls.is_running(session_id):
             log.info("loop.already_running", {"session_id": session_id})
+            if auto_failover:
+                active_ctx = cls._active_loops.get(session_id)
+                if (
+                    active_ctx is not None
+                    and is_model_auto_session_category(
+                        getattr(active_ctx.session, "category", "user")
+                    )
+                ):
+                    active_ctx.auto_failover_allowed = True
             return LoopResult(
                 action="queued",
                 error="Loop already running",
@@ -339,6 +590,17 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} not found",
             )
+        if session.status != "active":
+            log.warning("loop.session_not_active", {
+                "session_id": session_id,
+                "status": session.status,
+            })
+            return LoopResult(
+                action="error",
+                error=f"Session {session_id} is {session.status}",
+            )
+        if working_directory:
+            session = session.model_copy(update={"directory": working_directory})
         
         # Resolve model when not explicitly provided
         if not provider_id or not model_id:
@@ -348,6 +610,19 @@ class SessionLoop:
             provider_id = provider_id or resolved_provider
             model_id = model_id or resolved_model
         
+        primary_model = RuntimeModel(
+            provider_id=provider_id,
+            model_id=model_id,
+        )
+        model_candidates = [primary_model]
+        candidate_index = 0
+        auto_failover = bool(
+            auto_failover
+            and is_model_auto_session_category(
+                getattr(session, "category", "user")
+            )
+        )
+
         # Keep the in-memory session aligned with the runtime model so
         # downstream helpers (title generation, compaction checks, etc.) see
         # the model actually selected for this loop iteration. Unpinned
@@ -379,10 +654,46 @@ class SessionLoop:
             agent_name=agent_name or session.agent or "rex",
             session_ctx=session_ctx,
             trace_step_offset=trace_offset,
+            auto_failover=auto_failover,
+            auto_failover_allowed=auto_failover,
+            model_candidates=model_candidates,
+            candidate_index=candidate_index,
+            session_start_pending=trace_offset == 0,
         )
         
-        # Register context
-        cls._active_loops[session_id] = ctx
+        # Register under the same lock used by archive/delete. This closes the
+        # gap where archival could commit after the status check above but
+        # before the loop became visible to the lifecycle stop logic.
+        async with Session.lifecycle_lock(session_id):
+            latest_session = await Session.get_by_id(session_id)
+            if latest_session is None:
+                log.warning("loop.session_not_found_before_register", {
+                    "session_id": session_id,
+                })
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} not found",
+                )
+            if latest_session.status != "active":
+                log.warning("loop.session_not_active_before_register", {
+                    "session_id": session_id,
+                    "status": latest_session.status,
+                })
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} is {latest_session.status}",
+                )
+            if Session.is_lifecycle_transitioning(session_id):
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} is changing lifecycle state",
+                )
+            if cls.is_running(session_id):
+                return LoopResult(
+                    action="queued",
+                    error="Loop already running",
+                )
+            cls._active_loops[session_id] = ctx
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())
@@ -421,7 +732,12 @@ class SessionLoop:
                 })
             except Exception as exc:
                 log.warn("loop.error.event_error", {"error": str(exc)})
-            return LoopResult(action="error", error=str(e))
+            return LoopResult(
+                action="error",
+                error=str(e),
+                provider_id=ctx.provider_id,
+                model_id=ctx.model_id,
+            )
         finally:
             # Clean up
             if session_id in cls._active_loops:
@@ -560,6 +876,484 @@ class SessionLoop:
         return resolved_provider, resolved_model
 
     @classmethod
+    async def _prepare_auto_turn(
+        cls,
+        ctx: LoopContext,
+        last_user: MessageInfo,
+    ) -> bool:
+        """Synchronize routing when the loop advances to a real WebUI turn.
+
+        Returns:
+            True when ``last_user`` starts a new non-synthetic user turn.
+        """
+        if last_user.id == ctx.turn_user_id:
+            return False
+
+        parts = await Message.parts(last_user.id, ctx.session.id)
+        if any(bool(getattr(part, "synthetic", False)) for part in parts):
+            return False
+
+        if ctx.turn_user_id is None:
+            ctx.turn_user_id = last_user.id
+            if ctx.auto_failover and ctx.auto_failover_allowed:
+                primary = ctx.model_candidates[0]
+                preferred = cls._active_cooldown_model(
+                    ctx.session.id,
+                    primary,
+                )
+                ctx.model_candidates = await cls._build_model_candidates(
+                    primary,
+                    route_seed=f"{ctx.session.id}:{last_user.id}",
+                    preferred=preferred,
+                )
+                next_index = cls._cooldown_candidate_index(
+                    ctx.session.id,
+                    ctx.model_candidates,
+                )
+                cls._select_candidate(ctx, next_index)
+            return True
+
+        ctx.turn_user_id = last_user.id
+        persisted_session = await Session.get_by_id(ctx.session.id)
+        persisted_model_auto = bool(
+            persisted_session
+            and is_model_auto_session_category(
+                getattr(persisted_session, "category", "user")
+            )
+            and getattr(persisted_session, "model_auto", False)
+        )
+        persisted_auto = persisted_model_auto and ctx.auto_failover_allowed
+
+        user_model = getattr(last_user, "model", None)
+        user_provider_id = None
+        user_model_id = None
+        if isinstance(user_model, dict):
+            user_provider_id = user_model.get("providerID") or user_model.get("provider_id")
+            user_model_id = user_model.get("modelID") or user_model.get("model_id")
+
+        if not persisted_auto:
+            ctx.auto_failover = False
+            if not persisted_model_auto:
+                cls.clear_auto_failover_state(ctx.session.id)
+                ctx.auto_failover_allowed = False
+            provider_id = (
+                getattr(persisted_session, "provider", None)
+                if Session.has_pinned_model(persisted_session)
+                else user_provider_id
+            ) or ctx.provider_id
+            model_id = (
+                getattr(persisted_session, "model", None)
+                if Session.has_pinned_model(persisted_session)
+                else user_model_id
+            ) or ctx.model_id
+            ctx.model_candidates = [RuntimeModel(provider_id, model_id)]
+            cls._select_candidate(ctx, 0)
+            log.info("session.model.auto_disabled_for_turn", {
+                "session_id": ctx.session.id,
+                "provider_id": provider_id,
+                "model_id": model_id,
+            })
+            return True
+
+        from flocks.config.config import Config
+
+        previous = RuntimeModel(ctx.provider_id, ctx.model_id)
+        default_llm = await Config.resolve_default_llm()
+        primary = RuntimeModel(
+            provider_id=(default_llm or {}).get("provider_id") or user_provider_id or ctx.provider_id,
+            model_id=(default_llm or {}).get("model_id") or user_model_id or ctx.model_id,
+        )
+        # Rebuild once for every real turn. The user message ID makes the
+        # pseudo-random choices stable throughout that turn, while an active
+        # cooldown keeps its valid target in the newly sampled tier.
+        preferred = cls._active_cooldown_model(ctx.session.id, primary)
+        ctx.model_candidates = await cls._build_model_candidates(
+            primary,
+            route_seed=f"{ctx.session.id}:{last_user.id}",
+            preferred=preferred,
+        )
+        ctx.auto_failover = True
+        next_index = cls._cooldown_candidate_index(
+            ctx.session.id,
+            ctx.model_candidates,
+        )
+        cls._select_candidate(ctx, next_index)
+        active = ctx.model_candidates[next_index]
+        log.info("session.model.auto_turn_reset", {
+            "session_id": ctx.session.id,
+            "from_provider_id": previous.provider_id,
+            "from_model_id": previous.model_id,
+            "to_provider_id": active.provider_id,
+            "to_model_id": active.model_id,
+            "cooldown_active": next_index > 0,
+        })
+        return True
+
+    @classmethod
+    async def _run_user_prompt_submit_hook(
+        cls,
+        ctx: LoopContext,
+        last_user: MessageInfo,
+    ) -> None:
+        """Run UserPromptSubmit once for a newly observed real user turn."""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+
+            prompt = await Message.get_text_content(last_user)
+            hook_ctx = await HookPipeline.run_user_prompt_submit({
+                "sessionID": ctx.session.id,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_user, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "messageID": last_user.id,
+                "prompt": prompt,
+            })
+            additional_context = hook_ctx.output.get("additionalContext")
+            if isinstance(additional_context, str) and additional_context.strip():
+                ctx.turn_additional_context = additional_context.strip()
+        except Exception as exc:
+            log.debug("loop.hook.user_prompt_submit.error", {
+                "session_id": ctx.session.id,
+                "message_id": last_user.id,
+                "error": str(exc),
+            })
+
+    @classmethod
+    async def _run_turn_finish_hook(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        last_message: MessageInfo,
+    ) -> bool:
+        """Run TurnFinish and continue the loop when the hook blocks stopping."""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+
+            hook_user = last_user
+            if ctx.turn_user_id:
+                hook_user = (
+                    await Message.get(ctx.session.id, ctx.turn_user_id)
+                    or last_user
+                )
+            user_text = await Message.get_text_content(hook_user)
+            assistant_text = await Message.get_text_content(last_message)
+            hook_ctx = await HookPipeline.run_turn_finish({
+                "sessionID": ctx.session.id,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_message, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "step": ctx.trace_step,
+                "userMessage": {
+                    "id": hook_user.id,
+                    "content": user_text,
+                },
+                "assistantMessage": {
+                    "id": last_message.id,
+                    "content": assistant_text,
+                },
+                "finishReason": "stop",
+                "stopHookActive": ctx.stop_hook_active,
+            })
+        except Exception as exc:
+            log.debug("loop.hook.turn_finish.error", {
+                "session_id": ctx.session.id,
+                "message_id": getattr(last_message, "id", None),
+                "error": str(exc),
+            })
+            return False
+
+        decision = str(hook_ctx.output.get("decision") or "").strip().lower()
+        reason = str(hook_ctx.output.get("reason") or "").strip()
+        if decision != "block":
+            return False
+        if not reason:
+            log.warn("loop.hook.turn_finish.missing_reason", {
+                "session_id": ctx.session.id,
+                "message_id": last_message.id,
+            })
+            return False
+        if ctx.should_abort():
+            log.info("loop.hook.turn_finish.ignored_after_abort", {
+                "session_id": ctx.session.id,
+                "message_id": last_message.id,
+            })
+            return False
+
+        try:
+            if ctx.session_ctx:
+                post_hook_messages = await ctx.session_ctx.get_messages()
+            else:
+                post_hook_messages = await Message.list(ctx.session.id)
+            queued_user = await cls._detect_queued_user_message(
+                ctx.session.id,
+                post_hook_messages,
+                last_user.id,
+                last_message,
+            )
+        except Exception as exc:
+            queued_user = None
+            log.debug("loop.hook.turn_finish.queued_recheck_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+        if queued_user is not None:
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="queued_message",
+                queued_message_detected=True,
+            )
+            await cls._publish_runtime_event(callbacks, "turn.continued", {
+                **turn_state.model_dump(by_alias=True),
+                "queuedUserMessageID": queued_user.id,
+            })
+            log.info("loop.hook.turn_finish.queued_message_won", {
+                "session_id": ctx.session.id,
+                "queued_user_id": queued_user.id,
+                "source_assistant_message_id": last_message.id,
+            })
+            return True
+
+        from flocks.agent.registry import Agent
+        from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
+
+        try:
+            agent = await Agent.get(
+                getattr(last_message, "agent", None) or ctx.agent_name
+            )
+        except Exception as exc:
+            log.debug("loop.hook.turn_finish.agent_load_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+            agent = None
+        max_steps = (
+            agent.steps
+            if agent is not None and getattr(agent, "steps", None) is not None
+            else DEFAULT_MAX_TOOL_STEPS
+        )
+        if ctx.trace_step >= max_steps:
+            log.warn("loop.hook.turn_finish.step_limit", {
+                "session_id": ctx.session.id,
+                "step": ctx.trace_step,
+                "max_steps": max_steps,
+            })
+            return False
+
+        try:
+            continuation = await Message.create(
+                session_id=ctx.session.id,
+                role=MessageRole.USER,
+                content=reason,
+                agent=getattr(hook_user, "agent", None) or ctx.agent_name,
+                model={
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                synthetic=True,
+                part_metadata={
+                    "turnFinishContinuation": True,
+                    "stopHookActive": True,
+                    "sourceAssistantMessageID": last_message.id,
+                },
+            )
+        except Exception as exc:
+            log.error("loop.hook.turn_finish.continuation_error", {
+                "session_id": ctx.session.id,
+                "error": str(exc),
+            })
+            return False
+        ctx.stop_hook_active = True
+        turn_state = set_turn_state(
+            ctx.session.id,
+            step=ctx.step,
+            status="continued",
+            continue_reason="turn_finish_hook",
+            queued_message_detected=False,
+        )
+        await cls._publish_runtime_event(callbacks, "turn.continued", {
+            **turn_state.model_dump(by_alias=True),
+            "turnFinishMessageID": continuation.id,
+        })
+        log.info("loop.continuing_for_turn_finish_hook", {
+            "session_id": ctx.session.id,
+            "continuation_message_id": continuation.id,
+            "source_assistant_message_id": last_message.id,
+        })
+        return True
+
+    @classmethod
+    async def _finalize_deferred_failure(
+        cls,
+        ctx: LoopContext,
+        failure: Any,
+        last_user: MessageInfo,
+    ) -> None:
+        """Persist only the final Auto candidate failure."""
+        if not failure.assistant_message_id:
+            assistant = await Message.create(
+                session_id=ctx.session.id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=getattr(last_user, "agent", None) or ctx.agent_name or "rex",
+                model_id=ctx.model_id,
+                provider_id=ctx.provider_id,
+                parent_id=last_user.id,
+                error=failure.error_data,
+                finish="error",
+            )
+            failure.assistant_message_id = assistant.id
+            return
+        await Message.update(
+            ctx.session.id,
+            failure.assistant_message_id,
+            error=failure.error_data,
+            finish="error",
+        )
+
+    @classmethod
+    async def _process_step_with_failover(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+    ) -> Any:
+        """Run one logical step, moving across candidates without replaying output."""
+        from flocks.session.runner import RunnerCallbacks, SessionRunner
+
+        while True:
+            runner_cbs = callbacks.runner_callbacks
+            if runner_cbs is None:
+                runner_cbs = RunnerCallbacks()
+            if callbacks.event_publish_callback and not runner_cbs.event_publish_callback:
+                runner_cbs.event_publish_callback = callbacks.event_publish_callback
+
+            runner = SessionRunner(
+                session=ctx.session,
+                provider_id=ctx.provider_id,
+                model_id=ctx.model_id,
+                agent_name=ctx.agent_name,
+                abort_event=ctx.abort_event,
+                callbacks=runner_cbs,
+                session_ctx=ctx.session_ctx,
+                memory_bootstrap_data=ctx.memory_bootstrap_data,
+                static_cache=ctx.runner_static_cache,
+                defer_step_errors=ctx.auto_failover,
+                failover_available=(
+                    ctx.auto_failover
+                    and ctx.candidate_index + 1 < len(ctx.model_candidates)
+                ),
+                turn_additional_context=ctx.turn_additional_context,
+                session_start_pending=ctx.session_start_pending,
+            )
+            runner._step = ctx.trace_step
+
+            step_result = await runner._process_step(messages, last_user)
+            if runner._session_start_fired:
+                ctx.session_start_pending = False
+            failure = step_result.failure
+            if not ctx.auto_failover or failure is None:
+                return step_result
+
+            next_index = ctx.candidate_index + 1
+            has_next = next_index < len(ctx.model_candidates)
+            if not failure.allow_fallback or not has_next:
+                if (
+                    failure.allow_fallback
+                    and not has_next
+                    and ctx.candidate_index > 0
+                    and failure.reason not in {"rate_limit", "billing"}
+                ):
+                    expires_at = time.monotonic() + CHAIN_EXHAUSTION_COOLDOWN_SECONDS
+                    existing_cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
+                    if not (
+                        existing_cooldown
+                        and existing_cooldown.expires_at > expires_at
+                    ):
+                        cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+                            model=ctx.model_candidates[ctx.candidate_index],
+                            primary=ctx.model_candidates[0],
+                            expires_at=expires_at,
+                            reason="chain_exhausted",
+                        )
+                await cls._finalize_deferred_failure(ctx, failure, last_user)
+                return step_result
+
+            # A candidate may be removed only while its attempt is completely
+            # replay-safe. Failure to delete stops the switch to avoid leaving
+            # two assistant cards for one logical response.
+            if failure.assistant_message_id:
+                try:
+                    deleted = await Message.delete(
+                        ctx.session.id,
+                        failure.assistant_message_id,
+                    )
+                except Exception as exc:
+                    deleted = False
+                    log.error("session.model.fallback_cleanup_failed", {
+                        "session_id": ctx.session.id,
+                        "message_id": failure.assistant_message_id,
+                        "error": str(exc),
+                    })
+                if not deleted:
+                    await cls._finalize_deferred_failure(ctx, failure, last_user)
+                    return step_result
+                await cls._publish_runtime_event(callbacks, "message.removed", {
+                    "sessionID": ctx.session.id,
+                    "messageID": failure.assistant_message_id,
+                })
+
+            previous = ctx.model_candidates[ctx.candidate_index]
+            next_candidate = ctx.model_candidates[next_index]
+
+            if ctx.candidate_index == 0 and failure.reason in {"rate_limit", "billing"}:
+                cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+                    model=next_candidate,
+                    primary=ctx.model_candidates[0],
+                    expires_at=time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS,
+                    reason=failure.reason,
+                )
+            else:
+                cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
+                if cooldown and cooldown.expires_at > time.monotonic():
+                    cooldown.model = next_candidate
+
+            cls._select_candidate(ctx, next_index)
+            event_payload = {
+                "sessionID": ctx.session.id,
+                "from": {
+                    "providerID": previous.provider_id,
+                    "modelID": previous.model_id,
+                },
+                "to": {
+                    "providerID": next_candidate.provider_id,
+                    "modelID": next_candidate.model_id,
+                },
+                "reason": failure.reason,
+                "candidateIndex": next_index,
+            }
+            log.warn("session.model.fallback", {
+                "from": event_payload["from"],
+                "to": event_payload["to"],
+                "reason": event_payload["reason"],
+                "candidateIndex": event_payload["candidateIndex"],
+            })
+            await cls._publish_runtime_event(
+                callbacks,
+                "session.model.fallback",
+                event_payload,
+            )
+
+    @classmethod
     async def _run_loop(
         cls,
         ctx: LoopContext,
@@ -578,6 +1372,7 @@ class SessionLoop:
         7. Loop until complete
         """
         last_message: Optional[MessageInfo] = None
+        loop_error: Optional[str] = None
         
         while not ctx.should_abort():
             # Set status to busy
@@ -675,7 +1470,7 @@ class SessionLoop:
                     stop_reason="no_user_message",
                 )
                 break
-            
+
             last_assistant_parts = (
                 await Message.parts(last_assistant.id, ctx.session.id)
                 if last_assistant
@@ -696,6 +1491,11 @@ class SessionLoop:
                 })
                 last_message = last_assistant
                 break
+
+            if await cls._prepare_auto_turn(ctx, last_user):
+                ctx.turn_additional_context = None
+                ctx.stop_hook_active = False
+                await cls._run_user_prompt_submit_hook(ctx, last_user)
             
             # Bootstrap memory on first step (once per loop, stored in ctx)
             if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
@@ -717,7 +1517,7 @@ class SessionLoop:
             # may cancel this task before it finishes).
             # generate_title_after_first_message is idempotent: if this task saves
             # the title first, the safety-net call returns immediately.
-            if ctx.step == 1:
+            if ctx.step == 1 and not ctx.auto_failover:
                 try:
                     from flocks.session.lifecycle.title import SessionTitle
                     # UserMessageInfo.model is Dict[str, str] {"providerID": ..., "modelID": ...}
@@ -1204,34 +2004,16 @@ class SessionLoop:
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
             
-            # Process step - delegate to runner (matching TUI SessionProcessor.process)
-            from flocks.session.runner import SessionRunner, RunnerCallbacks
-            
-            # Build runner callbacks from loop callbacks
-            runner_cbs = callbacks.runner_callbacks
-            if runner_cbs is None:
-                runner_cbs = RunnerCallbacks()
-            # Ensure event_publish_callback is propagated
-            if callbacks.event_publish_callback and not runner_cbs.event_publish_callback:
-                runner_cbs.event_publish_callback = callbacks.event_publish_callback
-            
-            runner = SessionRunner(
-                session=ctx.session,
-                provider_id=ctx.provider_id,
-                model_id=ctx.model_id,
-                agent_name=ctx.agent_name,
-                abort_event=ctx.abort_event,
-                callbacks=runner_cbs,
-                session_ctx=ctx.session_ctx,
-                memory_bootstrap_data=ctx.memory_bootstrap_data,
-                static_cache=ctx.runner_static_cache,
-            )
-            # Use session-cumulative step number for observability.
-            runner._step = ctx.trace_step
-            
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
-            step_task = asyncio.create_task(runner._process_step(messages, last_user))
+            step_task = asyncio.create_task(
+                cls._process_step_with_failover(
+                    ctx,
+                    callbacks,
+                    messages,
+                    last_user,
+                )
+            )
             ctx._current_step_task = step_task
             step_started_at = asyncio.get_event_loop().time()
             try:
@@ -1253,6 +2035,7 @@ class SessionLoop:
             
             # Handle result
             if step_result.action == "stop":
+                loop_error = step_result.error
                 # Report error if step failed
                 if step_result.error and callbacks.on_error:
                     await callbacks.on_error(step_result.error)
@@ -1263,7 +2046,13 @@ class SessionLoop:
                 else:
                     post_messages = await Message.list(ctx.session.id)
                 for msg in reversed(post_messages):
-                    if msg.role == MessageRole.ASSISTANT:
+                    if (
+                        msg.role == MessageRole.ASSISTANT
+                        and (
+                            not ctx.auto_failover
+                            or getattr(msg, "parentID", None) == last_user.id
+                        )
+                    ):
                         last_message = msg
                         break
 
@@ -1372,6 +2161,20 @@ class SessionLoop:
                         })
                         continue
 
+                if (
+                    not step_result.error
+                    and not ctx.should_abort()
+                    and last_message is not None
+                    and getattr(last_message, "finish", None) == "stop"
+                    and await cls._run_turn_finish_hook(
+                        ctx,
+                        callbacks,
+                        last_user,
+                        last_message,
+                    )
+                ):
+                    continue
+
                 stop_reason = step_result.error or (getattr(last_message, "finish", None) if last_message else None) or "stop"
                 turn_state = set_turn_state(
                     ctx.session.id,
@@ -1426,12 +2229,16 @@ class SessionLoop:
         
         # Return result
         return LoopResult(
-            action="stop",
+            action="error" if ctx.auto_failover and loop_error else "stop",
             last_message=last_message,
+            error=loop_error if ctx.auto_failover else None,
+            provider_id=ctx.provider_id,
+            model_id=ctx.model_id,
             metadata={
                 "steps": ctx.step,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
+                **({"aborted": True} if ctx.should_abort() else {}),
             },
         )
     
@@ -1706,6 +2513,7 @@ class SessionLoop:
             agent=last_user.agent if hasattr(last_user, 'agent') else agent_name,
             model=last_user.model if hasattr(last_user, 'model') else model_id,
             provider=last_user.provider if hasattr(last_user, 'provider') else provider_id,
+            synthetic=True,
         )
         
         log.info("loop.subtask.completed", {

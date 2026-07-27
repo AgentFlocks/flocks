@@ -38,9 +38,10 @@ API 参数和适用场景见 [references/api-reference.md](references/api-refere
 - API 调用必须以当前 tool schema 为准，优先使用 schema 暴露的顶层语义化参数；列表类工具常见 `keyword`、`severity`、`cur_page`、`page_size`、`sort_by`，但 `tdp_log_search.sql` 是过滤表达式不是完整 SQL，禁止 `SELECT/FROM`，控制返回数量用 `size`，`terms` 可不传 `sql`，外部攻击结果筛选用 `result_list`。
 - 用户说“告警”“告警记录”“告警日志”“明细记录”“查某 IP 的告警”时，默认走 `tdp_log_search`
 - 用户说“看板”“概览”“趋势”“统计”时，先用 `tdp_dashboard_status`
-- 用户说“威胁事件”“外部攻击”“攻击事件”“事件总览”“事件趋势”时，优先用 `tdp_incident_list` 或 `tdp_threat_inbound_attack`
-- 用户说“实时监控”“威胁监控列表”时，优先用正式 API 工具 `tdp_threat_monitor_list`；不要用 Cookie 认证的旧 Web CLI 代替
-- 用户说“告警主机”“受害主机”“主机下的事件”时，优先用 `tdp_host_threat_list`
+- 用户明确说“智能聚合”“聚合攻击事件”“智能聚合事件”“攻击过程”“事件攻击时间线”时，优先用 `tdp_threat_intelligent_aggregation`
+- 用户说“外部攻击”“外部攻击严重性分布”时，优先用 `tdp_threat_external_attack`
+- 用户说“威胁事件列表”“实时监控”“威胁实时监控列表”“威胁监控列表”时，优先用正式 API 工具 `tdp_threat_monitor_list`；不要用 Cookie 认证的旧 Web CLI 代替
+- 用户说“告警主机”“受害主机”“主机下的事件”时，优先用 `tdp_threat_alert_host`
 - 用户说“系统状态”“核心服务状态”“数据库状态”时，优先用 `tdp_system_status`
 - 用户说“MDR”“研判结果”“研判统计”时，优先用 `tdp_mdr_alert_list`
 - 用户说“脆弱性”“弱口令”“登录入口”“上传接口”“API 风险”“隐私数据”时，走对应资产或风险类工具

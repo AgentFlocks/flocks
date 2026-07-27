@@ -49,12 +49,12 @@ fixtures:
       assert:
         success: true
 
-  tdp_incident_list:
-    - label: "Search incidents (page 1)"
-      label_cn: "查询威胁事件列表（第 1 页）"
+  tdp_threat_intelligent_aggregation:
+    - label: "Search intelligent aggregation incidents (page 1)"
+      label_cn: "查询智能聚合威胁事件（第 1 页）"
       tags: [smoke, incidents]
       params:
-        action: search
+        action: incident_search
         cur_page: 1
         page_size: 20
       assert:
@@ -66,12 +66,12 @@ fixtures:
       params:
         action: top_attacked_entity
 
-  tdp_host_threat_list:
-    - label: "Get threat host summary"
-      label_cn: "查询威胁主机摘要"
+  tdp_threat_alert_host:
+    - label: "List alert hosts"
+      label_cn: "查询告警主机列表"
       tags: [smoke, threats]
       params:
-        action: summary
+        action: alert_host_list
         cur_page: 1
         page_size: 20
       assert:
@@ -147,15 +147,15 @@ fixtures:
         action: search
         size: 20
 
-  tdp_threat_inbound_attack:
-    - label: "Get inbound attack overview (last 24 hours)"
-      label_cn: "查询外部入侵攻击概览（最近 24 小时）"
+  tdp_threat_external_attack:
+    - label: "Get external attack severity distribution (last 24 hours)"
+      label_cn: "查询外部攻击严重性分布（最近 24 小时）"
       tags: [smoke, threats]
       params: {}
 
   tdp_threat_monitor_list:
-    - label: "List real-time threats (last 24 hours)"
-      label_cn: "查询威胁实时监控列表（最近 24 小时）"
+    - label: "List monitored threats (last 24 hours)"
+      label_cn: "查询威胁监控列表（最近 24 小时）"
       tags: [smoke, threats]
       params:
         cur_page: 1

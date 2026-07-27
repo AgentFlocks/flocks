@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
-import { workflowAPI, Workflow } from '@/api/workflow';
+import { workflowAPI, Workflow, WorkflowSummary } from '@/api/workflow';
 import {
   createSharedResource,
   useRefreshOnResume,
@@ -11,7 +11,7 @@ const WORKFLOW_LIST_STALE_TIME_MS = 5000;
 const WORKFLOW_LIST_MIN_FETCH_INTERVAL_MS = 1000;
 const MAX_WORKFLOW_LIST_RESOURCES = 80;
 
-const workflowListResources = new Map<string, SharedResource<Workflow[]>>();
+const workflowListResources = new Map<string, SharedResource<WorkflowSummary[]>>();
 
 function makeWorkflowListKey(category?: string, status?: string): string {
   return JSON.stringify({
@@ -20,7 +20,7 @@ function makeWorkflowListKey(category?: string, status?: string): string {
   });
 }
 
-function getWorkflowListResource(category?: string, status?: string): SharedResource<Workflow[]> {
+function getWorkflowListResource(category?: string, status?: string): SharedResource<WorkflowSummary[]> {
   const key = makeWorkflowListKey(category, status);
   const existing = workflowListResources.get(key);
   if (existing) {
@@ -29,12 +29,12 @@ function getWorkflowListResource(category?: string, status?: string): SharedReso
     return existing;
   }
 
-  const resource = createSharedResource<Workflow[]>({
+  const resource = createSharedResource<WorkflowSummary[]>({
     initialData: [],
     staleTimeMs: WORKFLOW_LIST_STALE_TIME_MS,
     minFetchIntervalMs: WORKFLOW_LIST_MIN_FETCH_INTERVAL_MS,
     fetcher: async () => {
-      const response = await workflowAPI.list({ category, status });
+      const response = await workflowAPI.listSummaries({ category, status });
       return Array.isArray(response.data) ? response.data : [];
     },
     fallbackDataOnError: [],

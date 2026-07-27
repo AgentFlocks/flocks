@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useTranslation } from 'react-i18next';
 import { Globe, StopCircle, Loader2, RefreshCw, ExternalLink } from 'lucide-react';
-import { workflowAPI, WorkflowService } from '@/api/workflow';
+import { resolveWorkflowServicePort, workflowAPI, WorkflowService } from '@/api/workflow';
 import { useToast } from '@/components/common/Toast';
 import EmptyState from '@/components/common/EmptyState';
 import CopyButton from '@/components/common/CopyButton';
@@ -164,7 +164,7 @@ export default function ServicesSection() {
     setRestartingIds(prev => new Set(prev).add(service.workflowId));
     try {
       const publishRequest = service.driver === 'local' || service.driver === 'docker'
-        ? { driver: service.driver }
+        ? { driver: service.driver, port: resolveWorkflowServicePort(service) }
         : undefined;
       await workflowAPI.publish(service.workflowId, publishRequest);
       await fetchServices();

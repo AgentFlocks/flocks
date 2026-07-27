@@ -297,6 +297,13 @@ async def test_stream_processor_tool_call_diff_when_sandbox_on_off(
 
     assert len(captured_extras) == 2
     assert captured_extras[0][0] == "bash"
-    assert captured_extras[0][1] == {}
+    assert captured_extras[0][1] == {
+        "execution_mode": "build",
+        "workspace_dir": "/tmp",
+        "model": {"providerID": "test-provider", "modelID": "test-model"},
+        "plan_file_path": None,
+        "plan_relative_path": None,
+        "plan_permission_path": None,
+    }
     assert "sandbox" in captured_extras[1][1]
     assert captured_extras[1][1]["sandbox"]["container_name"] == "flocks-sbx-test"

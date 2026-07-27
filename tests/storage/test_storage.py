@@ -71,6 +71,85 @@ async def test_storage_with_model(storage):
 
 
 @pytest.mark.asyncio
+async def test_storage_set_many_commits_all_entries(storage):
+    """Multiple values should be persisted by one batch operation."""
+    await storage.set_many([
+        ("batch-set:key1", {"value": 1}, "test"),
+        ("batch-set:key2", StorageTestModel(id="m2", name="Beta", value=2), "test_model"),
+    ])
+
+    assert await storage.get("batch-set:key1") == {"value": 1}
+    model = await storage.get("batch-set:key2", StorageTestModel)
+    assert model == StorageTestModel(id="m2", name="Beta", value=2)
+
+
+@pytest.mark.asyncio
+async def test_storage_set_many_rolls_back_all_entries(storage, monkeypatch):
+    """A failed entry must not leave an earlier entry committed."""
+    original_connect = Storage.connect
+
+    @asynccontextmanager
+    async def failing_connect(db_path=None):
+        async with original_connect(db_path) as connection:
+            original_execute = connection.execute
+            calls = 0
+
+            async def fail_second_insert(sql, parameters=None):
+                nonlocal calls
+                if "INSERT OR REPLACE INTO storage" in sql:
+                    calls += 1
+                    if calls == 2:
+                        raise sqlite3.OperationalError("injected batch failure")
+                return await original_execute(sql, parameters)
+
+            monkeypatch.setattr(connection, "execute", fail_second_insert)
+            yield connection
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Storage, "connect", failing_connect)
+        with pytest.raises(sqlite3.OperationalError, match="injected batch failure"):
+            await storage.set_many([
+                ("rollback:key1", {"value": 1}, "test"),
+                ("rollback:key2", {"value": 2}, "test"),
+            ])
+
+    assert await storage.get("rollback:key1") is None
+    assert await storage.get("rollback:key2") is None
+
+
+@pytest.mark.asyncio
+async def test_storage_mutate_many_rolls_back_sets_and_deletes(storage, monkeypatch):
+    """A failed mixed mutation must preserve every pre-transaction value."""
+    await storage.set("mixed:replace", {"value": "before"}, "test")
+    await storage.set("mixed:delete", {"value": "keep"}, "test")
+    original_connect = Storage.connect
+
+    @asynccontextmanager
+    async def failing_connect(db_path=None):
+        async with original_connect(db_path) as connection:
+            original_execute = connection.execute
+
+            async def fail_delete(sql, parameters=None):
+                if "DELETE FROM storage" in sql:
+                    raise sqlite3.OperationalError("injected mixed mutation failure")
+                return await original_execute(sql, parameters)
+
+            monkeypatch.setattr(connection, "execute", fail_delete)
+            yield connection
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Storage, "connect", failing_connect)
+        with pytest.raises(sqlite3.OperationalError, match="injected mixed mutation failure"):
+            await storage.mutate_many(
+                set_entries=[("mixed:replace", {"value": "after"}, "test")],
+                delete_keys=["mixed:delete"],
+            )
+
+    assert await storage.get("mixed:replace") == {"value": "before"}
+    assert await storage.get("mixed:delete") == {"value": "keep"}
+
+
+@pytest.mark.asyncio
 async def test_storage_delete(storage):
     """Test delete operation"""
     await storage.set("delete_key", {"data": "test"}, "test")

@@ -198,7 +198,7 @@ export default function Layout() {
   const { t: tWebUIContractPage } = useTranslation('webuiContractPage');
   const { t: tAuth } = useTranslation('auth');
   const toast = useToast();
-  const { productName } = useProductName();
+  const { productName, proProductName } = useProductName();
   const [hasUpdate, setHasUpdate] = useState(false);
   const [latestVersion, setLatestVersion] = useState<string | null>(null);
   const [currentVersion, setCurrentVersion] = useState<string | null>(null);
@@ -217,6 +217,8 @@ export default function Layout() {
   const [flocksproStatusReady, setFlocksproStatusReady] = useState(false);
   const [flocksproVersion, setFlocksproVersion] = useState<string | null>(null);
   const canManageUpdates = user?.role === 'admin';
+  const notificationGateReady = flocksproStatusReady
+    && (!canManageUpdates || hasCompletedUpdateCheck);
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
   const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
@@ -253,7 +255,7 @@ export default function Layout() {
   }, [handleOpenOnboarding]);
 
   const refreshUpdateStatus = useCallback(async (bypassMinGap = false) => {
-    if (!flocksproStatusReady) return;
+    if (!flocksproStatusReady || !canManageUpdates) return;
 
     const now = Date.now();
     if (checkingUpdateRef.current) return;
@@ -304,7 +306,7 @@ export default function Layout() {
   }, [canManageUpdates, flocksproStatusReady, i18n.language, isFlocksproActive]);
 
   useEffect(() => {
-    if (!flocksproStatusReady) return undefined;
+    if (!flocksproStatusReady || !canManageUpdates) return undefined;
 
     const initialCheckTimerId = window.setTimeout(() => {
       refreshUpdateStatus(true);
@@ -335,7 +337,7 @@ export default function Layout() {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('focus', handleWindowFocus);
     };
-  }, [flocksproStatusReady, refreshUpdateStatus]);
+  }, [canManageUpdates, flocksproStatusReady, refreshUpdateStatus]);
 
   useEffect(() => {
     let cancelled = false;
@@ -397,16 +399,14 @@ export default function Layout() {
       lastNotificationFetchKeyRef.current = null;
       return;
     }
-    if (!hasCompletedUpdateCheck) return;
-
-    const fetchKey = `${user.id}:${i18n.language}:${currentVersion ?? 'pending-version'}`;
+    const fetchKey = `${user.id}:${i18n.language}`;
     if (lastNotificationFetchKeyRef.current === fetchKey) return;
     const previousFetchKey = lastNotificationFetchKeyRef.current;
     lastNotificationFetchKeyRef.current = fetchKey;
     setBackendNotificationsReady(false);
 
     let cancelled = false;
-    void getActiveNotifications(i18n.language, currentVersion)
+    void getActiveNotifications(i18n.language)
       .then((items) => {
         if (cancelled) return;
         setNotifications((prev) => {
@@ -431,7 +431,7 @@ export default function Layout() {
     return () => {
       cancelled = true;
     };
-  }, [currentVersion, hasCompletedUpdateCheck, i18n.language, user?.id]);
+  }, [i18n.language, user?.id]);
 
   useEffect(() => {
     if (!user?.id) {
@@ -439,7 +439,7 @@ export default function Layout() {
       setUpdateNotificationReady(false);
       return;
     }
-    if (!hasCompletedUpdateCheck) return;
+    if (!notificationGateReady) return;
 
     setUpdateNotificationReady(false);
     const notification = buildUpdateNotification(updateInfo, i18n.language);
@@ -465,7 +465,7 @@ export default function Layout() {
     return () => {
       cancelled = true;
     };
-  }, [hasCompletedUpdateCheck, i18n.language, updateInfo, user?.id]);
+  }, [i18n.language, notificationGateReady, updateInfo, user?.id]);
 
   const allNotifications = updateNotification
     ? [...notifications, updateNotification].sort((a, b) => a.priority - b.priority)
@@ -914,7 +914,7 @@ export default function Layout() {
                     className="flex items-center gap-2 px-3 py-2 text-sm font-medium text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:hover:text-zinc-50"
                   >
                     <ArrowUpCircle className="h-4 w-4 text-zinc-400" />
-                    {productName}
+                    {proProductName}
                   </Link>
                 )}
                 <button

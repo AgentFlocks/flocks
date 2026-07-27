@@ -23,6 +23,8 @@ class TestDelegateTaskTolerance:
 
     @pytest.mark.asyncio
     async def test_delegate_task_derives_description_and_ignores_blank_skills(self):
+        ctx = _make_ctx()
+        ctx.extra["workflow_temp_parent"] = True
         parent_session = SimpleNamespace(
             id="test-session",
             project_id="proj",
@@ -47,7 +49,7 @@ class TestDelegateTaskTolerance:
         ):
             result = await ToolRegistry.execute(
                 "delegate_task",
-                ctx=_make_ctx(),
+                ctx=ctx,
                 subagent_type="asset-survey",
                 prompt="Investigate threatbook.cn assets",
                 load_skills=["", "   "],
@@ -56,6 +58,7 @@ class TestDelegateTaskTolerance:
         assert result.success is True
         assert result.title == "Investigate threatbook.cn assets"
         assert result.metadata["sessionId"] == "ses-child"
+        assert ctx.extra["workflow_child_session_created"] is True
         skill_get.assert_not_awaited()
         permissions = create_session.await_args.kwargs["permission"]
         denied_permissions = {rule.permission for rule in permissions if rule.action == "deny"}

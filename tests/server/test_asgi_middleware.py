@@ -382,3 +382,40 @@ async def test_long_lived_streams_do_not_spawn_base_http_middleware_tasks(
         await asyncio.gather(*requests, return_exceptions=True)
 
     assert len(cleared_tokens) == 11
+
+
+@pytest.mark.asyncio
+async def test_instance_context_without_directory_uses_process_cwd(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    """Ordinary requests keep the pre-project-management cwd behavior."""
+    from flocks.project.instance import Instance
+
+    process_cwd = tmp_path / "server-cwd"
+    process_cwd.mkdir()
+    monkeypatch.chdir(process_cwd)
+    provided_directories: list[str] = []
+
+    async def provide(*, directory, init, fn):
+        provided_directories.append(directory)
+        return await fn()
+
+    async def endpoint(_scope, _receive, _send) -> None:
+        return None
+
+    async def receive():
+        return {"type": "http.request", "body": b"", "more_body": False}
+
+    async def send(_message):
+        return None
+
+    monkeypatch.setattr(Instance, "provide", provide)
+
+    await server_app._InstanceContextMiddleware(endpoint)(
+        _http_scope("/api/skill"),
+        receive,
+        send,
+    )
+
+    assert provided_directories == [str(process_cwd)]

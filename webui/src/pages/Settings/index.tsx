@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft,
   ArrowUpCircle,
+  Archive,
   Check,
   ImageIcon,
   Languages,
@@ -26,6 +27,7 @@ import { useAuth } from '@/contexts/AuthContext';
 import { useProductName } from '@/contexts/ProductNameContext';
 import { useToast } from '@/components/common/Toast';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
+import { toolFailureConfigApi } from '@/api/toolFailureConfig';
 import { preloadI18nNamespaces } from '@/i18nResources';
 
 type LazySettingsModule = { default: ComponentType<any> };
@@ -44,8 +46,9 @@ const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
 const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpgrade'), ['flockspro']);
 const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
+const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
 
-type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
+type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -73,6 +76,7 @@ interface SettingsGroup {
 function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
   return (
     value === 'preferences' ||
+    value === 'archived-data' ||
     value === 'account' ||
     value === 'system-logs' ||
     value === 'audit-logs' ||
@@ -156,6 +160,38 @@ function SegmentedOption({
   );
 }
 
+function PreferenceSwitch({
+  checked,
+  disabled,
+  label,
+  onChange,
+}: {
+  checked: boolean;
+  disabled: boolean;
+  label: string;
+  onChange: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role="switch"
+      aria-checked={checked}
+      aria-label={label}
+      disabled={disabled}
+      onClick={onChange}
+      className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-zinc-400 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60 ${
+        checked ? 'bg-zinc-950 dark:bg-zinc-100' : 'bg-zinc-300 dark:bg-zinc-700'
+      }`}
+    >
+      <span
+        className={`pointer-events-none inline-block h-5 w-5 rounded-full bg-white shadow transition-transform dark:bg-zinc-950 ${
+          checked ? 'translate-x-5' : 'translate-x-0.5'
+        }`}
+      />
+    </button>
+  );
+}
+
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
   const { theme, setTheme } = useContext(ThemeContext);
@@ -168,26 +204,58 @@ function PreferencesPanel() {
     uploadProductFavicon,
     resetProductFavicon,
   } = useProductName();
-  const toast = useToast();
+  const { error: showToastError, success: showToastSuccess } = useToast();
   const language = i18n.language?.toLowerCase().startsWith('zh') ? 'zh-CN' : 'en-US';
   const faviconInputRef = useRef<HTMLInputElement | null>(null);
   const [displayNameDraft, setDisplayNameDraft] = useState(configuredDisplayName ?? '');
   const [savingDisplayName, setSavingDisplayName] = useState(false);
   const [savingFavicon, setSavingFavicon] = useState(false);
+  const [toolFailureAutoDisable, setToolFailureAutoDisable] = useState(true);
+  const [loadingToolFailure, setLoadingToolFailure] = useState(true);
+  const [savingToolFailure, setSavingToolFailure] = useState(false);
   const normalizedDisplayName = displayNameDraft.trim();
   const displayNameChanged = normalizedDisplayName !== (configuredDisplayName ?? '');
+  const toolFailureSettingLoadFailedMessage = t('toolFailureSettingLoadFailed');
 
   useEffect(() => {
     setDisplayNameDraft(configuredDisplayName ?? '');
   }, [configuredDisplayName]);
 
+  useEffect(() => {
+    let cancelled = false;
+    setLoadingToolFailure(true);
+    toolFailureConfigApi.get()
+      .then((config) => {
+        if (!cancelled) {
+          setToolFailureAutoDisable(config.disableOnRepeatedFailure);
+        }
+      })
+      .catch((err: any) => {
+        if (!cancelled) {
+          showToastError(
+            toolFailureSettingLoadFailedMessage,
+            err?.response?.data?.detail || err?.message,
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingToolFailure(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [showToastError, toolFailureSettingLoadFailedMessage]);
+
   const handleSaveDisplayName = async () => {
     setSavingDisplayName(true);
     try {
       await updateProductName(normalizedDisplayName || null);
-      toast.success(t('displayNameSaved'));
+      showToastSuccess(t('displayNameSaved'));
     } catch (err: any) {
-      toast.error(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingDisplayName(false);
     }
@@ -197,9 +265,9 @@ function PreferencesPanel() {
     setSavingDisplayName(true);
     try {
       await updateProductName(null);
-      toast.success(t('displayNameSaved'));
+      showToastSuccess(t('displayNameSaved'));
     } catch (err: any) {
-      toast.error(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('displayNameSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingDisplayName(false);
     }
@@ -213,9 +281,9 @@ function PreferencesPanel() {
     setSavingFavicon(true);
     try {
       await uploadProductFavicon(file);
-      toast.success(t('faviconSaved'));
+      showToastSuccess(t('faviconSaved'));
     } catch (err: any) {
-      toast.error(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingFavicon(false);
     }
@@ -225,11 +293,28 @@ function PreferencesPanel() {
     setSavingFavicon(true);
     try {
       await resetProductFavicon();
-      toast.success(t('faviconSaved'));
+      showToastSuccess(t('faviconSaved'));
     } catch (err: any) {
-      toast.error(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
+      showToastError(t('faviconSaveFailed'), err?.response?.data?.detail || err?.message);
     } finally {
       setSavingFavicon(false);
+    }
+  };
+
+  const handleToolFailureAutoDisableChange = async () => {
+    const nextValue = !toolFailureAutoDisable;
+    setSavingToolFailure(true);
+    try {
+      const config = await toolFailureConfigApi.update(nextValue);
+      setToolFailureAutoDisable(config.disableOnRepeatedFailure);
+      showToastSuccess(t('toolFailureSettingSaved'));
+    } catch (err: any) {
+      showToastError(
+        t('toolFailureSettingSaveFailed'),
+        err?.response?.data?.detail || err?.message,
+      );
+    } finally {
+      setSavingToolFailure(false);
     }
   };
 
@@ -371,6 +456,19 @@ function PreferencesPanel() {
             </SegmentedOption>
           </div>
         </PreferenceRow>
+
+        <PreferenceRow
+          icon={ShieldCheck}
+          title={t('toolFailureAutoDisable')}
+          description={t('toolFailureAutoDisableDescription')}
+        >
+          <PreferenceSwitch
+            checked={toolFailureAutoDisable}
+            disabled={loadingToolFailure || savingToolFailure}
+            label={t('toolFailureAutoDisable')}
+            onChange={() => void handleToolFailureAutoDisableChange()}
+          />
+        </PreferenceRow>
       </div>
     </div>
   );
@@ -382,6 +480,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   return (
     <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
       {sectionId === 'account' && <ConfigPage />}
+      {sectionId === 'archived-data' && <ArchivedDataPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}
       {sectionId === 'flockspro' && <FlocksproUpgradePage />}
@@ -395,7 +494,7 @@ export default function SettingsPage() {
   const navigate = useNavigate();
   const { t } = useTranslation('nav');
   const { user } = useAuth();
-  const { productName } = useProductName();
+  const { proProductName } = useProductName();
   const isAdmin = user?.role === 'admin';
   const sectionId = params.sectionId;
   const [flocksproCapabilityReady, setFlocksproCapabilityReady] = useState(false);
@@ -450,16 +549,22 @@ export default function SettingsPage() {
         ],
       },
       {
+        name: t('settingsGroupData'),
+        items: [
+          { id: 'archived-data', name: t('archivedData'), icon: Archive },
+        ],
+      },
+      {
         name: t('settingsGroupSystem'),
         items: [
           { id: 'account', name: t('accountManagement'), icon: UserCog },
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
           { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
-          { id: 'flockspro', name: productName, icon: ArrowUpCircle, adminOnly: true },
+          { id: 'flockspro', name: proProductName, icon: ArrowUpCircle, adminOnly: true },
         ],
       },
     ],
-    [productName, t],
+    [proProductName, t],
   );
 
   const visibleGroups = groups

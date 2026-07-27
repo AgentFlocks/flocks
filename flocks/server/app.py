@@ -338,6 +338,7 @@ async def lifespan(app: FastAPI):
     try:
         from flocks.server.routes.workflow import (
             reconcile_published_workflow_api_services,
+            start_workflow_api_health_monitor,
             sync_workflows_from_filesystem,
         )
 
@@ -346,6 +347,7 @@ async def lifespan(app: FastAPI):
             log.info("workflow.sync.done", {"imported": imported})
             api_services = await reconcile_published_workflow_api_services()
             log.info("workflow.api_services.reconciled", api_services)
+            app.state.startup_background_tasks.append(start_workflow_api_health_monitor())
 
         _schedule_startup_phase(app, log, "workflow.sync_filesystem", _sync_workflows_phase)
     except Exception as e:
@@ -471,18 +473,6 @@ async def lifespan(app: FastAPI):
         _schedule_startup_phase(app, log, "workflow.trigger_runtime.start", _delayed_trigger_runtime_start)
     except Exception as e:
         log.warning("workflow.trigger_runtime.start_failed", {"error": str(e)})
-
-    try:
-        from flocks.updater.updater import recover_upgrade_state
-
-        await _run_startup_phase(
-            log,
-            "updater.recover_upgrade_state",
-            lambda: asyncio.to_thread(recover_upgrade_state),
-        )
-        log.info("updater.recovery.checked")
-    except Exception as e:
-        log.warning("updater.recovery.failed", {"error": str(e)})
 
     blocking_startup_ms = int((time.perf_counter() - startup_started_at) * 1000)
     log.info("server.startup.ready", {
@@ -1111,7 +1101,8 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 @app.exception_handler(StarletteHTTPException)
 async def http_exception_handler(request: Request, exc: StarletteHTTPException):
     """Handle HTTP exceptions"""
-    log.error("http.error", {
+    http_log = log.warn if 400 <= exc.status_code < 500 else log.error
+    http_log("http.error", {
         "path": request.url.path,
         "status": exc.status_code,
         "detail": exc.detail,

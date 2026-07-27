@@ -585,6 +585,58 @@ class TestBootstrapUserApiServices:
         assert written["apiKey"] == "{secret:key}"
         assert written["base_url"] == "https://api.example.com"
 
+    def test_bootstrap_writes_unique_versioned_storage_key(self):
+        tools = {"tdp_tool": _make_api_tool("tdp_tool", "tdp_api")}
+        with patch(
+            "flocks.config.api_versioning.versioned_storage_key_for",
+            return_value="tdp_api_v3_3_10",
+        ):
+            mock_set = self._run_bootstrap(tools, get_raw_side_effect=lambda _: None)
+
+        mock_set.assert_called_once_with("tdp_api_v3_3_10", {"enabled": True})
+
+    def test_bootstrap_then_sync_reads_the_same_versioned_storage_key(self):
+        tool = _make_api_tool("tdp_tool", "tdp_api")
+        tools = {"tdp_tool": tool}
+        services = {
+            "tdp_api": {"apiKey": "legacy-copy"},
+            "tdp_api_v3_3_10": {"apiKey": "versioned-copy"},
+        }
+
+        def get_raw(storage_key: str):
+            value = services.get(storage_key)
+            return value.copy() if value is not None else None
+
+        def set_service(storage_key: str, value: dict):
+            services[storage_key] = value.copy()
+
+        with (
+            patch.object(ToolRegistry, "_tools", tools),
+            patch.object(ToolRegistry, "_enabled_defaults", {"tdp_tool": True}),
+            patch(
+                "flocks.config.api_versioning.versioned_storage_key_for",
+                return_value="tdp_api_v3_3_10",
+            ),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.get_api_service_raw",
+                side_effect=get_raw,
+            ),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.set_api_service",
+                side_effect=set_service,
+            ),
+            patch(
+                "flocks.config.config_writer.ConfigWriter.list_api_services_raw",
+                side_effect=lambda: services,
+            ),
+        ):
+            ToolRegistry._bootstrap_user_api_services()
+            ToolRegistry._sync_api_service_states()
+
+        assert services["tdp_api_v3_3_10"]["enabled"] is True
+        assert "enabled" not in services["tdp_api"]
+        assert tool.info.enabled is True
+
     def test_bootstrap_does_not_overwrite_explicit_disabled(self):
         """When api_services.<provider>.enabled is False, bootstrap leaves it untouched."""
         existing = {"enabled": False, "apiKey": "{secret:key}"}

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
-import shlex
 import shutil
 import subprocess
 import sys
@@ -18,14 +18,12 @@ console = Console()
 
 
 def doctor_command() -> None:
-    """Run the source installer from the Flocks source directory."""
+    """Repair the active source installation using the shared core installer."""
     source_root = _find_source_root()
-    script = _select_source_install_script(source_root)
-    command = _build_source_install_command(script)
     env = _build_source_install_env()
 
     console.print(f"[cyan]Flocks source directory:[/cyan] {source_root}")
-    console.print(f"[cyan]Source install command:[/cyan] {_format_command(command)}")
+    console.print("[cyan]Repairing Flocks core installation...[/cyan]")
 
     if _needs_windows_handoff():
         _start_windows_handoff(source_root, env=env)
@@ -35,10 +33,39 @@ def doctor_command() -> None:
         )
         return
 
-    _run_source_install(command, source_root=source_root, env=env)
+    _run_core_install(source_root, env=env)
 
     console.print("[green]安装正常[/green]")
     _print_service_diagnosis()
+
+
+def _run_core_install(source_root: Path, *, env: dict[str, str] | None = None) -> None:
+    """Run the shared updater/doctor core installation entry point."""
+    from flocks.updater import updater
+
+    uv_path = shutil.which("uv")
+    if not uv_path:
+        script_name = "install.ps1" if _is_windows() else "install.sh"
+        console.print(
+            f"[red]uv was not found. Run scripts/{script_name} to install system prerequisites.[/red]"
+        )
+        raise typer.Exit(1)
+
+    install_env = env or os.environ
+    try:
+        asyncio.run(
+            updater.install_or_repair_source(
+                install_root=source_root,
+                uv_path=uv_path,
+                version=updater.get_current_version(),
+                uv_default_index=install_env.get("FLOCKS_UV_DEFAULT_INDEX"),
+                npm_registry=install_env.get("FLOCKS_NPM_REGISTRY"),
+                sync_timeout=300,
+            )
+        )
+    except RuntimeError as error:
+        console.print(f"[red]Core installation repair failed: {error}[/red]")
+        raise typer.Exit(1) from error
 
 
 def _find_source_root(start: Path | None = None) -> Path:
@@ -53,44 +80,6 @@ def _find_source_root(start: Path | None = None) -> Path:
             return candidate
 
     raise typer.BadParameter("Could not locate the Flocks source directory.")
-
-
-def _select_source_install_script(source_root: Path) -> Path:
-    """Select the platform-specific source install script."""
-    suffix = ".ps1" if _is_windows() else ".sh"
-    script = source_root / "scripts" / f"install{suffix}"
-
-    if not script.is_file():
-        raise typer.BadParameter(f"Source installer not found: {script}")
-
-    return script
-
-
-def _build_source_install_command(script: Path) -> list[str]:
-    """Build the subprocess command for the selected installer."""
-    if script.suffix == ".ps1":
-        powershell = _find_powershell()
-        return [
-            powershell,
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-        ]
-
-    return ["bash", str(script)]
-
-
-def _run_source_install(command: list[str], *, source_root: Path, env: dict[str, str] | None) -> None:
-    """Run the selected source installer synchronously."""
-    try:
-        subprocess.run(command, cwd=source_root, check=True, env=env)
-    except FileNotFoundError as error:
-        console.print(f"[red]Failed to start installer: {error}[/red]")
-        raise typer.Exit(1) from error
-    except subprocess.CalledProcessError as error:
-        raise typer.Exit(error.returncode or 1) from error
 
 
 def _build_source_install_env() -> dict[str, str] | None:
@@ -193,11 +182,6 @@ def _service_status_is_healthy(status_lines: list[str]) -> bool:
     backend_running = any("后端运行中" in line for line in status_lines)
     webui_running = any("WebUI 运行中" in line for line in status_lines)
     return backend_running and webui_running
-
-
-def _format_command(command: list[str]) -> str:
-    """Return a shell-readable representation of the command."""
-    return " ".join(shlex.quote(part) for part in command)
 
 
 def _is_windows() -> bool:

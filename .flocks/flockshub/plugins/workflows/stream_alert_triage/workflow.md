@@ -6,7 +6,7 @@ stream_alert_triage 是 NDR 告警流并发研判 Pipeline。
 - 读取上游 stream_alert_denoise 去重输出
 - 同批次 dedup_key 相同 → 只研判 leader，follower 复用结果
 - 跨批次 dedup_key 命中缓存 → 直接复用历史研判，不调 LLM
-- 4 并行 LLM 分支（survey / cve_related / cve_info / payload_analysis）
+- 4 个 LLM 分支（survey / cve_related / cve_info / payload_analysis），共享运行级并发预算
 - 研判产物仅写入 triage_report 字段，不生成独立报告文件
 
 **完全自包含**，研判逻辑直接内联，不依赖也不嵌入 `tdp_alert_triage`。
@@ -15,7 +15,7 @@ stream_alert_triage 是 NDR 告警流并发研判 Pipeline。
 
 * **跨批次复用**：dedup_key 命中持久化 cache 时直接复用历史 verdict/title/triage_report，不调 LLM
 * **同批次去重**：批内多条 alert 共享 dedup_key 时，只对 **leader（首条）研判**，follower 广播复用 leader 结果
-* **保留 4 并行 LLM 分支**（survey / cve_related / cve_info / payload_analysis）— 与 `tdp_alert_triage` 完全相同的研判语义
+* **保留 4 个 LLM 分支**（survey / cve_related / cve_info / payload_analysis）— 与 `tdp_alert_triage` 完全相同的研判语义；所有 LLM 调用共享运行级并发预算，避免与外层 work unit 并发相乘
 * **研判产物仅以字段形式附加**到每条 alert（`triage_report` 字段含带语义标签的完整 markdown），**不生成任何独立的 per-alert 报告文件**
 
 ## 与上游的关系
@@ -51,7 +51,7 @@ load_dedup_file -> concurrent_triage -> summarize
 | 顺序 | 节点 | 做什么 | 下一步 |
 | --- | --- | --- | --- |
 | 1 | load_dedup_file | 一次性读取 stream_alert_denoise 写入的 JSONL 文件。输入优先级：input_paths > input_path > input_date（自动遍历该日所有 dedup_result_*.jsonl）> 当日默认。跳过 file_header 行，输出 enriched_alerts (list[dict])。 | concurrent_triage |
-| 2 | concurrent_triage | Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1），内层 ThreadPoolExecutor(4) 并行 survey / cve_related / cve_info / payload_analysis。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 并行 LLM + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。SOC DB 持久化只接受明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的告警，并通过数据库唯一索引保证跨执行全局唯一；重复 key 只更新研判字段并保留首次事件元数据，持久化失败会使工作流失败。可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。 | summarize |
+| 2 | concurrent_triage | Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1）；单条告警仍执行 survey / cve_related / cve_info / payload_analysis 4 个分支，但所有 `llm.ask()` 共享运行级 concurrency 预算，因此总 LLM 峰值不超过 1–5，不再与分支数相乘。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 个 LLM 分支 + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。SOC DB 持久化只接受明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的告警，并通过数据库唯一索引保证跨执行全局唯一；重复 key 只更新研判字段并保留首次事件元数据，持久化失败会使工作流失败。可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。 | summarize |
 | 3 | summarize | 汇总输出：写 pipeline_summary.md 到 ~/.flocks/workspace/outputs/<today>/artifacts/，暴露 top-risk 告警的 verdict/title/triage_report 作为工作流的 final outputs。 | 工作流最终输出 |
 
 编辑流程结构时，要同时确认节点顺序、边关系、字段映射和最终输出是否仍然一致。
@@ -96,7 +96,7 @@ load_dedup_file -> concurrent_triage -> summarize
 
 ### 4.2 concurrent_triage
 
-职责: Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1），内层 ThreadPoolExecutor(4) 并行 survey / cve_related / cve_info / payload_analysis。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 并行 LLM + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。SOC DB 持久化只接受明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的告警，并通过数据库唯一索引保证跨执行全局唯一；重复 key 只更新研判字段并保留首次事件元数据，持久化失败会使工作流失败。可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。
+职责: Leader/follower 分组并发研判节点（自包含，内联 tdp_alert_triage 逻辑）。先按 dedup_key 把 alerts 分组：每组只对 leader 研判，follower 复用 leader 结果。外层 ThreadPoolExecutor(concurrency) 处理 unique work units（concurrency 取值 1–5，默认 1）；单条告警仍执行 survey / cve_related / cve_info / payload_analysis 4 个分支，但所有 `llm.ask()` 共享运行级 concurrency 预算，因此总 LLM 峰值不超过 1–5，不再与分支数相乘。dedup_key 在 triage_cache.pkl 命中时直接复用历史 verdict/title/triage_report；未命中则 leader 执行完整研判（情报查询 + 4 个 LLM 分支 + attack_analysis + verdict + title + 聚合 markdown），完整研判 markdown 仅写入 alert 的 `triage_report` 字段，**不生成任何独立报告文件**。新结果合并写回 cache（FIFO LRU + 文件锁 + 原子落盘）。SOC DB 持久化只接受明确 `is_duplicate=false`、包含 `dedup_key` 且批内首次出现的告警，并通过数据库唯一索引保证跨执行全局唯一；重复 key 只更新研判字段并保留首次事件元数据，持久化失败会使工作流失败。可通过工作流目录 `config.json` 或运行输入将 `triage_output_mode` 切换为 `jsonl` / `both` / `none`，保留 `triage_result_NNN.jsonl` 可选输出。
 
 - 节点类型: Python
 - 输入来源: load_dedup_file

@@ -15,7 +15,7 @@ from typing import Dict, Iterable, List, Optional, Tuple
 import aiosqlite
 from pydantic import BaseModel, Field
 
-from flocks.auth.context import AuthUser
+from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.extensions import ensure_callable_methods
 from flocks.storage.storage import Storage
 from flocks.utils.id import Identifier
@@ -256,6 +256,8 @@ class LocalAuthBackend:
         normalized_username = username.strip()
         if not normalized_username:
             raise ValueError("用户名不能为空")
+        if normalized_username == API_TOKEN_SERVICE_USER_ID:
+            raise ValueError("该用户名为系统保留用户名")
         if len(password) < 8:
             raise ValueError("密码长度至少 8 位")
 
@@ -635,6 +637,7 @@ class LocalAuthBackend:
                     await Session.update(
                         project_id=session.project_id,
                         session_id=session.id,
+                        allow_inactive=True,
                         owner_user_id=admin_user_id,
                         owner_username=admin_user.username,
                     )
@@ -672,6 +675,7 @@ class LocalAuthBackend:
                 await Session.update(
                     project_id=session.project_id,
                     session_id=session.id,
+                    allow_inactive=True,
                     owner_user_id=admin_user_id,
                     owner_username=admin_username,
                 )

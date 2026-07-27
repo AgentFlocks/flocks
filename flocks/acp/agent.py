@@ -1334,9 +1334,13 @@ class ACPAgent:
         from flocks.session.message import Message
         from flocks.session.features.todo import Todo
         from flocks.session.core.status import SessionStatus
+        from flocks.session.session import Session
 
-        await Message.clear(session_id)
-        await Todo.clear(session_id)
+        async def clear_persisted_state() -> None:
+            await Message.clear(session_id)
+            await Todo.clear(session_id)
+
+        await Session.run_active_write(session_id, clear_persisted_state)
         SessionStatus.clear(session_id)
 
         session = self._session_manager.get(session_id)

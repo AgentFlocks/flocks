@@ -37,7 +37,6 @@
     "fetchingPro": "Downloading Pro bundle",
     "backing_up": "Backing up current version",
     "applying": "Applying new version",
-    "syncing": "Syncing backend dependencies",
     "restarting": "Restarting service",
     "done": "Done",
     "error": "Error"

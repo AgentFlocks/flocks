@@ -1,7 +1,7 @@
-name: tdp_host_threat_list
+name: tdp_threat_alert_host
 description: >
-  查询 TDP 告警主机相关数据。`summary` 返回告警主机列表，适合按严重级别、威胁性质、威胁类型、业务组和关键词筛选；`events`
-  返回某台告警主机下的威胁事件列表，通常需要先从 `summary` 结果里拿到 `assets_machine` 再继续查询。优先使用顶层语义化参数，不要手写
+  查询 TDP 告警主机相关数据。`alert_host_list` 返回告警主机列表；`host_threat_list`
+  返回指定告警主机的威胁列表，通常需要先从 `alert_host_list` 结果里取得 `assets_machine`。优先使用顶层语义化参数，不要手写
   `condition` / `page`，只有在需要透传尚未覆盖的底层字段时才使用这两个高级兼容参数。
 category: custom
 enabled: true
@@ -14,10 +14,10 @@ inputSchema:
     action:
       type: string
       description: >
-        告警主机子接口动作。`summary` 会自动补齐默认时间范围、全部告警主机的威胁类型、空的威胁特征和默认分页；
-        `events` 用于查看单台主机下的威胁事件，要求提供 `asset_machine`，级联场景可额外传 `device_id`。
-      enum: [summary, events]
-      default: summary
+        `alert_host_list` 查询告警主机列表，可按严重级别、威胁性质、威胁类型、业务组和关键词筛选；
+        `host_threat_list` 查询指定 `asset_machine` 的威胁列表，级联场景可额外传 `device_id`。
+      enum: [alert_host_list, host_threat_list]
+      default: alert_host_list
     time_from:
       type: integer
       description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
@@ -26,7 +26,7 @@ inputSchema:
       description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
     asset_machine:
       type: string
-      description: 资产机器标识，`events` 动作必填；应从 `summary` 结果中的主机标识字段获取。
+      description: 资产机器标识，`host_threat_list` 必填；应从 `alert_host_list` 结果中的主机标识字段获取。
     device_id:
       type: string
       description: 设备 ID，级联平台场景使用；非级联平台通常可省略。
@@ -52,7 +52,7 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 威胁类型列表。`summary` 默认已覆盖全部常见威胁类型；仅在需要缩小范围时传入。
+      description: 威胁类型列表。`alert_host_list` 默认已覆盖全部常见威胁类型；仅在需要缩小范围时传入。
     disposal_status:
       type: array
       items:
@@ -64,21 +64,21 @@ inputSchema:
       type: array
       items:
         type: string
-      description: 主机类型列表，适用于 `summary`，常见值对应服务器或终端视角。
+      description: 主机类型列表，适用于 `alert_host_list`，常见值对应服务器或终端视角。
     assets_group:
       type: array
       items:
         type: integer
-      description: 业务组 ID 列表，适用于 `summary`。
+      description: 业务组 ID 列表，适用于 `alert_host_list`。
     host_type:
       type: array
       items:
         type: string
-      description: 资产类型列表，适用于 `summary`。
+      description: 资产类型列表，适用于 `alert_host_list`。
     keyword:
       type: string
       description: >
-        关键词搜索，适用于 `summary` 和 `events`。handler 会自动组装固定的
+        关键词搜索，适用于 `alert_host_list` 和 `host_threat_list`。handler 会自动组装固定的
         `condition.fuzzy.fieldlist=["threat.name","external_ip","machine","assets.name","data","machine_name"]`。
     cur_page:
       type: integer
@@ -88,7 +88,7 @@ inputSchema:
       description: 每页条数，默认 20。
     sort_by:
       type: string
-      description: 排序字段。`summary` 默认按 `severity`，`events` 默认按 `max_severity`。
+      description: 排序字段。`alert_host_list` 默认按 `severity`，`host_threat_list` 默认按 `max_severity`。
     sort_order:
       type: string
       enum: [asc, desc]

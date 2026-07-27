@@ -136,3 +136,19 @@ describe('providerAPI.listApiServices', () => {
     expect(response.data[0].name).toBe('Forced Service');
   });
 });
+
+describe('providerAPI.revealCredentials', () => {
+  afterEach(() => {
+    vi.resetModules();
+    mockPost.mockReset();
+  });
+
+  it('uses the explicit credential reveal endpoint', async () => {
+    mockPost.mockResolvedValue({ data: { api_key: 'sk-revealed', has_credential: true } });
+
+    const { providerAPI } = await import('./provider');
+    await providerAPI.revealCredentials('openai');
+
+    expect(mockPost).toHaveBeenCalledWith('/api/provider/openai/credentials/reveal');
+  });
+});

@@ -2,7 +2,7 @@
 channel_message tool — sends a message to the messaging channel bound to a given session.
 
 Looks up the SessionBinding for the given session_id to automatically resolve
-the target channel (WeCom / Weixin / Feishu / DingTalk / Telegram / WhatsApp / Email)
+the target channel (WeCom / Weixin / Feishu / DingTalk / Telegram / WhatsApp / Email / Slack)
 and chat_id, so the caller
 does not need to specify them manually.
 
@@ -29,6 +29,7 @@ _CHANNEL_ALIASES: dict[str, list[str]] = {
     "telegram": ["telegram", "tg", "tele"],
     "whatsapp": ["whatsapp", "wa"],
     "email": ["email", "mail", "邮件", "imap", "smtp"],
+    "slack": ["slack", "sl"],
 }
 
 
@@ -136,7 +137,7 @@ async def _http_session_send(
     description=(
         "Send a message to the messaging channel bound to a session. "
         "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk, "
-        "Telegram=telegram, WhatsApp=whatsapp, Email/邮件=email. "
+        "Telegram=telegram, WhatsApp=whatsapp, Email/邮件=email, Slack=slack. "
         "Resolves the target channel and chat automatically from session_id. "
         "Use channel_type to target a specific channel when the session has multiple bindings."
     ),
@@ -166,6 +167,7 @@ async def _http_session_send(
                 "telegram",
                 "whatsapp",
                 "email",
+                "slack",
                 "企微",
                 "企业微信",
                 "微信",
@@ -175,7 +177,7 @@ async def _http_session_send(
             ],
             description=(
                 "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, dingtalk=钉钉, "
-                "telegram=Telegram, whatsapp=WhatsApp, or email=邮件. "
+                "telegram=Telegram, whatsapp=WhatsApp, email=邮件, or slack=Slack. "
                 "Chinese aliases are accepted. "
                 "If omitted and the session has only one binding, that channel is used automatically. "
                 "If omitted and the session has multiple bindings, the message is sent to all of them."

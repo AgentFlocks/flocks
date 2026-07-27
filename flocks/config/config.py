@@ -349,6 +349,20 @@ class ToolOutputConfig(BaseModel):
     )
 
 
+class ToolFailureConfig(BaseModel):
+    """Repeated tool-failure handling."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        True,
+        alias="disableOnRepeatedFailure",
+        description=(
+            "Disable a standalone custom tool after repeated identical failures."
+        ),
+    )
+
+
 class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
 
@@ -674,6 +688,11 @@ class ConfigInfo(BaseModel):
         None,
         alias="toolOutput",
         description="Tool output size limits (read, truncation caps).",
+    )
+    tool_failure: Optional[ToolFailureConfig] = Field(
+        None,
+        alias="toolFailure",
+        description="Repeated tool-failure handling.",
     )
     experimental: Optional[ExperimentalConfig] = None
     
@@ -1186,7 +1205,7 @@ class Config:
             # Remove comments properly
             # 1. Remove /* */ block comments first
             text_no_comments = re.sub(r'/\*.*?\*/', '', text, flags=re.DOTALL)
-            
+
             # 2. Remove // line comments, but NOT in strings!
             # We need to be careful not to remove // inside quoted strings (like URLs)
             # This regex matches // that are NOT inside quotes
@@ -1199,30 +1218,30 @@ class Config:
                 in_string = False
                 escape_next = False
                 comment_start = -1
-                
+
                 for i, char in enumerate(line):
                     if escape_next:
                         escape_next = False
                         continue
-                    
+
                     if char == '\\':
                         escape_next = True
                         continue
-                    
+
                     if char == '"' and not escape_next:
                         in_string = not in_string
-                    
+
                     if not in_string and i < len(line) - 1 and line[i:i+2] == '//':
                         comment_start = i
                         break
-                
+
                 if comment_start >= 0:
                     line = line[:comment_start]
-                
+
                 cleaned_lines.append(line)
-            
+
             text_no_comments = '\n'.join(cleaned_lines)
-            
+
             # Parse JSON
             data = json.loads(text_no_comments)
         except json.JSONDecodeError as e:
@@ -1372,7 +1391,13 @@ class Config:
         return None
 
     @classmethod
-    async def update(cls, config: ConfigInfo, project_dir: Optional[Path] = None) -> None:
+    async def update(
+        cls,
+        config: ConfigInfo,
+        project_dir: Optional[Path] = None,
+        *,
+        channel_allow_from_deletions: Optional[set[str]] = None,
+    ) -> None:
         """
         Update configuration
         
@@ -1380,6 +1405,9 @@ class Config:
             config: New configuration
             project_dir: Deprecated and ignored. Config is always written to
                 the unified user config directory.
+            channel_allow_from_deletions: Channel IDs whose persisted
+                allowFrom field should be removed after a successful full
+                config validation and merge.
         """
         _ = project_dir
 
@@ -1396,6 +1424,13 @@ class Config:
         
         # Write
         config_data = merged.model_dump(by_alias=True, exclude_none=True, mode="json")
+        if channel_allow_from_deletions:
+            channels = config_data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channel_allow_from_deletions:
+                    channel_cfg = channels.get(channel_id)
+                    if isinstance(channel_cfg, dict):
+                        channel_cfg.pop("allowFrom", None)
         config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
         
         # Clear cache

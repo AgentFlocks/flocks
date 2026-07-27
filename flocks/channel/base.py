@@ -39,6 +39,7 @@ class ChannelCapabilities:
     reactions: bool = False
     edit: bool = False
     rich_text: bool = False
+    self_managed_connection: bool = False
 
 
 @dataclass
@@ -84,6 +85,10 @@ class DeliveryResult:
     success: bool = True
     error: Optional[str] = None
     retryable: bool = False
+
+
+class NonRetryableChannelError(RuntimeError):
+    """Raised when reconnecting cannot fix a channel startup failure."""
 
 
 @dataclass

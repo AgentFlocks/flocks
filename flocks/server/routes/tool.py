@@ -639,33 +639,39 @@ def _get_effective_tool_enabled(
 
 def _set_global_tool_enabled(tool: Any, desired: bool) -> bool:
     """Persist and apply the global enabled state for a registry tool."""
-    default = _get_default_enabled(tool.info)
-    # Service gate: only matters when the user is trying to enable.
-    # Disabling is always honoured.
-    service_ok = _service_allows_enable(tool.info)
-    new_enabled = desired and service_ok
+    with ToolRegistry._refresh_lock:
+        previous_enabled = bool(tool.info.enabled)
+        default = _get_default_enabled(tool.info)
+        # Service gate: only matters when the user is trying to enable.
+        # Disabling is always honoured.
+        service_ok = _service_allows_enable(tool.info)
+        new_enabled = desired and service_ok
 
-    if desired == default:
-        removed = ConfigWriter.delete_tool_setting(tool.info.name)
-        log.info("tool.updated.reset_to_default", {
-            "name": tool.info.name,
-            "enabled": new_enabled,
-            "default": default,
-            "removed_overlay": removed,
-        })
-    else:
-        ConfigWriter.set_tool_setting(tool.info.name, {"enabled": desired})
-        log.info("tool.updated", {
-            "name": tool.info.name,
-            "enabled": new_enabled,
-            "requested": desired,
-            "blocked_by_service": desired and not service_ok,
-            "native": tool.info.native,
-            "store": "overlay",
-        })
+        if desired == default:
+            removed = ConfigWriter.delete_tool_setting(tool.info.name)
+            log.info("tool.updated.reset_to_default", {
+                "name": tool.info.name,
+                "enabled": new_enabled,
+                "default": default,
+                "removed_overlay": removed,
+            })
+        else:
+            ConfigWriter.set_tool_setting(tool.info.name, {"enabled": desired})
+            log.info("tool.updated", {
+                "name": tool.info.name,
+                "enabled": new_enabled,
+                "requested": desired,
+                "blocked_by_service": desired and not service_ok,
+                "native": tool.info.native,
+                "store": "overlay",
+            })
 
-    tool.info.enabled = new_enabled
-    return new_enabled
+        tool.info.enabled = new_enabled
+        if new_enabled:
+            ToolRegistry._reset_failure_state(tool.info.name)
+        if new_enabled != previous_enabled:
+            ToolRegistry._bump_revision("tool_setting_update")
+        return new_enabled
 
 
 # Routes
@@ -969,10 +975,16 @@ async def reset_tool_setting(tool_name: str, _admin: object = Depends(require_ad
             detail=f"Tool not found: {tool_name}",
         )
 
-    removed = ConfigWriter.delete_tool_setting(tool_name)
-    default = _get_default_enabled(tool.info)
-    new_enabled = default and _service_allows_enable(tool.info)
-    tool.info.enabled = new_enabled
+    with ToolRegistry._refresh_lock:
+        removed = ConfigWriter.delete_tool_setting(tool_name)
+        default = _get_default_enabled(tool.info)
+        new_enabled = default and _service_allows_enable(tool.info)
+        previous_enabled = bool(tool.info.enabled)
+        tool.info.enabled = new_enabled
+        if new_enabled:
+            ToolRegistry._reset_failure_state(tool_name)
+        if new_enabled != previous_enabled:
+            ToolRegistry._bump_revision("tool_setting_reset")
     _invalidate_tool_summary_cache()
 
     log.info("tool.setting.reset", {

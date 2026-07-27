@@ -22,11 +22,13 @@ from pydantic import BaseModel, Field, ConfigDict
 import uuid
 
 from flocks.workflow.models import Workflow, Node, Edge
+from flocks.workflow.service_port import resolve_service_port
 from flocks.workflow.runner import RunWorkflowResult, run_workflow
 from flocks.workflow.center import (
     WorkflowCenterError,
     WorkflowNotFoundError,
     WorkflowNotPublishedError,
+    WorkflowPortUnavailableError,
     get_workflow_health,
     invoke_published_workflow,
     list_registry_entries,
@@ -75,6 +77,7 @@ from flocks.workflow.triggers import (
     workflow_json_declares_triggers,
     workflow_trigger_definitions_from_json,
 )
+from flocks.workflow.triggers.models import TriggerType
 from flocks.workflow.triggers.dispatcher import evaluate_trigger_filter
 from flocks.workflow.triggers.runtime import default_runtime as default_trigger_runtime
 from flocks.workflow.triggers.compat import (
@@ -97,6 +100,12 @@ webhook_router = APIRouter()
 log = Log.create(service="workflow-routes")
 
 _PROGRESS_FLUSH_EVERY_STEPS = 5
+_WORKFLOW_LIST_ENRICH_CONCURRENCY = 8
+_WORKFLOW_API_HEALTH_INTERVAL_S = 5.0
+_WORKFLOW_API_HEALTH_PROBE_CONCURRENCY = 4
+
+_workflow_api_health_cache: Dict[str, bool] = {}
+_workflow_api_health_monitor_task: Optional[asyncio.Task[None]] = None
 
 _LEGACY_SINGLETON_TRIGGER_TYPES = frozenset({"schedule", "kafka", "syslog"})
 _WEBHOOK_TRIGGER_TYPES = frozenset({"webhook", "custom_webhook"})
@@ -187,6 +196,32 @@ class WorkflowUpdateRequest(BaseModel):
     status: Optional[Literal["draft", "active", "archived"]] = Field(None, description="Status")
 
 
+WorkflowCapabilityState = Literal["unconfigured", "starting", "running", "stopped", "error"]
+
+
+class WorkflowCapabilityStatusResponse(BaseModel):
+    configured: bool
+    state: WorkflowCapabilityState
+
+
+class WorkflowTriggerStatusItemResponse(BaseModel):
+    id: str
+    type: TriggerType
+    name: Optional[str] = None
+    state: WorkflowCapabilityState
+    rawState: Optional[str] = None
+
+
+class WorkflowTriggerCapabilityStatusResponse(WorkflowCapabilityStatusResponse):
+    count: int = 0
+    items: List[WorkflowTriggerStatusItemResponse] = Field(default_factory=list)
+
+
+class WorkflowIntegrationStatusResponse(BaseModel):
+    api: WorkflowCapabilityStatusResponse
+    trigger: WorkflowTriggerCapabilityStatusResponse
+
+
 class WorkflowResponse(BaseModel):
     """Workflow response"""
 
@@ -206,6 +241,27 @@ class WorkflowResponse(BaseModel):
     createdAt: int = Field(..., description="Created timestamp (ms)")
     updatedAt: int = Field(..., description="Updated timestamp (ms)")
     stats: Dict[str, Any] = Field(default_factory=dict, description="Statistics")
+    integrationStatus: Optional[WorkflowIntegrationStatusResponse] = Field(
+        None,
+        description="API publishing and trigger runtime summary",
+    )
+
+
+class WorkflowSummaryResponse(BaseModel):
+    """Lightweight workflow data used by card lists."""
+
+    id: str
+    name: str
+    nameI18n: Optional[Dict[str, str]] = None
+    description: Optional[str] = None
+    category: str = "default"
+    status: str = "draft"
+    source: Optional[str] = None
+    createdAt: int
+    updatedAt: int
+    nodeCount: int = 0
+    stats: Dict[str, Any] = Field(default_factory=dict)
+    integrationStatus: WorkflowIntegrationStatusResponse
 
 
 class WorkflowRunRequest(BaseModel):
@@ -260,6 +316,7 @@ class WorkflowCenterPublishRequest(BaseModel):
         None,
         description="Service driver. Defaults to FLOCKS_WORKFLOW_SERVICE_DRIVER or local.",
     )
+    port: Optional[int] = Field(None, ge=1, le=65535, description="Stable host listening port")
 
 
 class WorkflowCenterInvokeRequest(BaseModel):
@@ -329,9 +386,9 @@ def _workflow_integration_config_key(workflow_id: str) -> str:
 def _read_workflow_from_fs(workflow_id: str) -> Optional[Dict[str, Any]]:
     """Read workflow data from the filesystem.
 
-    Search order (lowest → highest priority), same roots as
-    resolve_global_workflow_roots / resolve_project_workflow_roots; per-id dir
-    is ``<root>/<id>/`` with ``workflow.json`` inside.
+    Search order (lowest → highest priority) visits project-bundled roots before
+    global user roots; per-id dir is ``<root>/<id>/`` with ``workflow.json``
+    inside.
     """
     return shared_read_workflow_from_fs(workflow_id)
 
@@ -531,9 +588,8 @@ def _scan_workflow_base_dir(base_dir: Path, source: str) -> Dict[str, Dict[str, 
 def _list_workflows_from_fs() -> List[Dict[str, Any]]:
     """Scan global and project workflow directories and return merged list.
 
-    Scan order matches *_all_scan_dirs()* (lowest -> highest priority): each
-    root from *resolve_global_workflow_roots* then each from
-    *resolve_project_workflow_roots(workspace)*; under each root, immediate
+    Scan order matches *_all_scan_dirs()* (lowest -> highest priority): project
+    bundle roots first, then global user roots; under each root, immediate
     subdirectories with *workflow.json* are workflows.
 
     Later entries override earlier ones when the workflow directory name (*id*)
@@ -804,6 +860,7 @@ def _publish_for_config(service: Optional[Dict[str, Any]]) -> Dict[str, Any]:
             "enabled": bool(service) and status_value not in {"stopped", "unpublished"},
             "status": status_value,
             "driver": service.get("driver") if service else None,
+            "port": resolve_service_port(service) if service else None,
             "serviceUrl": service.get("serviceUrl") if service else None,
             "invokeUrl": service.get("invokeUrl") if service else None,
             "containerName": service.get("containerName") if service else None,
@@ -1309,6 +1366,22 @@ async def _get_workflow_stats(workflow_id: str) -> Dict[str, Any]:
 # =============================================================================
 
 
+def _filter_workflow_list_data(
+    all_data: List[Dict[str, Any]],
+    *,
+    category: Optional[str],
+    status: Optional[str],
+    exclude_id: Optional[str],
+) -> List[Dict[str, Any]]:
+    return [
+        data
+        for data in all_data
+        if not category or data.get("category") == category
+        if not status or data.get("status") == status
+        if not exclude_id or data.get("id") != exclude_id
+    ]
+
+
 @router.get("/workflow", response_model=List[WorkflowResponse])
 async def list_workflows(
     category: Optional[str] = Query(None, description="Filter by category"),
@@ -1326,26 +1399,31 @@ async def list_workflows(
     try:
         await _migrate_storage_to_filesystem()
 
-        all_data = _list_workflows_from_fs()
-        workflows = []
+        filtered_data = _filter_workflow_list_data(
+            _list_workflows_from_fs(),
+            category=category,
+            status=status,
+            exclude_id=exclude_id,
+        )
 
-        for data in all_data:
+        semaphore = asyncio.Semaphore(_WORKFLOW_LIST_ENRICH_CONCURRENCY)
+
+        async def enrich_workflow(data: Dict[str, Any]) -> Optional[WorkflowResponse]:
             try:
-                if category and data.get("category") != category:
-                    continue
-                if status and data.get("status") != status:
-                    continue
-                if exclude_id and data.get("id") == exclude_id:
-                    continue
-
-                workflow_id = data["id"]
-                stats = await _get_workflow_stats(workflow_id)
-                data["stats"] = stats
-
-                workflows.append(WorkflowResponse(**data))
+                async with semaphore:
+                    workflow_id = data["id"]
+                    stats = await _get_workflow_stats(workflow_id)
+                enriched_data = {
+                    **data,
+                    "stats": stats,
+                }
+                return WorkflowResponse(**enriched_data)
             except Exception as e:
                 log.warning("workflow.list.skip", {"id": data.get("id"), "error": str(e)})
-                continue
+                return None
+
+        enriched = await asyncio.gather(*(enrich_workflow(data) for data in filtered_data))
+        workflows = [workflow for workflow in enriched if workflow is not None]
 
         workflows.sort(key=lambda w: w.updatedAt, reverse=True)
 
@@ -1356,6 +1434,60 @@ async def list_workflows(
     except Exception as e:
         log.error("workflow.list.error", {"error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to list workflows: {str(e)}")
+
+
+@router.get("/workflow-summaries", response_model=List[WorkflowSummaryResponse])
+async def list_workflow_summaries(
+    category: Optional[str] = Query(None, description="Filter by category"),
+    status: Optional[str] = Query(None, description="Filter by status"),
+    exclude_id: Optional[str] = Query(None, alias="excludeId", description="Exclude workflow by ID"),
+):
+    """Return lightweight workflow card data with cached integration states."""
+    try:
+        await _migrate_storage_to_filesystem()
+        filtered_data = _filter_workflow_list_data(
+            _list_workflows_from_fs(),
+            category=category,
+            status=status,
+            exclude_id=exclude_id,
+        )
+        semaphore = asyncio.Semaphore(_WORKFLOW_LIST_ENRICH_CONCURRENCY)
+
+        async def build_summary(data: Dict[str, Any]) -> Optional[WorkflowSummaryResponse]:
+            try:
+                async with semaphore:
+                    workflow_id = data["id"]
+                    stats, integration_status = await asyncio.gather(
+                        _get_workflow_stats(workflow_id),
+                        _get_workflow_integration_status(workflow_id, data),
+                    )
+                workflow_json = data.get("workflowJson") or {}
+                nodes = workflow_json.get("nodes") if isinstance(workflow_json, dict) else []
+                return WorkflowSummaryResponse(
+                    id=workflow_id,
+                    name=data.get("name") or workflow_id,
+                    nameI18n=data.get("nameI18n"),
+                    description=data.get("description"),
+                    category=data.get("category") or "default",
+                    status=data.get("status") or "draft",
+                    source=data.get("source"),
+                    createdAt=int(data.get("createdAt") or 0),
+                    updatedAt=int(data.get("updatedAt") or 0),
+                    nodeCount=len(nodes) if isinstance(nodes, list) else 0,
+                    stats=stats,
+                    integrationStatus=integration_status,
+                )
+            except Exception as exc:
+                log.warning("workflow.summary.skip", {"id": data.get("id"), "error": str(exc)})
+                return None
+
+        enriched = await asyncio.gather(*(build_summary(data) for data in filtered_data))
+        summaries = [summary for summary in enriched if summary is not None]
+        summaries.sort(key=lambda item: item.updatedAt, reverse=True)
+        return summaries
+    except Exception as exc:
+        log.error("workflow.summary.error", {"error": str(exc)})
+        raise HTTPException(status_code=500, detail=f"Failed to list workflow summaries: {str(exc)}")
 
 
 @router.post("/workflow", response_model=WorkflowResponse, status_code=status.HTTP_201_CREATED)
@@ -1782,6 +1914,7 @@ async def workflow_center_publish(workflow_id: str, req: Optional[WorkflowCenter
             workflow_id,
             image=req.image if req else None,
             driver=req.driver if req else None,
+            port=req.port if req else None,
         )
         return result
     except WorkflowNotFoundError as e:
@@ -2219,9 +2352,13 @@ async def _prepare_workflow_api_registry(workflow_id: str) -> tuple[Dict[str, An
         "sourceType": "main_storage",
         "workflowPath": str(workflow_path),
         "fingerprint": fp,
-        "publishStatus": "unpublished",
+        "publishStatus": existing_registry.get("publishStatus", "unpublished"),
         "registeredAt": existing_registry.get("registeredAt", now_ms),
         "updatedAt": now_ms,
+        "activeReleaseId": existing_registry.get("activeReleaseId"),
+        "serviceKey": existing_registry.get("serviceKey"),
+        "serviceUrl": existing_registry.get("serviceUrl"),
+        "servicePort": existing_registry.get("servicePort"),
     }
     await WorkflowStore.kv_put(f"{_REGISTRY_PREFIX_MAIN}{workflow_id}", registry_entry)
     return data, now_ms
@@ -2262,6 +2399,7 @@ async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[s
         service["driver"] = runtime.get("driver") or service.get("driver")
         service["containerName"] = runtime.get("containerName") or service.get("containerName", "")
         service["image"] = runtime.get("image") or service.get("image")
+        service["port"] = resolve_service_port(runtime) or resolve_service_port(service)
         return service
 
     status = str(service.get("status") or "").strip().lower()
@@ -2274,6 +2412,177 @@ async def _normalize_listed_api_service(key: Any, entry: Any) -> Optional[Dict[s
             "reason": "missing_runtime",
         }
     return service
+
+
+def _summarize_capability_state(raw_state: Any) -> WorkflowCapabilityState:
+    state = str(raw_state or "").strip().lower()
+    if state in {"running", "listening", "ready", "active"}:
+        return "running"
+    if state in {"failed", "error"}:
+        return "error"
+    if state in {"stopped", "unpublished", "paused", "disabled"}:
+        return "stopped"
+    return "starting"
+
+
+async def refresh_workflow_api_health_cache() -> Dict[str, int]:
+    """Refresh API health outside list requests with process-wide bounded concurrency."""
+    keys = await WorkflowStore.kv_list_keys(_API_SERVICE_PREFIX)
+    services = await asyncio.gather(*(WorkflowStore.kv_get(key) for key in keys))
+    active_workflow_ids = [
+        str(service.get("workflowId") or _workflow_id_from_api_service_key(key))
+        for key, service in zip(keys, services)
+        if isinstance(service, dict)
+        and service
+        and _summarize_capability_state(service.get("status")) == "running"
+    ]
+    semaphore = asyncio.Semaphore(_WORKFLOW_API_HEALTH_PROBE_CONCURRENCY)
+
+    async def probe(workflow_id: str) -> tuple[str, bool]:
+        async with semaphore:
+            try:
+                health = await get_workflow_health(workflow_id)
+                return workflow_id, bool(health.get("ok"))
+            except Exception as exc:
+                log.warning("workflow.api_health_monitor.probe_failed", {"id": workflow_id, "error": str(exc)})
+                return workflow_id, False
+
+    results = await asyncio.gather(*(probe(workflow_id) for workflow_id in active_workflow_ids))
+    _workflow_api_health_cache.clear()
+    _workflow_api_health_cache.update(results)
+    return {
+        "checked": len(results),
+        "healthy": sum(1 for _, healthy in results if healthy),
+    }
+
+
+async def run_workflow_api_health_monitor() -> None:
+    """Continuously maintain the health snapshot consumed by workflow cards."""
+    while True:
+        try:
+            await refresh_workflow_api_health_cache()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("workflow.api_health_monitor.refresh_failed", {"error": str(exc)})
+        await asyncio.sleep(_WORKFLOW_API_HEALTH_INTERVAL_S)
+
+
+def start_workflow_api_health_monitor() -> asyncio.Task[None]:
+    global _workflow_api_health_monitor_task
+    if _workflow_api_health_monitor_task is None or _workflow_api_health_monitor_task.done():
+        _workflow_api_health_monitor_task = asyncio.create_task(
+            run_workflow_api_health_monitor(),
+            name="workflow-api-health-monitor",
+        )
+    return _workflow_api_health_monitor_task
+
+
+async def _get_workflow_integration_status(
+    workflow_id: str,
+    workflow_data: Dict[str, Any],
+) -> WorkflowIntegrationStatusResponse:
+    api_summary = WorkflowCapabilityStatusResponse(configured=False, state="unconfigured")
+    try:
+        service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+        if isinstance(service, dict) and service:
+            normalized_service = await _normalize_listed_api_service(
+                _api_service_key(workflow_id),
+                service,
+            )
+            state = _summarize_capability_state((normalized_service or service).get("status"))
+            if state == "running":
+                cached_health = _workflow_api_health_cache.get(workflow_id)
+                if cached_health is None:
+                    persisted_health = service.get("health")
+                    if isinstance(persisted_health, dict) and isinstance(persisted_health.get("ok"), bool):
+                        cached_health = persisted_health["ok"]
+                if cached_health is False:
+                    state = "error"
+                elif cached_health is None:
+                    state = "starting"
+            api_summary = WorkflowCapabilityStatusResponse(configured=True, state=state)
+    except Exception as exc:
+        log.warning("workflow.list.api_status_failed", {"id": workflow_id, "error": str(exc)})
+        api_summary = WorkflowCapabilityStatusResponse(configured=False, state="error")
+
+    try:
+        triggers = await _get_workflow_trigger_defs(workflow_id, workflow_data)
+        if not triggers:
+            trigger_summary = WorkflowTriggerCapabilityStatusResponse(
+                configured=False,
+                state="unconfigured",
+            )
+        else:
+            statuses = await default_trigger_runtime.get_workflow_trigger_statuses(
+                workflow_id,
+                set_workflow_json_triggers(workflow_data.get("workflowJson") or {}, triggers),
+            )
+            statuses_by_id = {
+                item.get("triggerId"): item
+                for item in statuses
+                if isinstance(item, dict) and item.get("triggerId")
+            }
+            trigger_items: List[WorkflowTriggerStatusItemResponse] = []
+            for trigger in triggers:
+                runtime_status = statuses_by_id.get(trigger.id)
+                raw_state = runtime_status.get("state") if runtime_status else None
+                trigger_items.append(
+                    WorkflowTriggerStatusItemResponse(
+                        id=trigger.id,
+                        type=trigger.type,
+                        name=trigger.name,
+                        state=_summarize_capability_state(raw_state) if raw_state else "error",
+                        rawState=raw_state,
+                    )
+                )
+            summarized_states = [item.state for item in trigger_items]
+            if "error" in summarized_states:
+                state = "error"
+            elif "stopped" in summarized_states:
+                state = "stopped"
+            elif summarized_states and all(item == "running" for item in summarized_states):
+                state = "running"
+            else:
+                state = "starting"
+            trigger_summary = WorkflowTriggerCapabilityStatusResponse(
+                configured=True,
+                state=state,
+                count=len(triggers),
+                items=trigger_items,
+            )
+    except Exception as exc:
+        log.warning("workflow.list.trigger_status_failed", {"id": workflow_id, "error": str(exc)})
+        trigger_summary = WorkflowTriggerCapabilityStatusResponse(configured=True, state="error")
+
+    return WorkflowIntegrationStatusResponse(api=api_summary, trigger=trigger_summary)
+
+
+async def _record_api_publish_failure(
+    workflow_id: str,
+    existing_service: Dict[str, Any],
+    error: Exception,
+) -> None:
+    """Mark a failed restart only when no prior runtime survived the attempt."""
+    if not existing_service:
+        return
+    try:
+        runtime = await WorkflowStore.kv_get(_runtime_key_main(workflow_id))
+        if isinstance(runtime, dict) and runtime:
+            return
+        failed_service = {
+            **existing_service,
+            "status": "error",
+            "lastStartError": str(error),
+            "lastStartAttemptAt": int(time.time() * 1000),
+            "health": {"ok": False, "reason": "publish_failed"},
+        }
+        await WorkflowStore.kv_put(_api_service_key(workflow_id), failed_service)
+    except Exception as persist_error:
+        log.warning(
+            "workflow.api.publish_failure_persist_failed",
+            {"id": workflow_id, "error": str(persist_error)},
+        )
 
 
 async def reconcile_published_workflow_api_services() -> Dict[str, int]:
@@ -2315,6 +2624,7 @@ async def reconcile_published_workflow_api_services() -> Dict[str, int]:
                 image=service.get("image") or None,
                 driver=_service_driver_from_record(service),
                 api_key=service.get("apiKey") or None,
+                port=resolve_service_port(service),
             )
 
             service_url = active_record.get("serviceUrl", "")
@@ -2329,6 +2639,7 @@ async def reconcile_published_workflow_api_services() -> Dict[str, int]:
                     "containerName": active_record.get("containerName", ""),
                     "driver": active_record.get("driver") or service.get("driver"),
                     "image": active_record.get("image") or service.get("image"),
+                    "port": resolve_service_port(active_record) or resolve_service_port(service),
                     "restartedAt": int(time.time() * 1000),
                 }
             )
@@ -2357,6 +2668,7 @@ class WorkflowServiceResponse(BaseModel):
     containerName: Optional[str] = None
     driver: Optional[Literal["local", "docker"]] = None
     image: Optional[str] = None
+    port: Optional[int] = None
 
 
 class KafkaConfigRequest(BaseModel):
@@ -2450,6 +2762,7 @@ async def publish_workflow_as_api(
     Writes the workflow JSON to disk, registers it with the workflow center,
     starts the selected runtime, and returns the service URL and generated API key.
     """
+    existing_service: Dict[str, Any] = {}
     try:
         data, now_ms = await _prepare_workflow_api_registry(workflow_id)
 
@@ -2458,6 +2771,7 @@ async def publish_workflow_as_api(
         # enforce the key returned to callers.
         existing_service = await WorkflowStore.kv_get(_api_service_key(workflow_id)) or {}
         api_key = existing_service.get("apiKey") or (uuid.uuid4().hex + uuid.uuid4().hex)
+        requested_port = req.port if req and req.port is not None else resolve_service_port(existing_service)
 
         # Use center.py to publish the selected runtime.
         active_record = await publish_workflow(
@@ -2465,6 +2779,7 @@ async def publish_workflow_as_api(
             image=req.image if req else None,
             driver=req.driver if req else None,
             api_key=api_key,
+            port=requested_port,
         )
 
         service_url = active_record.get("serviceUrl", "")
@@ -2472,6 +2787,7 @@ async def publish_workflow_as_api(
         container_name = active_record.get("containerName", "")
         driver = active_record.get("driver") or (req.driver if req else None)
         image = active_record.get("image") or (req.image if req else None)
+        host_port = resolve_service_port(active_record) or requested_port
 
         service_info = {
             "workflowId": workflow_id,
@@ -2484,6 +2800,7 @@ async def publish_workflow_as_api(
             "containerName": container_name,
             "driver": driver,
             "image": image,
+            "port": host_port,
         }
         await WorkflowStore.kv_put(_api_service_key(workflow_id), service_info)
 
@@ -2491,9 +2808,13 @@ async def publish_workflow_as_api(
         return service_info
     except WorkflowNotFoundError as e:
         raise HTTPException(status_code=404, detail=str(e))
+    except WorkflowPortUnavailableError as e:
+        await _record_api_publish_failure(workflow_id, existing_service, e)
+        raise HTTPException(status_code=409, detail=str(e))
     except HTTPException:
         raise
     except WorkflowCenterError as e:
+        await _record_api_publish_failure(workflow_id, existing_service, e)
         log.error("workflow.publish.center_error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"发布失败: {str(e)}")
     except Exception as e:
@@ -2536,7 +2857,8 @@ async def get_workflow_service(workflow_id: str):
     Returns null if not published.
     """
     try:
-        return await WorkflowStore.kv_get(_api_service_key(workflow_id))  # None / null if not found
+        service = await WorkflowStore.kv_get(_api_service_key(workflow_id))
+        return await _normalize_listed_api_service(_api_service_key(workflow_id), service)
     except Exception as e:
         log.error("workflow.service.get.error", {"id": workflow_id, "error": str(e)})
         raise HTTPException(status_code=500, detail=f"Failed to get service info: {str(e)}")
@@ -2559,6 +2881,12 @@ async def delete_workflow_service(workflow_id: str):
             await WorkflowStore.kv_remove(_api_service_key(workflow_id))
         except Exception:
             pass
+        else:
+            registry_key = f"{_REGISTRY_PREFIX_MAIN}{workflow_id}"
+            registry = await WorkflowStore.kv_get(registry_key)
+            if isinstance(registry, dict) and "servicePort" in registry:
+                registry.pop("servicePort", None)
+                await WorkflowStore.kv_put(registry_key, registry)
 
         log.info("workflow.api.service_deleted", {"id": workflow_id})
         return {"ok": True, "workflowId": workflow_id}

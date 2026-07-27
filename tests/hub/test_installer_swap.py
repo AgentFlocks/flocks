@@ -20,31 +20,37 @@ def _make_tree(path: Path, marker: str) -> None:
     (path / "manifest.json").write_text(marker, encoding="utf-8")
 
 
-def test_replace_dir_swaps_into_place(tmp_path):
+def test_replace_prepared_path_swaps_into_place(tmp_path):
     src = tmp_path / ".soc_ui.scratch"
     dst = tmp_path / "soc_ui"
     _make_tree(src, "new")
 
-    installer._replace_dir(src, dst)
+    backup = installer._replace_prepared_path(src, dst)
 
+    assert backup is None
     assert (dst / "manifest.json").read_text(encoding="utf-8") == "new"
     assert not src.exists()
     assert not (tmp_path / ".soc_ui.bak").exists()
 
 
-def test_replace_dir_overwrites_existing_and_removes_backup(tmp_path):
+def test_replace_prepared_path_overwrites_existing_and_returns_backup(tmp_path):
     src = tmp_path / ".soc_ui.scratch"
     dst = tmp_path / "soc_ui"
     _make_tree(src, "new")
     _make_tree(dst, "old")
 
-    installer._replace_dir(src, dst)
+    backup = installer._replace_prepared_path(src, dst)
 
     assert (dst / "manifest.json").read_text(encoding="utf-8") == "new"
+    assert backup == tmp_path / ".soc_ui.bak"
+    assert (backup / "manifest.json").read_text(encoding="utf-8") == "old"
+
+    installer._commit_replacement(backup)
+
     assert not (tmp_path / ".soc_ui.bak").exists()
 
 
-def test_replace_dir_restores_existing_after_new_swap_fails(tmp_path, monkeypatch):
+def test_replace_prepared_path_restores_existing_after_new_swap_fails(tmp_path, monkeypatch):
     monkeypatch.setattr(installer.sys, "platform", "win32")
     monkeypatch.setattr(installer.time, "sleep", lambda _s: None)
 
@@ -65,7 +71,7 @@ def test_replace_dir_restores_existing_after_new_swap_fails(tmp_path, monkeypatc
 
     monkeypatch.setattr(Path, "replace", deny_new_swap)
     with pytest.raises(PermissionError):
-        installer._replace_dir(src, dst)
+        installer._replace_prepared_path(src, dst)
 
     assert failed_attempts == 6
     assert (dst / "manifest.json").read_text(encoding="utf-8") == "old"

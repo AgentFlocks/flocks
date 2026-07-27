@@ -186,8 +186,8 @@ async def test_tdp_dashboard_status_uses_non_deprecated_threat_topic_path():
 
 
 @pytest.mark.asyncio
-async def test_tdp_incident_list_can_use_secret_manager_credentials_and_default_filters():
-    tool = _load_tool("tdp_incident_list.yaml")
+async def test_tdp_threat_intelligent_aggregation_can_use_secret_manager_credentials_and_default_filters():
+    tool = _load_tool("tdp_threat_intelligent_aggregation.yaml")
     mock_secret_manager = MagicMock()
     mock_secret_manager.get.side_effect = lambda key: {
         "tdp_api_key": "secret-api",
@@ -212,7 +212,7 @@ async def test_tdp_incident_list_can_use_secret_manager_credentials_and_default_
     assert method == "POST"
     assert request_url == "https://tdp.internal/api/v1/incident/search"
     condition = request_kwargs["json"]["condition"]
-    assert condition["duration"] == {"begin_duration": 0, "end_duration": 24}
+    assert condition["duration"] == {"begin_duration": 0}
     assert condition["time_from"] < condition["time_to"]
 
 
@@ -252,8 +252,8 @@ async def test_tdp_machine_asset_list_can_switch_to_web_app_framework_action():
 
 
 @pytest.mark.asyncio
-async def test_tdp_threat_inbound_attack_uses_severity_distribution_endpoint():
-    tool = _load_tool("tdp_threat_inbound_attack.yaml")
+async def test_tdp_threat_external_attack_uses_severity_distribution_endpoint():
+    tool = _load_tool("tdp_threat_external_attack.yaml")
     fake_session = _FakeSession([_FakeResponse(json_payload={"response_code": 0, "data": [{"key": "4", "value": 2}]})])
 
     with (

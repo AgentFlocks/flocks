@@ -54,7 +54,7 @@ export function useStats() {
 
   const error = useMemo(() => {
     if (fetchError) return new Error(fetchError);
-    if (stats?.system.status === 'error') return new Error(stats.system.message);
+    if (stats?.system.status === 'error' || stats?.system.status === 'warning') return new Error(stats.system.message);
     return null;
   }, [fetchError, stats?.system.message, stats?.system.status]);
 

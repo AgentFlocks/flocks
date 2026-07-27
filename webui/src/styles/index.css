@@ -1388,6 +1388,54 @@
   background: #687584;
 }
 
+.session-sidebar-scrollbar {
+  scrollbar-color: #c4c8cc transparent;
+  scrollbar-width: thin;
+}
+
+.session-sidebar-scrollbar::-webkit-scrollbar {
+  width: 7px;
+}
+
+.session-sidebar-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.session-sidebar-scrollbar::-webkit-scrollbar-thumb {
+  background: #c4c8cc;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+.session-sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #a9aeb4;
+  background-clip: padding-box;
+}
+
+.dark .session-sidebar-scrollbar {
+  scrollbar-color: #626e7c transparent !important;
+}
+
+.dark .session-sidebar-scrollbar::-webkit-scrollbar {
+  width: 7px;
+}
+
+.dark .session-sidebar-scrollbar::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.dark .session-sidebar-scrollbar::-webkit-scrollbar-thumb {
+  background: #626e7c;
+  border-color: transparent;
+  background-clip: padding-box;
+}
+
+.dark .session-sidebar-scrollbar::-webkit-scrollbar-thumb:hover {
+  background: #758292;
+  background-clip: padding-box;
+}
+
 .dark table {
   color: var(--flocks-dark-text-muted);
 }

@@ -6,6 +6,7 @@ import json
 import os
 import re
 import sqlite3
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -27,6 +28,11 @@ def _concurrent_triage_code() -> str:
     return next(node["code"] for node in workflow["nodes"] if node["id"] == "concurrent_triage")
 
 
+def _load_dedup_code() -> str:
+    workflow = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    return next(node["code"] for node in workflow["nodes"] if node["id"] == "load_dedup_file")
+
+
 def _load_functions(*names: str) -> dict[str, object]:
     tree = ast.parse(_concurrent_triage_code())
     body = [
@@ -44,6 +50,62 @@ def _load_functions(*names: str) -> dict[str, object]:
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(WORKFLOW_PATH), "exec"), namespace)
     return namespace
+
+
+def test_load_node_defaults_to_safe_single_alert_concurrency(tmp_path: Path) -> None:
+    input_path = tmp_path / "dedup_result_001.jsonl"
+    input_path.write_text(
+        json.dumps({"dedup_key": "first", "is_duplicate": False}) + "\n",
+        encoding="utf-8",
+    )
+    namespace: dict[str, object] = {
+        "inputs": {"input_path": str(input_path)},
+        "outputs": {},
+    }
+
+    exec(compile(_load_dedup_code(), str(WORKFLOW_PATH), "exec"), namespace)
+
+    assert namespace["outputs"]["concurrency"] == 1
+
+
+def test_llm_calls_share_the_run_concurrency_budget() -> None:
+    functions = _load_functions("_ask_llm")
+    active = 0
+    peak = 0
+    lock = threading.Lock()
+
+    class FakeLLM:
+        def ask(self, _prompt: str, **_kwargs: object) -> str:
+            nonlocal active, peak
+            with lock:
+                active += 1
+                peak = max(peak, active)
+            try:
+                time.sleep(0.02)
+                return "ok"
+            finally:
+                with lock:
+                    active -= 1
+
+    functions.update(
+        {
+            "llm": FakeLLM(),
+            "LLM_CALL_TIMEOUT_S": 120.0,
+            "LLM_CALL_MAX_RETRIES": 1,
+            "_llm_slots": threading.BoundedSemaphore(5),
+        }
+    )
+    ask_llm = functions["_ask_llm"]
+
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        results = list(pool.map(ask_llm, [f"prompt-{i}" for i in range(40)]))
+
+    assert results == ["ok"] * 40
+    assert peak == 5
+    assert re.search(
+        r"_llm_slots\s*=\s*threading\.BoundedSemaphore\(concurrency\)",
+        _concurrent_triage_code(),
+    )
 
 
 def test_soc_db_selects_only_verified_first_seen_unique_alerts() -> None:

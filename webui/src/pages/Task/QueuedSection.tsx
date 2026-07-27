@@ -467,6 +467,15 @@ function QueuedDetailPanel({ task, onClose, onAction, onRefresh }: {
               sessionId={sessionId}
               live={shouldStreamSession}
               hideInput
+              display={{
+                compact: false,
+                fullWidth: true,
+                pageCanvas: true,
+                showTimestamp: true,
+                collapseIntermediateSteps: true,
+                processGroupsDefaultOpen: false,
+                processGroupsOpenWhileActive: true,
+              }}
               emptyText={emptyText}
               className="flex-1 min-h-0"
               onSSEEvent={(event) => {

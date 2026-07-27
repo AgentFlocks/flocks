@@ -20,6 +20,7 @@ from flocks.provider.provider import (
     ModelInfo,
     StreamChunk,
 )
+from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 from flocks.utils.log import Log
 
 log = Log.create(service="provider.openai_base")
@@ -301,7 +302,26 @@ def _normalize_stream_usage(raw_usage: Any) -> Optional[Dict[str, int]]:
     prompt_tokens = (_pt if _pt is not None else getattr(raw_usage, "input_tokens", 0)) or 0
     _ct = getattr(raw_usage, "completion_tokens", None)
     completion_tokens = (_ct if _ct is not None else getattr(raw_usage, "output_tokens", 0)) or 0
-    reasoning_tokens = getattr(raw_usage, "reasoning_tokens", 0) or 0
+    completion_details = getattr(raw_usage, "completion_tokens_details", None)
+    output_details = getattr(raw_usage, "output_tokens_details", None)
+    nested_reasoning_tokens = (
+        getattr(completion_details, "reasoning_tokens", 0)
+        or getattr(output_details, "reasoning_tokens", 0)
+        or 0
+    )
+    reasoning_tokens = (
+        getattr(raw_usage, "reasoning_tokens", 0)
+        or nested_reasoning_tokens
+        or 0
+    )
+    if nested_reasoning_tokens:
+        # OpenAI reports reasoning_tokens as a breakdown already included in
+        # completion_tokens / output_tokens. Flocks stores visible output and
+        # reasoning separately, so remove that nested subset before persisting.
+        completion_tokens = max(
+            0,
+            completion_tokens - nested_reasoning_tokens,
+        )
     total_tokens = getattr(raw_usage, "total_tokens", 0) or (
         prompt_tokens + completion_tokens + reasoning_tokens
     )
@@ -388,6 +408,33 @@ def apply_openai_token_limit(
         params["max_completion_tokens"] = max_tokens
     else:
         params["max_tokens"] = max_tokens
+
+
+def _is_effective_thinking_enabled(
+    model_id: str,
+    thinking: Any,
+    extra_body: Dict[str, Any],
+) -> bool:
+    """Return the effective reasoning state represented by a request."""
+    if is_kimi_k27_code_model(model_id) or is_kimi_k3_model(model_id):
+        return True
+
+    if isinstance(thinking, dict):
+        return thinking.get("type") != "disabled"
+    if thinking:
+        return True
+
+    extra_thinking = extra_body.get("thinking")
+    if isinstance(extra_thinking, dict):
+        return extra_thinking.get("type") != "disabled"
+    if extra_thinking:
+        return True
+
+    if extra_body.get("reasoning_effort") is not None:
+        return True
+    if extra_body.get("reasoning_split") is True:
+        return True
+    return extra_body.get("enable_thinking") is True
 
 
 async def create_chat_completion_with_fallbacks(
@@ -934,7 +981,9 @@ class OpenAIBaseProvider(BaseProvider):
         apply_openai_token_limit(
             params,
             max_tokens,
-            prefer_completion_tokens=self.PREFER_MAX_COMPLETION_TOKENS,
+            prefer_completion_tokens=(
+                self.PREFER_MAX_COMPLETION_TOKENS or is_kimi_k3_model(model_id)
+            ),
             completion_tokens_explicit=max_completion_tokens_explicit,
         )
         if kwargs.get("tools"):
@@ -945,7 +994,11 @@ class OpenAIBaseProvider(BaseProvider):
         # these request logs are emitted for every model call in long sessions.
         log.info("openai_base.chat.request", {
             "model": model_id,
-            "thinking_enabled": bool(thinking),
+            "thinking_enabled": _is_effective_thinking_enabled(
+                model_id,
+                thinking,
+                extra_body,
+            ),
             "has_extra_body": "extra_body" in params,
             "has_tools": bool(kwargs.get("tools")),
             "max_tokens": max_tokens,
@@ -1021,7 +1074,9 @@ class OpenAIBaseProvider(BaseProvider):
         apply_openai_token_limit(
             params,
             max_tokens,
-            prefer_completion_tokens=self.PREFER_MAX_COMPLETION_TOKENS,
+            prefer_completion_tokens=(
+                self.PREFER_MAX_COMPLETION_TOKENS or is_kimi_k3_model(model_id)
+            ),
             completion_tokens_explicit=max_completion_tokens_explicit,
         )
         if kwargs.get("tools"):
@@ -1031,7 +1086,11 @@ class OpenAIBaseProvider(BaseProvider):
         # without repeating the full message history on every turn.
         log.info("openai_base.stream.request", {
             "model": model_id,
-            "thinking_enabled": bool(thinking),
+            "thinking_enabled": _is_effective_thinking_enabled(
+                model_id,
+                thinking,
+                extra_body,
+            ),
             "has_extra_body": "extra_body" in params,
             "has_tools": bool(kwargs.get("tools")),
             "max_tokens": max_tokens,
@@ -1048,6 +1107,7 @@ class OpenAIBaseProvider(BaseProvider):
             log_prefix="openai_base",
         )
         tool_calls: Dict[int, Dict[str, Any]] = {}
+        started_tool_inputs: set[int] = set()
         emitted_substantive_chunk = False
         stream_usage: Optional[Dict[str, int]] = None
         usage_emitted = False
@@ -1131,6 +1191,7 @@ class OpenAIBaseProvider(BaseProvider):
                 delta_tcs = getattr(delta, "tool_calls", None)
                 if delta_tcs:
                     emitted_substantive_chunk = True
+                    tool_input_markers: List[Dict[str, Any]] = []
                     for tc in delta_tcs:
                         idx = tc.index
                         if idx not in tool_calls:
@@ -1148,6 +1209,28 @@ class OpenAIBaseProvider(BaseProvider):
                                 tool_calls[idx]["function"]["arguments"] += (
                                     tc.function.arguments
                                 )
+                        accumulated_name = tool_calls[idx]["function"]["name"]
+                        if accumulated_name and idx not in started_tool_inputs:
+                            tool_input_markers.append({
+                                "index": idx,
+                                "id": tool_calls[idx]["id"],
+                                "type": "function",
+                                "function": {
+                                    "name": accumulated_name,
+                                    "arguments": "",
+                                },
+                            })
+                            started_tool_inputs.add(idx)
+
+                    # Surface the tool as soon as its name is known, but keep
+                    # partial JSON private. The terminal chunk below publishes
+                    # the complete input once the model finishes generating it.
+                    if tool_input_markers:
+                        yield StreamChunk(
+                            delta="",
+                            finish_reason=None,
+                            tool_calls=tool_input_markers,
+                        )
 
             if choice.finish_reason:
                 # Flush any remaining buffered content from the think-tag extractor
@@ -1173,7 +1256,10 @@ class OpenAIBaseProvider(BaseProvider):
                         yield StreamChunk(delta=seg_text, finish_reason=None)
 
                 if tool_calls:
-                    sorted_calls = [tool_calls[i] for i in sorted(tool_calls.keys())]
+                    sorted_calls = [
+                        {"index": i, **tool_calls[i]}
+                        for i in sorted(tool_calls.keys())
+                    ]
                     tool_calls.clear()
                     # Preserve real finish_reason (e.g. "length" when max_tokens
                     # hit) so the runner can detect truncated tool arguments.

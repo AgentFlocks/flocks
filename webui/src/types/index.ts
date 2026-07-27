@@ -5,21 +5,26 @@
  */
 export interface Session {
   id: string;
-  slug: string;
+  slug?: string;
   projectID: string;
+  projectName?: string;
+  effectiveProjectID?: string;
   directory: string;
   parentID?: string;
   summary?: SessionSummary;
   title: string;
-  version: string;
+  version?: string;
   time: SessionTime;
   permission?: PermissionRule[];
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  status?: 'active' | 'archived';
   provider?: string;
   model?: string;
   model_pinned?: boolean;
+  /** Runtime provider failover is enabled only after an explicit WebUI selection. */
+  model_auto?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
@@ -397,10 +402,8 @@ export interface MCPCatalogStats {
 export interface ProviderCredentials {
   secret_id?: string | null;
   /**
-   * Write-only compatibility field. Credential reads never return the raw key;
-   * they return ``api_key: null`` plus ``api_key_masked`` and
-   * ``has_credential``. UI code must never submit the masked value as a new
-   * secret. Leave ``api_key`` out of an update to preserve the stored key.
+   * Raw API key returned only by the admin-only reveal endpoint. Ordinary LLM
+   * and API-service credential reads return null and expose only masked values.
    */
   api_key?: string | null;
   api_key_masked?: string | null;
@@ -433,10 +436,11 @@ export interface ProviderInfoV2 {
   source: string;
   env: string[];
   key: string | null;
+  /** True only when the runtime has the credentials required by this provider. */
+  configured?: boolean;
   options: Record<string, any>;
   models: Record<string, ProviderModelInfo>;
   // Derived on frontend
-  configured?: boolean;
   modelCount?: number;
   category?: ProviderCategory;
 }

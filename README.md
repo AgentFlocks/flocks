@@ -149,7 +149,6 @@ macOS / Linux
 ```bash
 docker run -d \
   --name flocks \
-  -p 8000:8000 \
   -p 5173:5173 \
   --shm-size 4gb \
   -v "${HOME}/.flocks:/home/flocks/.flocks" \
@@ -160,14 +159,13 @@ Windows PowerShell
 ```powershell
 docker run -d `
   --name flocks `
-  -p 8000:8000 `
   -p 5173:5173 `
   --shm-size 4gb `
   -v "${env:USERPROFILE}\.flocks:/home/flocks/.flocks" `
   ghcr.io/agentflocks/flocks:latest
 ```
 
-`EXPOSE` in the image only documents container ports. You still need `-p 8000:8000 -p 5173:5173` to access the service from the host browser.
+`EXPOSE` in the image only documents container ports. You still need `-p 5173:5173` to access the service from the host browser.
 
 ## 4. FAQ
 

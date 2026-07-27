@@ -199,7 +199,6 @@ async def judge_goal_with_model(
         ],
         **provider_options,
         max_tokens=JUDGE_MAX_TOKENS,
-        temperature=0,
     )
 
     payload = _extract_json_object(response.content)

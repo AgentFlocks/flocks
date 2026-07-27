@@ -163,6 +163,12 @@ def test_is_real_page_accepts_normal_https_pages() -> None:
 def test_profile_dirs_only_returns_paths_for_requested_os() -> None:
     home = Path.home() / "profile-test-home"
     local_app_data = home / "AppData/Local"
+    flocks_debug_profiles = [
+        home / ".flocks/chrome-debug-profile",
+        home / ".flocks/edge-debug-profile",
+        home / ".flocks/chromium-debug-profile",
+        home / ".flocks/brave-debug-profile",
+    ]
 
     mac_profiles = daemon.profile_dirs(system="Darwin", home=home, environ={})
     linux_profiles = daemon.profile_dirs(system="Linux", home=home, environ={})
@@ -172,9 +178,12 @@ def test_profile_dirs_only_returns_paths_for_requested_os() -> None:
         environ={"LOCALAPPDATA": str(local_app_data)},
     )
 
-    assert all("Library" in path.parts and "Application Support" in path.parts for path in mac_profiles)
-    assert all(".config" in path.parts or ".var" in path.parts for path in linux_profiles)
-    assert all(path.is_relative_to(local_app_data) for path in windows_profiles)
+    assert mac_profiles[:4] == flocks_debug_profiles
+    assert linux_profiles[:4] == flocks_debug_profiles
+    assert windows_profiles[:4] == flocks_debug_profiles
+    assert all("Library" in path.parts and "Application Support" in path.parts for path in mac_profiles[4:])
+    assert all(".config" in path.parts or ".var" in path.parts for path in linux_profiles[4:])
+    assert all(path.is_relative_to(local_app_data) for path in windows_profiles[4:])
 
 
 def test_get_ws_url_skips_unreachable_profile_and_uses_next_candidate(tmp_path, monkeypatch) -> None:
@@ -298,6 +307,35 @@ def test_get_ws_url_uses_devtools_active_port_path_when_version_endpoint_returns
     monkeypatch.setattr(daemon, "profile_dirs", lambda: [profile])
     monkeypatch.setattr(daemon.urllib.request, "urlopen", fake_urlopen)
     monkeypatch.setattr(daemon.time, "sleep", lambda _seconds: pytest.fail("404 response must not be retried"))
+
+    assert daemon.get_ws_url() == "ws://127.0.0.1:9222/devtools/browser/current"
+
+
+def test_get_ws_url_uses_devtools_active_port_path_when_version_omits_websocket_url(
+    tmp_path, monkeypatch
+) -> None:
+    profile = tmp_path / "chrome"
+    profile.mkdir()
+    (profile / "DevToolsActivePort").write_text(
+        "9222\n/devtools/browser/current\n",
+        encoding="utf-8",
+    )
+
+    class FakeHttpResponse:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args) -> None:
+            pass
+
+        def read(self) -> bytes:
+            return b'{"Browser":"Chrome/126.0","Protocol-Version":"1.3"}'
+
+    monkeypatch.delenv("BU_CDP_WS", raising=False)
+    monkeypatch.delenv("BU_CDP_URL", raising=False)
+    monkeypatch.setattr(daemon, "profile_dirs", lambda: [profile])
+    monkeypatch.setattr(daemon.urllib.request, "urlopen", lambda _url, timeout: FakeHttpResponse())
+    monkeypatch.setattr(daemon.time, "sleep", lambda _seconds: pytest.fail("missing field must not be retried"))
 
     assert daemon.get_ws_url() == "ws://127.0.0.1:9222/devtools/browser/current"
 

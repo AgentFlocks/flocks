@@ -100,7 +100,7 @@ vi.mock('@/api/agent', () => ({
 
 vi.mock('@/api/workflow', () => ({
   workflowAPI: {
-    list: mocks.workflowList,
+    listSummaries: mocks.workflowList,
   },
 }));
 

@@ -93,6 +93,7 @@ class ChannelRegistry:
         from flocks.channel.builtin.dingtalk.channel import DingTalkChannel
         from flocks.channel.builtin.email.channel import EmailChannel
         from flocks.channel.builtin.feishu.channel import FeishuChannel
+        from flocks.channel.builtin.slack.channel import SlackChannel
         from flocks.channel.builtin.telegram.channel import TelegramChannel
         from flocks.channel.builtin.wecom.channel import WeComChannel
         from flocks.channel.builtin.whatsapp.channel import WhatsAppChannel
@@ -103,6 +104,7 @@ class ChannelRegistry:
         self.register(WhatsAppChannel())
         self.register(DingTalkChannel())
         self.register(WeixinChannel())
+        self.register(SlackChannel())
         self.register(EmailChannel())
 
     def _register_plugin_extension_point(self) -> None:

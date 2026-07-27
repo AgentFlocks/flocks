@@ -77,6 +77,7 @@
     "stopped": "已停止"
   },
   "delegate": {
+    "delegatedTo": "委派给 {{agent}}",
     "pending": "等待中",
     "running": "执行中",
     "completed": "已完成",
@@ -88,6 +89,7 @@
     "resultSummary": "结果摘要",
     "viewFullChat": "查看完整对话",
     "viewDialog": "查看对话框",
+    "viewExecution": "查看执行过程",
     "emptyChat": "子 Agent 对话为空",
     "subTask": "子任务"
   },
@@ -248,7 +250,7 @@
       "thirdPartySubtitle": "选择一个其他模型厂商，填写其 key，并指定默认模型。",
       "thirdPartyKeyPlaceholder": "粘贴第三方模型 API Key",
       "thirdPartyBaseUrlPlaceholder": "填写模型服务 Base URL（如需要）",
-      "thirdPartyModelIdPlaceholder": "输入模型 ID（例如 gpt-4o、deepseek-chat）",
+      "thirdPartyModelIdPlaceholder": "输入模型 ID（例如 gpt-4o、deepseek-v4-flash）",
       "thirdPartyModelHint": "保存后会验证并设为默认模型：{{model}}",
       "thirdPartyAdvancedHint": "如需 OpenAI Compatible 等高级自定义接入，请前往 Models 页面配置。",
       "validateAndApply": "验证并应用",

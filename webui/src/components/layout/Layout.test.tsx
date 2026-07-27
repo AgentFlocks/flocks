@@ -306,7 +306,7 @@ describe('Layout onboarding entry', () => {
             { id: 'qwen3-max', name: 'Qwen 3 Max' },
           ]),
           makeProvider('openai-compatible', 'OpenAI Compatible', []),
-          makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-chat', name: 'DeepSeek V3.2' }]),
+          makeProvider('deepseek', 'DeepSeek', [{ id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash' }]),
         ],
       },
     });
@@ -481,8 +481,11 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('admin.roleMember')).toBeInTheDocument();
     expect(await screen.findByText('v2026.6.21')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
-    await waitFor(() => expect(checkUpdate).toHaveBeenCalledWith('zh-CN', 'flockspro'));
+    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
+    expect(checkUpdate).not.toHaveBeenCalled();
+    await waitFor(() => {
+      expect(getActiveNotifications).toHaveBeenCalledWith('zh-CN');
+    });
 
     const sidebarShell = container.querySelector('aside > div');
     const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
@@ -537,7 +540,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('button', { name: 'checkUpdate' })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
@@ -608,7 +611,7 @@ describe('Layout onboarding entry', () => {
 
     await user.click(screen.getByRole('button', { name: 'admin settings' }));
 
-    expect(screen.getByRole('link', { name: 'Flocks' })).toHaveAttribute('href', '/settings/flockspro');
+    expect(screen.getByRole('link', { name: 'Flocks Pro' })).toHaveAttribute('href', '/settings/flockspro');
     expect(screen.getByRole('link', { name: 'settings' })).toHaveAttribute('href', '/settings/preferences');
 
     await user.click(screen.getByRole('button', { name: 'logout' }));
@@ -844,6 +847,33 @@ describe('Layout onboarding entry', () => {
 
     expect(await screen.findByText('Token 免费期已延长')).toBeInTheDocument();
     expect(screen.getByText('Flocks v2026.04.28 更新内容')).toBeInTheDocument();
+  });
+
+  it('loads backend notifications without waiting for the update check', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const updateCheck = deferred<{
+      has_update: boolean;
+      latest_version: null;
+      current_version: string;
+      error: null;
+    }>();
+    checkUpdate.mockReturnValue(updateCheck.promise);
+
+    renderHomeWithLayout();
+
+    await waitFor(() => {
+      expect(getActiveNotifications).toHaveBeenCalledWith('zh-CN');
+    });
+    expect(getNotificationAckStatus).not.toHaveBeenCalled();
+
+    await act(async () => {
+      updateCheck.resolve({
+        has_update: false,
+        latest_version: null,
+        current_version: '0.2.0',
+        error: null,
+      });
+    });
   });
 });
 
