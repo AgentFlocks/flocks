@@ -985,6 +985,24 @@ describe('Layout WebUI contract pages navigation', () => {
 
     expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'true');
     expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(sceneWorkspacesToggle.closest('h3')).toHaveClass(
+      'text-sm',
+      'font-medium',
+      'text-zinc-600',
+      'dark:text-zinc-400',
+    );
+    expect(aiWorkbenchToggle.closest('h3')).toHaveClass(
+      'text-sm',
+      'font-medium',
+      'text-zinc-600',
+      'dark:text-zinc-400',
+    );
+    expect(sceneWorkspacesToggle.closest('h3')).not.toHaveClass(
+      'text-xs',
+      'uppercase',
+      'text-zinc-400',
+      'dark:text-zinc-500',
+    );
     expect(screen.getByRole('button', { name: /projectsSection/ })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
 

@@ -785,12 +785,12 @@ export default function Layout() {
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
-                    <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
+                    <h3 className="px-3 mb-2 text-sm font-medium text-zinc-600 whitespace-nowrap dark:text-zinc-400">
                       {section.collapsible ? (
                         <button
                           type="button"
                           onClick={() => toggleNavSection(sectionId)}
-                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
+                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-900 focus:outline-none focus-visible:text-zinc-900 dark:hover:text-zinc-50 dark:focus-visible:text-zinc-50"
                           aria-expanded={!sectionCollapsed}
                           aria-controls={sectionContentId}
                         >
