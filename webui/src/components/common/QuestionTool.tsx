@@ -98,7 +98,7 @@ function optionDescription(opt: QuestionOption | string): string {
 const CUSTOM_CHOICE_PREFIX = '__flocks_custom_choice__:';
 
 function isCustomChoiceLabel(label: string): boolean {
-  return /^(其他|其它|自定义|补充)|\b(other|custom)\b|请补充|补充说明|type your answer/i.test(label.trim());
+  return /^(其他|其它|自定义|补充|调整计划)|\b(other|custom|feedback)\b|请补充|补充说明|type your answer/i.test(label.trim());
 }
 
 function customChoiceValue(text: string): string {

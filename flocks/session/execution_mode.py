@@ -24,14 +24,12 @@ class SessionExecutionMode(str, Enum):
 PLAN_ONLY_TOOL_NAMES = frozenset({"plan_exit"})
 PLAN_DENIED_TOOL_NAMES = frozenset(
     {
-        # OpenCode denies task.general in Plan. Flocks' task aliases do not
-        # have a safe read-only subtype, so deny both delegation entry points.
-        "delegate_task",
-        "task",
         # Explicit slash commands keep their existing direct user-only path.
         "run_slash_command",
     }
 )
+PLAN_DELEGATION_TOOL_NAMES = frozenset({"delegate_task", "task"})
+PLAN_DELEGATABLE_AGENT_NAMES = frozenset({"explore", "librarian"})
 PLAN_PATH_SCOPED_TOOL_NAMES = frozenset({"apply_patch", "edit", "write"})
 
 PLAN_MODE_PROMPT = """# Plan Mode
@@ -48,6 +46,7 @@ Follow this workflow:
 
 1. Explore first. Ground the plan in the existing environment and resolve
    discoverable facts through inspection before asking the user.
+   Delegation is limited to the `explore` and `librarian` subagents.
 2. Use the question tool only for material ambiguities, preferences, or
    trade-offs that cannot be resolved from the environment. After the user
    answers, continue exploring and planning as needed.
@@ -108,6 +107,19 @@ def tool_call_denial_reason(
 
     if runtime_execution_mode(value) != SessionExecutionMode.PLAN:
         return None
+    if tool_name in PLAN_DELEGATION_TOOL_NAMES:
+        subagent_type = str(arguments.get("subagent_type") or "").strip().lower()
+        if (
+            subagent_type in PLAN_DELEGATABLE_AGENT_NAMES
+            and not arguments.get("category")
+            and not arguments.get("session_id")
+        ):
+            return None
+        allowed = ", ".join(sorted(PLAN_DELEGATABLE_AGENT_NAMES))
+        return (
+            f"Tool {tool_name!r} may only delegate to {allowed} via "
+            "subagent_type while Plan mode is active."
+        )
     if tool_name not in PLAN_PATH_SCOPED_TOOL_NAMES:
         return None
 

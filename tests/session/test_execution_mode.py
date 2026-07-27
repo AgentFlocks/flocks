@@ -14,6 +14,7 @@ from flocks.session.execution_mode import (
     execution_mode_prompt,
     is_tool_allowed,
     runtime_execution_mode,
+    tool_call_denial_reason,
 )
 from flocks.session.interaction_queue import InteractionQueue
 from flocks.session.plan_file import is_current_plan_path, session_plan_file
@@ -88,8 +89,8 @@ def test_plan_uses_read_only_permission_rules() -> None:
     assert is_tool_allowed(SessionExecutionMode.PLAN, "edit")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "write")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "unknown_plugin_tool")
-    assert not is_tool_allowed(SessionExecutionMode.PLAN, "task")
-    assert not is_tool_allowed(SessionExecutionMode.PLAN, "delegate_task")
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "task")
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "delegate_task")
     assert not is_tool_allowed(SessionExecutionMode.PLAN, "run_slash_command")
 
     assert is_tool_allowed(SessionExecutionMode.BUILD, "bash")
@@ -97,7 +98,36 @@ def test_plan_uses_read_only_permission_rules() -> None:
     assert "decision-complete implementation plan" in execution_mode_prompt("plan")
     assert "material clarification question" in execution_mode_prompt("plan")
     assert "call plan_exit" in execution_mode_prompt("plan")
+    assert "`explore` and `librarian`" in execution_mode_prompt("plan")
     assert execution_mode_prompt("build") == ""
+
+
+@pytest.mark.parametrize("tool_name", ["task", "delegate_task"])
+def test_plan_delegation_only_allows_explore_and_librarian(tool_name) -> None:
+    ctx = ToolContext(session_id="session-1", message_id="message-1")
+
+    for subagent_type in ("explore", "librarian"):
+        assert tool_call_denial_reason(
+            SessionExecutionMode.PLAN,
+            tool_name,
+            {"subagent_type": subagent_type},
+            ctx,
+        ) is None
+
+    for arguments in (
+        {"subagent_type": "general"},
+        {"category": "quick"},
+        {"session_id": "child-session"},
+        {},
+    ):
+        reason = tool_call_denial_reason(
+            SessionExecutionMode.PLAN,
+            tool_name,
+            arguments,
+            ctx,
+        )
+        assert reason is not None
+        assert "explore, librarian" in reason
 
 
 def test_plan_file_is_stable_and_session_scoped(tmp_path) -> None:
@@ -207,13 +237,12 @@ async def test_prompt_queue_preserves_execution_mode() -> None:
 
 
 @pytest.mark.asyncio
-async def test_registry_denies_disallowed_tool_before_handler(monkeypatch) -> None:
-    called = False
+async def test_registry_scopes_plan_delegation_before_handler(monkeypatch) -> None:
+    calls: list[dict] = []
 
     async def handler(_ctx, **_kwargs):
-        nonlocal called
-        called = True
-        return ToolResult(success=True, output="unexpected")
+        calls.append(_kwargs)
+        return ToolResult(success=True, output="ok")
 
     tool = Tool(
         info=ToolInfo(
@@ -229,18 +258,29 @@ async def test_registry_denies_disallowed_tool_before_handler(monkeypatch) -> No
         classmethod(lambda _cls, _name: tool),
     )
 
-    result = await ToolRegistry.execute(
+    explore = await ToolRegistry.execute(
         "task",
         ctx=ToolContext(
             session_id="session-1",
             message_id="message-1",
             extra={"execution_mode": "plan"},
         ),
+        subagent_type="explore",
+    )
+    denied = await ToolRegistry.execute(
+        "delegate_task",
+        ctx=ToolContext(
+            session_id="session-1",
+            message_id="message-1",
+            extra={"execution_mode": "plan"},
+        ),
+        subagent_type="general",
     )
 
-    assert not result.success
-    assert "not available" in (result.error or "")
-    assert not called
+    assert explore.success
+    assert not denied.success
+    assert "explore, librarian" in (denied.error or "")
+    assert calls == [{"subagent_type": "explore"}]
 
 
 @pytest.mark.asyncio
@@ -367,7 +407,15 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     agent = SimpleNamespace(
-        tools=["read", "bash", "write", "edit", "task", "run_slash_command"]
+        tools=[
+            "read",
+            "bash",
+            "write",
+            "edit",
+            "task",
+            "delegate_task",
+            "run_slash_command",
+        ]
     )
 
     result = SimpleNamespace(
@@ -377,6 +425,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
             SimpleNamespace(name="write"),
             SimpleNamespace(name="edit"),
             SimpleNamespace(name="task"),
+            SimpleNamespace(name="delegate_task"),
             SimpleNamespace(name="run_slash_command"),
         ],
         metadata={},
@@ -417,13 +466,17 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "bash",
         "write",
         "edit",
+        "task",
+        "delegate_task",
         "plan_exit",
     ]
     assert metadata["executionMode"] == "plan"
     assert metadata["modeAllowedToolNames"] == [
         "bash",
+        "delegate_task",
         "edit",
         "plan_exit",
         "read",
+        "task",
         "write",
     ]
