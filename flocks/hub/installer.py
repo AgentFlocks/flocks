@@ -172,7 +172,12 @@ def _replace_dir(src: Path, dst: Path) -> None:
         if backup.exists():
             shutil.rmtree(backup)
         _replace_with_retry(dst, backup)
-    _replace_with_retry(src, dst)
+    try:
+        _replace_with_retry(src, dst)
+    except Exception:
+        if backup and backup.exists():
+            _replace_with_retry(backup, dst)
+        raise
     if backup and backup.exists():
         shutil.rmtree(backup)
 

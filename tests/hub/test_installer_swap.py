@@ -44,6 +44,35 @@ def test_replace_dir_overwrites_existing_and_removes_backup(tmp_path):
     assert not (tmp_path / ".soc_ui.bak").exists()
 
 
+def test_replace_dir_restores_existing_after_new_swap_fails(tmp_path, monkeypatch):
+    monkeypatch.setattr(installer.sys, "platform", "win32")
+    monkeypatch.setattr(installer.time, "sleep", lambda _s: None)
+
+    src = tmp_path / ".soc_ui.scratch"
+    dst = tmp_path / "soc_ui"
+    _make_tree(src, "new")
+    _make_tree(dst, "old")
+
+    real_replace = Path.replace
+    failed_attempts = 0
+
+    def deny_new_swap(self, target):
+        nonlocal failed_attempts
+        if self == src and Path(target) == dst:
+            failed_attempts += 1
+            raise PermissionError("[WinError 5] Access is denied")
+        return real_replace(self, target)
+
+    monkeypatch.setattr(Path, "replace", deny_new_swap)
+    with pytest.raises(PermissionError):
+        installer._replace_dir(src, dst)
+
+    assert failed_attempts == 6
+    assert (dst / "manifest.json").read_text(encoding="utf-8") == "old"
+    assert (src / "manifest.json").read_text(encoding="utf-8") == "new"
+    assert not (tmp_path / ".soc_ui.bak").exists()
+
+
 def test_replace_with_retry_recovers_from_transient_permission_error(tmp_path, monkeypatch):
     """A first ``PermissionError`` (WinError 5) is retried, not surfaced."""
     monkeypatch.setattr(installer.sys, "platform", "win32")
