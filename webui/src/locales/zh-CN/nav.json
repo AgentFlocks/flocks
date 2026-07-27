@@ -28,7 +28,7 @@
   "settingsTitle": "设置",
   "settingsDescription": "管理偏好、账号与系统配置",
   "settingsPreferences": "偏好设置",
-  "settingsPreferencesDescription": "管理显示偏好、模型清单和通道配置。",
+  "settingsPreferencesDescription": "管理工作台显示与行为偏好。",
   "settingsGeneral": "通用",
   "settingsGroupPreferences": "偏好",
   "settingsGroupData": "数据管理",

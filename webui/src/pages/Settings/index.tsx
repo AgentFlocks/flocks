@@ -52,7 +52,15 @@ const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), [
 const ModelPage = lazySettingsPage(() => import('@/pages/Model'), ['model']);
 const ChannelPage = lazySettingsPage(() => import('@/pages/Channel'), ['channel']);
 
-type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
+type SettingsSectionId =
+  | 'preferences'
+  | 'models'
+  | 'channels'
+  | 'archived-data'
+  | 'account'
+  | 'system-logs'
+  | 'audit-logs'
+  | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -68,6 +76,7 @@ interface SettingsSection {
   id: SettingsSectionId;
   name: string;
   icon: LucideIcon;
+  href?: string;
   adminOnly?: boolean;
   requiresFlockspro?: boolean;
 }
@@ -80,6 +89,8 @@ interface SettingsGroup {
 function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
   return (
     value === 'preferences' ||
+    value === 'models' ||
+    value === 'channels' ||
     value === 'archived-data' ||
     value === 'account' ||
     value === 'system-logs' ||
@@ -197,46 +208,6 @@ function PreferenceSwitch({
 }
 
 type PreferencesTab = 'general' | 'models' | 'channels';
-
-function PreferencesNav({ activeTab }: { activeTab: PreferencesTab }) {
-  const { t } = useTranslation('nav');
-  const tabs: Array<{
-    id: PreferencesTab;
-    name: string;
-    href: string;
-    icon: LucideIcon;
-  }> = [
-    { id: 'general', name: t('settingsGeneral'), href: '/settings/preferences', icon: SettingsIcon },
-    { id: 'models', name: t('models'), href: '/settings/preferences?tab=models', icon: Brain },
-    { id: 'channels', name: t('channels'), href: '/settings/preferences?tab=channels', icon: Radio },
-  ];
-
-  return (
-    <nav
-      className="mt-5 flex flex-wrap gap-1 rounded-lg border border-zinc-200 bg-zinc-50 p-1 dark:border-zinc-800 dark:bg-zinc-900"
-      aria-label={t('settingsPreferences')}
-    >
-      {tabs.map((tab) => {
-        const Icon = tab.icon;
-        const active = activeTab === tab.id;
-        return (
-          <Link
-            key={tab.id}
-            to={tab.href}
-            className={`inline-flex items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors ${
-              active
-                ? 'bg-white text-zinc-950 shadow-sm dark:bg-zinc-800 dark:text-zinc-50'
-                : 'text-zinc-500 hover:text-zinc-950 dark:text-zinc-400 dark:hover:text-zinc-50'
-            }`}
-          >
-            <Icon className="h-4 w-4" />
-            {tab.name}
-          </Link>
-        );
-      })}
-    </nav>
-  );
-}
 
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
@@ -372,12 +343,7 @@ function PreferencesPanel() {
   if (activeTab !== 'general') {
     return (
       <div className="mx-auto w-full max-w-6xl">
-        <header className="border-b border-zinc-200 pb-5 dark:border-zinc-800">
-          <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">{t('settingsPreferences')}</h1>
-          <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{t('settingsPreferencesDescription')}</p>
-          <PreferencesNav activeTab={activeTab} />
-        </header>
-        <div className="mt-6 min-h-[calc(100vh-12rem)]">
+        <div className="min-h-[calc(100vh-6rem)]">
           <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
             {activeTab === 'models' ? <ModelPage /> : <ChannelPage />}
           </Suspense>
@@ -391,7 +357,6 @@ function PreferencesPanel() {
       <header className="border-b border-zinc-200 pb-6 dark:border-zinc-800">
         <h1 className="text-2xl font-bold tracking-normal text-zinc-950 dark:text-zinc-50">{t('settingsPreferences')}</h1>
         <p className="mt-2 text-sm text-zinc-500 dark:text-zinc-400">{t('settingsPreferencesDescription')}</p>
-        <PreferencesNav activeTab={activeTab} />
       </header>
 
       <div className="mt-2">
@@ -618,6 +583,23 @@ export default function SettingsPage() {
         ],
       },
       {
+        name: t('settingsGroupIntegrations'),
+        items: [
+          {
+            id: 'models',
+            name: t('models'),
+            href: '/settings/preferences?tab=models',
+            icon: Brain,
+          },
+          {
+            id: 'channels',
+            name: t('channels'),
+            href: '/settings/preferences?tab=channels',
+            icon: Radio,
+          },
+        ],
+      },
+      {
         name: t('settingsGroupData'),
         items: [
           { id: 'archived-data', name: t('archivedData'), icon: Archive },
@@ -663,7 +645,16 @@ export default function SettingsPage() {
     return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
   }
 
-  const currentSection = visibleGroups.flatMap((group) => group.items).find((item) => item.id === sectionId);
+  const requestedPreferenceTab = new URLSearchParams(location.search).get('tab');
+  const activeNavigationSectionId: SettingsSectionId = (
+    sectionId === 'preferences'
+    && (requestedPreferenceTab === 'models' || requestedPreferenceTab === 'channels')
+  )
+    ? requestedPreferenceTab
+    : sectionId;
+  const currentSection = visibleGroups
+    .flatMap((group) => group.items)
+    .find((item) => item.id === activeNavigationSectionId);
 
   if (!currentSection) {
     return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
@@ -693,11 +684,11 @@ export default function SettingsPage() {
               <div className="mt-2 space-y-1">
                 {group.items.map((item) => {
                   const Icon = item.icon;
-                  const active = item.id === sectionId;
+                  const active = item.id === activeNavigationSectionId;
                   return (
                     <Link
                       key={item.id}
-                      to={`/settings/${item.id}`}
+                      to={item.href ?? `/settings/${item.id}`}
                       state={settingsRouteState}
                       className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                         active
@@ -733,11 +724,11 @@ export default function SettingsPage() {
           <nav className="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label={t('settingsTitle')}>
             {visibleGroups.flatMap((group) => group.items).map((item) => {
               const Icon = item.icon;
-              const active = item.id === sectionId;
+              const active = item.id === activeNavigationSectionId;
               return (
                 <Link
                   key={item.id}
-                  to={`/settings/${item.id}`}
+                  to={item.href ?? `/settings/${item.id}`}
                   state={settingsRouteState}
                   className={`inline-flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors ${
                     active
