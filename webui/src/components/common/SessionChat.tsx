@@ -2901,10 +2901,18 @@ export default function SessionChat({
     value: string,
     kind: 'workflow' | 'skill',
   ) => {
-    setComposerReferences((current) => [
-      { kind, value },
-      ...current.filter((reference) => reference.kind !== kind),
-    ]);
+    setComposerReferences((current) => {
+      if (kind === 'skill') {
+        if (current.some((reference) => reference.kind === 'skill' && reference.value === value)) {
+          return current;
+        }
+        return [{ kind, value }, ...current];
+      }
+      return [
+        { kind, value },
+        ...current.filter((reference) => reference.kind !== kind),
+      ];
+    });
     setMentionRange(null);
     setMentionQuery('');
     setSelectedMentionIndex(0);
@@ -3791,7 +3799,7 @@ export default function SessionChat({
                           : WorkflowIcon;
                       return (
                         <span
-                          key={reference.kind}
+                          key={`${reference.kind}:${reference.value}`}
                           className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] ${referenceStyle}`}
                         >
                           <ReferenceIcon className="h-3 w-3 shrink-0" />
@@ -3803,7 +3811,10 @@ export default function SessionChat({
                             type="button"
                             onClick={() => {
                               setComposerReferences((current) => current.filter(
-                                (item) => item.kind !== reference.kind,
+                                (item) => (
+                                  item.kind !== reference.kind
+                                  || item.value !== reference.value
+                                ),
                               ));
                               textareaRef.current?.focus();
                             }}
@@ -3915,7 +3926,7 @@ export default function SessionChat({
                       <div
                         role="menu"
                         aria-label={t('chat.addMenu.title')}
-                        className="absolute bottom-full left-0 z-50 mb-2 w-[264px] max-w-[calc(100vw-2rem)] overflow-visible rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]"
+                        className="absolute bottom-full left-0 z-50 mb-2 w-[228px] max-w-[calc(100vw-2rem)] overflow-visible rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]"
                       >
                         <div className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-zinc-400 dark:text-zinc-500">
                           {t('chat.addMenu.title')}

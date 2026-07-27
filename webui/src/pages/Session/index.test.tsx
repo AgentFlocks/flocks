@@ -453,7 +453,7 @@ describe('SessionPage session actions menu', () => {
     renderSessionPage();
 
     await screen.findByRole('button', { name: 'executionMode.title' });
-    const agentButton = screen.getByRole('button', { name: /Rex/i });
+    const agentButton = screen.getByRole('button', { name: 'chat.addMenu.agent' });
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
@@ -2040,7 +2040,7 @@ describe('SessionPage session actions menu', () => {
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-mention-agents', 'rex,explore');
 
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
 
     expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /hidden-system/i })).not.toBeInTheDocument();
@@ -2081,7 +2081,7 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
     });
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
@@ -2092,7 +2092,7 @@ describe('SessionPage session actions menu', () => {
     expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
     expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('menu', { name: 'projectPicker.title' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'chat.addMenu.agent' })).toBeInTheDocument();
   });
 
   it('shows the pinned model for the selected session on load', async () => {
@@ -2596,8 +2596,8 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
-    expect(screen.getAllByRole('button', { name: /Rex/i })).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
+    expect(screen.queryByRole('button', { name: /Rex/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Explore/i }));
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
@@ -2634,7 +2634,7 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
 
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
@@ -2677,7 +2677,13 @@ describe('SessionPage session actions menu', () => {
     renderSessionPage();
 
     await user.click(screen.getByRole('button', { name: 'mock-open-add-menu' }));
-    await user.click(screen.getByRole('button', { name: 'chat.addMenu.workflows' }));
+    const skillButton = screen.getByRole('button', { name: 'chat.addMenu.skills' });
+    const workflowButton = screen.getByRole('button', { name: 'chat.addMenu.workflows' });
+    const menuButtons = screen.getAllByRole('button');
+    expect(menuButtons.indexOf(skillButton)).toBeLessThan(menuButtons.indexOf(workflowButton));
+
+    await user.click(workflowButton);
+    expect(screen.queryByText('security')).not.toBeInTheDocument();
     await user.click(await screen.findByRole('button', { name: /Alert triage/i }));
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('workflow:alert-triage');
 
@@ -2685,5 +2691,6 @@ describe('SessionPage session actions menu', () => {
     await user.click(screen.getByRole('button', { name: 'chat.addMenu.skills' }));
     await user.click(await screen.findByRole('button', { name: /diagnose/i }));
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('skill:diagnose');
+    expect(screen.getByText('chat.addMenu.selectSkill')).toBeInTheDocument();
   });
 });

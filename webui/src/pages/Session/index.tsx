@@ -168,7 +168,7 @@ function ComposerResourcePicker({
         <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
       </button>
       {open && (
-        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[336px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
           <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
             <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
               {title}
@@ -277,10 +277,6 @@ type SelectorTooltip = {
   x: number;
   y: number;
 };
-
-function formatAgentName(name: string): string {
-  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
-}
 
 function readLastSelectedSessionId(): string | null {
   try {
@@ -736,10 +732,6 @@ export default function SessionPage() {
       return true;
     }),
     [chatAgents, agentSourceFilter],
-  );
-  const selectedAgentInfo = useMemo(
-    () => chatAgents.find((agent) => agent.name === selectedAgent),
-    [chatAgents, selectedAgent],
   );
   const loadComposerResources = useCallback(async () => {
     if (composerResourcesLoadedRef.current || loadingComposerResources) return;
@@ -2707,11 +2699,7 @@ export default function SessionPage() {
                 }}
                 className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                 title={t('agentPicker.title')}
-                aria-label={`${t('chat.addMenu.agent')}: ${
-                  selectedAgentInfo
-                    ? getAgentDisplayName(selectedAgentInfo, i18n.language)
-                    : formatAgentName(selectedAgent)
-                }`}
+                aria-label={t('chat.addMenu.agent')}
                 aria-haspopup="menu"
                 aria-expanded={showAgentOptions}
               >
@@ -2719,15 +2707,10 @@ export default function SessionPage() {
                   <Bot className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
-                <span className="max-w-[108px] truncate text-[11px] font-normal text-zinc-400 dark:text-zinc-500">
-                  {selectedAgentInfo
-                    ? getAgentDisplayName(selectedAgentInfo, i18n.language)
-                    : formatAgentName(selectedAgent)}
-                </span>
                 <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[336px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
                   <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
                     <div className="min-w-0">
                       <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
@@ -2831,31 +2814,6 @@ export default function SessionPage() {
               )}
             </div>
             <ComposerResourcePicker
-              label={t('chat.addMenu.workflows')}
-              title={t('chat.addMenu.selectWorkflow')}
-              emptyText={t('chat.addMenu.noWorkflows')}
-              icon={WorkflowIcon}
-              items={composerWorkflows.map((workflow) => ({
-                id: workflow.id,
-                name: getWorkflowDisplayName(workflow, i18n.language),
-                description: workflow.description,
-                badge: workflow.category,
-                source: workflow.source === 'project' ? 'builtin' : 'custom',
-              }))}
-              loading={loadingComposerResources}
-              open={showWorkflowOptions}
-              onToggle={() => {
-                setShowWorkflowOptions((open) => !open);
-                setShowAgentOptions(false);
-                setShowSkillOptions(false);
-              }}
-              onSelect={(workflow) => {
-                insertReference(workflow.id, 'workflow');
-                setShowWorkflowOptions(false);
-                closeMenu();
-              }}
-            />
-            <ComposerResourcePicker
               label={t('chat.addMenu.skills')}
               title={t('chat.addMenu.selectSkill')}
               emptyText={t('chat.addMenu.noSkills')}
@@ -2876,7 +2834,29 @@ export default function SessionPage() {
               }}
               onSelect={(skill) => {
                 insertReference(skill.id, 'skill');
+              }}
+            />
+            <ComposerResourcePicker
+              label={t('chat.addMenu.workflows')}
+              title={t('chat.addMenu.selectWorkflow')}
+              emptyText={t('chat.addMenu.noWorkflows')}
+              icon={WorkflowIcon}
+              items={composerWorkflows.map((workflow) => ({
+                id: workflow.id,
+                name: getWorkflowDisplayName(workflow, i18n.language),
+                description: workflow.description,
+                source: workflow.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showWorkflowOptions}
+              onToggle={() => {
+                setShowWorkflowOptions((open) => !open);
+                setShowAgentOptions(false);
                 setShowSkillOptions(false);
+              }}
+              onSelect={(workflow) => {
+                insertReference(workflow.id, 'workflow');
+                setShowWorkflowOptions(false);
                 closeMenu();
               }}
             />

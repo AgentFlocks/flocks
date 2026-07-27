@@ -2964,6 +2964,11 @@ describe('SessionChat composer references', () => {
         ),
         React.createElement(
           'button',
+          { type: 'button', onClick: () => insertReference('code-review', 'skill') },
+          '选择第二个技能',
+        ),
+        React.createElement(
+          'button',
           { type: 'button', onClick: () => insertReference('triage', 'workflow') },
           '选择工作流',
         ),
@@ -2973,12 +2978,15 @@ describe('SessionChat composer references', () => {
     await user.click(screen.getByRole('button', { name: '添加' }));
     await user.click(screen.getByRole('button', { name: '选择子智能体' }));
     await user.click(screen.getByRole('button', { name: '选择技能' }));
+    await user.click(screen.getByRole('button', { name: '选择第二个技能' }));
     await user.click(screen.getByRole('button', { name: '选择工作流' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('diagnose')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('code-review')).toBeInTheDocument();
     await user.type(screen.getByPlaceholderText('请输入消息'), 'check this{enter}');
 
     await waitFor(() => {
       expect(onCreateAndSend).toHaveBeenCalledWith(
-        'workflow:triage skill:diagnose subagent:explore check this',
+        'workflow:triage skill:code-review skill:diagnose subagent:explore check this',
         [],
         'explore',
         undefined,
