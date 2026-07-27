@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -87,6 +87,13 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.goal.status.completed': 'Completed',
   'chat.goal.status.blocked': 'Blocked',
   'chat.goal.status.paused': 'Paused',
+  'chat.addMenu.title': '添加',
+  'chat.addMenu.files': '文件和图片',
+  'chat.references.selected': '已选择的资源',
+  'chat.references.subagent': '子智能体',
+  'chat.references.skill': '技能',
+  'chat.references.workflow': '工作流',
+  'chat.references.remove': '移除 {{type}} {{name}}',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
@@ -1449,6 +1456,95 @@ describe('SessionChat composer controls', () => {
     expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
     expect(sendButton?.className).toContain('dark:border-[#5a6573]');
   });
+
+  it('groups attachment and injected actions in the Add menu', async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      onComposerAddMenuOpenChange: onOpenChange,
+      composerAddMenuSlot: ({ insertMention, insertReference }) => React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertMention('explore') },
+          '智能体',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('diagnose', 'skill') },
+          '技能',
+        ),
+      ),
+    }));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(screen.getByText('文件和图片')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '智能体' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '技能' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('diagnose')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('');
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps a selected subagent reference when the default agent changes', async () => {
+    const user = userEvent.setup();
+    const mentionAgents = [
+      {
+        name: 'rex',
+        description: 'Main orchestrator',
+        mode: 'primary',
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      },
+      {
+        name: 'explore',
+        description: 'Explore the codebase',
+        mode: 'subagent',
+        native: true,
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      },
+    ];
+    function AgentMenuHarness() {
+      const [agentName, setAgentName] = React.useState('rex');
+      return React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        agentName,
+        mentionAgents,
+        composerAddMenuSlot: ({ insertMention }) => React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: () => {
+              setAgentName('explore');
+              insertMention('explore');
+            },
+          },
+          '选择 Explore',
+        ),
+      });
+    }
+    render(React.createElement(AgentMenuHarness));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+    await user.click(screen.getByRole('button', { name: '选择 Explore' }));
+
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+  });
 });
 
 describe('shouldRenderMessage', () => {
@@ -2782,7 +2878,7 @@ describe('SessionChat optimistic message identity', () => {
   });
 });
 
-describe('SessionChat agent mentions', () => {
+describe('SessionChat composer references', () => {
   const mentionAgents = [
     {
       name: 'rex',
@@ -2807,20 +2903,20 @@ describe('SessionChat agent mentions', () => {
     },
   ];
 
-  it('shows matching agents when typing @', async () => {
+  it('opens the same Add menu when typing @', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
       mentionAgents,
     }));
 
-    await user.type(screen.getByPlaceholderText('请输入消息'), '@ex');
+    await user.type(screen.getByPlaceholderText('请输入消息'), '@');
 
-    expect(screen.getByText('@explore')).toBeInTheDocument();
-    expect(screen.getByText('探索代码库')).toBeInTheDocument();
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('');
   });
 
-  it('routes one message to the mentioned agent without changing the default agent', async () => {
+  it('routes one message to a structured subagent reference', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
@@ -2828,7 +2924,10 @@ describe('SessionChat agent mentions', () => {
       mentionAgents,
     }));
 
-    await user.type(screen.getByPlaceholderText('请输入消息'), '@explore summarize this file{enter}');
+    await user.type(
+      screen.getByPlaceholderText('请输入消息'),
+      'subagent:explore summarize this file{enter}',
+    );
 
     await waitFor(() => {
       expect(clientPostMock).toHaveBeenCalledWith(
@@ -2837,6 +2936,51 @@ describe('SessionChat agent mentions', () => {
           agent: 'explore',
           parts: expect.any(Array),
         }),
+      );
+    });
+  });
+
+  it('sends selected resources using the unified structured syntax', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    render(React.createElement(SessionChat, {
+      sessionId: null,
+      agentName: 'rex',
+      mentionAgents,
+      onCreateAndSend,
+      composerAddMenuSlot: ({ insertMention, insertReference }) => React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertMention('explore') },
+          '选择子智能体',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('diagnose', 'skill') },
+          '选择技能',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('triage', 'workflow') },
+          '选择工作流',
+        ),
+      ),
+    }));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+    await user.click(screen.getByRole('button', { name: '选择子智能体' }));
+    await user.click(screen.getByRole('button', { name: '选择技能' }));
+    await user.click(screen.getByRole('button', { name: '选择工作流' }));
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'check this{enter}');
+
+    await waitFor(() => {
+      expect(onCreateAndSend).toHaveBeenCalledWith(
+        'workflow:triage skill:diagnose subagent:explore check this',
+        [],
+        'explore',
+        undefined,
       );
     });
   });
@@ -2880,7 +3024,7 @@ describe('SessionChat agent mentions', () => {
     });
 
     sessionApiEnqueuePromptMock.mockClear();
-    await user.type(screen.getByRole('textbox'), '@explore queued message{enter}');
+    await user.type(screen.getByRole('textbox'), 'subagent:explore queued message{enter}');
 
     await waitFor(() => {
       expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith(

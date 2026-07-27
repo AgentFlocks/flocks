@@ -17,7 +17,7 @@
  */
 
 import { useState, useCallback, useRef, useEffect, useMemo, memo } from 'react';
-import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree } from 'lucide-react';
+import { Send, Loader2, ChevronDown, Square, Copy, User, FileText, AlertCircle, X, RefreshCw, Pencil, Save, ImageIcon, Paperclip, Plus, ArrowUp, Clock, CheckCircle2, XCircle, Brain, Trash2, Bot, Check, Eye, ListTree, BookOpen, Workflow as WorkflowIcon } from 'lucide-react';
 import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
@@ -112,6 +112,19 @@ export interface ConversationBottomSlotActions {
   hasMessages: boolean;
 }
 
+export interface ComposerAddMenuActions {
+  closeMenu: () => void;
+  insertMention: (agentName: string) => void;
+  insertReference: (value: string, kind: 'workflow' | 'skill') => void;
+}
+
+type ComposerReferenceKind = 'subagent' | 'skill' | 'workflow';
+
+interface ComposerReference {
+  kind: ComposerReferenceKind;
+  value: string;
+}
+
 function getMessagePartDisplayText(part: MessagePart, hideTaskMetadata = false): string {
   const metadataDisplayText = part.metadata?.displayText ?? part.metadata?.display_text;
   const displayText = typeof metadataDisplayText === 'string' && metadataDisplayText
@@ -169,6 +182,10 @@ export interface SessionChatProps {
   onError?: (message: string) => void;
   /** Extra content injected into the left side of the composer toolbar */
   toolbarSlot?: React.ReactNode;
+  /** Extra actions shown below the file picker in the composer's Add menu. */
+  composerAddMenuSlot?: React.ReactNode | ((actions: ComposerAddMenuActions) => React.ReactNode);
+  /** Called when the composer's Add menu opens or closes. */
+  onComposerAddMenuOpenChange?: (open: boolean) => void;
   /** Minimum textarea height in px. Defaults to the compact single-line composer height. */
   composerTextareaMinHeight?: number;
   /** Maximum textarea height in px. Defaults to the existing compact/full-page values. */
@@ -1466,13 +1483,17 @@ function findMentionTrigger(text: string, cursor: number): { start: number; end:
   };
 }
 
-function resolveMentionAgentName(text: string, agents: Agent[]): string | null {
+function resolveReferencedAgentName(text: string, agents: Agent[]): string | null {
   const sorted = [...agents].sort((a, b) => b.name.length - a.name.length);
   for (const agent of sorted) {
-    const pattern = new RegExp(`(^|\\s)@${escapeRegExp(agent.name)}(?=$|\\s|[,.!?;:，。！？；：])`, 'i');
+    const pattern = new RegExp(`(^|\\s)subagent:${escapeRegExp(agent.name)}(?=$|\\s|[,.!?;，。！？；])`, 'i');
     if (pattern.test(text)) return agent.name;
   }
   return null;
+}
+
+function formatComposerReference(reference: ComposerReference): string {
+  return `${reference.kind}:${reference.value}`;
 }
 
 export default function SessionChat({
@@ -1502,6 +1523,8 @@ export default function SessionChat({
   onInitialMessageConsumed,
   supportsVision,
   toolbarSlot,
+  composerAddMenuSlot,
+  onComposerAddMenuOpenChange,
   composerTextareaMinHeight,
   composerTextareaMaxHeight,
   centerToolbarSlot,
@@ -1538,11 +1561,13 @@ export default function SessionChat({
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
   const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
+  const [composerReferences, setComposerReferences] = useState<ComposerReference[]>([]);
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
   const activeToolPartIdsRef = useRef<Set<string>>(new Set());
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [isDragOver, setIsDragOver] = useState(false);
+  const [showComposerAddMenu, setShowComposerAddMenu] = useState(false);
   // Lightbox preview for composer thumbnails. Shares the same overlay
   // component used by message bubbles so the click-to-enlarge gesture is
   // consistent across the upload tray and the rendered chat history.
@@ -1667,6 +1692,45 @@ export default function SessionChat({
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isComposingRef = useRef(false);
 
+  const closeComposerAddMenu = useCallback(() => {
+    setShowComposerAddMenu(false);
+    onComposerAddMenuOpenChange?.(false);
+  }, [onComposerAddMenuOpenChange]);
+
+  const openComposerAddMenu = useCallback(() => {
+    setShowComposerAddMenu(true);
+    onComposerAddMenuOpenChange?.(true);
+  }, [onComposerAddMenuOpenChange]);
+
+  const toggleComposerAddMenu = useCallback(() => {
+    setShowComposerAddMenu((open) => {
+      const nextOpen = !open;
+      onComposerAddMenuOpenChange?.(nextOpen);
+      return nextOpen;
+    });
+  }, [onComposerAddMenuOpenChange]);
+
+  useEffect(() => {
+    if (!showComposerAddMenu) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('[data-composer-add-menu]')) closeComposerAddMenu();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeComposerAddMenu();
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [closeComposerAddMenu, showComposerAddMenu]);
+
+  useEffect(() => {
+    if (sending && showComposerAddMenu) closeComposerAddMenu();
+  }, [closeComposerAddMenu, sending, showComposerAddMenu]);
+
   // Slash command autocomplete state
   const [commands, setCommands] = useState<Command[]>([]);
   const [showCommandDropdown, setShowCommandDropdown] = useState(false);
@@ -1693,7 +1757,12 @@ export default function SessionChat({
   );
   const hasUploadingFiles = attachments.some((attachment) => attachment.status === 'uploading');
   const canSend = !sending && !hasUploadingFiles &&
-    (!!input.trim() || successfulDocAttachments.length > 0 || successfulImageAttachments.length > 0);
+    (
+      !!input.trim()
+      || composerReferences.length > 0
+      || successfulDocAttachments.length > 0
+      || successfulImageAttachments.length > 0
+    );
   const filteredMentionAgents = useMemo(() => {
     const q = mentionQuery.trim().toLowerCase();
     return mentionAgents
@@ -2107,7 +2176,6 @@ export default function SessionChat({
     setMentionRange(null);
     setMentionQuery('');
     setSelectedMentionIndex(0);
-    setPendingAgentName(agentName || 'rex');
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
     suppressStreamingUntilIdleRef.current = false;
@@ -2119,8 +2187,9 @@ export default function SessionChat({
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
     setInput(readChatDraft(sessionId));
+    setComposerReferences([]);
     setProcessGroupOpenState(readProcessGroupOpenState(sessionId));
-  }, [sessionId, agentName, clearPendingQuestions]);
+  }, [sessionId, clearPendingQuestions]);
 
   const handleProcessGroupOpenChange = useCallback((key: string, open: boolean) => {
     setProcessGroupOpenState(prev => {
@@ -2654,16 +2723,24 @@ export default function SessionChat({
 
   const handleSend = async () => {
     if (!canSend) return;
-    const rawText = input.trim();
+    const draftText = input.trim();
+    const referencesToSend = [...composerReferences];
+    const referenceText = referencesToSend.map(formatComposerReference).join(' ');
+    const rawText = [referenceText, draftText].filter(Boolean).join(' ');
     const docAttachmentsToSend = [...successfulDocAttachments];
     const imageAttachmentsToSend = [...successfulImageAttachments];
     const text = buildMessageText(rawText, docAttachmentsToSend);
-    const mentionedAgent = resolveMentionAgentName(rawText, mentionAgents);
+    const mentionedAgent = resolveReferencedAgentName(rawText, mentionAgents);
+    const restoreDraft = () => {
+      setInput(draftText);
+      setComposerReferences(referencesToSend);
+    };
 
     // Need either text content or image attachments
     if (!text && imageAttachmentsToSend.length === 0) return;
 
     setInput('');
+    setComposerReferences([]);
     setShowCommandDropdown(false);
     setMentionRange(null);
 
@@ -2688,7 +2765,7 @@ export default function SessionChat({
         await enqueueText(text, imageParts, mentionedAgent || undefined);
         setAttachments([]);
       } catch {
-        setInput(rawText);
+        restoreDraft();
         setAttachments([...docAttachmentsToSend, ...imageAttachmentsToSend]);
       }
       return;
@@ -2698,13 +2775,13 @@ export default function SessionChat({
     if (parsed) {
       if (!sessionId) {
         // Slash commands need an existing session; restore input and do nothing
-        setInput(rawText);
+        restoreDraft();
         return;
       }
       try {
         await sendCommand(parsed.command, parsed.args);
       } catch {
-        setInput(rawText);
+        restoreDraft();
       }
       return;
     }
@@ -2721,7 +2798,7 @@ export default function SessionChat({
           // Restore both the text and the attachment list so the user can
           // retry without re-uploading images. Image data URLs are already
           // in memory, so restoring the array is safe and cheap.
-          setInput(rawText);
+          restoreDraft();
           setAttachments(imageAttachmentsToSend);
         } finally {
           setSending(false);
@@ -2734,7 +2811,7 @@ export default function SessionChat({
       await sendText(text, imageParts, mentionedAgent || undefined);
       setAttachments([]);
     } catch {
-      setInput(rawText);
+      restoreDraft();
       setAttachments(imageAttachmentsToSend);
     }
   };
@@ -2772,6 +2849,35 @@ export default function SessionChat({
       textareaRef.current?.setSelectionRange(cursor, cursor);
     });
   }, [input, mentionRange]);
+
+  const insertAgentMention = useCallback((name: string) => {
+    setComposerReferences((current) => [
+      { kind: 'subagent', value: name },
+      ...current.filter((reference) => reference.kind !== 'subagent'),
+    ]);
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, []);
+
+  const insertComposerReference = useCallback((
+    value: string,
+    kind: 'workflow' | 'skill',
+  ) => {
+    setComposerReferences((current) => [
+      { kind, value },
+      ...current.filter((reference) => reference.kind !== kind),
+    ]);
+    setMentionRange(null);
+    setMentionQuery('');
+    setSelectedMentionIndex(0);
+    requestAnimationFrame(() => {
+      textareaRef.current?.focus();
+    });
+  }, []);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     const currentValue = e.currentTarget instanceof HTMLTextAreaElement ? e.currentTarget.value : input;
@@ -3633,14 +3739,74 @@ export default function SessionChat({
                     {t('chat.upload.dropHint')}
                   </div>
                 )}
-                <div className="px-4 pt-3 pb-1">
+                {composerReferences.length > 0 && (
+                  <div
+                    className="flex flex-wrap gap-1.5 px-4 pt-3"
+                    aria-label={t('chat.references.selected')}
+                  >
+                    {composerReferences.map((reference) => {
+                      const referenceStyle = reference.kind === 'subagent'
+                        ? 'border-sky-200/80 bg-sky-50 text-sky-700 dark:border-sky-400/20 dark:bg-sky-400/[0.10] dark:text-sky-200'
+                        : reference.kind === 'skill'
+                          ? 'border-emerald-200/80 bg-emerald-50 text-emerald-700 dark:border-emerald-400/20 dark:bg-emerald-400/[0.10] dark:text-emerald-200'
+                          : 'border-amber-200/80 bg-amber-50 text-amber-700 dark:border-amber-400/20 dark:bg-amber-400/[0.10] dark:text-amber-200';
+                      const ReferenceIcon = reference.kind === 'subagent'
+                        ? Bot
+                        : reference.kind === 'skill'
+                          ? BookOpen
+                          : WorkflowIcon;
+                      return (
+                        <span
+                          key={reference.kind}
+                          className={`inline-flex h-7 max-w-full items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium shadow-[0_1px_2px_rgba(22,27,34,0.03)] ${referenceStyle}`}
+                        >
+                          <ReferenceIcon className="h-3 w-3 shrink-0" />
+                          <span className="shrink-0 opacity-65">
+                            {t(`chat.references.${reference.kind}`)}
+                          </span>
+                          <span className="truncate font-semibold">{reference.value}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setComposerReferences((current) => current.filter(
+                                (item) => item.kind !== reference.kind,
+                              ));
+                              textareaRef.current?.focus();
+                            }}
+                            className="-mr-1 grid h-5 w-5 shrink-0 place-items-center rounded-md opacity-55 transition hover:bg-black/[0.06] hover:opacity-100 dark:hover:bg-white/[0.08]"
+                            aria-label={t('chat.references.remove', {
+                              type: t(`chat.references.${reference.kind}`),
+                              name: reference.value,
+                            })}
+                          >
+                            <X className="h-3 w-3" />
+                          </button>
+                        </span>
+                      );
+                    })}
+                  </div>
+                )}
+                <div className={`px-4 pb-1 ${composerReferences.length > 0 ? 'pt-2' : 'pt-3'}`}>
                   <textarea
                     ref={textareaRef}
                     value={input}
                     onChange={(e) => {
                       const val = e.target.value;
-                      setInput(val);
                       const cursor = e.target.selectionStart ?? val.length;
+                      const beforeCursor = val.slice(0, cursor);
+                      if (/(^|\s)@$/.test(beforeCursor)) {
+                        const next = `${val.slice(0, cursor - 1)}${val.slice(cursor)}`;
+                        setInput(next);
+                        setShowCommandDropdown(false);
+                        setMentionRange(null);
+                        openComposerAddMenu();
+                        requestAnimationFrame(() => {
+                          textareaRef.current?.focus();
+                          textareaRef.current?.setSelectionRange(cursor - 1, cursor - 1);
+                        });
+                        return;
+                      }
+                      setInput(val);
                       const mention = mentionAgents.length > 0 ? findMentionTrigger(val, cursor) : null;
                       const trimmed = val.trimStart();
                       const slashQuery = trimmed.startsWith('/') ? trimmed.slice(1) : '';
@@ -3693,15 +3859,61 @@ export default function SessionChat({
 
                 {/* Bottom toolbar inside the composer card */}
                 <div className="flex items-center gap-1 px-2 pb-2">
-                  <button
-                    type="button"
-                    onClick={() => fileInputRef.current?.click()}
-                    disabled={sending}
-                    title={t('chat.upload.selectWithImage')}
-                    className="inline-flex h-8 w-8 items-center justify-center rounded-lg text-zinc-500 transition-colors hover:bg-zinc-200/60 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-40"
-                  >
-                    <Paperclip className="h-4 w-4" />
-                  </button>
+                  <div className="relative" data-composer-add-menu>
+                    <button
+                      type="button"
+                      onClick={toggleComposerAddMenu}
+                      disabled={sending}
+                      title={t('chat.addMenu.title')}
+                      aria-label={t('chat.addMenu.title')}
+                      aria-haspopup="menu"
+                      aria-expanded={showComposerAddMenu}
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                        showComposerAddMenu
+                          ? 'border-zinc-300 bg-white text-zinc-900 shadow-[0_2px_8px_rgba(22,27,34,0.08)] dark:border-white/[0.14] dark:bg-white/[0.09] dark:text-white'
+                          : 'border-transparent text-zinc-500 hover:border-zinc-200 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:border-white/[0.10] dark:hover:bg-white/[0.07] dark:hover:text-white'
+                      }`}
+                    >
+                      <Plus className="h-[17px] w-[17px]" strokeWidth={2} />
+                    </button>
+
+                    {showComposerAddMenu && (
+                      <div
+                        role="menu"
+                        aria-label={t('chat.addMenu.title')}
+                        className="absolute bottom-full left-0 z-50 mb-2 w-[264px] max-w-[calc(100vw-2rem)] overflow-visible rounded-[14px] border border-black/[0.09] bg-white/95 p-1.5 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]"
+                      >
+                        <div className="px-2.5 pb-1.5 pt-1 text-[11px] font-medium text-zinc-400 dark:text-zinc-500">
+                          {t('chat.addMenu.title')}
+                        </div>
+                        <button
+                          type="button"
+                          role="menuitem"
+                          onClick={() => {
+                            closeComposerAddMenu();
+                            fileInputRef.current?.click();
+                          }}
+                          className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+                        >
+                          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                            <Paperclip className="h-3.5 w-3.5" />
+                          </span>
+                          <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
+                        </button>
+                        {composerAddMenuSlot && (
+                          <div className="mt-0.5 border-t border-zinc-100 pt-0.5 dark:border-white/[0.07]">
+                            {typeof composerAddMenuSlot === 'function'
+                              ? composerAddMenuSlot({
+                                closeMenu: closeComposerAddMenu,
+                                insertMention: insertAgentMention,
+                                insertReference: insertComposerReference,
+                              })
+                              : composerAddMenuSlot}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
 
                   <div className="mx-1 h-4 w-px shrink-0 bg-zinc-200 dark:bg-zinc-800" />
 

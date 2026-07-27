@@ -28,6 +28,8 @@ const {
   defaultModelAPI,
   modelV2API,
   hubAPI,
+  workflowAPI,
+  skillAPI,
   toast,
 } = vi.hoisted(() => ({
   client: {
@@ -61,6 +63,12 @@ const {
     install: vi.fn(),
     installStream: vi.fn(),
   },
+  workflowAPI: {
+    listSummaries: vi.fn(),
+  },
+  skillAPI: {
+    status: vi.fn(),
+  },
   toast: {
     error: vi.fn(),
     info: vi.fn(),
@@ -81,6 +89,14 @@ vi.mock('@/api/session', () => ({
 
 vi.mock('@/api/hub', () => ({
   hubAPI,
+}));
+
+vi.mock('@/api/workflow', () => ({
+  workflowAPI,
+}));
+
+vi.mock('@/api/skill', () => ({
+  skillAPI,
 }));
 
 vi.mock('@/hooks/useSessions', () => ({
@@ -131,6 +147,8 @@ vi.mock('@/components/common/SessionChat', () => ({
     sessionId,
     mentionAgents,
     toolbarSlot,
+    composerAddMenuSlot,
+    onComposerAddMenuOpenChange,
     centerToolbarSlot,
     welcomeContent,
     initialMessage,
@@ -148,6 +166,12 @@ vi.mock('@/components/common/SessionChat', () => ({
     agentName?: string;
     mentionAgents?: Array<{ name: string }>;
     toolbarSlot?: React.ReactNode;
+    composerAddMenuSlot?: React.ReactNode | ((actions: {
+      closeMenu: () => void;
+      insertMention: (agentName: string) => void;
+      insertReference: (value: string, kind: 'workflow' | 'skill') => void;
+    }) => React.ReactNode);
+    onComposerAddMenuOpenChange?: (open: boolean) => void;
     centerToolbarSlot?: React.ReactNode;
     welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
     initialMessage?: string | null;
@@ -190,6 +214,18 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-initial-display={initialDisplayText ?? ''}
       >
         {sessionId ?? 'no-session'}
+        <button type="button" onClick={() => onComposerAddMenuOpenChange?.(true)}>
+          mock-open-add-menu
+        </button>
+        {typeof composerAddMenuSlot === 'function'
+          ? composerAddMenuSlot({
+            closeMenu: vi.fn(),
+            insertMention: (agentName) => setInput(`subagent:${agentName} `),
+            insertReference: (value, kind) => {
+              setInput(`${kind}:${value} `);
+            },
+          })
+          : composerAddMenuSlot}
         {toolbarSlot}
         {centerToolbarSlot}
         {!sessionId && welcomeContent ? (
@@ -340,6 +376,8 @@ describe('SessionPage session actions menu', () => {
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
+    workflowAPI.listSummaries.mockResolvedValue({ data: [] });
+    skillAPI.status.mockResolvedValue({ data: [] });
     client.get.mockResolvedValue({
       data: [{
         id: 'default',
@@ -1925,7 +1963,8 @@ describe('SessionPage session actions menu', () => {
     });
     await user.click(screen.getByRole('button', { name: /Rex/i }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
-    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
 
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
@@ -2406,7 +2445,45 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('uses the selected agent for the first message when an empty session is created by sending', async () => {
+  it('keeps Rex as the default while selecting a one-turn subagent reference', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    expect(screen.getAllByRole('button', { name: /Rex/i })).toHaveLength(1);
+    await user.click(screen.getByRole('button', { name: /Explore/i }));
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
+  });
+
+  it('inserts the selected agent as a structured subagent reference', async () => {
     const user = userEvent.setup();
     useAgents.mockReturnValue({
       agents: [
@@ -2439,15 +2516,54 @@ describe('SessionPage session actions menu', () => {
 
     await user.click(screen.getByRole('button', { name: /Rex/i }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
-    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
 
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith(
-        '/api/session/session-2/prompt_async',
-        expect.objectContaining({ agent: 'explore' }),
-      );
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
+  });
+
+  it('inserts selected workflows and skills as composer references', async () => {
+    const user = userEvent.setup();
+    workflowAPI.listSummaries.mockResolvedValue({
+      data: [{
+        id: 'alert-triage',
+        name: 'Alert triage',
+        description: 'Investigate security alerts',
+        category: 'security',
+        status: 'active',
+        source: 'project',
+        createdAt: 1,
+        updatedAt: 1,
+        nodeCount: 2,
+        stats: {
+          callCount: 0,
+          successCount: 0,
+          errorCount: 0,
+          totalRuntime: 0,
+          avgRuntime: 0,
+          thumbsUp: 0,
+          thumbsDown: 0,
+        },
+      }],
     });
-    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    skillAPI.status.mockResolvedValue({
+      data: [{
+        name: 'diagnose',
+        description: 'Debug difficult failures',
+        location: '/skills/diagnose',
+        source: 'project',
+        eligible: true,
+      }],
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'mock-open-add-menu' }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.workflows' }));
+    await user.click(await screen.findByRole('button', { name: /Alert triage/i }));
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('workflow:alert-triage');
+
+    await user.click(screen.getByRole('button', { name: 'mock-open-add-menu' }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.skills' }));
+    await user.click(await screen.findByRole('button', { name: /diagnose/i }));
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('skill:diagnose');
   });
 });

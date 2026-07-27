@@ -5,7 +5,7 @@ import {
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X, Check,
-  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
+  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive, BookOpen,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
@@ -22,6 +22,8 @@ import SuiteInstallProgressPanel, {
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
+import { skillAPI, type Skill } from '@/api/skill';
+import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
@@ -35,6 +37,7 @@ import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import type { ModelDefinitionV2, Session } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 
@@ -89,6 +92,124 @@ type FolderBrowserResponse = {
   roots: FolderEntry[];
   entries: FolderEntry[];
 };
+
+type ComposerResourceItem = {
+  id: string;
+  name: string;
+  description?: string;
+  badge?: string;
+  source: 'builtin' | 'custom';
+};
+
+function ComposerResourcePicker({
+  label,
+  title,
+  emptyText,
+  icon: Icon,
+  items,
+  loading,
+  open,
+  onToggle,
+  onSelect,
+}: {
+  label: string;
+  title: string;
+  emptyText: string;
+  icon: React.ComponentType<{ className?: string }>;
+  items: ComposerResourceItem[];
+  loading: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onSelect: (item: ComposerResourceItem) => void;
+}) {
+  const { t } = useTranslation('session');
+  const [sourceFilter, setSourceFilter] = useState<AgentSourceFilter>('all');
+  const filteredItems = items.filter((item) => (
+    sourceFilter === 'all' || item.source === sourceFilter
+  ));
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[336px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+            <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
+              {title}
+            </span>
+            <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+              {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
+                <button
+                  key={filter}
+                  type="button"
+                  onClick={() => setSourceFilter(filter)}
+                  className={`rounded-md px-2 py-1 transition-colors ${
+                    sourceFilter === filter
+                      ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
+                      : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                  }`}
+                >
+                  {t(`agentPicker.filter.${filter}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+            {loading ? (
+              <div className="flex h-full items-center justify-center text-zinc-400">
+                <Loader2 className="h-4 w-4 animate-spin" />
+              </div>
+            ) : filteredItems.length > 0 ? (
+              filteredItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelect(item)}
+                  title={item.description}
+                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                >
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
+                    <Icon className="h-3 w-3" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                    item.source === 'builtin'
+                      ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                      : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                  }`}>
+                    {t(`agentPicker.badge.${item.source}`)}
+                  </span>
+                  {item.badge && (
+                    <span className="max-w-20 shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500 dark:bg-white/[0.07] dark:text-zinc-400">
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              ))
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-zinc-400">
+                {emptyText}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
 const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
 
@@ -460,6 +581,11 @@ export default function SessionPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
+  const [showWorkflowOptions, setShowWorkflowOptions] = useState(false);
+  const [showSkillOptions, setShowSkillOptions] = useState(false);
+  const [composerWorkflows, setComposerWorkflows] = useState<WorkflowSummary[]>([]);
+  const [composerSkills, setComposerSkills] = useState<Skill[]>([]);
+  const [loadingComposerResources, setLoadingComposerResources] = useState(false);
   const [showProjectOptions, setShowProjectOptions] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
@@ -533,6 +659,7 @@ export default function SessionPage() {
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
+  const composerResourcesLoadedRef = useRef(false);
   const toast = useToast();
 
   const sessionProjectIds = useMemo(
@@ -572,6 +699,7 @@ export default function SessionPage() {
   const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
   const filteredChatAgents = useMemo(
     () => chatAgents.filter((agent) => {
+      if (agent.name.toLowerCase() === 'rex') return false;
       if (agentSourceFilter === 'builtin') return agent.native;
       if (agentSourceFilter === 'custom') return !agent.native;
       return true;
@@ -582,6 +710,39 @@ export default function SessionPage() {
     () => chatAgents.find((agent) => agent.name === selectedAgent),
     [chatAgents, selectedAgent],
   );
+  const loadComposerResources = useCallback(async () => {
+    if (composerResourcesLoadedRef.current || loadingComposerResources) return;
+    setLoadingComposerResources(true);
+    try {
+      const [workflowResult, skillResult] = await Promise.allSettled([
+        workflowAPI.listSummaries({ status: 'active' }),
+        skillAPI.status(),
+      ]);
+      if (workflowResult.status === 'fulfilled') {
+        setComposerWorkflows(
+          workflowResult.value.data
+            .filter((workflow) => workflow.status === 'active')
+            .sort((a, b) => getWorkflowDisplayName(a, i18n.language)
+              .localeCompare(getWorkflowDisplayName(b, i18n.language))),
+        );
+      }
+      if (skillResult.status === 'fulfilled') {
+        setComposerSkills(
+          skillResult.value.data
+            .filter((skill) => (
+              !skill.ui_hidden
+              && !skill.disabled
+              && skill.eligible !== false
+              && skill.category !== 'system'
+            ))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      }
+      composerResourcesLoadedRef.current = true;
+    } finally {
+      setLoadingComposerResources(false);
+    }
+  }, [i18n.language, loadingComposerResources]);
   const chatModelOptions = useMemo<ChatModelOption[]>(() => {
     const providerById = new Map(
       providers
@@ -2366,6 +2527,204 @@ export default function SessionPage() {
               alertOperationsBusy={installingSocWorkspace}
             />
           )}
+          onComposerAddMenuOpenChange={(open) => {
+            setShowAgentOptions(false);
+            setShowWorkflowOptions(false);
+            setShowSkillOptions(false);
+            if (!open) return;
+            setShowProjectOptions(false);
+            setShowModelOptions(false);
+            void loadComposerResources();
+          }}
+          composerAddMenuSlot={({ closeMenu, insertMention, insertReference }) => (
+            <>
+            <div className="relative" data-agent-selector>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAgentOptions((open) => !open);
+                  setShowWorkflowOptions(false);
+                  setShowSkillOptions(false);
+                  setShowProjectOptions(false);
+                  setShowModelOptions(false);
+                }}
+                className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+                title={t('agentPicker.title')}
+                aria-label={`${t('chat.addMenu.agent')}: ${
+                  selectedAgentInfo
+                    ? getAgentDisplayName(selectedAgentInfo, i18n.language)
+                    : formatAgentName(selectedAgent)
+                }`}
+                aria-haspopup="menu"
+                aria-expanded={showAgentOptions}
+              >
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                  <Bot className="h-3.5 w-3.5" />
+                </span>
+                <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
+                <span className="max-w-[108px] truncate text-[11px] font-normal text-zinc-400 dark:text-zinc-500">
+                  {selectedAgentInfo
+                    ? getAgentDisplayName(selectedAgentInfo, i18n.language)
+                    : formatAgentName(selectedAgent)}
+                </span>
+                <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
+              </button>
+              {showAgentOptions && (
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[336px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+                    <div className="min-w-0">
+                      <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
+                      <div
+                        className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
+                        onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseLeave={() => setSelectorTooltip(null)}
+                        onPointerLeave={() => setSelectorTooltip(null)}
+                      >
+                        {t('agentPicker.hint')}
+                      </div>
+                    </div>
+                    <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+                      {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
+                        <button
+                          key={filter}
+                          type="button"
+                          onClick={() => setAgentSourceFilter(filter)}
+                          className={`rounded-md px-2 py-1 transition-colors ${
+                            agentSourceFilter === filter
+                              ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
+                              : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                          }`}
+                        >
+                          {t(`agentPicker.filter.${filter}`)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+                    {loadingAgents ? (
+                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
+                    ) : filteredChatAgents.length > 0 ? (
+                      filteredChatAgents.map((agent) => {
+                        const displayName = getAgentDisplayName(agent, i18n.language);
+                        const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
+                        return (
+                          <button
+                            key={agent.name}
+                            type="button"
+                            onClick={() => {
+                              setShowAgentOptions(false);
+                              insertMention(agent.name);
+                              closeMenu();
+                            }}
+                            className={`w-full min-w-0 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              selectedAgent === agent.name
+                                ? 'bg-zinc-100/90 text-zinc-900 dark:bg-white/[0.09] dark:text-zinc-50'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
+                                selectedAgent === agent.name
+                                  ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
+                                  : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
+                              }`}>
+                                <Bot className="h-3 w-3" />
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                                {displayName}
+                              </span>
+                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                agent.mode === 'primary'
+                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                  : agent.native
+                                    ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                    : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                              }`}>
+                                {agent.mode === 'primary'
+                                  ? t('agentPicker.badge.primary')
+                                  : agent.native
+                                    ? t('agentPicker.badge.builtin')
+                                    : t('agentPicker.badge.custom')}
+                              </span>
+                              {primaryDesc && (
+                                <span
+                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-white/[0.08]"
+                                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                  onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseOver={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseLeave={() => setSelectorTooltip(null)}
+                                  onPointerLeave={() => setSelectorTooltip(null)}
+                                >
+                                  <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="p-3 text-center text-xs text-zinc-500">{t('noAgents')}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <ComposerResourcePicker
+              label={t('chat.addMenu.workflows')}
+              title={t('chat.addMenu.selectWorkflow')}
+              emptyText={t('chat.addMenu.noWorkflows')}
+              icon={WorkflowIcon}
+              items={composerWorkflows.map((workflow) => ({
+                id: workflow.id,
+                name: getWorkflowDisplayName(workflow, i18n.language),
+                description: workflow.description,
+                badge: workflow.category,
+                source: workflow.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showWorkflowOptions}
+              onToggle={() => {
+                setShowWorkflowOptions((open) => !open);
+                setShowAgentOptions(false);
+                setShowSkillOptions(false);
+              }}
+              onSelect={(workflow) => {
+                insertReference(workflow.id, 'workflow');
+                setShowWorkflowOptions(false);
+                closeMenu();
+              }}
+            />
+            <ComposerResourcePicker
+              label={t('chat.addMenu.skills')}
+              title={t('chat.addMenu.selectSkill')}
+              emptyText={t('chat.addMenu.noSkills')}
+              icon={BookOpen}
+              items={composerSkills.map((skill) => ({
+                id: skill.name,
+                name: skill.name,
+                description: skill.description,
+                badge: skill.category,
+                source: skill.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showSkillOptions}
+              onToggle={() => {
+                setShowSkillOptions((open) => !open);
+                setShowAgentOptions(false);
+                setShowWorkflowOptions(false);
+              }}
+              onSelect={(skill) => {
+                insertReference(skill.id, 'skill');
+                setShowSkillOptions(false);
+                closeMenu();
+              }}
+            />
+            </>
+          )}
           toolbarSlot={
             <>
             {!activeChatSessionId && (
@@ -2440,118 +2799,6 @@ export default function SessionPage() {
                 )}
               </div>
             )}
-            <div className="relative" data-agent-selector>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowAgentOptions(!showAgentOptions);
-                  setShowProjectOptions(false);
-                  setShowModelOptions(false);
-                }}
-                className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                title={t('agentPicker.title')}
-              >
-                <Bot className="h-3 w-3 shrink-0" />
-                <span className="truncate font-medium">
-                  {selectedAgentInfo ? getAgentDisplayName(selectedAgentInfo, i18n.language) : formatAgentName(selectedAgent)}
-                </span>
-                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
-              </button>
-              {showAgentOptions && (
-                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                  <div className="flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('agentPicker.title')}</div>
-                      <div
-                        className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
-                        onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
-                        onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
-                        onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
-                        onMouseLeave={() => setSelectorTooltip(null)}
-                        onPointerLeave={() => setSelectorTooltip(null)}
-                      >
-                        {t('agentPicker.hint')}
-                      </div>
-                    </div>
-                    <div className="inline-flex shrink-0 items-center rounded-md border border-zinc-200 bg-white p-0.5 text-[10px] dark:border-zinc-800 dark:bg-zinc-950">
-                      {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
-                        <button
-                          key={filter}
-                          type="button"
-                          onClick={() => setAgentSourceFilter(filter)}
-                          className={`rounded px-1.5 py-0.5 transition-colors ${
-                            agentSourceFilter === filter
-                              ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
-                              : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
-                          }`}
-                        >
-                          {t(`agentPicker.filter.${filter}`)}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
-                    {loadingAgents ? (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
-                    ) : filteredChatAgents.length > 0 ? (
-                      filteredChatAgents.map((agent) => {
-                        const displayName = getAgentDisplayName(agent, i18n.language);
-                        const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
-                        return (
-                        <button
-                          key={agent.name}
-                          onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                          className={`w-full min-w-0 rounded-md px-2 py-1.5 text-left transition-colors ${
-                            selectedAgent === agent.name
-                              ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                              : 'hover:bg-zinc-50 text-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                          }`}
-                        >
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Bot className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                            <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                              {displayName}
-                            </span>
-                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
-                              agent.mode === 'primary'
-                                ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
-                                : agent.native
-                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
-                                  : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
-                            }`}>
-                              {agent.mode === 'primary'
-                                ? t('agentPicker.badge.primary')
-                                : agent.native
-                                  ? t('agentPicker.badge.builtin')
-                                  : t('agentPicker.badge.custom')}
-                            </span>
-                            <div className="ml-auto flex shrink-0 items-center gap-1">
-                              {primaryDesc && (
-                                <span
-                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                                  onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
-                                  onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
-                                  onMouseOver={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
-                                  onMouseLeave={() => setSelectorTooltip(null)}
-                                  onPointerLeave={() => setSelectorTooltip(null)}
-                                >
-                                  <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </button>
-                        );
-                      })
-                    ) : (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('noAgents')}</div>
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
             </>
           }
           centerToolbarSlot={

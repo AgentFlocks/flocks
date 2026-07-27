@@ -50,7 +50,7 @@
   "smartAssistant": "智能AI助手",
   "agentPicker": {
     "title": "选择对话 Agent",
-    "hint": "新会话首条默认由 Rex 处理；输入 @Agent 可路由单条消息",
+    "hint": "Rex 为默认智能体；选择后以子智能体标签路由当前消息",
     "filter": {
       "all": "全部",
       "builtin": "内置",
@@ -233,6 +233,24 @@
       "errorGeneric": "上传失败，请重试",
       "imageNotSupported": "当前模型不支持图片分析，请在模型配置中选择支持视觉的模型",
       "imageNotSupportedBanner": "当前模型不支持图片分析"
+    },
+    "addMenu": {
+      "title": "添加",
+      "files": "文件和图片",
+      "agent": "智能体",
+      "workflows": "工作流",
+      "skills": "技能",
+      "selectWorkflow": "选择工作流",
+      "selectSkill": "选择技能",
+      "noWorkflows": "暂无可用工作流",
+      "noSkills": "暂无可用技能"
+    },
+    "references": {
+      "selected": "已选择的资源",
+      "subagent": "子智能体",
+      "skill": "技能",
+      "workflow": "工作流",
+      "remove": "移除 {{type}} {{name}}"
     },
     "tool": {
       "pending": "等待中",
