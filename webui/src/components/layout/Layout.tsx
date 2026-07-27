@@ -1,7 +1,6 @@
 import { Outlet, Link, useLocation, matchPath, useNavigate } from 'react-router-dom';
 import {
   Home,
-  MessageSquare,
   ListTodo,
   X,
   ChevronLeft,
@@ -100,6 +99,7 @@ import { useToast } from '@/components/common/Toast';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
+import AIWorkbenchNavigation from './AIWorkbenchNavigation';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -519,7 +519,6 @@ export default function Layout() {
             { name: t('tasks'), href: '/tasks', icon: ListTodo },
             { name: t('plugins'), href: '/plugins', icon: PackageCheck },
             { name: t('workspace'), href: '/workspace', icon: FolderOpen },
-            { name: t('sessions'), href: '/sessions', icon: MessageSquare },
           ],
         },
         {
@@ -530,6 +529,12 @@ export default function Layout() {
             ...sceneWorkspaceItems,
             { name: t('deviceIntegration'), href: '/devices', icon: ServerCog },
           ],
+        },
+        {
+          id: 'aiWorkbench',
+          name: t('aiWorkbench'),
+          collapsible: true,
+          items: [],
         },
       ];
     },
@@ -798,8 +803,21 @@ export default function Layout() {
                     </h3>
                   )}
                   {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
-                  {!sectionCollapsed && (
+                  {(!sectionCollapsed || section.id === 'aiWorkbench') && (
                     <div id={sectionContentId} className="space-y-0.5">
+                      {section.id === 'aiWorkbench' && (
+                        <div
+                          id="ai-workbench-navigation-slot"
+                          className={`${sectionCollapsed ? 'hidden' : ''} ${
+                            collapsed ? '[&_.session-workbench-portal]:hidden' : ''
+                          }`}
+                        >
+                          <AIWorkbenchNavigation
+                            collapsed={collapsed}
+                            onNavigate={() => setSidebarOpen(false)}
+                          />
+                        </div>
+                      )}
                       {section.items.map((item) => {
                         const isActive = location.pathname === item.href
                           || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));

@@ -15,6 +15,7 @@ const {
   onboardingAPI,
   providerAPI,
   sessionApi,
+  clientGet,
   getActiveNotifications,
   ackNotification,
   getNotificationAckStatus,
@@ -44,7 +45,9 @@ const {
   },
   sessionApi: {
     create: vi.fn(),
+    list: vi.fn(() => Promise.resolve([])),
   },
+  clientGet: vi.fn(() => Promise.resolve({ data: [] })),
   getActiveNotifications: vi.fn(),
   ackNotification: vi.fn(),
   getNotificationAckStatus: vi.fn(),
@@ -94,6 +97,12 @@ vi.mock('@/api/onboarding', () => ({
 
 vi.mock('@/api/session', () => ({
   sessionApi,
+}));
+
+vi.mock('@/api/client', () => ({
+  default: {
+    get: clientGet,
+  },
 }));
 
 vi.mock('@/api/update', () => ({
@@ -881,6 +890,8 @@ describe('Layout WebUI contract pages navigation', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     localStorage.clear();
+    clientGet.mockResolvedValue({ data: [] });
+    sessionApi.list.mockResolvedValue([]);
     checkUpdate.mockResolvedValue({
       has_update: false,
       latest_version: null,
@@ -918,15 +929,47 @@ describe('Layout WebUI contract pages navigation', () => {
 
   it('renders the requested flat primary navigation in order', async () => {
     localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    clientGet.mockResolvedValue({
+      data: [{
+        id: 'project-1',
+        worktree: '/workspace/flocks',
+        name: 'Flocks project',
+        sessionCount: 1,
+      }],
+    });
+    sessionApi.list.mockImplementation(({ projectID }: { projectID?: string }) => Promise.resolve(
+      projectID === 'project-1'
+        ? [{
+            id: 'project-session',
+            title: 'Project session',
+            projectID: 'project-1',
+            effectiveProjectID: 'project-1',
+          }]
+        : projectID === 'tasks'
+          ? [{ id: 'task-session', title: 'Task session', projectID: 'tasks' }]
+          : [],
+    ));
     const { container } = renderHomeWithLayout();
     await screen.findByRole('link', { name: 'flocksHome' });
     const sidebarNav = container.querySelector('aside nav') as HTMLElement;
     const primaryLinks = within(sidebarNav).getAllByRole('link')
       .map((link) => link.textContent)
-      .slice(0, 5);
+      .slice(0, 4);
 
-    expect(primaryLinks).toEqual(['flocksHome', 'tasks', 'plugins', 'workspace', 'sessions']);
-    expect(screen.queryByRole('button', { name: 'aiWorkbench' })).not.toBeInTheDocument();
+    expect(primaryLinks).toEqual(['flocksHome', 'tasks', 'plugins', 'workspace']);
+    expect(screen.getByRole('button', { name: 'aiWorkbench' })).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: /projectsSection/ })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /tasksSection/ })).toBeInTheDocument();
+    expect(await screen.findByText('Flocks project')).toBeInTheDocument();
+    expect(screen.getByRole('link', { name: 'Project session' })).toHaveAttribute(
+      'href',
+      '/sessions?session=project-session',
+    );
+    expect(screen.getByRole('link', { name: 'Task session' })).toHaveAttribute(
+      'href',
+      '/sessions?session=task-session',
+    );
+    expect(screen.queryByRole('link', { name: 'sessions' })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: 'agentHub' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: '自定义仪表盘' })).not.toBeInTheDocument();
   });
@@ -938,19 +981,25 @@ describe('Layout WebUI contract pages navigation', () => {
     renderHomeWithLayout();
 
     const sceneWorkspacesToggle = await screen.findByRole('button', { name: 'sceneWorkspaces' });
+    const aiWorkbenchToggle = screen.getByRole('button', { name: 'aiWorkbench' });
 
     expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'true');
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'true');
+    expect(screen.getByRole('button', { name: /projectsSection/ })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
 
     await user.click(sceneWorkspacesToggle);
     expect(sceneWorkspacesToggle).toHaveAttribute('aria-expanded', 'false');
     expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBe(JSON.stringify(['sceneWorkspaces']));
     expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /projectsSection/ })).toBeInTheDocument();
     await user.click(sceneWorkspacesToggle);
     expect(localStorage.getItem('flocks_layout_collapsed_nav_sections')).toBeNull();
     expect(screen.getByRole('link', { name: 'deviceIntegration' })).toBeInTheDocument();
+
+    await user.click(aiWorkbenchToggle);
+    expect(aiWorkbenchToggle).toHaveAttribute('aria-expanded', 'false');
+    expect(document.getElementById('ai-workbench-navigation-slot')).toHaveClass('hidden');
   });
 
   it('restores collapsed sidebar workspace groups after refresh', async () => {
@@ -961,7 +1010,7 @@ describe('Layout WebUI contract pages navigation', () => {
 
     expect(await screen.findByRole('button', { name: 'sceneWorkspaces' })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('link', { name: 'deviceIntegration' })).not.toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'sessions' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /projectsSection/ })).toBeInTheDocument();
     expect(screen.getByRole('link', { name: 'plugins' })).toBeInTheDocument();
   });
 
@@ -1097,6 +1146,7 @@ describe('Layout WebUI contract pages navigation', () => {
 
     const sectionHeadings = Array.from(container.querySelectorAll('h3')).map((element) => element.textContent);
     expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeGreaterThanOrEqual(0);
+    expect(sectionHeadings.indexOf('sceneWorkspaces')).toBeLessThan(sectionHeadings.indexOf('aiWorkbench'));
     expect(sectionHeadings).not.toContain('agentHub');
     expect(sectionHeadings).not.toContain('systemCenter');
 

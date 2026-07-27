@@ -1,8 +1,9 @@
-import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
+import { memo, useState, useEffect, useMemo, useCallback, useRef, type ReactNode, type RefObject } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Plus, Trash2, Archive,
   ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
-  PanelLeftClose, PanelLeft, Bot, Loader2,
+  Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X,
   FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
@@ -62,10 +63,21 @@ const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
+const WORKBENCH_NAVIGATION_REFRESH_EVENT = 'flocks:workbench-navigation-refresh';
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+
+function WorkbenchNavigationPortal({
+  target,
+  children,
+}: {
+  target: HTMLElement | null;
+  children: ReactNode;
+}) {
+  return target ? createPortal(children, target) : children;
+}
 
 function ExecutionModeIcon({
   mode,
@@ -480,7 +492,7 @@ export default function SessionPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
-  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [workbenchNavigationTarget, setWorkbenchNavigationTarget] = useState<HTMLElement | null>(null);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
   const [selectedExecutionMode, setSelectedExecutionMode] = useState<SessionExecutionMode>(
@@ -565,6 +577,10 @@ export default function SessionPage() {
   const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
   const toast = useToast();
+
+  useEffect(() => {
+    setWorkbenchNavigationTarget(document.getElementById('ai-workbench-navigation-slot'));
+  }, []);
 
   const sessionProjectIds = useMemo(
     () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
@@ -837,6 +853,10 @@ export default function SessionPage() {
   const canShowMoreTaskSessions = taskSessionsCollapsedToFirstPage || hasMoreRemoteTaskSessions;
   const canCollapseTaskSessions = !taskSessionsCollapsedToFirstPage
     && taskSessionGroup.sessions.length > sessionListPageSize;
+
+  useEffect(() => {
+    window.dispatchEvent(new Event(WORKBENCH_NAVIGATION_REFRESH_EVENT));
+  }, [projects, sessions]);
 
   const selectedProjectIDForCreate = selectedProjectId && selectedProjectId !== TASK_SESSION_GROUP_ID
     ? selectedProjectId
@@ -2002,12 +2022,9 @@ export default function SessionPage() {
   return (
     <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
+      <WorkbenchNavigationPortal target={workbenchNavigationTarget}>
       <div
-        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
-          sidebarCollapsed
-            ? 'w-0 border-transparent opacity-0'
-            : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
-        }`}
+        className="session-workbench-portal flex w-full flex-col overflow-hidden"
         aria-label={t('managementTitle')}
       >
         {/* Header：始终显示标题、新建与搜索 */}
@@ -2424,22 +2441,12 @@ export default function SessionPage() {
           </div>
         )}
       </div>
+      </WorkbenchNavigationPortal>
 
       {/* ── Main area ── */}
       <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
         {/* Header */}
         <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
-          <div className="shrink-0">
-            <button
-              onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="grid h-[30px] w-[30px] place-items-center rounded-lg border-0 bg-transparent text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
-              title={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
-              aria-label={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
-            >
-              {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
-            </button>
-          </div>
-
           <div className="flex min-w-0 items-center">
             <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
               {selectedSession?.title || t('newSession')}
