@@ -1929,6 +1929,9 @@ export default function SessionPage() {
                     aria-label={t('toggleProjects')}
                   >
                     <span>{t('projectsSection')}</span>
+                    <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                      ({managedProjectSessionGroups.length})
+                    </span>
                     {projectsSectionCollapsed
                       ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                       : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
@@ -2029,9 +2032,6 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <span className="min-w-[18px] shrink-0 text-center text-[12px] font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
-                          {group.sessionCount}
-                        </span>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
@@ -2172,6 +2172,9 @@ export default function SessionPage() {
                       aria-label={t('toggleTasks')}
                     >
                       <span>{t('tasksSection')}</span>
+                      <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                        ({taskSessionGroup.sessionCount})
+                      </span>
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
@@ -2191,9 +2194,6 @@ export default function SessionPage() {
                         ? <Loader2 className="h-3 w-3 animate-spin" />
                         : <Plus className="h-3 w-3" />}
                     </button>
-                    <span className="min-w-[18px] shrink-0 text-center text-[12px] font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
-                      {taskSessionGroup.sessionCount}
-                    </span>
                   </div>
                   {!taskGroupCollapsed && (
                     <div className="mt-0.5">

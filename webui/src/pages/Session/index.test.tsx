@@ -419,6 +419,8 @@ describe('SessionPage session actions menu', () => {
     expect(searchInput).toHaveClass('text-sm', 'font-medium');
     expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
+    expect(tasksHeading.nextElementSibling).toHaveTextContent('(1)');
+    expect(projectsHeading.nextElementSibling).toHaveTextContent('(0)');
     expect(tasksSection).not.toBeNull();
     expect(projectsSection).not.toBeNull();
     expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
@@ -1100,7 +1102,8 @@ describe('SessionPage session actions menu', () => {
       expect(client.patch).toHaveBeenCalledWith('/api/project/prj_project2', { name: 'Renamed Project' });
     });
     const renamedProject = await screen.findByText('Renamed Project');
-    expect(renamedProject.closest('[class*="group/project"]')).toHaveTextContent('8');
+    expect(renamedProject.closest('[class*="group/project"]')).not.toHaveTextContent('8');
+    expect(screen.getByText('projectsSection').nextElementSibling).toHaveTextContent('(1)');
   });
 
   it('shares and unshares a project from the sidebar', async () => {

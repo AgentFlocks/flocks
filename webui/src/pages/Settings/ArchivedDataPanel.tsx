@@ -224,7 +224,7 @@ export default function ArchivedDataPanel() {
           </div>
         ) : (
           <>
-            <div className="hidden grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] items-center gap-4 border-b border-zinc-200 bg-zinc-50 px-4 py-2.5 text-xs font-semibold text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 md:grid">
+            <div className="hidden grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] items-center gap-4 border-b border-zinc-200 bg-zinc-50 px-4 py-2.5 text-sm font-normal text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400 md:grid">
               <input
                 type="checkbox"
                 checked={allSelected}
@@ -248,7 +248,7 @@ export default function ArchivedDataPanel() {
                 : session.ownerUsername || t('archivedData.systemOwner');
               const projectLabel = getProjectLabel(session);
               return (
-                <div key={session.id} className="grid gap-3 border-b border-zinc-100 px-4 py-3.5 last:border-b-0 dark:border-zinc-900 md:grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] md:items-center md:gap-4">
+                <div key={session.id} className="grid gap-3 border-b border-zinc-100 px-4 py-3.5 text-sm font-normal last:border-b-0 dark:border-zinc-900 md:grid-cols-[2.25rem_minmax(10rem,2fr)_minmax(6.5rem,0.8fr)_minmax(7rem,1fr)_9.5rem_7rem] md:items-center md:gap-4">
                   <input
                     type="checkbox"
                     checked={selectedIds.has(session.id)}
@@ -258,15 +258,15 @@ export default function ArchivedDataPanel() {
                     className="h-4 w-4 justify-self-center"
                   />
                   <div className="min-w-0">
-                    <p className="truncate text-sm font-semibold text-zinc-900 dark:text-zinc-100">{session.title}</p>
+                    <p className="truncate text-sm font-normal text-zinc-900 dark:text-zinc-100">{session.title}</p>
                   </div>
-                  <p className="truncate text-sm text-zinc-600 dark:text-zinc-400" title={ownerLabel}>
+                  <p className="truncate text-sm font-normal text-zinc-600 dark:text-zinc-400" title={ownerLabel}>
                     {ownerLabel}
                   </p>
-                  <p className="truncate text-sm text-zinc-600 dark:text-zinc-400" title={projectLabel}>
+                  <p className="truncate text-sm font-normal text-zinc-600 dark:text-zinc-400" title={projectLabel}>
                     {projectLabel}
                   </p>
-                  <p className="text-xs text-zinc-500">
+                  <p className="text-sm font-normal text-zinc-500">
                     {session.time.archived ? new Date(session.time.archived).toLocaleString() : '—'}
                   </p>
                   <div className="flex items-center justify-center gap-3">
@@ -276,7 +276,7 @@ export default function ArchivedDataPanel() {
                       disabled={!canManage || restoring}
                       aria-label={t('archivedData.restore')}
                       title={t('archivedData.restore')}
-                      className="text-sm font-medium text-zinc-600 transition-colors hover:text-zinc-950 disabled:opacity-40 dark:text-zinc-300 dark:hover:text-zinc-50"
+                      className="text-sm font-normal text-zinc-600 transition-colors hover:text-zinc-950 disabled:opacity-40 dark:text-zinc-300 dark:hover:text-zinc-50"
                     >
                       {t('archivedData.restore')}
                     </button>
@@ -286,7 +286,7 @@ export default function ArchivedDataPanel() {
                       disabled={!canManage}
                       aria-label={t('archivedData.delete')}
                       title={t('archivedData.delete')}
-                      className="text-sm font-medium text-red-600 transition-colors hover:text-red-700 disabled:opacity-40 dark:text-red-300 dark:hover:text-red-200"
+                      className="text-sm font-normal text-red-600 transition-colors hover:text-red-700 disabled:opacity-40 dark:text-red-300 dark:hover:text-red-200"
                     >
                       {t('archivedData.delete')}
                     </button>

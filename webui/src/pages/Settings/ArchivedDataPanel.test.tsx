@@ -68,11 +68,20 @@ describe('ArchivedDataPanel', () => {
     expect(screen.queryByText('project-1')).not.toBeInTheDocument();
     expect(screen.queryByText('user')).not.toBeInTheDocument();
 
+    const tableHeader = screen.getByText('archivedData.session').parentElement;
+    expect(tableHeader).toHaveClass('text-sm', 'font-normal');
+    expect(tableHeader).not.toHaveClass('text-xs', 'font-semibold');
+    expect(screen.getByText('Archived Session')).toHaveClass('text-sm', 'font-normal');
+    expect(screen.getByText('alice')).toHaveClass('text-sm', 'font-normal');
+    expect(screen.getByText('Security Project')).toHaveClass('text-sm', 'font-normal');
+
     const refreshButton = screen.getByRole('button', { name: 'archivedData.refresh' });
     expect(refreshButton.textContent).toBe('');
 
     const restoreButton = screen.getByRole('button', { name: 'archivedData.restore' });
     expect(restoreButton).toHaveTextContent('archivedData.restore');
+    expect(restoreButton).toHaveClass('text-sm', 'font-normal');
+    expect(screen.getByRole('button', { name: 'archivedData.delete' })).toHaveClass('text-sm', 'font-normal');
     await user.click(restoreButton);
 
     await waitFor(() => expect(sessionApi.restore).toHaveBeenCalledWith('session-archived'));
