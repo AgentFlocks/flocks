@@ -106,6 +106,8 @@
     "placeholderStreaming": "AI 正在处理中，请稍候...",
     "placeholderNodeRef": "描述对节点 {{nodeId}} 的修改意图...",
     "emptyText": "暂无执行记录",
+    "loadFailed": "消息加载失败",
+    "retry": "重试",
     "suggestions": "示例问题",
     "stopTitle": "停止执行",
     "contextUsageTitle": "上下文已用：{{used}} / {{total}}（{{percent}}%）",

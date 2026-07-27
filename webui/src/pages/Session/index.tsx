@@ -1838,13 +1838,13 @@ export default function SessionPage() {
   const showSessionListSkeleton = loadingSessions && sessions.length === 0;
 
   return (
-    <div className="flex h-full w-full overflow-hidden bg-gray-50 text-[#202328] dark:bg-[#252c35] dark:text-[#d7dee8]">
+    <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`flex h-[calc(100%_-_1.5rem)] flex-shrink-0 flex-col overflow-hidden rounded-2xl border bg-white shadow-[0_3px_12px_rgba(22,27,34,0.045)] transition-[width,margin,opacity] duration-200 dark:border-white/[0.08] dark:bg-[#303842] dark:shadow-[0_8px_24px_rgba(15,18,22,0.16)] ${
+        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
           sidebarCollapsed
-            ? 'my-3 w-0 border-transparent opacity-0'
-            : 'm-3 w-[282px] border-black/[0.07] opacity-100'
+            ? 'w-0 border-transparent opacity-0'
+            : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
         }`}
         aria-label={t('managementTitle')}
       >
@@ -2294,9 +2294,9 @@ export default function SessionPage() {
       </div>
 
       {/* ── Main area ── */}
-      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-gray-50 dark:bg-[#252c35]">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
         {/* Header */}
-        <div className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
+        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
           <div className="shrink-0">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
@@ -2317,7 +2317,7 @@ export default function SessionPage() {
           {workbenchRefreshing && (
             <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
           )}
-        </div>
+        </header>
 
         {/* Chat — powered by unified SessionChat */}
         {resolvingSelectedSession ? (
