@@ -1,6 +1,6 @@
 import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
-  Plus, Trash2,
+  Plus, Trash2, Archive,
   ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
@@ -536,7 +536,7 @@ export default function SessionPage() {
   const [folderBrowser, setFolderBrowser] = useState<FolderBrowserResponse | null>(null);
   const [folderBrowserLoading, setFolderBrowserLoading] = useState(false);
   const [projectSubmitting, setProjectSubmitting] = useState(false);
-  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchArchiving, setBatchArchiving] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
@@ -824,13 +824,11 @@ export default function SessionPage() {
         worktree: '',
         sessions: taskSessions,
         sessionCount: taskSessions.length,
-        pathStatus: 'available' as const,
       };
     },
     [projects, sessions, t],
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
-  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
   const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
   const visibleTaskSessions = taskSessionsCollapsedToFirstPage
     ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
@@ -1332,10 +1330,6 @@ export default function SessionPage() {
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
-  const handleCreateSessionInProject = useCallback((projectId: string) => {
-    void handleCreateSession(projectId);
-  }, [handleCreateSession]);
-
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     const previousModelKey = selectedModelKey;
     setSelectedModelKey(option.key);
@@ -1507,22 +1501,28 @@ export default function SessionPage() {
     });
   }, []);
 
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
+  const handleArchiveSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
     if (target?.canDelete === false) {
-      toast.error(t('deleteFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
+      toast.error(t('archiveFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
       return;
     }
-    if (!confirm(t('confirmDelete'))) return;
+    if (!confirm(t('confirmArchive'))) return;
     try {
-      await sessionApi.delete(sessionId);
-      // Remove from local state first so auto-select won't pick the deleted session.
-      // No need to refetchSessions — removeSession already keeps the list accurate.
-      if (selectedSessionId === sessionId) setSelectedSessionId(null);
-      removeSession(sessionId);
-      await fetchProjects(undefined, searchQuery);
+      await sessionApi.archive(sessionId);
     } catch (err: any) {
-      toast.error(t('deleteFailed'), err.message);
+      toast.error(t('archiveFailed'), err.message);
+      return;
+    }
+    // The mutation is complete. A secondary project-count refresh must not
+    // turn a successful archive into an error or re-enable the removed row.
+    if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    removeSession(sessionId);
+    toast.success(t('archiveSuccess'));
+    try {
+      await fetchProjects(undefined, searchQuery);
+    } catch {
+      // SSE/reconnect refreshes will reconcile project counts later.
     }
   }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
 
@@ -1860,37 +1860,44 @@ export default function SessionPage() {
     }
   }, [checkedIds.size, sessions]);
 
-  const handleBatchDelete = useCallback(async () => {
-    if (checkedIds.size === 0 || batchDeleting) return;
-    if (!confirm(t('confirmBatchDelete', { count: checkedIds.size }))) return;
-    setBatchDeleting(true);
-    const ids = Array.from(checkedIds);
-    const succeeded: string[] = [];
-    const failed: string[] = [];
-    await Promise.all(ids.map(async (id) => {
-      try {
-        await client.delete(`/api/session/${id}`);
-        succeeded.push(id);
-      } catch {
-        failed.push(id);
+  const handleBatchArchive = useCallback(async () => {
+    if (checkedIds.size === 0 || batchArchiving) return;
+    if (!confirm(t('confirmBatchArchive', { count: checkedIds.size }))) return;
+    setBatchArchiving(true);
+    try {
+      const ids = Array.from(checkedIds);
+      const succeeded: string[] = [];
+      const failed: string[] = [];
+      await Promise.all(ids.map(async (id) => {
+        try {
+          await sessionApi.archive(id);
+          succeeded.push(id);
+        } catch {
+          failed.push(id);
+        }
+      }));
+      if (succeeded.length > 0) {
+        removeSessions(succeeded);
+        if (selectedSessionId && succeeded.includes(selectedSessionId)) {
+          setSelectedSessionId(null);
+        }
+        try {
+          await fetchProjects(undefined, searchQuery);
+        } catch {
+          // The archive results remain authoritative; counts reconcile later.
+        }
       }
-    }));
-    if (succeeded.length > 0) {
-      removeSessions(succeeded);
-      await fetchProjects(undefined, searchQuery);
-      if (selectedSessionId && succeeded.includes(selectedSessionId)) {
-        setSelectedSessionId(null);
+      if (failed.length > 0) {
+        setCheckedIds(new Set(failed));
+        toast.error(t('batchArchiveFailed', { count: failed.length }));
+      } else {
+        setCheckedIds(new Set());
+        setSelectMode(false);
       }
+    } finally {
+      setBatchArchiving(false);
     }
-    if (failed.length > 0) {
-      setCheckedIds(new Set(failed));
-      toast.error(t('batchDeleteFailed', { count: failed.length }));
-    } else {
-      setCheckedIds(new Set());
-      setSelectMode(false);
-    }
-    setBatchDeleting(false);
-  }, [batchDeleting, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
+  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
 
   const renderSessionListItem = (session: Session) => (
     <div
@@ -2071,6 +2078,9 @@ export default function SessionPage() {
                     aria-label={t('toggleProjects')}
                   >
                     <span>{t('projectsSection')}</span>
+                    <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                      ({managedProjectSessionGroups.length})
+                    </span>
                     {projectsSectionCollapsed
                       ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                       : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
@@ -2137,21 +2147,6 @@ export default function SessionPage() {
                             />
                           )}
                         </button>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleCreateSessionInProject(group.id);
-                          }}
-                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
-                          className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
-                            isSelectedProject ? 'opacity-100' : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
-                          }`}
-                          title={t('createSessionInProject', { project: group.label })}
-                          aria-label={t('createSessionInProject', { project: group.label })}
-                        >
-                          {creating && isSelectedProject ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-                        </button>
                         {persistedProject && (
                           <button
                             type="button"
@@ -2171,9 +2166,6 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <span className="min-w-[18px] shrink-0 text-center text-[12px] font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
-                          {group.sessionCount}
-                        </span>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
@@ -2314,28 +2306,13 @@ export default function SessionPage() {
                       aria-label={t('toggleTasks')}
                     >
                       <span>{t('tasksSection')}</span>
+                      <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                        ({taskSessionGroup.sessionCount})
+                      </span>
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
                     </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void handleCreateSession(TASK_SESSION_GROUP_ID);
-                      }}
-                      disabled={creating || taskSessionGroup.pathStatus !== 'available'}
-                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
-                      title={t('createTaskSession')}
-                      aria-label={t('createTaskSession')}
-                    >
-                      {creating && taskGroupSelected
-                        ? <Loader2 className="h-3 w-3 animate-spin" />
-                        : <Plus className="h-3 w-3" />}
-                    </button>
-                    <span className="min-w-[18px] shrink-0 text-center text-[12px] font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
-                      {taskSessionGroup.sessionCount}
-                    </span>
                   </div>
                   {!taskGroupCollapsed && (
                     <div className="mt-0.5">
@@ -2425,13 +2402,13 @@ export default function SessionPage() {
                   <X className="h-[15px] w-[15px]" />
                 </button>
                 <button
-                  onClick={handleBatchDelete}
-                  disabled={checkedIds.size === 0 || batchDeleting}
+                  onClick={handleBatchArchive}
+                  disabled={checkedIds.size === 0 || batchArchiving}
                   className="grid h-[30px] w-[30px] place-items-center rounded-lg text-red-600 transition-colors hover:bg-red-50 disabled:cursor-default disabled:opacity-35 dark:text-red-300 dark:hover:bg-red-500/10"
-                  title={t('deleteSelected', { count: checkedIds.size })}
-                  aria-label={t('deleteSelected', { count: checkedIds.size })}
+                  title={t('archiveSelected', { count: checkedIds.size })}
+                  aria-label={t('archiveSelected', { count: checkedIds.size })}
                 >
-                  {batchDeleting ? <Loader2 className="h-[15px] w-[15px] animate-spin" /> : <Trash2 className="h-[15px] w-[15px]" />}
+                  {batchArchiving ? <Loader2 className="h-[15px] w-[15px] animate-spin" /> : <Archive className="h-[15px] w-[15px]" />}
                 </button>
               </div>
             ) : (
@@ -3187,12 +3164,12 @@ export default function SessionPage() {
             </button>
             <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
             <button
-              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
+              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleArchiveSession(session.id); }}
               disabled={session.canDelete === false}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
             >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>{t('deleteAction')}</span>
+              <Archive className="w-3.5 h-3.5" />
+              <span>{t('archiveAction')}</span>
             </button>
           </div>
         );

@@ -37,6 +37,7 @@ const {
     post: vi.fn(),
   },
   sessionApi: {
+    archive: vi.fn(),
     delete: vi.fn(),
     get: vi.fn(),
     getMessages: vi.fn(),
@@ -406,6 +407,7 @@ describe('SessionPage session actions menu', () => {
         parts: [{ id: 'part-1', type: 'text', text: 'hello export' }],
       },
     ]);
+    sessionApi.archive.mockResolvedValue({ id: 'session-1', status: 'archived' });
     sessionApi.delete.mockResolvedValue(true);
 
     vi.stubGlobal('confirm', vi.fn(() => true));
@@ -540,6 +542,8 @@ describe('SessionPage session actions menu', () => {
     expect(searchInput).toHaveClass('text-sm', 'font-medium');
     expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
+    expect(tasksHeading.nextElementSibling).toHaveTextContent('(1)');
+    expect(projectsHeading.nextElementSibling).toHaveTextContent('(0)');
     expect(tasksSection).not.toBeNull();
     expect(projectsSection).not.toBeNull();
     expect(tasksSection?.parentElement).toBe(projectsSection?.parentElement);
@@ -557,6 +561,7 @@ describe('SessionPage session actions menu', () => {
     expect(tasksToggle).toContainElement(tasksHeading);
     expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'createTaskSession' })).not.toBeInTheDocument();
 
     await user.click(tasksToggle);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
@@ -724,20 +729,6 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByText('Task 7')).toBeInTheDocument();
     expect(screen.getByText('Task 8')).toBeInTheDocument();
     expect(loadMore).not.toHaveBeenCalled();
-  });
-
-  it('creates a new session from the tasks row', async () => {
-    const user = userEvent.setup();
-    renderSessionPage();
-
-    await screen.findByText('tasksSection');
-    await user.click(screen.getByRole('button', { name: 'createTaskSession' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/session', {
-        title: 'New Session',
-      });
-    });
   });
 
   it('collapses the projects section and restores it after remounting', async () => {
@@ -1221,7 +1212,8 @@ describe('SessionPage session actions menu', () => {
       expect(client.patch).toHaveBeenCalledWith('/api/project/prj_project2', { name: 'Renamed Project' });
     });
     const renamedProject = await screen.findByText('Renamed Project');
-    expect(renamedProject.closest('[class*="group/project"]')).toHaveTextContent('8');
+    expect(renamedProject.closest('[class*="group/project"]')).not.toHaveTextContent('8');
+    expect(screen.getByText('projectsSection').nextElementSibling).toHaveTextContent('(1)');
   });
 
   it('shares and unshares a project from the sidebar', async () => {
@@ -1285,7 +1277,7 @@ describe('SessionPage session actions menu', () => {
 
     const projectRow = (await screen.findByText('Shared Labs')).closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' })).toBeDisabled();
+    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
     await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
     expect(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.copyPathAction' })).toBeInTheDocument();
     expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'shareAction' })).not.toBeInTheDocument();
@@ -1378,19 +1370,10 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('creates a session from a specific project row', async () => {
-    const user = userEvent.setup();
+  it('does not show a create-session button on a project row', async () => {
     const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
     client.get.mockResolvedValue({
       data: [currentProject, { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' }],
-    });
-    client.post.mockResolvedValue({
-      data: {
-        ...secondSession,
-        id: 'session-labs',
-        projectID: 'prj_project2',
-        title: 'New Session',
-      },
     });
 
     renderSessionPage();
@@ -1398,18 +1381,7 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' }));
-
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith('/api/session', {
-        title: 'New Session',
-        projectID: 'prj_project2',
-      });
-    });
-    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({
-      id: 'session-labs',
-      projectID: 'prj_project2',
-    }));
+    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
   });
 
   it('opens the actions menu for a session item', async () => {
@@ -1425,7 +1397,7 @@ describe('SessionPage session actions menu', () => {
     expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'deleteAction' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'archiveAction' })).toBeInTheDocument();
   });
 
   it('shows a compact relative session timestamp and keeps the actions trigger background-free', async () => {
@@ -1585,20 +1557,35 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('Blob', OriginalBlob);
   });
 
-  it('deletes a session from the actions menu', async () => {
+  it('archives a session from the actions menu', async () => {
     const user = userEvent.setup();
 
     renderSessionPage();
 
     await screen.findByText('Original Session');
     await user.click(screen.getByRole('button', { name: 'moreActions' }));
-    await user.click(screen.getByRole('button', { name: 'deleteAction' }));
+    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
 
     await waitFor(() => {
-      expect(sessionApi.delete).toHaveBeenCalledWith('session-1');
+      expect(sessionApi.archive).toHaveBeenCalledWith('session-1');
     });
     expect(removeSession).toHaveBeenCalledWith('session-1');
-    expect(global.confirm).toHaveBeenCalledWith('confirmDelete');
+    expect(global.confirm).toHaveBeenCalledWith('confirmArchive');
+  });
+
+  it('keeps a successful archive successful when project-count refresh fails', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await waitFor(() => expect(client.get).toHaveBeenCalled());
+    client.get.mockRejectedValueOnce(new Error('project refresh failed'));
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'archiveAction' }));
+
+    await waitFor(() => expect(toast.success).toHaveBeenCalledWith('archiveSuccess'));
+    expect(removeSession).toHaveBeenCalledWith('session-1');
+    expect(toast.error).not.toHaveBeenCalledWith('archiveFailed', expect.anything());
   });
 
   it('does not auto-attach any session on first load without history', () => {

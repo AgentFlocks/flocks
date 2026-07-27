@@ -91,23 +91,37 @@ class Todo:
             for todo in todos
         ]
         
-        # Store in storage
         await Storage.set(
             f"todo:{session_id}",
             [todo.model_dump(exclude_none=True) for todo in validated_todos],
-            "todo"
+            "todo",
         )
-        
-        # Publish event
         await Bus.publish(cls.Updated, {
             "sessionID": session_id,
             "todos": validated_todos,
         })
-        
         log.info("todo.updated", {
             "session_id": session_id,
             "count": len(validated_todos),
         })
+
+    @classmethod
+    async def update_active(
+        cls,
+        session_id: str,
+        todos: List[TodoInfo],
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> None:
+        """Update todos only while the owning session remains active."""
+
+        from flocks.session.session import Session
+
+        await Session.run_active_write(
+            session_id,
+            lambda: cls.update(session_id, todos),
+            expected_generation=expected_generation,
+        )
     
     @classmethod
     async def get(cls, session_id: str) -> List[TodoInfo]:

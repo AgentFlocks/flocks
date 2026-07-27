@@ -1202,6 +1202,31 @@ class InboundDispatcher:
         model: Optional[dict] = None,
         agent: Optional[str] = None,
     ) -> None:
+        """Append an inbound message only while its bound session is active."""
+
+        from flocks.session.session import Session
+
+        await Session.run_active_write(
+            session_id,
+            lambda: InboundDispatcher._append_user_message_unchecked(
+                session_id,
+                text,
+                msg,
+                channel_config,
+                model,
+                agent,
+            ),
+        )
+
+    @staticmethod
+    async def _append_user_message_unchecked(
+        session_id: str,
+        text: str,
+        msg: InboundMessage,
+        channel_config: Optional[ChannelConfig] = None,
+        model: Optional[dict] = None,
+        agent: Optional[str] = None,
+    ) -> None:
         import mimetypes
         import os
         from pathlib import Path

@@ -10,6 +10,9 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+API_TOKEN_SERVICE_USER_ID = "api-token-service"
+
+
 class AuthUser(BaseModel):
     """Current authenticated local user."""
 

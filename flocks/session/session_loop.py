@@ -590,6 +590,15 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} not found",
             )
+        if session.status != "active":
+            log.warning("loop.session_not_active", {
+                "session_id": session_id,
+                "status": session.status,
+            })
+            return LoopResult(
+                action="error",
+                error=f"Session {session_id} is {session.status}",
+            )
         if working_directory:
             session = session.model_copy(update={"directory": working_directory})
         
@@ -652,8 +661,39 @@ class SessionLoop:
             session_start_pending=trace_offset == 0,
         )
         
-        # Register context
-        cls._active_loops[session_id] = ctx
+        # Register under the same lock used by archive/delete. This closes the
+        # gap where archival could commit after the status check above but
+        # before the loop became visible to the lifecycle stop logic.
+        async with Session.lifecycle_lock(session_id):
+            latest_session = await Session.get_by_id(session_id)
+            if latest_session is None:
+                log.warning("loop.session_not_found_before_register", {
+                    "session_id": session_id,
+                })
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} not found",
+                )
+            if latest_session.status != "active":
+                log.warning("loop.session_not_active_before_register", {
+                    "session_id": session_id,
+                    "status": latest_session.status,
+                })
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} is {latest_session.status}",
+                )
+            if Session.is_lifecycle_transitioning(session_id):
+                return LoopResult(
+                    action="error",
+                    error=f"Session {session_id} is changing lifecycle state",
+                )
+            if cls.is_running(session_id):
+                return LoopResult(
+                    action="queued",
+                    error="Loop already running",
+                )
+            cls._active_loops[session_id] = ctx
         
         # Set status to busy
         SessionStatus.set(session_id, SessionStatusBusy())

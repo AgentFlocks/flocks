@@ -7,7 +7,7 @@ Handles permission requests, replies, and rule evaluation.
 
 import asyncio
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Callable, Awaitable
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Iterable
 
 from pydantic import BaseModel, Field
 
@@ -59,6 +59,7 @@ class PermissionNext:
     _session_permissions: Dict[str, Dict[str, str]] = {}
     _permanent_rules: Dict[str, str] = {}
     _state_loaded: bool = False
+    _persistence_tasks: set[asyncio.Task[Any]] = set()
 
     _PENDING_PREFIX = "permission_pending:"
     _REPLY_PREFIX = "permission_reply:"
@@ -114,9 +115,18 @@ class PermissionNext:
     def _schedule_persist(cls, coro: Awaitable[Any]) -> None:
         try:
             loop = asyncio.get_running_loop()
-            loop.create_task(coro)
+            task = loop.create_task(coro)
+            cls._persistence_tasks.add(task)
+            task.add_done_callback(cls._persistence_tasks.discard)
         except RuntimeError:
             pass
+
+    @classmethod
+    async def _flush_persistence(cls) -> None:
+        """Wait for permission writes already scheduled in this process."""
+
+        while cls._persistence_tasks:
+            await asyncio.gather(*tuple(cls._persistence_tasks))
 
     @classmethod
     async def _persist_pending_request(cls, request_info: PermissionRequestInfo) -> None:
@@ -183,6 +193,53 @@ class PermissionNext:
             cls._session_permissions.get(session_id, {}),
             "permission_session",
         )
+
+    @classmethod
+    async def deletion_storage_keys(cls, session_ids: Iterable[str]) -> List[str]:
+        """Return every persisted permission key owned by the given sessions."""
+
+        ids = {session_id for session_id in session_ids if session_id}
+        if not ids:
+            return []
+
+        await cls._flush_persistence()
+        keys = {f"{cls._SESSION_PREFIX}{session_id}" for session_id in ids}
+        request_ids = {
+            request_id
+            for request_id, pending in cls._pending.items()
+            if getattr(pending.get("info"), "session_id", None) in ids
+        }
+
+        for key, value in await Storage.list_entries(prefix=cls._PENDING_PREFIX):
+            if isinstance(value, dict) and value.get("sessionID") in ids:
+                keys.add(key)
+                request_ids.add(key.removeprefix(cls._PENDING_PREFIX))
+
+        for key, value in await Storage.list_entries(prefix=cls._REPLY_PREFIX):
+            if isinstance(value, dict) and value.get("sessionID") in ids:
+                keys.add(key)
+                request_ids.add(key.removeprefix(cls._REPLY_PREFIX))
+
+        for request_id in request_ids:
+            keys.add(f"{cls._PENDING_PREFIX}{request_id}")
+            keys.add(f"{cls._REPLY_PREFIX}{request_id}")
+        return sorted(keys)
+
+    @classmethod
+    def clear_session_runtime(cls, session_ids: Iterable[str]) -> None:
+        """Drop session permission caches and cancel their pending requests."""
+
+        ids = {session_id for session_id in session_ids if session_id}
+        for session_id in ids:
+            cls._session_permissions.pop(session_id, None)
+
+        for request_id, pending in list(cls._pending.items()):
+            if getattr(pending.get("info"), "session_id", None) not in ids:
+                continue
+            future = pending.get("future")
+            if isinstance(future, asyncio.Future) and not future.done():
+                future.cancel()
+            cls._pending.pop(request_id, None)
 
     @classmethod
     async def list_pending_infos(cls) -> List[PermissionRequestInfo]:

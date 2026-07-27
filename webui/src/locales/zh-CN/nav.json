@@ -29,6 +29,8 @@
   "settingsPreferences": "偏好设置",
   "settingsPreferencesDescription": "调整当前工作台的显示、语言、主题和工具失败处理。",
   "settingsGroupPreferences": "偏好",
+  "settingsGroupData": "数据管理",
+  "archivedData": "已归档任务",
   "settingsGroupSystem": "账号与系统",
   "settingsGroupIntegrations": "模型与通道",
   "displayName": "工作台名称",

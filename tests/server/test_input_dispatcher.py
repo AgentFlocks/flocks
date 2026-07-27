@@ -446,7 +446,9 @@ class TestPromptQueueRoutes:
             session_routes._session_uploads_dir("../outside")
 
     @pytest.mark.asyncio
-    async def test_prompt_async_queues_when_session_running_without_creating_message(self, monkeypatch):
+    async def test_prompt_async_queues_when_session_running_without_creating_message(
+        self, monkeypatch, tmp_path
+    ):
         from flocks.server.routes import session as session_routes
         from flocks.session.interaction_queue import InteractionQueue
 
@@ -456,7 +458,13 @@ class TestPromptQueueRoutes:
         message_create = AsyncMock()
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
         )
         monkeypatch.setattr("flocks.session.session_loop.SessionLoop.is_running", lambda _sid: True)
         monkeypatch.setattr("flocks.session.message.Message.create", message_create)
@@ -474,7 +482,7 @@ class TestPromptQueueRoutes:
         message_create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_prompt_queue_rejects_when_full(self, monkeypatch):
+    async def test_prompt_queue_rejects_when_full(self, monkeypatch, tmp_path):
         from fastapi import HTTPException
 
         from flocks.server.routes import session as session_routes
@@ -484,7 +492,13 @@ class TestPromptQueueRoutes:
         await InteractionQueue.clear(session_id)
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
         )
         monkeypatch.setattr("flocks.session.session_loop.SessionLoop.is_running", lambda _sid: True)
         monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
@@ -502,7 +516,7 @@ class TestPromptQueueRoutes:
         assert exc_info.value.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_run_now_aborts_and_schedules_drain(self, monkeypatch):
+    async def test_run_now_aborts_and_schedules_drain(self, monkeypatch, tmp_path):
         from flocks.server.routes import session as session_routes
         from flocks.session.interaction_queue import InteractionQueue
 
@@ -518,7 +532,13 @@ class TestPromptQueueRoutes:
         drain_mock = AsyncMock()
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
         )
         monkeypatch.setattr("flocks.session.session_loop.SessionLoop.is_running", lambda _sid: True)
         monkeypatch.setattr(session_routes, "abort_session", abort_mock)
@@ -531,7 +551,7 @@ class TestPromptQueueRoutes:
         assert resp["status"] == "accepted"
         abort_mock.assert_awaited_once_with(session_id)
         wait_mock.assert_awaited_once_with(session_id)
-        drain_mock.assert_awaited_once_with(session_id, "/tmp/project")
+        drain_mock.assert_awaited_once_with(session_id, str(tmp_path.resolve()))
 
     @pytest.mark.asyncio
     async def test_scheduled_drain_retries_until_session_idle(self, monkeypatch):

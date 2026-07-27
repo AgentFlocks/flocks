@@ -1,7 +1,8 @@
+import asyncio
 from pathlib import Path
 
 import pytest
-from fastapi import status
+from fastapi import HTTPException, status
 from httpx import AsyncClient
 
 from flocks.auth.context import AuthUser
@@ -48,6 +49,12 @@ async def test_project_crud_uses_registry_without_project_database_rows(
     )
     assert session_response.status_code == status.HTTP_200_OK
     session_id = session_response.json()["id"]
+    other_session_response = await client.post(
+        "/api/session",
+        json={"title": "Keep archived", "projectID": project["id"]},
+    )
+    assert other_session_response.status_code == status.HTTP_200_OK
+    other_session_id = other_session_response.json()["id"]
 
     delete_response = await client.delete(f"/api/project/{project['id']}")
     assert delete_response.status_code == status.HTTP_200_OK
@@ -55,6 +62,25 @@ async def test_project_crud_uses_registry_without_project_database_rows(
     assert retained_file.read_text(encoding="utf-8") == "project files stay"
     assert (await client.get("/api/project")).json() == []
     assert (await client.get(f"/api/session/{session_id}")).status_code == status.HTTP_404_NOT_FOUND
+    archived = (
+        await client.get(
+            "/api/session",
+            params={"status": "archived", "view": "list", "manager": "true", "roots": "true"},
+        )
+    ).json()
+    archived_by_id = {item["id"]: item for item in archived}
+    assert archived_by_id[session_id]["projectName"] == "Security Labs"
+    assert other_session_id in archived_by_id
+    assert (await Session.get(project["id"], session_id)).status == "archived"
+
+    restore_response = await client.post(f"/api/session/{session_id}/restore")
+    assert restore_response.status_code == status.HTTP_200_OK
+    assert restore_response.json()["status"] == "active"
+    restored_projects = (await client.get("/api/project")).json()
+    assert [item["id"] for item in restored_projects] == [project["id"]]
+    assert restored_projects[0]["name"] == "Security Labs"
+    assert (await Session.get(project["id"], session_id)).status == "active"
+    assert (await Session.get(project["id"], other_session_id)).status == "archived"
 
 
 @pytest.mark.asyncio
@@ -72,6 +98,134 @@ async def test_create_project_creates_missing_directory(
     assert response.status_code == status.HTTP_200_OK
     assert response.json()["worktree"] == str(worktree.resolve())
     assert worktree.is_dir()
+
+
+@pytest.mark.asyncio
+async def test_restore_archived_task_keeps_project_removed_when_directory_is_missing(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    worktree = tmp_path / "missing-after-remove"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Missing Project", "worktree": str(worktree)},
+        )
+    ).json()
+    session = (
+        await client.post(
+            "/api/session",
+            json={"title": "Still Archived", "projectID": project["id"]},
+        )
+    ).json()
+    assert (await client.delete(f"/api/project/{project['id']}")).status_code == status.HTTP_200_OK
+    worktree.rmdir()
+
+    restore_response = await client.post(f"/api/session/{session['id']}/restore")
+
+    assert restore_response.status_code == status.HTTP_409_CONFLICT
+    assert "directory is unavailable" in restore_response.text
+    assert (await client.get("/api/project")).json() == []
+    stored = await Session.get(project["id"], session["id"])
+    assert stored is not None and stored.status == "archived"
+
+
+@pytest.mark.asyncio
+async def test_project_removal_waits_for_inflight_session_creation(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    worktree = tmp_path / "concurrent-remove"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Concurrent", "worktree": str(worktree)},
+        )
+    ).json()
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    original_set = Storage.set
+
+    async def blocked_set(key, value, *args, **kwargs):
+        if key.startswith(f"session:{project['id']}:"):
+            create_started.set()
+            await allow_create.wait()
+        return await original_set(key, value, *args, **kwargs)
+
+    monkeypatch.setattr(Storage, "set", blocked_set)
+    create_task = asyncio.create_task(
+        client.post(
+            "/api/session",
+            json={"title": "Concurrent task", "projectID": project["id"]},
+        )
+    )
+    await create_started.wait()
+    delete_task = asyncio.create_task(client.delete(f"/api/project/{project['id']}"))
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(asyncio.shield(delete_task), timeout=0.05)
+
+    allow_create.set()
+    create_response, delete_response = await asyncio.gather(create_task, delete_task)
+
+    assert create_response.status_code == status.HTTP_200_OK
+    assert delete_response.status_code == status.HTTP_200_OK
+    created = await Session.get(project["id"], create_response.json()["id"])
+    assert created is not None and created.status == "archived"
+
+
+@pytest.mark.asyncio
+async def test_project_delete_restores_earlier_tasks_when_later_archive_fails(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import session as session_routes
+
+    worktree = tmp_path / "archive-rollback"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Archive rollback", "worktree": str(worktree)},
+        )
+    ).json()
+    session_ids = [
+        (
+            await client.post(
+                "/api/session",
+                json={"title": title, "projectID": project["id"]},
+            )
+        ).json()["id"]
+        for title in ("First", "Second")
+    ]
+    original_archive = session_routes.archive_session_for_user
+    calls = 0
+
+    async def fail_second_archive(session_id, user):
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            raise HTTPException(status_code=409, detail="archive failed")
+        return await original_archive(session_id, user)
+
+    monkeypatch.setattr(
+        session_routes,
+        "archive_session_for_user",
+        fail_second_archive,
+    )
+
+    response = await client.delete(f"/api/project/{project['id']}")
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert [item["id"] for item in (await client.get("/api/project")).json()] == [
+        project["id"]
+    ]
+    stored = [await Session.get(project["id"], session_id) for session_id in session_ids]
+    assert all(session is not None and session.status == "active" for session in stored)
 
 
 @pytest.mark.asyncio
@@ -272,6 +426,13 @@ async def test_project_counts_and_session_lists_are_user_scoped(
         "Alice session",
         "Second Alice session",
     }
+
+    archive_response = await client.post(
+        f"/api/session/{alice_session.json()['id']}/archive",
+    )
+    assert archive_response.status_code == status.HTTP_200_OK
+    after_archive = (await client.get("/api/project")).json()
+    assert after_archive[0]["sessionCount"] == 1
 
 
 @pytest.mark.asyncio

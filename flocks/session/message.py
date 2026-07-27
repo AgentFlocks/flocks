@@ -472,6 +472,25 @@ class Message:
             task.cancel()
 
     @classmethod
+    async def quiesce_parts(cls, session_id: str, *, persist: bool) -> None:
+        """Stop a delayed parts flush, optionally persisting its latest cache."""
+        task = cls._parts_flush_tasks.pop(session_id, None)
+        if task and not task.done():
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+
+        async with _session_locks.get(session_id):
+            if persist and session_id in cls._parts_cache:
+                if cls._parts_storage_format.get(session_id) == "legacy":
+                    await cls._persist_parts(session_id)
+                else:
+                    for message_id in list(cls._parts_cache[session_id]):
+                        await cls._persist_parts(session_id, message_id=message_id)
+
+    @classmethod
     def _cache_token(cls, session_id: str) -> tuple[int, int]:
         return cls._cache_epoch, cls._session_cache_generations.get(session_id, 0)
 
@@ -1988,7 +2007,7 @@ class Message:
             Number of messages cleared
         """
         await cls._ensure_message_cache(session_id)
-        
+
         async with _session_locks.get(session_id):
             count = len(cls._messages_cache.get(session_id, []))
             cls._messages_cache[session_id] = []
@@ -1999,18 +2018,33 @@ class Message:
             cls._parts_storage_format[session_id] = "per_message"
             cls._parts_fully_loaded.add(session_id)
             cls._cancel_parts_flush_task(session_id)
-            
-            # Persist changes
+
             await cls._persist_messages(session_id)
             await Storage.clear(prefix=cls._parts_item_prefix(session_id))
             await Storage.delete(cls._parts_blob_key(session_id))
-            
+
             log.info("messages.cleared", {
                 "session_id": session_id,
                 "count": count,
             })
-            
             return count
+
+    @classmethod
+    async def clear_active(
+        cls,
+        session_id: str,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> int:
+        """Clear history only while the owning session remains active."""
+
+        from flocks.session.session import Session
+
+        return await Session.run_active_write(
+            session_id,
+            lambda: cls.clear(session_id),
+            expected_generation=expected_generation,
+        )
     
     @classmethod
     def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
@@ -2543,7 +2577,7 @@ class MessageSync:
     @classmethod
     def clear(cls, session_id: str) -> int:
         """Sync version"""
-        return cls._run_async(Message.clear(session_id))
+        return cls._run_async(Message.clear_active(session_id))
     
     @classmethod
     def get_text_content(cls, message: MessageInfo) -> str:

@@ -361,7 +361,7 @@ class CLISessionRunner:
             )
 
             async def _clear_history() -> None:
-                await Message.clear(self._session.id)
+                await Message.clear_active(self._session.id)
                 await self._clear_screen()
                 self.console.print("[dim]Conversation history cleared.[/dim]")
 

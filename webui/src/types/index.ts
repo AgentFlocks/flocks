@@ -5,19 +5,21 @@
  */
 export interface Session {
   id: string;
-  slug: string;
+  slug?: string;
   projectID: string;
+  projectName?: string;
   effectiveProjectID?: string;
   directory: string;
   parentID?: string;
   summary?: SessionSummary;
   title: string;
-  version: string;
+  version?: string;
   time: SessionTime;
   permission?: PermissionRule[];
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  status?: 'active' | 'archived';
   provider?: string;
   model?: string;
   model_pinned?: boolean;
