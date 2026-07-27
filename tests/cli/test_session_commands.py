@@ -139,17 +139,26 @@ async def test_restore_session_resolves_project_from_session(monkeypatch) -> Non
         assert session_id == session.id
         return session
 
-    async def fake_unarchive(project_id: str, session_id: str):
+    async def fake_restore(
+        project_id: str,
+        session_id: str,
+        *,
+        project_owner_id: str,
+    ):
         assert project_id == session.project_id
         assert session_id == session.id
+        assert project_owner_id == "usr_cli"
         return True
 
     monkeypatch.setattr(session_cmd.Storage, "init", _noop_storage_init)
     monkeypatch.setattr(session_cmd.Session, "get_by_id", fake_get_by_id)
-    monkeypatch.setattr(session_cmd.Session, "unarchive", fake_unarchive)
-    restore_project = AsyncMock(return_value=None)
-    monkeypatch.setattr(session_cmd.Project, "restore", restore_project)
+    restore_session = AsyncMock(side_effect=fake_restore)
+    monkeypatch.setattr(session_cmd.Session, "restore", restore_session)
 
     await session_cmd._restore_session(session.id, None)
 
-    restore_project.assert_awaited_once_with(session.project_id, owner_id="usr_cli")
+    restore_session.assert_awaited_once_with(
+        session.project_id,
+        session.id,
+        project_owner_id="usr_cli",
+    )

@@ -292,23 +292,30 @@ class SessionBindingService:
         existing = await self._find_binding(
             msg.channel_id, msg.account_id, chat_id, thread_id,
         )
+        replaced_session = None
         if existing:
-            # Verify the bound session still exists (user may have deleted it via WebUI)
+            # Archived sessions are immutable history, not live conversation
+            # targets. Replace stale or inactive bindings before the dispatcher
+            # persists the inbound message.
             from flocks.session.session import Session as _Session
-            still_alive = await _Session.get_by_id(existing.session_id)
-            if still_alive:
+            bound_session = await _Session.get_by_id_unfiltered(existing.session_id)
+            if bound_session and bound_session.status == "active":
                 await self._touch(existing.session_id)
                 return existing
-            # Session was deleted — remove stale binding and fall through to create a new one
+            replaced_session = bound_session
             log.info("channel.binding.stale", {
                 "channel": msg.channel_id,
                 "chat_id": chat_id,
                 "old_session_id": existing.session_id,
+                "status": getattr(bound_session, "status", "missing"),
             })
             await self.unbind(existing.session_id)
 
         session_id = await self._create_session(
-            msg, default_agent=default_agent, directory=directory,
+            msg,
+            default_agent=default_agent,
+            directory=directory,
+            source_session=replaced_session,
         )
         now = time.time()
         binding = SessionBinding(
@@ -368,8 +375,11 @@ class SessionBindingService:
             ValueError: if *session_id* does not exist.
         """
         from flocks.session.session import Session as _Session
-        if not await _Session.get_by_id(session_id):
+        session = await _Session.get_by_id_unfiltered(session_id)
+        if not session:
             raise ValueError(f"Session '{session_id}' not found")
+        if session.status != "active":
+            raise ValueError(f"Session '{session_id}' is not active")
 
         now = time.time()
         binding = SessionBinding(
@@ -560,6 +570,7 @@ class SessionBindingService:
         msg: InboundMessage,
         default_agent: Optional[str] = None,
         directory: Optional[str] = None,
+        source_session=None,
     ) -> str:
         """Create a new Flocks Session and return its ID.
 
@@ -572,7 +583,7 @@ class SessionBindingService:
         from flocks.session.session import Session
 
         title = _build_title(msg)
-        owner_kwargs = await resolve_channel_session_owner_kwargs()
+        owner_kwargs = await resolve_channel_session_owner_kwargs(source_session)
         session = await Session.create(
             project_id="channel",
             directory=_resolve_session_directory(directory),

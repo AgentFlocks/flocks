@@ -16,6 +16,24 @@ function getProjectLabel(session: Session): string {
   return directoryName || session.projectID;
 }
 
+async function runBatchAction(
+  ids: string[],
+  action: (id: string) => Promise<unknown>,
+): Promise<{ succeeded: string[]; failed: string[] }> {
+  const results = await Promise.all(ids.map(async (id) => {
+    try {
+      await action(id);
+      return { id, succeeded: true };
+    } catch {
+      return { id, succeeded: false };
+    }
+  }));
+  return {
+    succeeded: results.filter((result) => result.succeeded).map((result) => result.id),
+    failed: results.filter((result) => !result.succeeded).map((result) => result.id),
+  };
+}
+
 export default function ArchivedDataPanel() {
   const { t } = useTranslation('session');
   const toast = useToast();
@@ -53,7 +71,7 @@ export default function ArchivedDataPanel() {
         offset,
       });
       if (requestSeq !== requestSeqRef.current) return;
-      const rows = Array.isArray(response) ? response as Session[] : [];
+      const rows = Array.isArray(response) ? response : [];
       setSessions((current) => {
         if (!append) return rows;
         const knownIds = new Set(current.map((session) => session.id));
@@ -96,16 +114,7 @@ export default function ArchivedDataPanel() {
   const restoreSessions = useCallback(async (ids: string[]) => {
     if (ids.length === 0) return;
     setRestoringIds((current) => new Set([...current, ...ids]));
-    const succeeded: string[] = [];
-    const failed: string[] = [];
-    await Promise.all(ids.map(async (id) => {
-      try {
-        await sessionApi.restore(id);
-        succeeded.push(id);
-      } catch {
-        failed.push(id);
-      }
-    }));
+    const { succeeded, failed } = await runBatchAction(ids, sessionApi.restore);
     removeRows(succeeded);
     setRestoringIds((current) => {
       const next = new Set(current);
@@ -119,16 +128,10 @@ export default function ArchivedDataPanel() {
   const permanentlyDelete = useCallback(async () => {
     if (pendingDeleteIds.length === 0 || deleting) return;
     setDeleting(true);
-    const succeeded: string[] = [];
-    const failed: string[] = [];
-    await Promise.all(pendingDeleteIds.map(async (id) => {
-      try {
-        await sessionApi.delete(id);
-        succeeded.push(id);
-      } catch {
-        failed.push(id);
-      }
-    }));
+    const { succeeded, failed } = await runBatchAction(
+      pendingDeleteIds,
+      sessionApi.delete,
+    );
     removeRows(succeeded);
     setDeleting(false);
     setPendingDeleteIds([]);

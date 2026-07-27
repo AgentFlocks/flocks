@@ -321,10 +321,11 @@ async def _restore_session(session_id: str, project_id: Optional[str]):
         console.print(f"[red]Restore the root session for this session tree: {session_id}[/red]")
         raise typer.Exit(1)
 
-    async with Project.lifecycle_lock(project_id):
-        if session.owner_user_id:
-            await Project.restore(project_id, owner_id=session.owner_user_id)
-        success = await Session.unarchive(project_id, session_id)
+    success = await Session.restore(
+        project_id,
+        session_id,
+        project_owner_id=session.owner_user_id,
+    )
     
     if success:
         console.print(f"[green]Restored session: {session_id}[/green]")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 from pathlib import Path
 from typing import List, Optional
@@ -19,7 +20,7 @@ from flocks.project.project import (
 )
 from flocks.server.auth import require_user
 from flocks.session.policy import SessionPolicy
-from flocks.session.session import Session
+from flocks.session.session import Session, SessionInfo
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -291,7 +292,7 @@ async def delete_project(project_id: str, request: Request):
 
     user = require_user(request)
     try:
-        async with Project.lifecycle_lock(project_id):
+        async with Project.lifecycle_guard(project_id):
             if await Project.get(project_id, owner_id=user.id) is None:
                 raise ValueError(f"Project {project_id} not found")
 
@@ -316,10 +317,27 @@ async def delete_project(project_id: str, request: Request):
 
             from flocks.server.routes.session import archive_session_for_user
 
-            for session in root_sessions:
-                await archive_session_for_user(session.id, user)
+            newly_archived: list[SessionInfo] = []
+            try:
+                for session in root_sessions:
+                    await archive_session_for_user(session.id, user)
+                    if session.status != "archived":
+                        newly_archived.append(session)
 
-            return await Project.delete(project_id, owner_id=user.id)
+                return await Project.delete(project_id, owner_id=user.id)
+            except BaseException:
+                for session in reversed(newly_archived):
+                    try:
+                        await asyncio.shield(
+                            Session._unarchive_locked(project_id, session.id)
+                        )
+                    except Exception as rollback_exc:
+                        log.warn("project.delete.rollback_failed", {
+                            "project_id": project_id,
+                            "session_id": session.id,
+                            "error": str(rollback_exc),
+                        })
+                raise
     except ProjectDeletionError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except ValueError as exc:

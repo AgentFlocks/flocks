@@ -127,23 +127,7 @@ async def cleanup_workflow_tool_context(tool_context: Optional[ToolContext]) -> 
         if extra.get("workflow_child_session_created") is True:
             return False
 
-        await Session.delete(session.project_id, session.id)
-
-        # Session.delete removes the persisted task data but retains a tombstone.
-        # Trigger parents without child tasks are implementation details, so
-        # remove that residual row to keep high-frequency traffic storage-bounded.
-        from flocks.storage.storage import Storage
-
-        await Storage.delete(f"session:{session.project_id}:{session.id}")
-        await Storage.delete(f"message:{session.id}")
-        await Storage.delete(f"todo:{session.id}")
-        await Storage.delete(f"goal:{session.id}")
-        await Storage.delete(f"session_diff:{session.id}")
-        await Storage.clear(prefix=f"message_diff:{session.id}:")
-        await Storage.clear(prefix=f"system_prompts:{session.id}:")
-
-        Message.invalidate_cache(session.id)
-        return True
+        return await Session.delete(session.project_id, session.id)
     except Exception as exc:
         log.warning(
             "workflow.tool_context.cleanup_failed",

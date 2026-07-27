@@ -133,11 +133,13 @@ async def test_session_manage_restore_revives_removed_project_first():
             AsyncMock(return_value=["session:project_removed:ses_archived"]),
         ),
         patch("flocks.storage.storage.Storage.get", AsyncMock(return_value=session)),
-        patch("flocks.project.project.Project.restore", AsyncMock(return_value=None)) as restore_project,
-        patch("flocks.session.session.Session.unarchive", AsyncMock(return_value=True)) as unarchive,
+        patch("flocks.session.session.Session.restore", AsyncMock(return_value=True)) as restore_session,
     ):
         result = await _session_archive_impl(ctx, session.id, False)
 
     assert result.success is True
-    restore_project.assert_awaited_once_with(session.project_id, owner_id="usr_owner")
-    unarchive.assert_awaited_once_with(session.project_id, session.id)
+    restore_session.assert_awaited_once_with(
+        session.project_id,
+        session.id,
+        project_owner_id="usr_owner",
+    )

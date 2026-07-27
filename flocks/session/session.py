@@ -8,7 +8,9 @@ Based on Flocks' ported src/session/index.ts
 import asyncio
 import contextvars
 import re
-from typing import List, Dict, Any, Optional
+import weakref
+from contextlib import AsyncExitStack
+from typing import Awaitable, Callable, List, Dict, Any, Optional, TypeVar
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -33,6 +35,15 @@ log = Log.create(service="session")
 PARENT_TITLE_PREFIX = "New session - "
 CHILD_TITLE_PREFIX = "Child session - "
 MODEL_AUTO_SESSION_CATEGORIES = frozenset({"user", "entity-config", "workflow"})
+_WriteResult = TypeVar("_WriteResult")
+
+
+class SessionNotFoundError(ValueError):
+    """Raised when a lifecycle-aware write cannot find its session."""
+
+
+class SessionInactiveError(RuntimeError):
+    """Raised when a lifecycle-aware write targets a non-active session."""
 
 
 def is_model_auto_session_category(category: Optional[str]) -> bool:
@@ -156,7 +167,12 @@ class Session:
     _id_index: Dict[str, str] = {}
     # Hot-path cache for repeatedly listing sessions in the UI.
     _all_sessions_cache: Optional[List[SessionInfo]] = None
-    _archive_lock = asyncio.Lock()
+    # Serializes tree topology changes only. Ordinary writes use a keyed lock,
+    # so unrelated sessions no longer block each other.
+    _tree_lock = asyncio.Lock()
+    _lifecycle_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+        weakref.WeakValueDictionary()
+    )
     _lifecycle_transition_ids: set[str] = set()
     _lifecycle_generations: Dict[str, int] = {}
 
@@ -194,6 +210,16 @@ class Session:
         cls._all_sessions_cache = cls._sort_sessions(remaining)
 
     @classmethod
+    def _remove_from_list_cache(cls, session_id: str) -> None:
+        """Remove a permanently deleted session from derived caches."""
+        if cls._all_sessions_cache is not None:
+            cls._all_sessions_cache = [
+                session
+                for session in cls._all_sessions_cache
+                if session.id != session_id
+            ]
+
+    @classmethod
     def invalidate_cache(cls) -> None:
         """Clear in-memory indexes when the underlying storage changes."""
         cls._id_index.clear()
@@ -206,8 +232,54 @@ class Session:
 
     @classmethod
     def lifecycle_generation(cls, session_id: str) -> int:
-        """Return a token that changes whenever archive/delete begins."""
+        """Return a token that changes whenever a lifecycle transition begins."""
         return cls._lifecycle_generations.get(session_id, 0)
+
+    @classmethod
+    def lifecycle_lock(cls, session_id: str) -> asyncio.Lock:
+        """Return the lock that linearizes durable writes for one session."""
+
+        lock = cls._lifecycle_locks.get(session_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._lifecycle_locks[session_id] = lock
+        return lock
+
+    @classmethod
+    async def get_by_id_unfiltered(cls, session_id: str) -> Optional[SessionInfo]:
+        """Get a session by ID without applying the ambient auth policy."""
+
+        token = set_current_auth_user(None)
+        try:
+            return await cls.get_by_id(session_id)
+        finally:
+            reset_current_auth_user(token)
+
+    @classmethod
+    async def run_active_write(
+        cls,
+        session_id: str,
+        operation: Callable[[], Awaitable[_WriteResult]],
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> _WriteResult:
+        """Run one durable write atomically with lifecycle transitions."""
+
+        async with cls.lifecycle_lock(session_id):
+            session = await cls.get_by_id_unfiltered(session_id)
+            if session is None:
+                raise SessionNotFoundError(f"Session {session_id} not found")
+            generation_changed = (
+                expected_generation is not None
+                and cls.lifecycle_generation(session_id) != expected_generation
+            )
+            if (
+                session.status != "active"
+                or cls.is_lifecycle_transitioning(session_id)
+                or generation_changed
+            ):
+                raise SessionInactiveError(f"Session {session_id} is not active")
+            return await operation()
 
     @staticmethod
     def has_pinned_model(session: Optional[SessionInfo]) -> bool:
@@ -328,19 +400,10 @@ class Session:
                 kwargs.setdefault("owner_user_id", API_TOKEN_SERVICE_USER_ID)
                 kwargs.setdefault("owner_username", API_TOKEN_SERVICE_USER_ID)
         
-        parent_lock_acquired = False
-        if parent_id is not None:
-            await cls._archive_lock.acquire()
-            parent_lock_acquired = True
-        try:
+        async def persist(parent: Optional[SessionInfo] = None) -> SessionInfo:
             if parent_id is not None:
-                parent = await Storage.get(f"session:{project_id}:{parent_id}", SessionInfo)
-                if parent is None or parent.status == "deleted":
+                if parent is None:
                     raise ValueError(f"Parent session {parent_id} not found")
-                if cls.is_lifecycle_transitioning(parent_id):
-                    raise ValueError(f"Parent session {parent_id} is changing lifecycle state")
-                if parent.status != "active":
-                    raise ValueError(f"Parent session {parent_id} is not active")
                 child_owner_id = kwargs.get("owner_user_id")
                 child_owner_username = kwargs.get("owner_username")
                 if parent.owner_user_id and child_owner_id and parent.owner_user_id != child_owner_id:
@@ -352,7 +415,7 @@ class Session:
                 if child_owner_username is None:
                     kwargs["owner_username"] = parent.owner_username
 
-            session = SessionInfo(
+            created = SessionInfo(
                 project_id=project_id,
                 directory=directory,
                 title=title or cls._create_default_title(is_child),
@@ -363,13 +426,39 @@ class Session:
 
             # The parent status check and child row creation share the archive
             # lock, so an archive cannot commit between them in this process.
-            storage_key = f"session:{project_id}:{session.id}"
-            await Storage.set(storage_key, session, "session")
-            cls._id_index[session.id] = storage_key
-            cls._sync_list_cache(session)
-        finally:
-            if parent_lock_acquired:
-                cls._archive_lock.release()
+            storage_key = f"session:{project_id}:{created.id}"
+            await Storage.set(storage_key, created, "session")
+            cls._id_index[created.id] = storage_key
+            cls._sync_list_cache(created)
+            return created
+
+        from flocks.project.project import Project, ProjectDeletionError
+
+        # Every creation path participates in the project lifecycle claim. If
+        # deletion wins the race, a waiting creator observes the removed marker
+        # and cannot recreate an orphan task under the hidden project.
+        async with Project.lifecycle_guard(project_id):
+            if project_id.startswith("prj_") and Project.is_removed(project_id):
+                raise ProjectDeletionError(f"Project {project_id} is no longer available")
+
+            if parent_id is None:
+                session = await persist()
+            else:
+                async with cls._tree_lock:
+                    async with cls.lifecycle_lock(parent_id):
+                        parent = await Storage.get(
+                            f"session:{project_id}:{parent_id}",
+                            SessionInfo,
+                        )
+                        if parent is None or parent.status == "deleted":
+                            raise ValueError(f"Parent session {parent_id} not found")
+                        if cls.is_lifecycle_transitioning(parent_id):
+                            raise ValueError(
+                                f"Parent session {parent_id} is changing lifecycle state"
+                            )
+                        if parent.status != "active":
+                            raise ValueError(f"Parent session {parent_id} is not active")
+                        session = await persist(parent)
 
         try:
             from flocks.agent.registry import Agent
@@ -592,7 +681,7 @@ class Session:
         Returns:
             Updated session info or None
         """
-        async with cls._archive_lock:
+        async with cls.lifecycle_lock(session_id):
             if cls.is_lifecycle_transitioning(session_id):
                 return None
             session = await cls.get(project_id, session_id)
@@ -651,8 +740,17 @@ class Session:
     
     @classmethod
     async def delete(cls, project_id: str, session_id: str) -> bool:
+        """Permanently delete a session tree and all application-owned data."""
+
+        from flocks.project.project import Project
+
+        async with Project.lifecycle_guard(project_id):
+            return await cls._delete_locked(project_id, session_id)
+
+    @classmethod
+    async def _delete_locked(cls, project_id: str, session_id: str) -> bool:
         """
-        Permanently delete session data while retaining a tombstone row.
+        Permanently delete a session tree and all application-owned data.
         
         Also deletes child sessions.
         
@@ -666,26 +764,28 @@ class Session:
         sessions = await cls._begin_lifecycle_transition(project_id, session_id)
         if not sessions:
             return False
+        deleted = False
         try:
             if not await cls._stop_session_tree_for_archive(sessions):
                 return False
             for session in sessions:
                 await Message.quiesce_parts(session.id, persist=False)
 
-            refreshed = await cls._collect_session_tree(project_id, session_id)
+            refreshed = await cls.collect_tree(project_id, session_id)
             if not refreshed:
                 return False
             sessions = refreshed
-            tombstones = [session.model_copy(update={"status": "deleted"}) for session in sessions]
+            session_ids = [session.id for session in sessions]
+
+            from flocks.permission.next import PermissionNext
+
+            permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
             await Storage.mutate_many(
-                set_entries=[
-                    (f"session:{session.project_id}:{session.id}", session, "session")
-                    for session in tombstones
-                ],
                 delete_keys=[
                     key
                     for session in sessions
                     for key in (
+                        f"session:{session.project_id}:{session.id}",
                         f"message:{session.id}",
                         f"message_parts:{session.id}",
                         f"todo:{session.id}",
@@ -693,7 +793,7 @@ class Session:
                         f"session_diff:{session.id}",
                         f"session_callable_tools:{session.id}",
                     )
-                ],
+                ] + permission_keys,
                 delete_prefixes=[
                     prefix
                     for session in sessions
@@ -704,16 +804,31 @@ class Session:
                     )
                 ],
             )
+            PermissionNext.clear_session_runtime(session_ids)
 
             from flocks.session.session_loop import SessionLoop
             from flocks.session.callable_state import invalidate_session_callable_tools_cache
+            from flocks.project.project import Project
 
-            for session, tombstone in zip(sessions, tombstones):
+            Project.invalidate_session_stats()
+
+            for session in sessions:
                 cls._id_index.pop(session.id, None)
-                cls._sync_list_cache(tombstone)
+                cls._remove_from_list_cache(session.id)
                 SessionLoop.clear_auto_failover_state(session.id)
                 Message.invalidate_cache(session.id)
                 invalidate_session_callable_tools_cache(session.id)
+
+                try:
+                    from flocks.session.files import remove_session_uploads
+
+                    if await asyncio.to_thread(remove_session_uploads, session.id):
+                        log.info("session.uploads.cleaned", {"session_id": session.id})
+                except Exception as exc:
+                    log.warn("session.uploads.cleanup_failed", {
+                        "session_id": session.id,
+                        "error": str(exc),
+                    })
 
             for session in reversed(sessions):
                 try:
@@ -742,9 +857,13 @@ class Session:
                 "project_id": project_id,
                 "count": len(sessions),
             })
+            deleted = True
             return True
         finally:
             await cls._end_lifecycle_transition(sessions)
+            if deleted:
+                for session in sessions:
+                    cls._lifecycle_generations.pop(session.id, None)
 
     @classmethod
     async def retain_deleted_user_sessions(cls, user_id: str, username: str) -> int:
@@ -800,6 +919,15 @@ class Session:
                     "error": str(exc),
                 })
             try:
+                from flocks.session.background_tasks import cancel_session_background_tasks
+
+                await cancel_session_background_tasks(session_id)
+            except Exception as exc:
+                log.warn("session.archive.background_task_cleanup_error", {
+                    "id": session_id,
+                    "error": str(exc),
+                })
+            try:
                 from flocks.task.background import get_background_manager
 
                 get_background_manager().cancel_by_parent_session_id(session_id)
@@ -828,6 +956,15 @@ class Session:
     
     @classmethod
     async def archive(cls, project_id: str, session_id: str) -> bool:
+        """Archive a root session and its descendants."""
+
+        from flocks.project.project import Project
+
+        async with Project.lifecycle_guard(project_id):
+            return await cls._archive_locked(project_id, session_id)
+
+    @classmethod
+    async def _archive_locked(cls, project_id: str, session_id: str) -> bool:
         """
         Archive a session
         
@@ -854,7 +991,7 @@ class Session:
 
             # Lifecycle claims prevent new in-process children and writes. Read
             # once more so every child committed before the claim is included.
-            refreshed = await cls._collect_session_tree(project_id, session_id)
+            refreshed = await cls.collect_tree(project_id, session_id)
             if not refreshed:
                 return False
             sessions = refreshed
@@ -869,6 +1006,7 @@ class Session:
                     "status": "archived",
                     "time": session.time.model_copy(update={
                         "archived": session.time.archived or archived_ts,
+                        "updated": archived_ts,
                     }),
                 }))
 
@@ -918,6 +1056,15 @@ class Session:
     
     @classmethod
     async def unarchive(cls, project_id: str, session_id: str) -> bool:
+        """Restore an archived root session and its descendants."""
+
+        from flocks.project.project import Project
+
+        async with Project.lifecycle_guard(project_id):
+            return await cls._unarchive_locked(project_id, session_id)
+
+    @classmethod
+    async def _unarchive_locked(cls, project_id: str, session_id: str) -> bool:
         """
         Restore an archived session
         
@@ -928,20 +1075,22 @@ class Session:
         Returns:
             True if restored
         """
-        async with cls._archive_lock:
-            sessions = await cls._collect_session_tree(project_id, session_id)
-            if not sessions:
-                return False
-            if any(cls.is_lifecycle_transitioning(session.id) for session in sessions):
-                return False
-            if sessions[0].parent_id is not None:
-                log.warn("session.unarchive.non_root_rejected", {"id": session_id})
-                return False
-
+        sessions = await cls._begin_lifecycle_transition(
+            project_id,
+            session_id,
+            require_root=True,
+        )
+        if not sessions:
+            return False
+        try:
+            restored_ts = int(datetime.now().timestamp() * 1000)
             changed = [
                 session.model_copy(update={
                     "status": "active",
-                    "time": session.time.model_copy(update={"archived": None}),
+                    "time": session.time.model_copy(update={
+                        "archived": None,
+                        "updated": restored_ts,
+                    }),
                 })
                 for session in sessions
                 if session.status == "archived"
@@ -961,11 +1110,72 @@ class Session:
                 "count": len(sessions),
             })
             return True
+        finally:
+            await cls._end_lifecycle_transition(sessions)
 
     @classmethod
-    async def _collect_session_tree(cls, project_id: str, session_id: str) -> List[SessionInfo]:
+    async def restore(
+        cls,
+        project_id: str,
+        session_id: str,
+        *,
+        project_owner_id: Optional[str],
+    ) -> bool:
+        """Restore a session tree and its removed project as one operation."""
+
+        from flocks.project.project import (
+            DEFAULT_PROJECT_ID,
+            Project,
+            ProjectDeletionError,
+            TASK_SESSION_GROUP_ID,
+        )
+
+        async with Project.lifecycle_guard(project_id):
+            project_state = (
+                Project.registry_state(project_id, owner_id=project_owner_id)
+                if project_owner_id
+                else (
+                    "virtual"
+                    if project_id in {DEFAULT_PROJECT_ID, TASK_SESSION_GROUP_ID}
+                    else "missing"
+                )
+            )
+            if project_state == "missing" and project_id.startswith("prj_"):
+                raise ProjectDeletionError(
+                    f"Project {project_id} restoration metadata is unavailable"
+                )
+
+            project_was_removed = project_state == "removed"
+            if project_state in {"active", "removed"} and project_owner_id is not None:
+                await Project.restore(project_id, owner_id=project_owner_id)
+
+            try:
+                restored = await cls.unarchive(project_id, session_id)
+            except BaseException:
+                if project_was_removed and project_owner_id is not None:
+                    try:
+                        await asyncio.shield(
+                            Project._delete_locked(project_id, owner_id=project_owner_id)
+                        )
+                    except Exception as rollback_exc:
+                        log.error("session.restore.project_rollback_failed", {
+                            "project_id": project_id,
+                            "error": str(rollback_exc),
+                        })
+                raise
+
+            if not restored and project_was_removed and project_owner_id is not None:
+                await Project.delete(project_id, owner_id=project_owner_id)
+            return restored
+
+    @classmethod
+    async def collect_tree(cls, project_id: str, session_id: str) -> List[SessionInfo]:
         """Return a root session and all descendants in parent-first order."""
-        root = await cls.get(project_id, session_id)
+        token = set_current_auth_user(None)
+        try:
+            root = await cls.get(project_id, session_id)
+        finally:
+            reset_current_auth_user(token)
         if root is None:
             return []
 
@@ -988,12 +1198,6 @@ class Session:
                 visit(child)
 
         visit(root)
-        current_user = get_current_auth_user()
-        if current_user is not None:
-            from flocks.session.policy import SessionPolicy
-
-            if any(not SessionPolicy.can_delete(session, current_user) for session in tree):
-                return []
         return tree
 
     @classmethod
@@ -1005,24 +1209,32 @@ class Session:
         require_root: bool = False,
     ) -> List[SessionInfo]:
         """Claim a complete tree so ordinary writes cannot overtake its transition."""
-        async with cls._archive_lock:
-            sessions = await cls._collect_session_tree(project_id, session_id)
+        async with cls._tree_lock:
+            sessions = await cls.collect_tree(project_id, session_id)
             if not sessions:
                 return []
             if require_root and sessions[0].parent_id is not None:
                 log.warn("session.lifecycle.non_root_rejected", {"id": session_id})
                 return []
-            ids = {session.id for session in sessions}
-            if ids & cls._lifecycle_transition_ids:
-                return []
-            cls._lifecycle_transition_ids.update(ids)
-            for item_id in ids:
-                cls._lifecycle_generations[item_id] = cls.lifecycle_generation(item_id) + 1
-            return sessions
+
+            async with AsyncExitStack() as locks:
+                for item_id in sorted(session.id for session in sessions):
+                    await locks.enter_async_context(cls.lifecycle_lock(item_id))
+
+                # A child may have committed before the topology lock was
+                # acquired. Re-read under all known keyed locks before claiming.
+                sessions = await cls.collect_tree(project_id, session_id)
+                ids = {session.id for session in sessions}
+                if not sessions or ids & cls._lifecycle_transition_ids:
+                    return []
+                cls._lifecycle_transition_ids.update(ids)
+                for item_id in ids:
+                    cls._lifecycle_generations[item_id] = cls.lifecycle_generation(item_id) + 1
+                return sessions
 
     @classmethod
     async def _end_lifecycle_transition(cls, sessions: List[SessionInfo]) -> None:
-        async with cls._archive_lock:
+        async with cls._tree_lock:
             cls._lifecycle_transition_ids.difference_update(session.id for session in sessions)
 
     @classmethod

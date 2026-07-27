@@ -1,4 +1,5 @@
 import client from './client';
+import type { Session } from '@/types';
 import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
 export interface SessionMessagePartPayload {
@@ -105,8 +106,8 @@ export const sessionApi = {
   /**
    * 获取会话列表
    */
-  list: async (params?: SessionListParams) => {
-    const response = await client.get('/api/session', { params });
+  list: async (params?: SessionListParams): Promise<Session[]> => {
+    const response = await client.get<Session[]>('/api/session', { params });
     return response.data;
   },
 
@@ -137,8 +138,8 @@ export const sessionApi = {
   /**
    * 永久删除会话（普通工作台应使用 archive）
    */
-  delete: async (sessionId: string) => {
-    const response = await client.delete(`/api/session/${sessionId}`);
+  delete: async (sessionId: string): Promise<boolean> => {
+    const response = await client.delete<boolean>(`/api/session/${sessionId}`);
     return response.data;
   },
 

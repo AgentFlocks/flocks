@@ -8,6 +8,7 @@ registered project remain ordinary sessions rather than becoming a project.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import hashlib
 import json
 import os
@@ -16,13 +17,15 @@ import sys
 import tempfile
 import time
 import uuid
-from contextlib import contextmanager
+import weakref
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Iterator, List, Literal, Optional, Tuple
+from typing import AsyncIterator, Any, ClassVar, Dict, Iterator, List, Literal, Optional, Tuple
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from flocks.config.config import Config
 from flocks.utils.log import Log
 
 log = Log.create(service="project")
@@ -56,6 +59,24 @@ def _platform_file_unlock(fd: int) -> None:
         import fcntl
 
         fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+async def _acquire_file_lock(fd: int) -> None:
+    """Acquire a blocking OS lock without leaking it when the waiter is cancelled."""
+
+    worker = asyncio.create_task(asyncio.to_thread(_platform_file_lock, fd))
+    try:
+        await asyncio.shield(worker)
+    except asyncio.CancelledError:
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                continue
+        if not worker.cancelled():
+            worker.result()
+            _platform_file_unlock(fd)
+        raise
 
 
 @contextmanager
@@ -164,7 +185,12 @@ class Project:
     """User-scoped registry of explicitly created projects."""
 
     _lock = asyncio.Lock()
-    _lifecycle_locks: ClassVar[Dict[str, asyncio.Lock]] = {}
+    _lifecycle_locks: ClassVar[weakref.WeakValueDictionary[str, asyncio.Lock]] = (
+        weakref.WeakValueDictionary()
+    )
+    _held_lifecycle_guards: ClassVar[
+        contextvars.ContextVar[Dict[str, asyncio.Task[Any]]]
+    ] = contextvars.ContextVar("project_lifecycle_guards", default={})
     _session_stats_cache: ClassVar[
         Dict[Tuple[str, str], Tuple[float, Dict[str, Tuple[int, int, Optional[int]]]]]
     ] = {}
@@ -178,7 +204,84 @@ class Project:
     def lifecycle_lock(cls, project_id: str) -> asyncio.Lock:
         """Serialize session creation, project removal, and restoration per project."""
 
-        return cls._lifecycle_locks.setdefault(project_id, asyncio.Lock())
+        lock = cls._lifecycle_locks.get(project_id)
+        if lock is None:
+            lock = asyncio.Lock()
+            cls._lifecycle_locks[project_id] = lock
+        return lock
+
+    @classmethod
+    @asynccontextmanager
+    async def lifecycle_guard(cls, project_id: str) -> AsyncIterator[None]:
+        """Serialize a project lifecycle transition across tasks and processes.
+
+        The context is re-entrant for the current asyncio task so project deletion
+        can archive several roots through the same public session APIs. ContextVar
+        state records the owning task explicitly because child tasks inherit
+        context and must acquire their own lock.
+        """
+
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("Project lifecycle guard requires an asyncio task")
+
+        held = cls._held_lifecycle_guards.get()
+        if held.get(project_id) is task:
+            yield
+            return
+
+        async with cls.lifecycle_lock(project_id):
+            lock_dir = Config.get_data_path() / "locks" / "project-lifecycle"
+            lock_dir.mkdir(parents=True, exist_ok=True)
+            lock_name = hashlib.sha256(project_id.encode("utf-8")).hexdigest()
+            fd = os.open(str(lock_dir / f"{lock_name}.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+            acquired = False
+            try:
+                await _acquire_file_lock(fd)
+                acquired = True
+                token = cls._held_lifecycle_guards.set({**held, project_id: task})
+                try:
+                    yield
+                finally:
+                    cls._held_lifecycle_guards.reset(token)
+            finally:
+                try:
+                    if acquired:
+                        _platform_file_unlock(fd)
+                finally:
+                    os.close(fd)
+
+    @classmethod
+    def registry_state(
+        cls,
+        project_id: str,
+        *,
+        owner_id: str,
+    ) -> Literal["virtual", "missing", "active", "removed"]:
+        """Return the registry state used by session create/restore guards."""
+
+        if project_id in {DEFAULT_PROJECT_ID, TASK_SESSION_GROUP_ID}:
+            return "virtual"
+        entry = next(
+            (
+                item
+                for item in cls._read_registry(owner_id).projects
+                if item.id == project_id
+            ),
+            None,
+        )
+        if entry is None:
+            return "missing"
+        return "removed" if entry.removed_at is not None else "active"
+
+    @classmethod
+    def is_removed(cls, project_id: str) -> bool:
+        """Return whether any local registry marks this project as removed."""
+
+        return any(
+            entry.id == project_id and entry.removed_at is not None
+            for entry in cls._all_registry_entries(include_removed=True)
+        )
 
     @staticmethod
     def _flocks_root() -> Path:
@@ -657,6 +760,13 @@ class Project:
     async def delete(cls, project_id: str, *, owner_id: str) -> bool:
         """Hide a project registration while preserving metadata for restoration."""
 
+        async with cls.lifecycle_guard(project_id):
+            return await cls._delete_locked(project_id, owner_id=owner_id)
+
+    @classmethod
+    async def _delete_locked(cls, project_id: str, *, owner_id: str) -> bool:
+        """Update the project registry while its lifecycle guard is held."""
+
         if project_id == DEFAULT_PROJECT_ID:
             raise ProjectDeletionError("The default project cannot be deleted")
         async with cls._lock:
@@ -690,6 +800,18 @@ class Project:
     ) -> Optional[ProjectInfo]:
         """Restore a soft-removed project when its original directory is usable."""
 
+        async with cls.lifecycle_guard(project_id):
+            return await cls._restore_locked(project_id, owner_id=owner_id)
+
+    @classmethod
+    async def _restore_locked(
+        cls,
+        project_id: str,
+        *,
+        owner_id: str,
+    ) -> Optional[ProjectInfo]:
+        """Restore registry metadata while its lifecycle guard is held."""
+
         if project_id == DEFAULT_PROJECT_ID:
             return None
         async with cls._lock:
@@ -697,7 +819,9 @@ class Project:
                 registry = cls._read_registry(owner_id)
                 entry = next((item for item in registry.projects if item.id == project_id), None)
                 if entry is None:
-                    return None
+                    raise ProjectDeletionError(
+                        f"Project {project_id} restoration metadata is unavailable"
+                    )
                 if entry.removed_at is None:
                     return cls._entry_to_info(entry)
                 if cls._path_status(entry.worktree) != "available":

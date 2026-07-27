@@ -1,5 +1,7 @@
 import asyncio
 import json
+import os
+import sys
 import uuid
 from unittest.mock import AsyncMock, patch
 
@@ -13,6 +15,8 @@ from flocks.project.project import (
     ProjectPathConflictError,
     TASK_SESSION_GROUP_ID,
 )
+from flocks.config.config import Config
+from flocks.session.session import Session
 from flocks.storage.storage import Storage
 
 
@@ -22,6 +26,49 @@ def project_root(tmp_path, monkeypatch):
     monkeypatch.setenv("FLOCKS_ROOT", str(root))
     monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
     return tmp_path
+
+
+@pytest.mark.asyncio
+async def test_lifecycle_guard_is_reentrant_and_cross_process(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        Config,
+        "get_data_path",
+        classmethod(lambda _cls: tmp_path),
+    )
+    marker = tmp_path / "child-acquired"
+    project_id = "prj_cross_process_guard"
+    script = """
+import os
+import sys
+from pathlib import Path
+from flocks.project.project import _platform_file_lock, _platform_file_unlock
+
+fd = os.open(sys.argv[1], os.O_RDWR)
+try:
+    _platform_file_lock(fd)
+    Path(sys.argv[2]).touch()
+    _platform_file_unlock(fd)
+finally:
+    os.close(fd)
+"""
+
+    async with Project.lifecycle_guard(project_id):
+        async with Project.lifecycle_guard(project_id):
+            pass
+        lock_path = next((tmp_path / "locks" / "project-lifecycle").glob("*.lock"))
+        process = await asyncio.create_subprocess_exec(
+            sys.executable,
+            "-c",
+            script,
+            str(lock_path),
+            str(marker),
+            cwd=os.getcwd(),
+        )
+        await asyncio.sleep(0.1)
+        assert not marker.exists()
+
+    assert await asyncio.wait_for(process.wait(), timeout=5) == 0
+    assert marker.exists()
 
 
 @pytest.mark.asyncio
@@ -153,6 +200,23 @@ async def test_restore_removed_project_requires_original_directory(project_root)
         await Project.restore(created.id, owner_id="user-1")
 
     assert await Project.get(created.id, owner_id="user-1") is None
+
+
+@pytest.mark.asyncio
+async def test_removed_project_rejects_direct_session_creation(project_root):
+    labs = project_root / "removed"
+    labs.mkdir()
+    created = await Project.create(owner_id="user-1", name="Removed", worktree=str(labs))
+    await Project.delete(created.id, owner_id="user-1")
+
+    with pytest.raises(ProjectDeletionError, match="no longer available"):
+        await Session.create(project_id=created.id, directory=str(labs))
+
+
+@pytest.mark.asyncio
+async def test_restore_missing_project_metadata_is_rejected(project_root):
+    with pytest.raises(ProjectDeletionError, match="metadata is unavailable"):
+        await Project.restore("prj_missing", owner_id="user-1")
 
 
 @pytest.mark.asyncio

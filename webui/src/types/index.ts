@@ -5,7 +5,7 @@
  */
 export interface Session {
   id: string;
-  slug: string;
+  slug?: string;
   projectID: string;
   projectName?: string;
   effectiveProjectID?: string;
@@ -13,7 +13,7 @@ export interface Session {
   parentID?: string;
   summary?: SessionSummary;
   title: string;
-  version: string;
+  version?: string;
   time: SessionTime;
   permission?: PermissionRule[];
   revert?: SessionRevert;

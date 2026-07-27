@@ -664,7 +664,7 @@ class SessionLoop:
         # Register under the same lock used by archive/delete. This closes the
         # gap where archival could commit after the status check above but
         # before the loop became visible to the lifecycle stop logic.
-        async with Session._archive_lock:
+        async with Session.lifecycle_lock(session_id):
             latest_session = await Session.get_by_id(session_id)
             if latest_session is None:
                 log.warning("loop.session_not_found_before_register", {

@@ -499,20 +499,9 @@ async def _session_archive_impl(
     session_id: str,
     archive: Optional[bool] = True,
 ) -> ToolResult:
-    from flocks.session.session import Session, SessionInfo
-    from flocks.storage.storage import Storage
+    from flocks.session.session import Session
 
-    # get_by_id 会跳过 archived session，需直接扫 Storage
-    session = None
-    keys = await Storage.list_keys(prefix="session:")
-    for key in keys:
-        try:
-            s = await Storage.get(key, SessionInfo)
-            if s and s.id == session_id and s.status != "deleted":
-                session = s
-                break
-        except Exception:
-            continue
+    session = await Session.get_by_id_unfiltered(session_id)
 
     if not session:
         return ToolResult(success=False, error=f"未找到 session '{session_id}'")
@@ -530,13 +519,12 @@ async def _session_archive_impl(
 
     try:
         if archive is False:
-            from flocks.project.project import Project
-
-            async with Project.lifecycle_lock(session.project_id):
-                owner_user_id = getattr(session, "owner_user_id", None)
-                if owner_user_id:
-                    await Project.restore(session.project_id, owner_id=owner_user_id)
-                ok = await Session.unarchive(session.project_id, session_id)
+            owner_user_id = getattr(session, "owner_user_id", None)
+            ok = await Session.restore(
+                session.project_id,
+                session_id,
+                project_owner_id=owner_user_id,
+            )
             action = "取消归档"
         else:
             ok = await Session.archive(session.project_id, session_id)

@@ -2007,7 +2007,7 @@ class Message:
             Number of messages cleared
         """
         await cls._ensure_message_cache(session_id)
-        
+
         async with _session_locks.get(session_id):
             count = len(cls._messages_cache.get(session_id, []))
             cls._messages_cache[session_id] = []
@@ -2018,18 +2018,33 @@ class Message:
             cls._parts_storage_format[session_id] = "per_message"
             cls._parts_fully_loaded.add(session_id)
             cls._cancel_parts_flush_task(session_id)
-            
-            # Persist changes
+
             await cls._persist_messages(session_id)
             await Storage.clear(prefix=cls._parts_item_prefix(session_id))
             await Storage.delete(cls._parts_blob_key(session_id))
-            
+
             log.info("messages.cleared", {
                 "session_id": session_id,
                 "count": count,
             })
-            
             return count
+
+    @classmethod
+    async def clear_active(
+        cls,
+        session_id: str,
+        *,
+        expected_generation: Optional[int] = None,
+    ) -> int:
+        """Clear history only while the owning session remains active."""
+
+        from flocks.session.session import Session
+
+        return await Session.run_active_write(
+            session_id,
+            lambda: cls.clear(session_id),
+            expected_generation=expected_generation,
+        )
     
     @classmethod
     def invalidate_cache(cls, session_id: Optional[str] = None) -> None:
@@ -2562,7 +2577,7 @@ class MessageSync:
     @classmethod
     def clear(cls, session_id: str) -> int:
         """Sync version"""
-        return cls._run_async(Message.clear(session_id))
+        return cls._run_async(Message.clear_active(session_id))
     
     @classmethod
     def get_text_content(cls, message: MessageInfo) -> str:

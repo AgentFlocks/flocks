@@ -105,6 +105,31 @@ describe('ArchivedDataPanel', () => {
     expect(screen.queryByText('Archived Session')).not.toBeInTheDocument();
   });
 
+  it('keeps failed rows after a partial bulk restore', async () => {
+    const user = userEvent.setup();
+    const failedSession = {
+      ...archivedSession,
+      id: 'session-failed',
+      title: 'Failed Session',
+    };
+    sessionApi.list.mockResolvedValue([archivedSession, failedSession]);
+    sessionApi.restore.mockImplementation((id: string) => (
+      id === failedSession.id
+        ? Promise.reject(new Error('restore failed'))
+        : Promise.resolve({ ...archivedSession, status: 'active' })
+    ));
+    render(<ArchivedDataPanel />);
+
+    await screen.findByText('Failed Session');
+    await user.click(screen.getByRole('checkbox', { name: 'archivedData.selectAll' }));
+    await user.click(screen.getByRole('button', { name: 'archivedData.restoreSelected' }));
+
+    await waitFor(() => expect(screen.queryByText('Archived Session')).not.toBeInTheDocument());
+    expect(screen.getByText('Failed Session')).toBeInTheDocument();
+    expect(toast.success).toHaveBeenCalled();
+    expect(toast.error).toHaveBeenCalled();
+  });
+
   it('ignores an older response after a newer search completes', async () => {
     const user = userEvent.setup();
     let resolveInitial!: (value: unknown[]) => void;

@@ -22,9 +22,11 @@ from flocks.auth.context import (
     set_current_auth_user,
 )
 from flocks.session.message import Message, MessageRole, ToolPart, ToolStatePending
+from flocks.session.features.todo import Todo, TodoInfo
 from flocks.session.session import (
     PermissionRule,
     Session,
+    SessionInactiveError,
     SessionInfo,
     SessionRevert,
     SessionTime,
@@ -199,6 +201,19 @@ class TestArchiveUnarchive:
         assert "archived" in (result.error or "")
 
     @pytest.mark.asyncio
+    async def test_lifecycle_guard_rejects_todo_write_after_archive(self):
+        session = await _create(project_id="proj_arch_todo_guard")
+        assert await Session.archive(session.project_id, session.id) is True
+
+        with pytest.raises(SessionInactiveError):
+            await Todo.update_active(
+                session.id,
+                [TodoInfo(id="late", content="must not persist")],
+            )
+
+        assert await Todo.get(session.id) == []
+
+    @pytest.mark.asyncio
     async def test_archive_wins_before_session_loop_registration(self, monkeypatch):
         from flocks.session.session_loop import SessionLoop
 
@@ -226,9 +241,7 @@ class TestArchiveUnarchive:
         storage_key = f"session:{session.project_id}:{session.id}"
         update_reached_write = asyncio.Event()
         release_update = asyncio.Event()
-        archive_entered_collection = asyncio.Event()
         original_set = Storage.set
-        original_collect = Session._collect_session_tree
 
         async def delayed_set(key, value, *args, **kwargs):
             if key == storage_key and getattr(value, "title", None) == "Racing update":
@@ -236,12 +249,7 @@ class TestArchiveUnarchive:
                 await release_update.wait()
             return await original_set(key, value, *args, **kwargs)
 
-        async def observed_collect(project_id: str, session_id: str):
-            archive_entered_collection.set()
-            return await original_collect(project_id, session_id)
-
         monkeypatch.setattr(Storage, "set", delayed_set)
-        monkeypatch.setattr(Session, "_collect_session_tree", observed_collect)
 
         update_task = asyncio.create_task(
             Session.update(session.project_id, session.id, title="Racing update")
@@ -249,7 +257,7 @@ class TestArchiveUnarchive:
         await update_reached_write.wait()
         archive_task = asyncio.create_task(Session.archive(session.project_id, session.id))
         await asyncio.sleep(0)
-        assert archive_entered_collection.is_set() is False
+        assert archive_task.done() is False
         release_update.set()
 
         assert await update_task is not None
@@ -258,6 +266,36 @@ class TestArchiveUnarchive:
         assert stored is not None
         assert stored.status == "archived"
         assert stored.title == "Racing update"
+
+    @pytest.mark.asyncio
+    async def test_unrelated_session_updates_do_not_share_a_global_lock(self, monkeypatch):
+        first = await _create(project_id="proj_keyed_locks", title="First")
+        second = await _create(project_id="proj_keyed_locks", title="Second")
+        first_write_started = asyncio.Event()
+        release_first_write = asyncio.Event()
+        original_set = Storage.set
+
+        async def delayed_set(key, value, *args, **kwargs):
+            if key.endswith(f":{first.id}") and getattr(value, "title", None) == "Slow":
+                first_write_started.set()
+                await release_first_write.wait()
+            return await original_set(key, value, *args, **kwargs)
+
+        monkeypatch.setattr(Storage, "set", delayed_set)
+        first_update = asyncio.create_task(
+            Session.update(first.project_id, first.id, title="Slow")
+        )
+        await first_write_started.wait()
+
+        try:
+            second_update = await asyncio.wait_for(
+                Session.update(second.project_id, second.id, title="Fast"),
+                timeout=0.5,
+            )
+            assert second_update is not None and second_update.title == "Fast"
+        finally:
+            release_first_write.set()
+            await first_update
 
     @pytest.mark.asyncio
     async def test_archive_flushes_debounced_tool_parts_before_cache_invalidation(self):
@@ -285,7 +323,20 @@ class TestArchiveUnarchive:
         assert reloaded_tool.state.status == "pending"
 
     @pytest.mark.asyncio
-    async def test_permanent_delete_removes_tree_data_in_one_mutation(self):
+    async def test_permanent_delete_removes_tree_data_in_one_mutation(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        from flocks.config.config import Config
+        from flocks.permission.next import PermissionNext, PermissionRequestInfo
+        from flocks.session.files import session_uploads_dir
+
+        monkeypatch.setattr(
+            Config,
+            "get_data_path",
+            classmethod(lambda _cls: tmp_path),
+        )
         parent = await _create(project_id="proj_delete_atomic", title="Parent")
         child = await Session.create(
             project_id=parent.project_id,
@@ -294,6 +345,9 @@ class TestArchiveUnarchive:
             parent_id=parent.id,
         )
         for session in (parent, child):
+            upload_dir = session_uploads_dir(session.id)
+            upload_dir.mkdir(parents=True)
+            (upload_dir / "attachment.txt").write_text("remove", encoding="utf-8")
             await Storage.set(f"message:{session.id}", [{"id": "message"}], "message")
             await Storage.set(f"message_parts:{session.id}", {"legacy": []}, "message_parts")
             await Storage.set(f"message_parts:{session.id}:message", [], "message_parts")
@@ -303,15 +357,43 @@ class TestArchiveUnarchive:
             await Storage.set(f"message_diff:{session.id}:message", {"diff": "remove"}, "message_diff")
             await Storage.set(f"system_prompts:{session.id}:default", {"text": "remove"}, "system_prompt")
             await Storage.set(f"session_callable_tools:{session.id}", {"tools": ["read"]}, "session_callable_tools")
+            await Storage.set(
+                f"{PermissionNext._SESSION_PREFIX}{session.id}",
+                {"bash": "allow"},
+                "permission_session",
+            )
+            PermissionNext._session_permissions[session.id] = {"bash": "allow"}
+
+        pending = PermissionRequestInfo(
+            id="per_delete_tree",
+            sessionID=child.id,
+            permission="write",
+            patterns=["*"],
+        )
+        pending_future = asyncio.get_running_loop().create_future()
+        PermissionNext._pending[pending.id] = {
+            "info": pending,
+            "future": pending_future,
+        }
+        await Storage.set(
+            f"{PermissionNext._PENDING_PREFIX}{pending.id}",
+            pending.model_dump(by_alias=True),
+            "permission_pending",
+        )
+        await Storage.set(
+            f"{PermissionNext._REPLY_PREFIX}{pending.id}",
+            {"reply": "allow", "sessionID": child.id},
+            "permission_reply",
+        )
 
         assert await Session.delete(parent.project_id, parent.id) is True
 
         for session in (parent, child):
-            tombstone = await Storage.get(
+            deleted_session = await Storage.get(
                 f"session:{session.project_id}:{session.id}",
                 SessionInfo,
             )
-            assert tombstone is not None and tombstone.status == "deleted"
+            assert deleted_session is None
             assert await Storage.get(f"message:{session.id}") is None
             assert await Storage.get(f"message_parts:{session.id}") is None
             assert await Storage.list_keys(prefix=f"message_parts:{session.id}:") == []
@@ -321,6 +403,13 @@ class TestArchiveUnarchive:
             assert await Storage.list_keys(prefix=f"message_diff:{session.id}:") == []
             assert await Storage.list_keys(prefix=f"system_prompts:{session.id}:") == []
             assert await Storage.get(f"session_callable_tools:{session.id}") is None
+            assert await Storage.get(f"{PermissionNext._SESSION_PREFIX}{session.id}") is None
+            assert session.id not in PermissionNext._session_permissions
+            assert not session_uploads_dir(session.id).exists()
+        assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{pending.id}") is None
+        assert await Storage.get(f"{PermissionNext._REPLY_PREFIX}{pending.id}") is None
+        assert pending.id not in PermissionNext._pending
+        assert pending_future.cancelled()
 
 
 # ---------------------------------------------------------------------------
