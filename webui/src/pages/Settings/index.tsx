@@ -6,11 +6,13 @@ import {
   ArrowLeft,
   ArrowUpCircle,
   Archive,
+  Brain,
   Check,
   ImageIcon,
   Languages,
   Moon,
   RotateCcw,
+  Radio,
   ScrollText,
   Save,
   Settings as SettingsIcon,
@@ -47,8 +49,18 @@ const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpgrade'), ['flockspro']);
 const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
 const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
+const ModelPage = lazySettingsPage(() => import('@/pages/Model'), ['model']);
+const ChannelPage = lazySettingsPage(() => import('@/pages/Channel'), ['channel']);
 
-type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
+type SettingsSectionId =
+  | 'preferences'
+  | 'models'
+  | 'channels'
+  | 'archived-data'
+  | 'account'
+  | 'system-logs'
+  | 'audit-logs'
+  | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -64,6 +76,7 @@ interface SettingsSection {
   id: SettingsSectionId;
   name: string;
   icon: LucideIcon;
+  href?: string;
   adminOnly?: boolean;
   requiresFlockspro?: boolean;
 }
@@ -76,6 +89,8 @@ interface SettingsGroup {
 function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
   return (
     value === 'preferences' ||
+    value === 'models' ||
+    value === 'channels' ||
     value === 'archived-data' ||
     value === 'account' ||
     value === 'system-logs' ||
@@ -192,8 +207,11 @@ function PreferenceSwitch({
   );
 }
 
+type PreferencesTab = 'general' | 'models' | 'channels';
+
 function PreferencesPanel() {
   const { t, i18n } = useTranslation('nav');
+  const location = useLocation();
   const { theme, setTheme } = useContext(ThemeContext);
   const {
     productName,
@@ -216,6 +234,10 @@ function PreferencesPanel() {
   const normalizedDisplayName = displayNameDraft.trim();
   const displayNameChanged = normalizedDisplayName !== (configuredDisplayName ?? '');
   const toolFailureSettingLoadFailedMessage = t('toolFailureSettingLoadFailed');
+  const requestedTab = new URLSearchParams(location.search).get('tab');
+  const activeTab: PreferencesTab = requestedTab === 'models' || requestedTab === 'channels'
+    ? requestedTab
+    : 'general';
 
   useEffect(() => {
     setDisplayNameDraft(configuredDisplayName ?? '');
@@ -317,6 +339,18 @@ function PreferencesPanel() {
       setSavingToolFailure(false);
     }
   };
+
+  if (activeTab !== 'general') {
+    return (
+      <div className="mx-auto w-full max-w-6xl">
+        <div className="min-h-[calc(100vh-6rem)]">
+          <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
+            {activeTab === 'models' ? <ModelPage /> : <ChannelPage />}
+          </Suspense>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="mx-auto w-full max-w-5xl">
@@ -549,6 +583,23 @@ export default function SettingsPage() {
         ],
       },
       {
+        name: t('settingsGroupIntegrations'),
+        items: [
+          {
+            id: 'models',
+            name: t('models'),
+            href: '/settings/preferences?tab=models',
+            icon: Brain,
+          },
+          {
+            id: 'channels',
+            name: t('channels'),
+            href: '/settings/preferences?tab=channels',
+            icon: Radio,
+          },
+        ],
+      },
+      {
         name: t('settingsGroupData'),
         items: [
           { id: 'archived-data', name: t('archivedData'), icon: Archive },
@@ -583,18 +634,27 @@ export default function SettingsPage() {
   }
 
   if (sectionId === 'models') {
-    return <Navigate to="/models" replace />;
+    return <Navigate to="/settings/preferences?tab=models" replace state={settingsRouteState} />;
   }
 
   if (sectionId === 'channels') {
-    return <Navigate to="/channels" replace />;
+    return <Navigate to="/settings/preferences?tab=channels" replace state={settingsRouteState} />;
   }
 
   if (!isSettingsSectionId(sectionId)) {
     return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
   }
 
-  const currentSection = visibleGroups.flatMap((group) => group.items).find((item) => item.id === sectionId);
+  const requestedPreferenceTab = new URLSearchParams(location.search).get('tab');
+  const activeNavigationSectionId: SettingsSectionId = (
+    sectionId === 'preferences'
+    && (requestedPreferenceTab === 'models' || requestedPreferenceTab === 'channels')
+  )
+    ? requestedPreferenceTab
+    : sectionId;
+  const currentSection = visibleGroups
+    .flatMap((group) => group.items)
+    .find((item) => item.id === activeNavigationSectionId);
 
   if (!currentSection) {
     return <Navigate to="/settings/preferences" replace state={settingsRouteState} />;
@@ -624,11 +684,11 @@ export default function SettingsPage() {
               <div className="mt-2 space-y-1">
                 {group.items.map((item) => {
                   const Icon = item.icon;
-                  const active = item.id === sectionId;
+                  const active = item.id === activeNavigationSectionId;
                   return (
                     <Link
                       key={item.id}
-                      to={`/settings/${item.id}`}
+                      to={item.href ?? `/settings/${item.id}`}
                       state={settingsRouteState}
                       className={`flex items-center gap-3 rounded-lg px-3 py-2 text-sm font-semibold transition-colors ${
                         active
@@ -664,11 +724,11 @@ export default function SettingsPage() {
           <nav className="mt-3 flex gap-2 overflow-x-auto pb-1" aria-label={t('settingsTitle')}>
             {visibleGroups.flatMap((group) => group.items).map((item) => {
               const Icon = item.icon;
-              const active = item.id === sectionId;
+              const active = item.id === activeNavigationSectionId;
               return (
                 <Link
                   key={item.id}
-                  to={`/settings/${item.id}`}
+                  to={item.href ?? `/settings/${item.id}`}
                   state={settingsRouteState}
                   className={`inline-flex shrink-0 items-center gap-2 rounded-md px-3 py-2 text-sm font-semibold transition-colors ${
                     active

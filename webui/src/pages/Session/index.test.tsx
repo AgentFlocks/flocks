@@ -570,7 +570,7 @@ describe('SessionPage session actions menu', () => {
     expect(screen.getByText('Original Session')).toBeInTheDocument();
   });
 
-  it('keeps the workbench canvas, sidebar, selected row, and dark palette classes stable', async () => {
+  it('renders the selected session full-width without the legacy secondary navigation', async () => {
     renderSessionPage('/sessions?session=session-1');
 
     const workbenchSidebar = screen.getByLabelText('managementTitle');
@@ -580,11 +580,8 @@ describe('SessionPage session actions menu', () => {
     const selectedRow = sessionTitle.closest('div.group');
 
     expect(workbenchCanvas).toHaveClass('bg-[#fcfcfd]', 'dark:bg-[#303842]');
-    expect(workbenchSidebar).toHaveClass('bg-gray-50', 'dark:bg-[#252c35]');
-    expect(workbenchSidebar).toHaveClass('h-full', 'border-r');
-    expect(workbenchSidebar).toHaveClass('border-black/[0.10]');
-    expect(workbenchSidebar).not.toHaveClass('rounded-2xl');
-    expect(workbenchSidebar.className).not.toContain('shadow-');
+    expect(workbenchSidebar).toHaveClass('session-workbench-portal');
+    expect(screen.queryByRole('button', { name: 'hideHistory' })).not.toBeInTheDocument();
     expect(mainCanvas).toHaveClass('bg-[#fcfcfd]', 'dark:bg-[#303842]');
     expect(within(mainCanvas as HTMLElement).getByRole('heading', { level: 2 })).toHaveClass('text-[#555a61]');
     await waitFor(() => {

@@ -33,20 +33,14 @@ function lazyPage<T extends LazyPageModule>(
 }
 
 const SessionPage = lazyPage(() => import('@/pages/Session'), ['session']);
-const AgentPage = lazyPage(() => import('@/pages/Agent'), ['agent']);
 const LoginPage = lazyPage(() => import('@/pages/Login'));
 const SetupAdminPage = lazyPage(() => import('@/pages/SetupAdmin'));
 const ForceChangePasswordPage = lazyPage(() => import('@/pages/ForceChangePassword'));
-const WorkflowListPage = lazyPage(() => import('@/pages/Workflow'), ['workflow']);
 const WorkflowCreate = lazyPage(() => import('@/pages/WorkflowCreate'), ['workflow']);
 const WorkflowEditor = lazyPage(() => import('@/pages/WorkflowEditor'), ['workflow']);
 const WorkflowDetail = lazyPage(() => import('@/pages/WorkflowDetail'), ['workflow']);
 const TaskPage = lazyPage(() => import('@/pages/Task'), ['task']);
-const ToolPage = lazyPage(() => import('@/pages/Tool'), ['tool']);
-const HubPage = lazyPage(() => import('@/pages/Hub'));
-const SkillPage = lazyPage(() => import('@/pages/Skill'), ['skill']);
-const ModelPage = lazyPage(() => import('@/pages/Model'), ['model']);
-const ChannelPage = lazyPage(() => import('@/pages/Channel'), ['channel']);
+const PluginManagerPage = lazyPage(() => import('@/pages/PluginManager'));
 const PermissionPage = lazyPage(() => import('@/pages/Permission'), ['permission']);
 const MonitoringPage = lazyPage(() => import('@/pages/Monitoring'), ['monitoring']);
 const WorkspacePage = lazyPage(() => import('@/pages/Workspace'), ['workspace']);
@@ -166,8 +160,8 @@ export function Routes() {
 
         {/* AI 工作台 */}
         <Route path="sessions" element={<LazyRoute><SessionPage /></LazyRoute>} />
-        <Route path="agents" element={<LazyRoute><AgentPage /></LazyRoute>} />
-        <Route path="workflows" element={<LazyRoute><WorkflowListPage /></LazyRoute>} />
+        <Route path="agents" element={<Navigate to="/plugins/agents" replace />} />
+        <Route path="workflows" element={<Navigate to="/plugins/workflows" replace />} />
         <Route path="workflows/new" element={<LazyRoute><WorkflowCreate /></LazyRoute>} />
         <Route path="workflows/:id" element={<LazyRoute><WorkflowDetail /></LazyRoute>} />
         <Route path="workflows/:id/edit" element={<LazyRoute><WorkflowEditor /></LazyRoute>} />
@@ -178,17 +172,19 @@ export function Routes() {
         <Route path="devices" element={<LazyRoute><DeviceIntegrationPage /></LazyRoute>} />
 
         {/* Agent Smith */}
-        <Route path="tools" element={<LazyRoute><ToolPage /></LazyRoute>} />
-        <Route path="hub" element={<LazyRoute><HubPage /></LazyRoute>} />
-        <Route path="models" element={<LazyRoute><ModelPage /></LazyRoute>} />
-        <Route path="skills" element={<LazyRoute><SkillPage /></LazyRoute>} />
+        <Route path="plugins" element={<Navigate to="/plugins/agents" replace />} />
+        <Route path="plugins/:section" element={<LazyRoute><PluginManagerPage /></LazyRoute>} />
+        <Route path="tools" element={<Navigate to="/plugins/tools" replace />} />
+        <Route path="hub" element={<Navigate to="/plugins/marketplace" replace />} />
+        <Route path="models" element={<Navigate to="/settings/preferences?tab=models" replace />} />
+        <Route path="skills" element={<Navigate to="/plugins/skills" replace />} />
         {/* MCP 已整合到工具清单页面 */}
-        <Route path="mcp" element={<Navigate to="/tools" replace />} />
+        <Route path="mcp" element={<Navigate to="/plugins/tools" replace />} />
 
         <Route path="config" element={<Navigate to="/settings/account" replace />} />
         <Route path="config/*" element={<Navigate to="/settings/account" replace />} />
         <Route path="system-logs" element={<Navigate to="/settings/system-logs" replace />} />
-        <Route path="channels" element={<LazyRoute><ChannelPage /></LazyRoute>} />
+        <Route path="channels" element={<Navigate to="/settings/preferences?tab=channels" replace />} />
         <Route path="permissions" element={<LazyRoute><PermissionPage /></LazyRoute>} />
         <Route path="monitoring" element={<LazyRoute><MonitoringPage /></LazyRoute>} />
         <Route path="audit-logs" element={<Navigate to="/settings/audit-logs" replace />} />

@@ -77,7 +77,11 @@ const CAPABILITY_DETAIL_LABEL_KEYS = {
 // WorkflowPage
 // ---------------------------------------------------------------------------
 
-export default function WorkflowPage() {
+interface WorkflowPageProps {
+  embedded?: boolean;
+}
+
+export default function WorkflowPage({ embedded = false }: WorkflowPageProps = {}) {
   const { t } = useTranslation('workflow');
   const navigate = useNavigate();
   const { workflows, loading, error, refetch } = useWorkflows();
@@ -148,14 +152,16 @@ export default function WorkflowPage() {
 
   return (
     <div className="h-full flex flex-col">
-      <PageHeader
-        title={t('pageTitle')}
-        description={t('pageDescription')}
-        icon={<WorkflowIcon className="w-8 h-8" />}
-        // Refresh / create actions intentionally moved to the toolbar below so
-        // the page header stays uniform with Skill/Agent pages and the
-        // segmented source filter shares a row with its primary actions.
-      />
+      {!embedded && (
+        <PageHeader
+          title={t('pageTitle')}
+          description={t('pageDescription')}
+          icon={<WorkflowIcon className="w-8 h-8" />}
+          // Refresh / create actions intentionally moved to the toolbar below so
+          // the page header stays uniform with Skill/Agent pages and the
+          // segmented source filter shares a row with its primary actions.
+        />
+      )}
 
       {/* Toolbar */}
       <div className="px-4 py-2 border-b border-gray-100 flex items-center gap-3">

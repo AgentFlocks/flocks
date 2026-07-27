@@ -164,6 +164,7 @@ class HubCatalogEntry(BaseModel):
     riskLevel: str = "low"
     state: PluginState = "available"
     installedVersion: Optional[str] = None
+    enabled: bool = True
     source: str = "bundled"
     manifestPath: str
     installPath: Optional[str] = None

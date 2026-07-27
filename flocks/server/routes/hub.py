@@ -19,7 +19,7 @@ from flocks.hub.catalog import (
     load_taxonomy,
 )
 from flocks.hub.files import file_tree, read_file_content
-from flocks.hub.installer import install_plugin, uninstall_plugin, update_plugin
+from flocks.hub.installer import install_plugin, set_plugin_enabled, uninstall_plugin, update_plugin
 from flocks.hub.models import (
     HubCatalogEntry,
     HubFileContent,
@@ -39,6 +39,10 @@ log = Log.create(service="hub-routes")
 
 class HubInstallRequest(BaseModel):
     scope: str = Field(default="global", description="'global' only")
+
+
+class HubEnableRequest(BaseModel):
+    enabled: bool
 
 
 class HubCatalogFacets(BaseModel):
@@ -289,6 +293,18 @@ async def hub_update_plugin(
         return await update_plugin(plugin_type, plugin_id, scope=req.scope)
     except Exception as exc:
         log.error("hub.update.failed", {"type": plugin_type, "id": plugin_id, "error": str(exc)})
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.patch("/hub/plugins/{plugin_type}/{plugin_id}/enabled", response_model=InstalledPluginRecord)
+async def hub_set_plugin_enabled(plugin_type: PluginType, plugin_id: str, req: HubEnableRequest):
+    _guard_legacy_removed_plugin(plugin_type, plugin_id)
+    try:
+        return await set_plugin_enabled(plugin_type, plugin_id, req.enabled)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:
+        log.error("hub.enable.failed", {"type": plugin_type, "id": plugin_id, "enabled": req.enabled, "error": str(exc)})
         raise HTTPException(status_code=422, detail=str(exc)) from exc
 
 

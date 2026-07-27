@@ -154,17 +154,26 @@ describe('SettingsPage', () => {
     });
   });
 
-  it('redirects legacy model and channel settings URLs to workspace pages', async () => {
+  it('redirects legacy model and channel settings URLs into preferences', async () => {
     const { unmount } = renderSettings('/settings/models');
 
     expect(await screen.findByText('models page')).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'models' })[0]).toHaveAttribute(
+      'href',
+      '/settings/preferences?tab=models',
+    );
+    expect(screen.getAllByRole('link', { name: 'models' })[0]).toHaveClass('bg-zinc-100');
+    expect(screen.getByRole('heading', { name: 'settingsGroupIntegrations' })).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'channels' })[0]).toHaveAttribute(
+      'href',
+      '/settings/preferences?tab=channels',
+    );
 
     unmount();
     renderSettings('/settings/channels');
 
     expect(await screen.findByText('channels page')).toBeInTheDocument();
+    expect(screen.getAllByRole('link', { name: 'channels' })[0]).toHaveClass('bg-zinc-100');
   });
 
   it('returns to the page captured before opening settings', async () => {
@@ -198,8 +207,14 @@ describe('SettingsPage', () => {
     const mobileNav = screen.getByRole('navigation', { name: 'settingsTitle' });
     expect(within(mobileNav).getByRole('link', { name: 'accountManagement' })).toHaveAttribute('href', '/settings/account');
     expect(within(mobileNav).getByRole('link', { name: 'auditLogs' })).toHaveAttribute('href', '/settings/audit-logs');
-    expect(within(mobileNav).queryByRole('link', { name: 'models' })).not.toBeInTheDocument();
-    expect(within(mobileNav).queryByRole('link', { name: 'channels' })).not.toBeInTheDocument();
+    expect(within(mobileNav).getByRole('link', { name: 'models' })).toHaveAttribute(
+      'href',
+      '/settings/preferences?tab=models',
+    );
+    expect(within(mobileNav).getByRole('link', { name: 'channels' })).toHaveAttribute(
+      'href',
+      '/settings/preferences?tab=channels',
+    );
   });
 
   it('renders audit logs in settings for Flocks Pro admins', async () => {

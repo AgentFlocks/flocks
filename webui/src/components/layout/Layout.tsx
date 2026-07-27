@@ -1,14 +1,7 @@
 import { Outlet, Link, useLocation, matchPath, useNavigate } from 'react-router-dom';
 import {
   Home,
-  MessageSquare,
-  Bot,
-  Brain,
-  Workflow,
   ListTodo,
-  Wrench,
-  BookOpen,
-  Radio,
   X,
   ChevronLeft,
   ChevronRight,
@@ -16,7 +9,7 @@ import {
   Menu,
   FolderOpen,
   Sparkles,
-  Archive,
+  PackageCheck,
   ServerCog,
   LogOut,
   Settings,
@@ -106,6 +99,7 @@ import { useToast } from '@/components/common/Toast';
 import LazyLoadErrorBoundary from '@/components/common/LazyLoadErrorBoundary';
 import type { WebUIContractWorkspaceListItem } from '@/api/webuiContractPages';
 import { recoverLazyLoad } from '@/utils/chunkLoadRecovery';
+import AIWorkbenchNavigation from './AIWorkbenchNavigation';
 
 const UPDATE_CHECK_INTERVAL_MS = 3_600_000;
 const UPDATE_CHECK_MIN_GAP_MS = 600_000;
@@ -220,7 +214,7 @@ export default function Layout() {
   const notificationGateReady = flocksproStatusReady
     && (!canManageUpdates || hasCompletedUpdateCheck);
   const canCreateWorkspaceCustomPage = user?.role === 'admin';
-  const { pages: webuiContractPages, workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
+  const { workspaces: webuiContractWorkspaces = [] } = useWebUIContractPages();
   const [openWorkspaceMenuId, setOpenWorkspaceMenuId] = useState<string | null>(null);
   const [collapsedNavSectionIds, setCollapsedNavSectionIds] = useState<Set<string>>(readCollapsedNavSectionIds);
   const [collapsedWorkspaceSectionIds, setCollapsedWorkspaceSectionIds] = useState<Set<string>>(() => new Set());
@@ -522,24 +516,9 @@ export default function Layout() {
           name: '',
           items: [
             { name: t('flocksHome'), href: '/', icon: Home },
-            ...webuiContractPages
-              .filter((page) => !page.workspaceId && page.enabled && page.placement === 'home.after' && page.buildStatus === 'ready')
-              .map((page) => ({
-                name: getLocalizedWebUIContractTitle(page, i18n.language),
-                href: page.route,
-                icon: resolveWebUIContractPageIcon(page.icon),
-              })),
-          ],
-        },
-        {
-          id: 'aiWorkbench',
-          name: t('aiWorkbench'),
-          collapsible: true,
-          items: [
-            { name: t('sessions'), href: '/sessions', icon: MessageSquare },
-            { name: t('workspace'), href: '/workspace', icon: FolderOpen },
             { name: t('tasks'), href: '/tasks', icon: ListTodo },
-            { name: t('workflows'), href: '/workflows', icon: Workflow },
+            { name: t('plugins'), href: '/plugins', icon: PackageCheck },
+            { name: t('workspace'), href: '/workspace', icon: FolderOpen },
           ],
         },
         {
@@ -552,21 +531,14 @@ export default function Layout() {
           ],
         },
         {
-          id: 'agentHub',
-          name: t('agentHub'),
+          id: 'aiWorkbench',
+          name: t('aiWorkbench'),
           collapsible: true,
-          items: [
-            { name: t('agents'), href: '/agents', icon: Bot },
-            { name: t('skills'), href: '/skills', icon: BookOpen },
-            { name: t('tools'), href: '/tools', icon: Wrench },
-            { name: t('hub', { productName }), href: '/hub', icon: Archive },
-            { name: t('models'), href: '/models', icon: Brain },
-            { name: t('channels'), href: '/channels', icon: Radio },
-          ],
+          items: [],
         },
       ];
     },
-    [i18n.language, productName, webuiContractPages, webuiContractWorkspaces, t],
+    [i18n.language, webuiContractWorkspaces, t],
   );
 
   const isFullScreenPage =
@@ -813,12 +785,12 @@ export default function Layout() {
               return (
                 <div key={sectionId} className="mb-6">
                   {!collapsed && section.name && (
-                    <h3 className="px-3 mb-2 text-xs font-semibold text-zinc-400 uppercase tracking-wider whitespace-nowrap dark:text-zinc-500">
+                    <h3 className="px-3 mb-2 text-sm font-medium text-zinc-600 whitespace-nowrap dark:text-zinc-400">
                       {section.collapsible ? (
                         <button
                           type="button"
                           onClick={() => toggleNavSection(sectionId)}
-                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-600 focus:outline-none focus-visible:text-zinc-600 dark:hover:text-zinc-300 dark:focus-visible:text-zinc-300"
+                          className="flex h-6 w-full items-center justify-between text-left transition-colors hover:text-zinc-900 focus:outline-none focus-visible:text-zinc-900 dark:hover:text-zinc-50 dark:focus-visible:text-zinc-50"
                           aria-expanded={!sectionCollapsed}
                           aria-controls={sectionContentId}
                         >
@@ -831,8 +803,21 @@ export default function Layout() {
                     </h3>
                   )}
                   {collapsed && <div className="mb-1 border-t border-zinc-200 first:border-none dark:border-zinc-800" />}
-                  {!sectionCollapsed && (
+                  {(!sectionCollapsed || section.id === 'aiWorkbench') && (
                     <div id={sectionContentId} className="space-y-0.5">
+                      {section.id === 'aiWorkbench' && (
+                        <div
+                          id="ai-workbench-navigation-slot"
+                          className={`${sectionCollapsed ? 'hidden' : ''} ${
+                            collapsed ? '[&_.session-workbench-portal]:hidden' : ''
+                          }`}
+                        >
+                          <AIWorkbenchNavigation
+                            collapsed={collapsed}
+                            onNavigate={() => setSidebarOpen(false)}
+                          />
+                        </div>
+                      )}
                       {section.items.map((item) => {
                         const isActive = location.pathname === item.href
                           || (item.href !== '/' && location.pathname.startsWith(`${item.href}/`));
