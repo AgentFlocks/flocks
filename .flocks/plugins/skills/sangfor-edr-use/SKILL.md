@@ -1,37 +1,73 @@
 ---
 name: sangfor-edr-use
-description: 用于处理深信服 EDR（终端检测与响应）相关任务，通过 Flocks browser/CDP 完成登录态复用、终端状态查询、概况统计、失陷设备排查和设备运行状态查看。只要用户提到深信服 EDR、EDR 或 sangfor EDR，必须先加载本 skill；本 skill 是 EDR 任务的唯一入口，未阅读前不要直接使用 browser-use。
+description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户提到深信服 EDR、EDR 或 sangfor EDR 时必须先加载本 skill。
 ---
 
 # 深信服 EDR Use
 
-本 skill 只负责任务入口和登录分流；CDP 操作、浏览器启动、验证码、selector、tab/iframe 处理和页面数据提取见 [references/cdp-workflow.md](references/cdp-workflow.md)。
+## 核心功能
 
-## 登录分流
+- 管理同一次登录产生的 Cookie 与 `login_token`。
+- 默认使用 HTTP 登录；仅当用户明确选择自动化登录时使用 browser/CDP。
+- 每次登录或数据采集前探测现有认证，认证有效则跳过登录，失效则重新登录并更新存储。
+- 通过 API 采集首页终端概况、受影响终端、漏洞、勒索防护、实时病毒、Top 5 终端和设备资源使用率。
 
-需要打开 EDR 页面、抓取页面请求或调用 EDR API 采集工具时，按以下顺序执行：
+## 输入与输出
 
-1. 调用 `sangfor_edr_auth(action=status_auth_state)`，确认 `validation.valid`、`can_auto_refresh` 和 `has_saved_token`。不要先向用户索要账密。
-2. `validation.valid=true`：
-   - 仅浏览器/CDP任务：直接继续；
-   - 需要 API token：`has_saved_token=true` 才继续，否则调用 `refresh_auth_state` 补齐 token。
-3. `validation.valid=false` 且 `can_auto_refresh=true`：调用 `ensure_auth_state` 自动登录。
-4. 没有可用 state 或账密时：调用 `ensure_auth_state` 打开登录页；返回 `manual_login_required` 后，让用户在该工具打开的同一个 EDR tab 中完成登录、MFA 或 UKey。
-5. 用户完成手动登录后，调用 `complete_manual_login`；只有返回 `manual_login_captured_auth_state` 且 `token_saved=true`，才认为浏览器登录和 API 登录准备均完成。
-6. 返回 `browser_daemon_not_ready` 或 `auth_state_load_failed_browser_daemon_not_ready`：依次执行 `flocks browser --setup`、`flocks browser --doctor`，再重试原 action。
+### 认证工具
 
-认证工具会在登录提交前监听 `launch_login.php` 的 fetch/XHR 响应，将 `data.token` 保存到 Secret Manager；token 不得回显、写入日志或写入 `auth-state.json`。后续 API 工具应从 Secret Manager 读取对应 token，并同时使用同一 EDR 的 cookies。
+调用 `sangfor_edr_auth`：
 
-`bu.port` 是 Flocks browser daemon 的 IPC 端口文件，不是 Chrome 的 remote-debugging 端口；禁止手工创建或修改它。
+- `status_auth_state`：返回认证文件、凭据和认证探测状态，不返回敏感值。
+- `ensure_auth_state`、`refresh_auth_state`、`http_login`：执行“探测后按需 HTTP 登录”。
+- `browser_login`：用户明确选择自动化登录时，执行“探测后按需 browser/CDP 登录”。
+- `validate_auth_state`：仅验证浏览器 state。
+- `complete_manual_login`：保存用户在已打开浏览器中完成的登录。
 
-## 任务边界
+成功输出包含 `status`、`valid`、`login_skipped` 和非敏感探测结果；失败输出包含稳定的 `reason` 与恢复建议。
 
-- 当前 `sangfor_edr_v1_0_0` 的页面业务仍通过浏览器/CDP完成；需要 API 采集时，必须先完成 token readiness 检查。
-- 首页仪表盘可用于设备 CPU/内存/硬盘、终端概况和失陷统计。
-- 查询失陷终端清单时，必须进入“威胁资产分析”并选择“已失陷终端”，不能使用默认“全部”列表。
-- 设备状态抓取脚本位于 `references/fetch_edr_system_state.py`；执行前必须完成上述登录分流。
+### 仪表盘工具
+
+调用 `sangfor_edr_dashboard`，可输入：
+
+- `sections`：可选采集项；省略时采集全部仪表盘数据。
+- `days`：统计时间范围，允许 1–90 天。
+- `base_url`、`auth_state_path`：可选运行时覆盖。
+
+输出包含 `data`、`errors`、`sections`、`days` 和本次认证是复用还是重登；不得输出 Cookie、密码或 `login_token`。
+
+## 关键配置
+
+- `base_url`：从用户提供的 EDR 地址提取 scheme、host 和 port；不得使用固定示例地址。
+- `username`、`password`：从设备配置或 Secret Manager 读取。
+- `auth_state_path`：Cookie state 文件位置。
+- `auto_ocr_code`、`max_captcha_retry`：HTTP/browser 登录验证码配置。
+- selector 和页面路径配置仅用于 browser/CDP 登录。
+
+## EDR 交互协议
+
+1. 从 Secret Manager 与 `auth-state.json` 加载成套认证，并校验 base URL 和 Cookie 指纹。
+2. 使用 Cookie 与 `login_token` 调用 `list_auth_info`：
+   - HTTP 200、无登录页重定向、响应成功且包含预期用户/授权数据（`list_auth_info.auth_info`）：认证有效，跳过登录。
+   - Cookie 缺失或不匹配、401/403、重定向、非 200、响应无预期用户/授权数据：认证失效。
+3. 默认重新登录流程：访问登录页，获取 RSA 公钥和验证码，提交 `dlogin`，再调用 `launch_login.php`。
+4. 登录成功后将 Cookie 写入 `auth-state.json`，将 `login_token` 写入 Secret Manager，并更新配对指纹。
+5. 仪表盘 API 只能使用通过上述探测的同一套 Cookie/token；禁止从不同 state 或 Secret 拼接。
+
+## 错误处理
+
+- 缺少地址或账密：返回缺失字段，向用户索取后保存到配置或 Secret Manager。
+- 验证码或 HTTP 登录失败：返回 `http_login_failed`，不得自动切换 browser/CDP。
+- 用户明确选择自动化登录后，browser/CDP 失败：保留浏览器供用户完成登录，再调用 `complete_manual_login`。
+- 认证探测失败：禁止继续业务 API；HTTP 重登并再次探测，仍失败则返回错误。
+- 仪表盘部分接口失败：保留成功数据，在 `errors` 中按采集项返回失败原因。
+- Cookie、密码和 `login_token` 不得回显、记录日志或混入业务输出。
 
 ## 执行约束
 
-- 运行 skill 内 Python 脚本时必须使用 Flocks 虚拟环境；不要使用系统 Python。
-- 需要具体 CDP 命令、平台启动方式、验证码/selector 配置、tab/iframe 处理或页面关键词时，读取 `references/cdp-workflow.md`，不要在本文件重复展开。
+- 运行本 Skill 提供的 Python 脚本时，必须使用 Flocks 虚拟环境；禁止使用系统 Python。
+- 需要具体 CDP 命令、浏览器启动方式、验证码识别、selector、tab/iframe 处理或页面关键词时，必须先阅读 [references/cdp-workflow.md](references/cdp-workflow.md)，不要在本文件重复展开。
+- `bu.port` 是 Flocks browser daemon 的 IPC 端口文件，不是 Chrome remote-debugging 端口；禁止手工创建或修改。
+- 默认认证和仪表盘采集不得启动 browser daemon；只有用户明确选择 `browser_login` 或执行 `validate_auth_state`、`complete_manual_login` 时，才允许使用 browser/CDP。
+- HTTP 登录失败不得自动切换 browser/CDP；应返回错误并等待用户明确选择自动化登录或补充输入。
+- 任何 API 采集前必须完成认证探测；认证探测失败时不得继续调用业务接口。
