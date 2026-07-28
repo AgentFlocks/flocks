@@ -20,14 +20,19 @@ from flocks.memory.evolution import (
     run_dream_bridge,
 )
 from flocks.memory.evolution.common import (
-    _apply_memory_operations,
     _apply_pending_proposal,
     _build_turn_review,
+    _chat_text,
     _daily_delta,
     _hash_text,
     _prepare_skill_proposal,
     _redact_sensitive,
     _session_delta,
+)
+from flocks.memory.evolution.dream import (
+    DREAM_SYSTEM_PROMPT,
+    _dream_memory_tool_definition,
+    _run_dream_agent,
 )
 from flocks.memory.evolution.scheduler import (
     _LAST_SUCCESS_KEY,
@@ -166,147 +171,197 @@ def _review(
     )
 
 
-def test_memory_operations_apply_structured_changes_and_deduplicate() -> None:
-    current = "# Memory\n\n- editor: vim\n- stale fact\n"
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "replace",
-                "old": "- editor: vim",
-                "new": "- editor: neovim",
-            },
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "remove",
-                "old": "- stale fact",
-            },
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- language: Python",
-            },
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- language: Python",
-            },
-        ],
-    }
+def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
+    for heading in (
+        "# Role",
+        "# Inputs",
+        "# Memory destinations",
+        "# Rules",
+        "# Workflow",
+        "# Tool use",
+        "# Completion",
+    ):
+        assert heading in DREAM_SYSTEM_PROMPT
+    assert "Return strict JSON" not in DREAM_SYSTEM_PROMPT
+    assert "Do not output JSON" in DREAM_SYSTEM_PROMPT
+    assert "`memory` tool" in DREAM_SYSTEM_PROMPT
+    assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
-    updated = _apply_memory_operations(
-        current,
-        response,
-        dream_target=DreamTarget.global_only(),
-        file_scope=MemoryScope.GLOBAL,
-        path="MEMORY.md",
+
+def test_dream_memory_tool_scope_matches_target() -> None:
+    global_tool = _dream_memory_tool_definition(DreamTarget.global_only())
+    project_tool = _dream_memory_tool_definition(DreamTarget.project("prj_test"))
+    global_scope = global_tool["function"]["parameters"]["properties"]["scope"]["enum"]
+    project_scope = project_tool["function"]["parameters"]["properties"]["scope"]["enum"]
+
+    assert global_scope == ["global"]
+    assert project_scope == ["global", "project"]
+
+
+@pytest.mark.asyncio
+async def test_dream_agent_applies_memory_tool_calls() -> None:
+    provider = SimpleNamespace(
+        chat=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "memory",
+                                "arguments": (
+                                    '{"scope":"global","target":"USER.md","action":"add","content":"- Concise"}'
+                                ),
+                            },
+                        },
+                        {
+                            "id": "call_2",
+                            "type": "function",
+                            "function": {
+                                "name": "memory",
+                                "arguments": {
+                                    "scope": "project",
+                                    "target": "MEMORY.md",
+                                    "action": "add",
+                                    "content": "- Uses Ruff",
+                                },
+                            },
+                        },
+                    ],
+                ),
+                SimpleNamespace(
+                    content="Updated user and project memory.",
+                    finish_reason="stop",
+                    tool_calls=None,
+                ),
+            ]
+        )
     )
-
-    assert "- editor: neovim" in updated
-    assert "- stale fact" not in updated
-    assert updated.count("- language: Python") == 1
-
-
-def test_memory_add_does_not_treat_substring_as_duplicate() -> None:
-    updated = _apply_memory_operations(
-        "- language: Pythonic\n",
-        {
-            "action": "update",
-            "operations": [
-                {
-                    "scope": "global",
-                    "path": "MEMORY.md",
-                    "type": "add",
-                    "content": "- language: Python",
-                },
-            ],
-        },
-        dream_target=DreamTarget.global_only(),
-        file_scope=MemoryScope.GLOBAL,
-        path="MEMORY.md",
+    update = AsyncMock(
+        side_effect=[
+            {"success": True, "changed": True},
+            {"success": True, "changed": True},
+        ]
     )
+    with (
+        patch(
+            "flocks.memory.evolution.dream.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Provider.apply_config",
+            new=AsyncMock(),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Provider.get",
+            return_value=provider,
+        ),
+        patch(
+            "flocks.memory.evolution.dream.build_provider_options",
+            return_value={},
+        ),
+    ):
+        changed = await _run_dream_agent(
+            provider_id="test-provider",
+            model_id="test-model",
+            max_tokens=1000,
+            target=DreamTarget.project("prj_test"),
+            user_prompt="evidence",
+            update_memory=update,
+        )
 
-    assert updated.splitlines() == [
-        "- language: Pythonic",
-        "",
-        "- language: Python",
+    assert changed is True
+    assert update.await_count == 2
+    assert update.await_args_list[0].args[0]["target"] == "USER.md"
+    assert update.await_args_list[1].args[0]["scope"] == "project"
+    second_messages = provider.chat.await_args_list[1].kwargs["messages"]
+    tool_messages = [message for message in second_messages if message.role == "tool"]
+    assert [message.tool_call_id for message in tool_messages] == [
+        "call_1",
+        "call_2",
     ]
 
 
-def test_memory_operations_route_user_profile_separately() -> None:
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "global",
-                "path": "USER.md",
-                "type": "add",
-                "content": "- Prefers concise answers",
-            },
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- Project uses Ruff",
-            },
-        ],
-    }
-
-    updated_user = _apply_memory_operations(
-        "# User Profile\n",
-        response,
-        dream_target=DreamTarget.global_only(),
-        file_scope=MemoryScope.GLOBAL,
-        path="USER.md",
-    )
-    updated_memory = _apply_memory_operations(
-        "# Long-Term Memory\n",
-        response,
-        dream_target=DreamTarget.global_only(),
-        file_scope=MemoryScope.GLOBAL,
-        path="MEMORY.md",
-    )
-
-    assert "Prefers concise answers" in updated_user
-    assert "Project uses Ruff" not in updated_user
-    assert "Project uses Ruff" in updated_memory
-
-
-def test_project_dream_routes_project_memory_and_global_only_rejects_it() -> None:
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "project",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- Project uses Ruff",
-            }
-        ],
-    }
-
-    updated = _apply_memory_operations(
-        "# Project Memory\n",
-        response,
-        dream_target=DreamTarget.project("prj_test"),
-        file_scope=MemoryScope.PROJECT,
-        path="MEMORY.md",
-    )
-
-    assert "Project uses Ruff" in updated
-    with pytest.raises(ValueError, match="Global-only"):
-        _apply_memory_operations(
-            "# Long-Term Memory\n",
-            response,
-            dream_target=DreamTarget.global_only(),
-            file_scope=MemoryScope.GLOBAL,
-            path="MEMORY.md",
+@pytest.mark.asyncio
+async def test_dream_agent_accepts_explicit_no_changes() -> None:
+    provider = SimpleNamespace(
+        chat=AsyncMock(
+            return_value=SimpleNamespace(
+                content="NO_CHANGES",
+                finish_reason="stop",
+                tool_calls=None,
+            )
         )
+    )
+    with (
+        patch(
+            "flocks.memory.evolution.dream.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Provider.apply_config",
+            new=AsyncMock(),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Provider.get",
+            return_value=provider,
+        ),
+        patch(
+            "flocks.memory.evolution.dream.build_provider_options",
+            return_value={},
+        ),
+    ):
+        changed = await _run_dream_agent(
+            provider_id="test-provider",
+            model_id="test-model",
+            max_tokens=1000,
+            target=DreamTarget.global_only(),
+            user_prompt="evidence",
+            update_memory=AsyncMock(),
+        )
+
+    assert changed is False
+
+
+@pytest.mark.asyncio
+async def test_evolution_text_call_rejects_truncated_output() -> None:
+    provider = SimpleNamespace(
+        chat=AsyncMock(
+            return_value=SimpleNamespace(
+                content="A partial response that reached the token limit.",
+                finish_reason="length",
+            )
+        )
+    )
+    with (
+        patch(
+            "flocks.memory.evolution.common.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace()),
+        ),
+        patch(
+            "flocks.memory.evolution.common.Provider.apply_config",
+            new=AsyncMock(),
+        ),
+        patch(
+            "flocks.memory.evolution.common.Provider.get",
+            return_value=provider,
+        ),
+        patch(
+            "flocks.memory.evolution.common.build_provider_options",
+            return_value={},
+        ),
+    ):
+        with pytest.raises(ValueError, match="truncated"):
+            await _chat_text(
+                provider_id="test-provider",
+                model_id="test-model",
+                system="system",
+                user="user",
+                max_tokens=10,
+            )
 
 
 def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
@@ -546,23 +601,69 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         last_message_id="msg_2",
     )
     config = MemoryConfig()
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- Project uses Ruff",
-            },
-            {
-                "scope": "global",
-                "path": "USER.md",
-                "type": "add",
-                "content": "- Prefers concise answers",
-            },
-        ],
-    }
+    provider = SimpleNamespace(
+        chat=AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    content="",
+                    finish_reason="tool_calls",
+                    tool_calls=[
+                        {
+                            "id": "call_memory",
+                            "function": {
+                                "name": "memory",
+                                "arguments": (
+                                    '{"scope":"global",'
+                                    '"target":"MEMORY.md",'
+                                    '"action":"add",'
+                                    '"content":"- Project uses Ruff"}'
+                                ),
+                            },
+                        },
+                        {
+                            "id": "call_user",
+                            "function": {
+                                "name": "memory",
+                                "arguments": (
+                                    '{"scope":"global",'
+                                    '"target":"USER.md",'
+                                    '"action":"add",'
+                                    '"content":"- Prefers concise answers"}'
+                                ),
+                            },
+                        },
+                    ],
+                ),
+                SimpleNamespace(
+                    content="Updated durable memory.",
+                    finish_reason="stop",
+                    tool_calls=None,
+                ),
+            ],
+        ),
+    )
+
+    async def update_curated_memory(**arguments: object) -> dict[str, object]:
+        path = str(arguments["path"])
+        file_path = memory_root / path
+        current = file_path.read_text(encoding="utf-8").rstrip()
+        file_path.write_text(
+            current + "\n\n" + str(arguments["content"]) + "\n",
+            encoding="utf-8",
+        )
+        return {
+            "scope": arguments["scope"],
+            "path": path,
+            "action": arguments["action"],
+            "changed": True,
+        }
+
+    manager = SimpleNamespace(
+        initialize=AsyncMock(),
+        update_curated_memory=AsyncMock(
+            side_effect=update_curated_memory,
+        ),
+    )
 
     with (
         patch(
@@ -587,8 +688,20 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
             new=AsyncMock(return_value=([source], False, [("project", "/workspace")])),
         ),
         patch(
-            "flocks.memory.evolution.dream._chat_json",
-            new=AsyncMock(return_value=response),
+            "flocks.memory.evolution.dream.Provider.apply_config",
+            new=AsyncMock(),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Provider.get",
+            return_value=provider,
+        ),
+        patch(
+            "flocks.memory.evolution.dream.build_provider_options",
+            return_value={},
+        ),
+        patch(
+            "flocks.memory.evolution.dream.MemoryManager.get_instance",
+            return_value=manager,
         ),
         patch(
             "flocks.memory.evolution.dream._sync_memory_indexes",
@@ -600,6 +713,8 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
     assert result.changed is True
     assert "Project uses Ruff" in (memory_root / "MEMORY.md").read_text()
     assert "Prefers concise answers" in (memory_root / "USER.md").read_text()
+    manager.initialize.assert_awaited_once()
+    assert manager.update_curated_memory.await_count == 2
     checkpoint = await EvolutionCheckpointStore.get(
         "dream",
         "session",
@@ -607,6 +722,84 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
     )
     assert checkpoint is not None
     assert checkpoint["last_message_id"] == "msg_2"
+
+
+@pytest.mark.asyncio
+async def test_dream_bridge_supplies_complete_memory_and_syncs_no_changes(
+    tmp_path: Path,
+) -> None:
+    await Storage.init(tmp_path / "dream-complete-input.db")
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    memory_content = "# Memory\n\n- head-marker\n" + ("x" * 12_000) + "\n- tail-marker\n"
+    (memory_root / "MEMORY.md").write_text(
+        memory_content,
+        encoding="utf-8",
+    )
+    (memory_root / "USER.md").write_text(
+        "# User\n",
+        encoding="utf-8",
+    )
+    source = SourceSnapshot(
+        source_type="session",
+        source_key="ses_complete",
+        content="user: password=do-not-send",
+        content_hash="delta",
+        line_count=1,
+        last_message_id="msg_complete",
+    )
+    agent_run = AsyncMock(return_value=False)
+    sync = AsyncMock()
+    collect = AsyncMock(return_value=([source], False, []))
+
+    with (
+        patch(
+            "flocks.memory.evolution.dream.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace(memory=MemoryConfig())),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Config.resolve_default_llm",
+            new=AsyncMock(
+                return_value={
+                    "provider_id": "test-provider",
+                    "model_id": "test-model",
+                }
+            ),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Config.get_data_path",
+            return_value=tmp_path,
+        ),
+        patch(
+            "flocks.memory.evolution.dream._collect_dream_sources",
+            new=collect,
+        ),
+        patch(
+            "flocks.memory.evolution.dream._run_dream_agent",
+            new=agent_run,
+        ),
+        patch(
+            "flocks.memory.evolution.dream._sync_memory_indexes",
+            new=sync,
+        ),
+    ):
+        result = await run_dream_bridge()
+
+    assert result.changed is False
+    user_prompt = agent_run.await_args.kwargs["user_prompt"]
+    assert "- head-marker" in user_prompt
+    assert "- tail-marker" in user_prompt
+    assert "do-not-send" not in user_prompt
+    assert "[REDACTED]" in user_prompt
+    assert collect.await_args.kwargs["max_chars"] > 0
+    sync.assert_awaited_once()
+    checkpoint = await EvolutionCheckpointStore.get(
+        "dream",
+        "session",
+        "ses_complete",
+    )
+    assert checkpoint is not None
+    assert checkpoint["last_message_id"] == "msg_complete"
 
 
 @pytest.mark.asyncio
@@ -633,23 +826,17 @@ async def test_project_dream_updates_project_and_global_user_memory(
         scope_id="prj_test",
         last_message_id="msg_project",
     )
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "project",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- Project uses Ruff",
-            },
-            {
-                "scope": "global",
-                "path": "USER.md",
-                "type": "add",
-                "content": "- Prefers concise answers",
-            },
-        ],
-    }
+
+    async def apply_dream_updates(**_: object) -> bool:
+        project_path.write_text(
+            "# Project Memory\n\n- Project uses Ruff\n",
+            encoding="utf-8",
+        )
+        (memory_root / "USER.md").write_text(
+            "# User\n\n- Prefers concise answers\n",
+            encoding="utf-8",
+        )
+        return True
 
     with (
         patch(
@@ -680,8 +867,8 @@ async def test_project_dream_updates_project_and_global_user_memory(
             ),
         ),
         patch(
-            "flocks.memory.evolution.dream._chat_json",
-            new=AsyncMock(return_value=response),
+            "flocks.memory.evolution.dream._run_dream_agent",
+            new=AsyncMock(side_effect=apply_dream_updates),
         ),
         patch(
             "flocks.memory.evolution.dream._sync_memory_indexes",
@@ -705,10 +892,10 @@ async def test_project_dream_updates_project_and_global_user_memory(
 
 
 @pytest.mark.asyncio
-async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
+async def test_dream_bridge_retries_without_rolling_back_when_index_sync_fails(
     tmp_path: Path,
 ) -> None:
-    await Storage.init(tmp_path / "dream-rollback.db")
+    await Storage.init(tmp_path / "dream-index-retry.db")
     memory_root = tmp_path / "memory"
     memory_root.mkdir()
     memory_path = memory_root / "MEMORY.md"
@@ -724,24 +911,12 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
         last_message_id="msg_2",
     )
     config = MemoryConfig()
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- new memory",
-            },
-            {
-                "scope": "global",
-                "path": "USER.md",
-                "type": "add",
-                "content": "- new user",
-            },
-        ],
-    }
-    sync = AsyncMock(side_effect=[RuntimeError("index failed"), None])
+    sync = AsyncMock(side_effect=RuntimeError("index failed"))
+
+    async def apply_dream_updates(**_: object) -> bool:
+        memory_path.write_text("new memory\n", encoding="utf-8")
+        user_path.write_text("new user\n", encoding="utf-8")
+        return True
 
     with (
         patch(
@@ -766,8 +941,8 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
             new=AsyncMock(return_value=([source], False, [])),
         ),
         patch(
-            "flocks.memory.evolution.dream._chat_json",
-            new=AsyncMock(return_value=response),
+            "flocks.memory.evolution.dream._run_dream_agent",
+            new=AsyncMock(side_effect=apply_dream_updates),
         ),
         patch(
             "flocks.memory.evolution.dream._sync_memory_indexes",
@@ -777,16 +952,16 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
         with pytest.raises(RuntimeError, match="index failed"):
             await run_dream_bridge()
 
-    assert memory_path.read_text() == "old memory\n"
-    assert user_path.read_text() == "old user\n"
+    assert memory_path.read_text() == "new memory\n"
+    assert user_path.read_text() == "new user\n"
     assert await EvolutionCheckpointStore.get("dream", "session", "ses_test") is None
 
 
 @pytest.mark.asyncio
-async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
+async def test_dream_bridge_retries_without_rolling_back_when_checkpoint_commit_fails(
     tmp_path: Path,
 ) -> None:
-    await Storage.init(tmp_path / "dream-checkpoint-rollback.db")
+    await Storage.init(tmp_path / "dream-checkpoint-retry.db")
     memory_root = tmp_path / "memory"
     memory_root.mkdir()
     memory_path = memory_root / "MEMORY.md"
@@ -801,17 +976,10 @@ async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
         line_count=1,
         last_message_id="msg_2",
     )
-    response = {
-        "action": "update",
-        "operations": [
-            {
-                "scope": "global",
-                "path": "MEMORY.md",
-                "type": "add",
-                "content": "- new memory",
-            }
-        ],
-    }
+
+    async def apply_dream_updates(**_: object) -> bool:
+        memory_path.write_text("new memory\n", encoding="utf-8")
+        return True
 
     with (
         patch(
@@ -836,8 +1004,8 @@ async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
             new=AsyncMock(return_value=([source], False, [])),
         ),
         patch(
-            "flocks.memory.evolution.dream._chat_json",
-            new=AsyncMock(return_value=response),
+            "flocks.memory.evolution.dream._run_dream_agent",
+            new=AsyncMock(side_effect=apply_dream_updates),
         ),
         patch(
             "flocks.memory.evolution.dream._sync_memory_indexes",
@@ -852,7 +1020,7 @@ async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
         with pytest.raises(RuntimeError, match="checkpoint failed"):
             await run_dream_bridge()
 
-    assert memory_path.read_text() == "old memory\n"
+    assert memory_path.read_text() == "new memory\n"
     assert user_path.read_text() == "old user\n"
 
 

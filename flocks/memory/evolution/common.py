@@ -556,6 +556,26 @@ async def _chat_json(
     user: str,
     max_tokens: int,
 ) -> dict[str, Any]:
+    return _parse_json_object(
+        await _chat_text(
+            provider_id=provider_id,
+            model_id=model_id,
+            system=system,
+            user=user,
+            max_tokens=max_tokens,
+        )
+    )
+
+
+async def _chat_text(
+    *,
+    provider_id: str,
+    model_id: str,
+    system: str,
+    user: str,
+    max_tokens: int,
+) -> str:
+    """Run one evolution model call and return its plain-text response."""
     config = await Config.get()
     await Provider.apply_config(config, provider_id=provider_id)
     provider = Provider.get(provider_id)
@@ -592,7 +612,9 @@ async def _chat_json(
         **options,
         max_tokens=max_tokens,
     )
-    return _parse_json_object(response.content)
+    if response.finish_reason in {"length", "max_tokens"}:
+        raise ValueError("evolution response was truncated")
+    return response.content
 
 
 def _message_role(message: Any) -> str:
@@ -742,13 +764,6 @@ def _daily_delta(
     return snapshot, consumed_count < current_count
 
 
-def _contains_memory_entry(current: str, addition: str) -> bool:
-    if "\n" not in addition:
-        return any(line.strip() == addition for line in current.splitlines())
-    blocks = {block.strip() for block in re.split(r"\n\s*\n", current) if block.strip()}
-    return addition.strip() in blocks
-
-
 async def list_dream_targets() -> list[DreamTarget]:
     """List deterministic Dream targets backed by non-deleted user Sessions."""
     from flocks.session.session import Session
@@ -777,6 +792,8 @@ def _unique_session_prefixes(sessions: list[Any]) -> dict[str, Optional[str]]:
 async def _collect_dream_sources(
     config: MemoryConfig,
     target: DreamTarget,
+    *,
+    max_chars: Optional[int] = None,
 ) -> tuple[list[SourceSnapshot], bool, list[tuple[str, str]]]:
     """Collect one bounded bridge batch and its MemoryManager sync targets."""
     from flocks.session.session import Session
@@ -789,8 +806,15 @@ async def _collect_dream_sources(
     eligible_sessions = [session for session in all_eligible_sessions if session.project_id == target.project_id]
     eligible_session_ids = {session.id for session in eligible_sessions}
     session_prefixes = _unique_session_prefixes(all_eligible_sessions)
-    session_budget = max(evolution.max_input_chars // 3, 1000)
-    daily_budget = max(evolution.max_input_chars // 3, 1000)
+    if max_chars is None:
+        total_source_budget = max(
+            (evolution.max_input_chars * 2) // 3,
+            2000,
+        )
+    else:
+        total_source_budget = max(int(max_chars), 2)
+    session_budget = total_source_budget // 2
+    daily_budget = total_source_budget - session_budget
     sources: list[SourceSnapshot] = []
     sync_targets = [(session.project_id, session.directory) for session in eligible_sessions]
     backlog = False
@@ -858,63 +882,6 @@ async def _collect_dream_sources(
     return sources, backlog, sync_targets
 
 
-def _apply_memory_operations(
-    current: str,
-    response: dict[str, Any],
-    *,
-    dream_target: DreamTarget,
-    file_scope: MemoryScope,
-    path: str,
-) -> str:
-    action = response.get("action")
-    if action == "skip":
-        return current
-    if action != "update":
-        raise ValueError("Dream action must be 'skip' or 'update'")
-    operations = response.get("operations")
-    if not isinstance(operations, list) or not operations:
-        raise ValueError("Dream update requires non-empty operations")
-    result = current
-    for operation in operations:
-        if not isinstance(operation, dict):
-            raise ValueError("Dream operation must be an object")
-        try:
-            operation_scope = MemoryScope(str(operation.get("scope") or ""))
-        except ValueError as exc:
-            raise ValueError("Dream operation has an invalid scope") from exc
-        operation_path = str(operation.get("path") or "")
-        from flocks.memory.paths import validate_scope_path
-
-        operation_path = validate_scope_path(
-            operation_scope,
-            operation_path,
-        )
-        if dream_target.scope == MemoryScope.GLOBAL and operation_scope == MemoryScope.PROJECT:
-            raise ValueError("Global-only Dream cannot update Project Memory")
-        if operation_scope != file_scope or operation_path != path:
-            continue
-        operation_type = operation.get("type")
-        if operation_type == "add":
-            addition = str(operation.get("content") or "").strip()
-            if not addition:
-                raise ValueError("Dream add requires content")
-            if _contains_memory_entry(result, addition):
-                continue
-            result = result.rstrip() + ("\n\n" if result.strip() else "")
-            result += addition + "\n"
-            continue
-        old = str(operation.get("old") or "")
-        if not old or result.count(old) != 1:
-            raise ValueError("Dream replace/remove target must match exactly once")
-        if operation_type == "replace":
-            result = result.replace(old, str(operation.get("new") or ""), 1)
-        elif operation_type == "remove":
-            result = result.replace(old, "", 1)
-        else:
-            raise ValueError(f"unsupported Dream operation: {operation_type}")
-    return result
-
-
 async def _sync_memory_indexes(
     config: MemoryConfig,
     sync_targets: list[tuple[str, str]],
@@ -934,28 +901,6 @@ async def _sync_memory_indexes(
             config=config,
         )
         await manager.sync(reason="dream")
-
-
-async def _restore_memory_files_and_indexes(
-    *,
-    config: MemoryConfig,
-    sync_targets: list[tuple[str, str]],
-    fallback_project_id: str,
-    originals: dict[Path, tuple[bool, str]],
-) -> None:
-    for path, (existed, content) in originals.items():
-        if existed:
-            _atomic_write(path, content)
-        else:
-            path.unlink(missing_ok=True)
-    try:
-        await _sync_memory_indexes(
-            config,
-            sync_targets,
-            fallback_project_id=fallback_project_id,
-        )
-    except Exception as restore_exc:
-        log.warn("dream.restore_reindex_failed", {"error": str(restore_exc)})
 
 
 def _redact_sensitive(value: Any, *, key: Optional[str] = None) -> Any:
