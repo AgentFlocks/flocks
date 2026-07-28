@@ -26,6 +26,7 @@ from flocks.session.context_usage import (
     token_usage_to_dict,
 )
 from flocks.session.background_tasks import (
+    has_pending_session_tasks,
     pending_background_tasks,
     track_background_task,
 )
@@ -522,6 +523,7 @@ async def _resolve_session_working_directory(session: SessionModel) -> str:
             detail="The session directory and current request directory are unavailable",
         )
     fallback_directory = str(fallback_path.resolve())
+
     log.warn(
         "session.directory.fallback",
         {
@@ -1292,6 +1294,14 @@ class SessionUpdateRequest(BaseModel):
     model_auto: Optional[bool] = Field(None, description="Whether WebUI Auto mode is selected")
 
 
+class SessionMoveProjectRequest(BaseModel):
+    """Request to move a complete task tree to a project."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: str = Field(..., alias="projectID", description="Target project ID")
+
+
 @router.patch(
     "/{sessionID}",
     response_model=SessionResponse,
@@ -1395,6 +1405,105 @@ async def update_session(
     
     log.info("session.updated", {"session_id": sessionID})
     return await _session_to_response_with_goal(session)
+
+
+@router.patch(
+    "/{sessionID}/project",
+    response_model=SessionResponse,
+    summary="Move session to project",
+    description="Move a root session and all descendants to another project",
+)
+async def move_session_to_project(
+    sessionID: str,
+    request: SessionMoveProjectRequest,
+    http_request: Request,
+) -> SessionResponse:
+    """Move an idle root task tree into a writable project."""
+
+    existing = await _get_session_by_id_unfiltered(sessionID)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+
+    current_user = require_user(http_request)
+    _require_session_write_access(existing, current_user)
+    if existing.parent_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只能移动根任务及其完整任务树",
+        )
+
+    from flocks.project.project import Project
+
+    target_project = await Project.get(request.project_id, owner_id=current_user.id)
+    if target_project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {request.project_id} not found",
+        )
+    if target_project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="目标项目目录不可用",
+        )
+    if existing.project_id == target_project.id:
+        return await _session_to_response_with_goal(existing)
+
+    tree = await Session.collect_tree(existing.project_id, existing.id)
+    if any(not SessionPolicy.can_write(item, current_user) for item in tree):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅任务所有者可移动完整任务树",
+        )
+
+    if any(_is_session_busy_for_move(item.id) for item in tree):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务正在运行，请等待任务完成或停止后再移动",
+        )
+    if any(item.revert is not None for item in tree):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务正在历史恢复状态，请先完成或取消恢复后再移动",
+        )
+
+    auth_token = set_current_auth_user(current_user)
+    try:
+        moved = await Session.move_to_project(
+            existing.project_id,
+            existing.id,
+            target_project_id=target_project.id,
+            target_directory=target_project.worktree,
+            target_owner_id=current_user.id,
+            additional_busy_check=_is_session_busy_for_move,
+        )
+    finally:
+        reset_current_auth_user(auth_token)
+    if moved is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务移动失败，请刷新后重试",
+        )
+
+    from flocks.server.routes.event import publish_event
+
+    try:
+        await publish_event("session.updated", {
+            "id": sessionID,
+            "projectID": target_project.id,
+        })
+    except Exception as exc:
+        log.warn("session.move_project.event_error", {
+            "session_id": sessionID,
+            "error": str(exc),
+        })
+
+    return await _session_to_response_with_goal(
+        moved,
+        effective_project_id=target_project.id,
+    )
 
 
 @router.post(
@@ -1747,11 +1856,17 @@ async def revert_session(sessionID: str, request: RevertRequest, http_request: R
         )
     _require_session_write_access(session, current_user)
 
-    updated = await SessionRevert.revert(
-        session_id=sessionID,
-        message_id=request.messageID,
-        part_id=request.partID,
-    )
+    try:
+        updated = await SessionRevert.revert(
+            session_id=sessionID,
+            message_id=request.messageID,
+            part_id=request.partID,
+        )
+    except (ValueError, SessionInactiveError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     log.info("session.reverted", {"session_id": sessionID, "message_id": request.messageID})
     return await _session_to_response_with_goal(updated)
@@ -2646,6 +2761,14 @@ async def resend_session_message(
             detail="Session is currently generating a response",
         )
 
+    try:
+        await SessionRevert.ensure_replayable(session, messageID)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
     working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
@@ -2740,6 +2863,14 @@ async def regenerate_session_message(
             status_code=status.HTTP_409_CONFLICT,
             detail="Session is currently generating a response",
         )
+
+    try:
+        await SessionRevert.ensure_replayable(session, parent_message_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
 
     working_directory = await _resolve_session_working_directory(session)
 
@@ -3822,6 +3953,19 @@ def _is_prompt_chain_active(session_id: str) -> bool:
     return session_id in getattr(router, "_prompt_queue_active_sessions", set())
 
 
+def _is_session_busy_for_move(session_id: str) -> bool:
+    """Cover loop execution and route-owned background work during a move."""
+
+    from flocks.session.session_loop import SessionLoop
+
+    return (
+        Session.has_active_operations(session_id)
+        or SessionLoop.is_running(session_id)
+        or _is_prompt_chain_active(session_id)
+        or has_pending_session_tasks(session_id)
+    )
+
+
 def _set_prompt_chain_active(session_id: str, active: bool) -> None:
     if not hasattr(router, "_prompt_queue_active_sessions"):
         router._prompt_queue_active_sessions = set()
@@ -4607,12 +4751,24 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
     if request.model:
         model = {"providerID": request.model.providerID, "modelID": request.model.modelID}
     
-    result = await SessionRunner.shell(
-        session_id=sessionID,
-        agent=request.agent,
-        command=request.command,
-        model=model,
-    )
+    try:
+        async with Session.active_operation(sessionID):
+            result = await SessionRunner.shell(
+                session_id=sessionID,
+                agent=request.agent,
+                command=request.command,
+                model=model,
+            )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except SessionInactiveError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     log.info("session.shell.executed", {
         "sessionID": sessionID,
@@ -4855,7 +5011,9 @@ async def _clear_session_history(
 
     async def clear_persisted_history() -> int:
         await GoalManager.clear(sessionID)
-        return await Message.clear(sessionID)
+        deleted_count = await Message.clear(sessionID)
+        await Session._clear_project_move_metadata_locked(sessionID)
+        return deleted_count
 
     deleted_count = await _persist_active_session_write(
         sessionID,

@@ -12,6 +12,8 @@ Covers:
 """
 
 import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -65,13 +67,18 @@ class TestArchiveUnarchive:
     @pytest.mark.asyncio
     async def test_unarchive_restores_session(self):
         session = await _create(project_id="proj_arch_2")
+        await asyncio.sleep(0.01)
         await Session.archive("proj_arch_2", session.id)
+        archived = await Session.get("proj_arch_2", session.id)
+        assert archived is not None
+        assert archived.time.updated == session.time.updated
         result = await Session.unarchive("proj_arch_2", session.id)
         assert result is True
         restored = await Session.get("proj_arch_2", session.id)
         assert restored is not None
         assert restored.status == "active"
         assert restored.time.archived is None
+        assert restored.time.updated == session.time.updated
 
     @pytest.mark.asyncio
     async def test_unarchive_nonarchived_is_idempotent(self):
@@ -484,6 +491,117 @@ class TestArchiveUnarchive:
         assert pending_future.cancelled()
 
 
+class TestMoveToProject:
+    @pytest.mark.asyncio
+    async def test_move_updates_complete_tree_and_removes_source_keys(self):
+        parent = await _create(project_id="proj_move_source", title="Parent", directory="/tmp/source")
+        child = await Session.create(
+            project_id=parent.project_id,
+            directory=parent.directory,
+            title="Child",
+            parent_id=parent.id,
+        )
+
+        moved = await Session.move_to_project(
+            parent.project_id,
+            parent.id,
+            target_project_id="proj_move_target",
+            target_directory="/tmp/target",
+        )
+
+        assert moved is not None
+        assert moved.project_id == "proj_move_target"
+        assert moved.directory == "/tmp/target"
+        assert await Session.get("proj_move_source", parent.id) is None
+        assert await Session.get("proj_move_source", child.id) is None
+        moved_parent = await Session.get("proj_move_target", parent.id)
+        moved_child = await Session.get("proj_move_target", child.id)
+        assert moved_parent is not None and moved_parent.directory == "/tmp/target"
+        assert moved_child is not None and moved_child.directory == "/tmp/target"
+        assert moved_child.parent_id == moved_parent.id
+
+    @pytest.mark.asyncio
+    async def test_move_rejects_a_child_as_the_tree_root(self):
+        parent = await _create(project_id="proj_move_child_source", title="Parent")
+        child = await Session.create(
+            project_id=parent.project_id,
+            directory=parent.directory,
+            title="Child",
+            parent_id=parent.id,
+        )
+
+        moved = await Session.move_to_project(
+            parent.project_id,
+            child.id,
+            target_project_id="proj_move_child_target",
+            target_directory="/tmp/target",
+        )
+
+        assert moved is None
+        assert await Session.get(parent.project_id, parent.id) is not None
+        assert await Session.get(parent.project_id, child.id) is not None
+
+    @pytest.mark.asyncio
+    async def test_move_records_replay_boundary(self, monkeypatch):
+        parent = await _create(project_id="proj_move_history_source")
+        monkeypatch.setattr(
+            Message,
+            "list",
+            AsyncMock(return_value=[SimpleNamespace(id="msg_old")]),
+        )
+
+        moved = await Session.move_to_project(
+            parent.project_id,
+            parent.id,
+            target_project_id="proj_move_history_target",
+            target_directory="/tmp/target",
+        )
+
+        assert moved is not None
+        assert moved.revert is None
+        assert moved.metadata["projectMove"] == {
+            "sourceProjectID": "proj_move_history_source",
+            "targetProjectID": "proj_move_history_target",
+            "boundaryMessageID": "msg_old",
+            "movedAt": moved.time.updated,
+        }
+
+    @pytest.mark.asyncio
+    async def test_move_rejects_active_revert(self):
+        parent = await _create(project_id="proj_move_revert_source")
+        await Session.update(
+            parent.project_id,
+            parent.id,
+            revert={"messageID": "msg_old", "snapshot": "tree_old"},
+        )
+
+        moved = await Session.move_to_project(
+            parent.project_id,
+            parent.id,
+            target_project_id="proj_move_revert_target",
+            target_directory="/tmp/target",
+        )
+
+        assert moved is None
+        original = await Session.get(parent.project_id, parent.id)
+        assert original is not None and original.revert is not None
+
+    @pytest.mark.asyncio
+    async def test_move_rejects_active_synchronous_operation(self):
+        parent = await _create(project_id="proj_move_active_source")
+
+        async with Session.active_operation(parent.id):
+            moved = await Session.move_to_project(
+                parent.project_id,
+                parent.id,
+                target_project_id="proj_move_active_target",
+                target_directory="/tmp/target",
+            )
+
+        assert moved is None
+        assert await Session.get(parent.project_id, parent.id) is not None
+
+
 # ---------------------------------------------------------------------------
 # Fork / Children
 # ---------------------------------------------------------------------------
@@ -496,6 +614,94 @@ class TestForkChildren:
         assert child is not None
         assert child.parent_id == parent.id
         assert child.project_id == parent.project_id
+
+    @pytest.mark.asyncio
+    async def test_fork_preserves_project_move_replay_boundary(self):
+        from flocks.session.lifecycle.revert import SessionRevert as LifecycleSessionRevert
+
+        parent = await _create(project_id="proj_fork_move_source")
+        await Message.create(
+            parent.id,
+            MessageRole.USER,
+            "First message before moving",
+        )
+        boundary_message = await Message.create(
+            parent.id,
+            MessageRole.USER,
+            "Last message before moving",
+        )
+        moved = await Session.move_to_project(
+            parent.project_id,
+            parent.id,
+            target_project_id="proj_fork_move_target",
+            target_directory="/tmp/fork-target",
+        )
+        assert moved is not None
+        await Message.create(moved.id, MessageRole.USER, "After moving")
+
+        child = await Session.fork(moved.project_id, moved.id)
+        child_messages = await Message.list(child.id, include_archived=True)
+
+        assert child.metadata["projectMove"]["boundaryMessageID"] == child_messages[1].id
+        with pytest.raises(ValueError, match="移动项目前"):
+            await LifecycleSessionRevert.ensure_replayable(child, child_messages[0].id)
+        with pytest.raises(ValueError, match="移动项目前"):
+            await LifecycleSessionRevert.ensure_replayable(child, child_messages[1].id)
+        await LifecycleSessionRevert.ensure_replayable(child, child_messages[2].id)
+
+        prefix_child = await Session.fork(
+            moved.project_id,
+            moved.id,
+            message_id=boundary_message.id,
+        )
+        prefix_messages = await Message.list(prefix_child.id, include_archived=True)
+        assert len(prefix_messages) == 1
+        assert (
+            prefix_child.metadata["projectMove"]["boundaryMessageID"]
+            == prefix_messages[0].id
+        )
+        with pytest.raises(ValueError, match="移动项目前"):
+            await LifecycleSessionRevert.ensure_replayable(
+                prefix_child,
+                prefix_messages[0].id,
+            )
+
+    @pytest.mark.asyncio
+    async def test_concurrent_move_waits_for_complete_fork(self, monkeypatch):
+        parent = await _create(project_id="proj_fork_race_source")
+        await Message.create(parent.id, MessageRole.USER, "Copy me")
+        copy_started = asyncio.Event()
+        allow_copy = asyncio.Event()
+        original_get_text_content = Message.get_text_content
+
+        async def blocking_get_text_content(message):
+            copy_started.set()
+            await allow_copy.wait()
+            return await original_get_text_content(message)
+
+        monkeypatch.setattr(Message, "get_text_content", blocking_get_text_content)
+
+        fork_task = asyncio.create_task(Session.fork(parent.project_id, parent.id))
+        await asyncio.wait_for(copy_started.wait(), timeout=1)
+        move_task = asyncio.create_task(Session.move_to_project(
+            parent.project_id,
+            parent.id,
+            target_project_id="proj_fork_race_target",
+            target_directory="/tmp/fork-race-target",
+        ))
+        await asyncio.sleep(0)
+        assert not move_task.done()
+
+        allow_copy.set()
+        child = await asyncio.wait_for(fork_task, timeout=1)
+        moved = await asyncio.wait_for(move_task, timeout=1)
+
+        assert moved is not None
+        assert await Session.get(parent.project_id, parent.id) is None
+        assert await Session.get(parent.project_id, child.id) is None
+        moved_child = await Session.get("proj_fork_race_target", child.id)
+        assert moved_child is not None
+        assert moved_child.parent_id == parent.id
 
     @pytest.mark.asyncio
     async def test_fork_nonexistent_raises_or_returns_none(self):
@@ -549,6 +755,24 @@ class TestSetRevert:
         assert updated is not None
         assert updated.revert is not None
         assert updated.revert.message_id == "msg_003"
+
+    @pytest.mark.asyncio
+    async def test_revert_rejects_part_from_a_different_message(self):
+        from flocks.session.lifecycle.revert import SessionRevert as LifecycleSessionRevert
+
+        session = await _create(project_id="proj_revert_part_binding")
+        first_message = await Message.create(session.id, MessageRole.USER, "First")
+        second_message = await Message.create(session.id, MessageRole.USER, "Second")
+        first_parts = await Message.parts(first_message.id, session.id)
+
+        with pytest.raises(ValueError, match="does not belong"):
+            await LifecycleSessionRevert.revert(
+                session.id,
+                second_message.id,
+                first_parts[0].id,
+            )
+
+        assert not Session.has_active_operations(session.id)
 
 
 # ---------------------------------------------------------------------------
