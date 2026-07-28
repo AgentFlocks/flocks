@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -16,6 +17,8 @@ from tests.helpers.service_supervisor import (
     SleeperProcessAdapter,
     make_short_runtime_root,
 )
+
+_REAL_ENSURE_WEBUI_DIST = service_manager._ensure_webui_dist
 
 
 class DummyConsole:
@@ -1815,6 +1818,108 @@ def test_build_webui_dist_prefers_bundled_npm_over_path_lookup(monkeypatch, tmp_
     service_manager._build_webui_dist(tmp_path, service_manager.ServiceConfig(), console)
 
     assert build_calls[0][0] == r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd"
+
+
+def test_webui_needs_build_when_source_is_newer_than_dist(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is True
+
+
+def test_webui_needs_build_ignores_generated_directories(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    generated_path = webui_dir / "node_modules" / "package" / "index.js"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    generated_path.parent.mkdir(parents=True)
+    source_path.write_text("source", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    generated_path.write_text("generated", encoding="utf-8")
+    built_at = max(path.stat().st_mtime_ns for path in (webui_dir, source_path.parent, source_path))
+    os.utime(index_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    os.utime(generated_path, ns=(built_at + 2_000_000_000, built_at + 2_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is False
+
+
+def test_webui_needs_build_when_source_is_deleted(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_dir = webui_dir / "src"
+    source_path = source_dir / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_dir.mkdir(parents=True)
+    index_path.parent.mkdir()
+    source_path.write_text("source", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = max(path.stat().st_mtime_ns for path in (webui_dir, source_dir, source_path))
+    os.utime(index_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    source_path.unlink()
+    os.utime(source_dir, ns=(built_at + 2_000_000_000, built_at + 2_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is True
+
+
+def test_ensure_webui_dist_rebuilds_when_source_is_newer(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server import static_webui
+
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    builds: list[Path] = []
+    monkeypatch.setattr(static_webui, "ensure_webui_dist_dir", lambda: index_path.parent.resolve())
+    monkeypatch.setattr(
+        service_manager,
+        "_build_webui_dist",
+        lambda root, _config, _console: builds.append(root),
+    )
+
+    _REAL_ENSURE_WEBUI_DIST(tmp_path, service_manager.ServiceConfig(), DummyConsole())
+
+    assert builds == [tmp_path]
+
+
+def test_ensure_webui_dist_skips_stale_source_when_requested(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server import static_webui
+
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    builds: list[Path] = []
+    monkeypatch.setattr(static_webui, "ensure_webui_dist_dir", lambda: index_path.parent.resolve())
+    monkeypatch.setattr(
+        service_manager,
+        "_build_webui_dist",
+        lambda root, _config, _console: builds.append(root),
+    )
+
+    config = service_manager.ServiceConfig(skip_frontend_build=True)
+    _REAL_ENSURE_WEBUI_DIST(tmp_path, config, DummyConsole())
+
+    assert builds == []
 
 
 def test_start_backend_raises_when_port_has_listener(monkeypatch, tmp_path: Path) -> None:
