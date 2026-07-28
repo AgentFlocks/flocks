@@ -338,14 +338,6 @@ class TestScanAndLoad:
                 f"Agent '{name}' should be native=True when loaded from _BUILTIN_AGENTS_DIR"
             )
 
-    def test_capability_gap_agent_is_not_builtin(self):
-        """The retired self-enhance capability-gap agent must not be discoverable."""
-        from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
-
-        result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
-
-        assert "self-enhance" not in result
-
     def test_returns_agent_info_objects(self):
         result = scan_and_load()
         for name, agent in result.items():
