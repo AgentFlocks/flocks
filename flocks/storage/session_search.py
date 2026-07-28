@@ -265,7 +265,7 @@ async def delete_message_document(
 
 async def reconcile_session_index(
     *,
-    project_id: str,
+    project_id: Optional[str] = None,
     batch_size: int = 50,
 ) -> dict[str, int]:
     """Rebuild missing/stale rows and remove orphaned derived rows."""
@@ -275,9 +275,10 @@ async def reconcile_session_index(
     sessions = [
         session
         for session in await Session.list_all_unfiltered()
-        if session.project_id == project_id and session.status != "deleted"
+        if session.status != "deleted"
+        and (project_id is None or session.project_id == project_id)
     ]
-    documents: list[tuple[Any, Sequence[Any]]] = []
+    documents: list[tuple[str, Any, Sequence[Any]]] = []
     desired_ids: set[str] = set()
     for session in sessions:
         for item in await Message.list_with_parts(
@@ -287,7 +288,7 @@ async def reconcile_session_index(
             document = build_session_document(item.info, item.parts)
             if document is not None:
                 desired_ids.add(document["message_id"])
-            documents.append((item.info, item.parts))
+            documents.append((session.project_id, item.info, item.parts))
 
     stats = {"scanned": len(documents), "updated": 0, "deleted": 0}
     effective_batch_size = max(1, batch_size)
@@ -296,10 +297,10 @@ async def reconcile_session_index(
         async with Storage.connect(Storage.get_db_path()) as db:
             try:
                 await db.execute("BEGIN IMMEDIATE")
-                for message, parts in batch:
+                for document_project_id, message, parts in batch:
                     if await upsert_session_document(
                         db,
-                        project_id=project_id,
+                        project_id=document_project_id,
                         message=message,
                         parts=parts,
                     ):
@@ -312,14 +313,22 @@ async def reconcile_session_index(
     async with Storage.connect(Storage.get_db_path()) as db:
         try:
             await db.execute("BEGIN IMMEDIATE")
-            cursor = await db.execute(
-                """
-                SELECT id, message_id
-                FROM session_transcript_index_state
-                WHERE project_id = ?
-                """,
-                (project_id,),
-            )
+            if project_id is None:
+                cursor = await db.execute(
+                    """
+                    SELECT id, message_id
+                    FROM session_transcript_index_state
+                    """
+                )
+            else:
+                cursor = await db.execute(
+                    """
+                    SELECT id, message_id
+                    FROM session_transcript_index_state
+                    WHERE project_id = ?
+                    """,
+                    (project_id,),
+                )
             stale_rowids = [
                 rowid
                 for rowid, message_id in await cursor.fetchall()
@@ -358,7 +367,7 @@ async def reconcile_session_index(
 
     log.info(
         "session_search.reconciled",
-        {"project_id": project_id, **stats},
+        {"project_id": project_id or "*", **stats},
     )
     return stats
 
@@ -370,9 +379,10 @@ async def session_fts_search(
     query: str,
     max_results: int,
 ) -> list[dict[str, Any]]:
-    """Search indexed session messages using FTS5 BM25 ranking."""
+    """Search all indexed session messages using FTS5 BM25 ranking."""
     from flocks.storage.vector import build_fts_query
 
+    del project_id  # Retained for API compatibility; Session search is global.
     fts_query = build_fts_query(query)
     if not fts_query:
         return []
@@ -391,11 +401,10 @@ async def session_fts_search(
             JOIN session_transcript_index_state s
                 ON s.id = session_transcript_fts.rowid
             WHERE session_transcript_fts MATCH ?
-                AND s.project_id = ?
             ORDER BY bm25(session_transcript_fts)
             LIMIT ?
             """,
-            (fts_query, project_id, max_results),
+            (fts_query, max_results),
         )
         rows = await cursor.fetchall()
 

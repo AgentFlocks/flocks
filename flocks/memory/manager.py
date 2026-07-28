@@ -355,13 +355,12 @@ class MemoryManager:
         self.config.sources.append("session")
 
     async def _reconcile_sessions(self) -> None:
-        """Synchronize historical transcript FTS rows for this project."""
+        """Synchronize historical transcript FTS rows across all projects."""
         if not self.config.sync.sessions.enabled:
             return
         from flocks.storage.session_search import reconcile_session_index
 
         await reconcile_session_index(
-            project_id=self.project_id,
             batch_size=self.config.sync.sessions.delta_messages,
         )
     

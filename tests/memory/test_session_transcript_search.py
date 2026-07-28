@@ -122,6 +122,53 @@ async def test_text_part_updates_and_message_delete_update_fts(
 
 
 @pytest.mark.asyncio
+async def test_session_search_is_global_across_projects(
+    tmp_path: Path,
+) -> None:
+    alpha = await _create_session(tmp_path, project_id="prj_alpha")
+    beta = await _create_session(tmp_path, project_id="prj_beta")
+    alpha_message = await Message.create(
+        alpha.id,
+        MessageRole.USER,
+        "cross project session marker alpha",
+    )
+    beta_message = await Message.create(
+        beta.id,
+        MessageRole.ASSISTANT,
+        "cross project session marker beta",
+    )
+
+    results = await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id=alpha.project_id,
+        query="cross project session marker",
+        max_results=10,
+    )
+
+    assert {result["path"] for result in results} == {
+        f"sessions/{alpha.id}/messages/{alpha_message.id}",
+        f"sessions/{beta.id}/messages/{beta_message.id}",
+    }
+
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute("DELETE FROM session_transcript_fts")
+        await db.execute("DELETE FROM session_transcript_index_state")
+        await db.commit()
+    stats = await reconcile_session_index(batch_size=1)
+    rebuilt = await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id=alpha.project_id,
+        query="cross project session marker",
+        max_results=10,
+    )
+    assert stats["updated"] == 2
+    assert {result["path"] for result in rebuilt} == {
+        f"sessions/{alpha.id}/messages/{alpha_message.id}",
+        f"sessions/{beta.id}/messages/{beta_message.id}",
+    }
+
+
+@pytest.mark.asyncio
 async def test_reconciliation_restores_history_and_removes_orphans(
     tmp_path: Path,
 ) -> None:
