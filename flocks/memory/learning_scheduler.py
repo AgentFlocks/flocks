@@ -16,7 +16,7 @@ from flocks.storage import Storage
 from flocks.utils.log import Log
 
 
-_TICK_SECONDS = 60
+_TICK_SECONDS = 30 * 60
 _FAILURE_RETRY_SECONDS = 15 * 60
 _LAST_SUCCESS_KEY = "memory:learning:dream:last_success_ts"
 

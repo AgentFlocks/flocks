@@ -28,6 +28,7 @@ from flocks.memory.learning import (
 from flocks.memory.learning_scheduler import (
     MemoryLearningScheduler,
     _LAST_SUCCESS_KEY,
+    _TICK_SECONDS,
 )
 from flocks.session.background_tasks import pending_background_tasks
 from flocks.session.message import (
@@ -1129,6 +1130,13 @@ async def test_scheduler_runs_due_dream_and_persists_success(
 
     run.assert_awaited_once()
     assert await Storage.get(_LAST_SUCCESS_KEY) == 1_000
+
+
+def test_scheduler_defaults_to_daily_run_and_half_hour_checks() -> None:
+    config = MemoryConfig()
+
+    assert config.learning.dream.interval_hours == 24
+    assert _TICK_SECONDS == 30 * 60
 
 
 @pytest.mark.asyncio

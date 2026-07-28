@@ -188,7 +188,7 @@ class MemoryDreamConfig(BaseModel):
         description="Extract durable facts from incremental sessions and daily memory",
     )
     interval_hours: float = Field(
-        12,
+        24,
         gt=0,
         description="Hours between successful background Dream bridging runs",
     )
