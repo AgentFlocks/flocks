@@ -18,8 +18,8 @@ from flocks.storage import (
 )
 from flocks.memory.types import MemoryFileEntry, MemoryChunk, MemorySyncProgress
 from flocks.memory.config import MemoryConfig
-from flocks.memory.utils.hash import compute_hash, compute_text_hash
-from flocks.memory.utils.text import is_memory_path
+from flocks.memory.paths import classify_memory_path
+from flocks.memory.utils.hash import compute_text_hash
 from flocks.memory.sync.chunking import TextChunker
 from flocks.utils.log import Log
 
@@ -96,7 +96,13 @@ class MemoryIndexer:
             
             for idx, file_entry in enumerate(memory_files):
                 if not force:
-                    indexed = indexed_files.get(file_entry.path)
+                    indexed = indexed_files.get(
+                        (
+                            file_entry.scope.value,
+                            file_entry.scope_id,
+                            file_entry.path,
+                        )
+                    )
                     if indexed and indexed["hash"] == file_entry.hash:
                         stats["files_skipped"] += 1
                         log.debug("indexer.file.skipped", {"path": file_entry.path})
@@ -117,7 +123,10 @@ class MemoryIndexer:
                     ))
             
             deleted_count = await self._clean_deleted_files(
-                current_files=[f.path for f in memory_files]
+                current_files=[
+                    (file.scope.value, file.scope_id, file.path)
+                    for file in memory_files
+                ]
             )
             if deleted_count > 0:
                 log.info("indexer.cleaned", {"deleted": deleted_count})
@@ -157,8 +166,17 @@ class MemoryIndexer:
                 resolved = str(fp.resolve())
                 if resolved in seen:
                     return
+                classified = classify_memory_path(memory_root, fp)
+                if classified is None:
+                    return
                 seen.add(resolved)
-                files.append(self._create_file_entry(fp, memory_root, _content_cache=_content_cache))
+                files.append(
+                    self._create_file_entry(
+                        fp,
+                        memory_root,
+                        _content_cache=_content_cache,
+                    )
+                )
 
             for fp in memory_root.glob("**/*.md"):
                 if fp.is_file():
@@ -193,10 +211,10 @@ class MemoryIndexer:
         by absolute path so that ``_index_file`` can reuse it without a second
         disk read (fixes the TOCTOU + double-I/O issue).
         """
-        try:
-            rel_path = str(file_path.relative_to(memory_root))
-        except ValueError:
-            rel_path = file_path.name
+        classified = classify_memory_path(memory_root, file_path)
+        if classified is None:
+            raise ValueError(f"Unsupported Memory index path: {file_path}")
+        scope, scope_id, rel_path = classified
         
         stat = file_path.stat()
         
@@ -207,6 +225,8 @@ class MemoryIndexer:
             _content_cache[str(file_path)] = content
         
         return MemoryFileEntry(
+            scope=scope,
+            scope_id=scope_id,
             path=rel_path,
             abs_path=str(file_path),
             mtime_ms=stat.st_mtime * 1000,
@@ -214,28 +234,28 @@ class MemoryIndexer:
             hash=content_hash,
         )
     
-    async def _get_indexed_files(self) -> Dict[str, Dict[str, Any]]:
+    async def _get_indexed_files(
+        self,
+    ) -> Dict[tuple[str, str, str], Dict[str, Any]]:
         """
         Get indexed files from database
         
         Returns:
             Dict mapping path to file info
         """
-        import aiosqlite
-        
-        indexed = {}
+        indexed: Dict[tuple[str, str, str], Dict[str, Any]] = {}
         
         try:
             async with Storage.connect(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
-                    SELECT path, hash, mtime, size
+                    SELECT scope, scope_id, path, hash, mtime, size
                     FROM memory_files
-                    WHERE project_id = ? AND source = 'memory'
-                """, (self.project_id,))
+                    WHERE source = 'memory'
+                """)
                 
                 rows = await cursor.fetchall()
-                for path, hash_val, mtime, size in rows:
-                    indexed[path] = {
+                for scope, scope_id, path, hash_val, mtime, size in rows:
+                    indexed[(scope, scope_id, path)] = {
                         "hash": hash_val,
                         "mtime": mtime,
                         "size": size,
@@ -267,14 +287,12 @@ class MemoryIndexer:
             # Chunk text
             chunks = self.chunker.chunk_text(content, file_entry.path)
             stats["chunks"] = len(chunks)
-            
-            if not chunks:
-                log.warn("indexer.no_chunks", {"path": file_entry.path})
-                return stats
-            
+
             # FTS indexing is always available. Embeddings are optional.
-            chunk_records = []
-            if self.provider_id is None:
+            chunk_records: List[Dict[str, Any]] = []
+            if not chunks:
+                log.debug("indexer.no_chunks", {"path": file_entry.path})
+            elif self.provider_id is None:
                 chunk_records = [
                     self._create_chunk_record(chunk, file_entry, None, None)
                     for chunk in chunks
@@ -302,8 +320,9 @@ class MemoryIndexer:
             await replace_memory_file_index(
                 Storage.get_db_path(),
                 file_entry={
+                    "scope": file_entry.scope.value,
+                    "scope_id": file_entry.scope_id,
                     "path": file_entry.path,
-                    "project_id": self.project_id,
                     "hash": file_entry.hash,
                     "mtime": file_entry.mtime_ms / 1000,
                     "size": file_entry.size,
@@ -422,8 +441,9 @@ class MemoryIndexer:
         """Create chunk record for database"""
         return {
             "id": str(uuid.uuid4()),
+            "scope": file_entry.scope.value,
+            "scope_id": file_entry.scope_id,
             "path": file_entry.path,
-            "project_id": self.project_id,
             "source": "memory",
             "start_line": chunk.start_line,
             "end_line": chunk.end_line,
@@ -439,7 +459,7 @@ class MemoryIndexer:
         text_hash: str,
     ) -> Optional[tuple[List[float], int]]:
         """Get embedding from cache"""
-        if not self.config.cache.enabled:
+        if not self.config.cache.enabled or self.provider_id is None:
             return None
         
         return await get_embedding_from_cache(
@@ -456,7 +476,7 @@ class MemoryIndexer:
         dims: int,
     ) -> None:
         """Put embedding to cache"""
-        if not self.config.cache.enabled:
+        if not self.config.cache.enabled or self.provider_id is None:
             return
         
         await put_embedding_to_cache(
@@ -468,7 +488,10 @@ class MemoryIndexer:
             dims=dims,
         )
     
-    async def _clean_deleted_files(self, current_files: List[str]) -> int:
+    async def _clean_deleted_files(
+        self,
+        current_files: List[tuple[str, str, str]],
+    ) -> int:
         """
         Clean up deleted files from database
         
@@ -478,16 +501,14 @@ class MemoryIndexer:
         Returns:
             Number of deleted files
         """
-        import aiosqlite
-        
         try:
             async with Storage.connect(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
-                    SELECT path FROM memory_files
-                    WHERE project_id = ? AND source = 'memory'
-                """, (self.project_id,))
+                    SELECT scope, scope_id, path FROM memory_files
+                    WHERE source = 'memory'
+                """)
                 
-                indexed_paths = [row[0] for row in await cursor.fetchall()]
+                indexed_paths = [tuple(row) for row in await cursor.fetchall()]
                 
                 # Find deleted files
                 deleted = [p for p in indexed_paths if p not in current_files]
@@ -495,26 +516,32 @@ class MemoryIndexer:
                 if not deleted:
                     return 0
                 
-                placeholders = ",".join("?" * len(deleted))
-                params = (self.project_id, *deleted)
-                
-                await db.execute(f"""
-                    DELETE FROM memory_fts
-                    WHERE project_id = ? AND source = 'memory'
-                        AND path IN ({placeholders})
-                """, params)
-
-                await db.execute(f"""
-                    DELETE FROM memory_chunks
-                    WHERE project_id = ? AND source = 'memory'
-                        AND path IN ({placeholders})
-                """, params)
-                
-                await db.execute(f"""
-                    DELETE FROM memory_files
-                    WHERE project_id = ? AND source = 'memory'
-                        AND path IN ({placeholders})
-                """, params)
+                for scope, scope_id, path in deleted:
+                    params = (scope, scope_id, path)
+                    await db.execute(
+                        """
+                        DELETE FROM memory_fts
+                        WHERE scope = ? AND scope_id = ?
+                            AND source = 'memory' AND path = ?
+                        """,
+                        params,
+                    )
+                    await db.execute(
+                        """
+                        DELETE FROM memory_chunks
+                        WHERE scope = ? AND scope_id = ?
+                            AND source = 'memory' AND path = ?
+                        """,
+                        params,
+                    )
+                    await db.execute(
+                        """
+                        DELETE FROM memory_files
+                        WHERE scope = ? AND scope_id = ?
+                            AND source = 'memory' AND path = ?
+                        """,
+                        params,
+                    )
                 
                 await db.commit()
                 

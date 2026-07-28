@@ -223,17 +223,19 @@ async def test_memory_search_uses_fts_without_embedding_provider(
     async with Storage.connect(Storage.get_db_path()) as db:
         await db.execute(
             """
-            INSERT INTO memory_fts (
-                text, chunk_id, path, source, project_id, start_line, end_line
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO memory_fts (
+                    text, chunk_id, path, source, scope, scope_id,
+                    start_line, end_line
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 "durable keyword memory",
                 "chunk-1",
-                "MEMORY.md",
-                "memory",
-                "project-memory",
-                1,
+                    "MEMORY.md",
+                    "memory",
+                    "global",
+                    "",
+                    1,
                 1,
             ),
         )

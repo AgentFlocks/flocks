@@ -23,6 +23,14 @@ import uuid
 from flocks.config import Config
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
+from flocks.memory.paths import (
+    GLOBAL_MEMORY_FILENAME,
+    GLOBAL_SCOPE_ID,
+    USER_FILENAME,
+    is_registered_project_id,
+    memory_file_path,
+)
+from flocks.memory.types import MemoryScope
 from flocks.provider import ChatMessage, Provider
 from flocks.provider.options import build_provider_options
 from flocks.session.message import Message, TextPart, ToolPart
@@ -71,10 +79,15 @@ _DESCRIPTION_TRIGGER_RE = re.compile(
     r"当.+时|用于|适用于|用户(?:要求|需要)|请求)",
     re.IGNORECASE,
 )
+_DAILY_SESSION_HEADER_RE = re.compile(
+    r"^## Session (?P<prefix>[A-Za-z0-9_-]+)(?:…|\.\.\.)?"
+)
 
 _SCHEMA_DDL = """
 CREATE TABLE IF NOT EXISTS memory_learning_checkpoints (
     pipeline TEXT NOT NULL,
+    scope TEXT NOT NULL,
+    scope_id TEXT NOT NULL,
     source_type TEXT NOT NULL,
     source_key TEXT NOT NULL,
     content_hash TEXT NOT NULL,
@@ -83,10 +96,10 @@ CREATE TABLE IF NOT EXISTS memory_learning_checkpoints (
     source_mtime REAL,
     processed_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (pipeline, source_type, source_key)
+    PRIMARY KEY (pipeline, scope, scope_id, source_type, source_key)
 );
 CREATE INDEX IF NOT EXISTS idx_memory_learning_checkpoint_updated
-ON memory_learning_checkpoints(pipeline, updated_at);
+ON memory_learning_checkpoints(pipeline, scope, scope_id, updated_at);
 
 CREATE TABLE IF NOT EXISTS memory_skill_proposals (
     id TEXT PRIMARY KEY,
@@ -119,6 +132,8 @@ class SourceSnapshot:
     content: str
     content_hash: str
     line_count: int
+    scope: MemoryScope = MemoryScope.GLOBAL
+    scope_id: str = GLOBAL_SCOPE_ID
     last_message_id: Optional[str] = None
     source_mtime: Optional[float] = None
 
@@ -130,6 +145,32 @@ class DreamBridgeResult:
     changed: bool
     processed_sources: int
     backlog: bool
+
+
+@dataclass(frozen=True)
+class DreamTarget:
+    """One independently scheduled Global-only or Project Dream."""
+
+    scope: MemoryScope
+    scope_id: str
+
+    @classmethod
+    def global_only(cls) -> "DreamTarget":
+        return cls(MemoryScope.GLOBAL, GLOBAL_SCOPE_ID)
+
+    @classmethod
+    def project(cls, project_id: str) -> "DreamTarget":
+        if not is_registered_project_id(project_id):
+            raise ValueError(f"Invalid registered project id: {project_id}")
+        return cls(MemoryScope.PROJECT, project_id)
+
+    @property
+    def project_id(self) -> str:
+        return self.scope_id if self.scope == MemoryScope.PROJECT else "default"
+
+    @property
+    def scheduler_key(self) -> str:
+        return f"{self.scope.value}:{self.scope_id}"
 
 
 @dataclass(frozen=True)
@@ -167,12 +208,67 @@ class SkillProposal:
 class LearningCheckpointStore:
     """SQLite cursors shared by Dream and skill review."""
 
+    _schema_lock = asyncio.Lock()
+
     @classmethod
     async def ensure_schema(cls) -> None:
         await Storage._ensure_init()
-        async with Storage.connect() as db:
-            await db.executescript(_SCHEMA_DDL)
-            await db.commit()
+        async with cls._schema_lock:
+            async with Storage.connect() as db:
+                cursor = await db.execute(
+                    "PRAGMA table_info(memory_learning_checkpoints)"
+                )
+                columns = {row[1] for row in await cursor.fetchall()}
+                if columns and not {"scope", "scope_id"}.issubset(columns):
+                    legacy_exists = await db.execute(
+                        """
+                        SELECT 1 FROM sqlite_master
+                        WHERE type = 'table'
+                            AND name = 'memory_learning_checkpoints_legacy'
+                        """
+                    )
+                    if await legacy_exists.fetchone() is None:
+                        await db.execute(
+                            """
+                            ALTER TABLE memory_learning_checkpoints
+                            RENAME TO memory_learning_checkpoints_legacy
+                            """
+                        )
+                await db.executescript(_SCHEMA_DDL)
+                legacy_cursor = await db.execute(
+                    """
+                    SELECT 1 FROM sqlite_master
+                    WHERE type = 'table'
+                        AND name = 'memory_learning_checkpoints_legacy'
+                    """
+                )
+                if await legacy_cursor.fetchone() is not None:
+                    await db.execute(
+                        """
+                        INSERT OR IGNORE INTO memory_learning_checkpoints (
+                            pipeline, scope, scope_id, source_type, source_key,
+                            content_hash, line_count, last_message_id,
+                            source_mtime, processed_at, updated_at
+                        )
+                        SELECT pipeline, 'global', '', source_type, source_key,
+                               content_hash, line_count, last_message_id,
+                               source_mtime, processed_at, updated_at
+                        FROM memory_learning_checkpoints_legacy
+                        """
+                    )
+                    await db.execute(
+                        "DROP TABLE memory_learning_checkpoints_legacy"
+                    )
+                    await db.execute(
+                        """
+                        CREATE INDEX IF NOT EXISTS
+                            idx_memory_learning_checkpoint_updated
+                        ON memory_learning_checkpoints(
+                            pipeline, scope, scope_id, updated_at
+                        )
+                        """
+                    )
+                await db.commit()
 
     @classmethod
     async def get(
@@ -180,6 +276,9 @@ class LearningCheckpointStore:
         pipeline: Pipeline,
         source_type: SourceType,
         source_key: str,
+        *,
+        scope: MemoryScope = MemoryScope.GLOBAL,
+        scope_id: str = GLOBAL_SCOPE_ID,
     ) -> Optional[dict[str, Any]]:
         await cls.ensure_schema()
         async with Storage.connect() as db:
@@ -188,9 +287,16 @@ class LearningCheckpointStore:
                 SELECT content_hash, line_count, last_message_id, source_mtime,
                        processed_at, updated_at
                 FROM memory_learning_checkpoints
-                WHERE pipeline = ? AND source_type = ? AND source_key = ?
+                WHERE pipeline = ? AND scope = ? AND scope_id = ?
+                    AND source_type = ? AND source_key = ?
                 """,
-                (pipeline, source_type, source_key),
+                (
+                    pipeline,
+                    scope.value,
+                    scope_id,
+                    source_type,
+                    source_key,
+                ),
             )
             row = await cursor.fetchone()
         if row is None:
@@ -210,7 +316,13 @@ class LearningCheckpointStore:
         pipeline: Pipeline,
         source: SourceSnapshot,
     ) -> bool:
-        row = await cls.get(pipeline, source.source_type, source.source_key)
+        row = await cls.get(
+            pipeline,
+            source.source_type,
+            source.source_key,
+            scope=source.scope,
+            scope_id=source.scope_id,
+        )
         if row is None:
             return False
         return bool(
@@ -251,11 +363,13 @@ class LearningCheckpointStore:
         await db.execute(
             """
             INSERT INTO memory_learning_checkpoints (
-                pipeline, source_type, source_key, content_hash,
+                pipeline, scope, scope_id, source_type, source_key, content_hash,
                 line_count, last_message_id, source_mtime,
                 processed_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(pipeline, source_type, source_key) DO UPDATE SET
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(
+                pipeline, scope, scope_id, source_type, source_key
+            ) DO UPDATE SET
                 content_hash = excluded.content_hash,
                 line_count = excluded.line_count,
                 last_message_id = excluded.last_message_id,
@@ -265,6 +379,8 @@ class LearningCheckpointStore:
             """,
             (
                 pipeline,
+                source.scope.value,
+                source.scope_id,
                 source.source_type,
                 source.source_key,
                 source.content_hash,
@@ -560,6 +676,8 @@ async def _session_delta(
     *,
     max_messages: int,
     max_chars: int,
+    scope: MemoryScope = MemoryScope.GLOBAL,
+    scope_id: str = GLOBAL_SCOPE_ID,
 ) -> tuple[Optional[SourceSnapshot], bool]:
     messages = await Message.list_with_parts(session_id, include_archived=True)
     last_message_id = checkpoint.get("last_message_id") if checkpoint else None
@@ -603,6 +721,8 @@ async def _session_delta(
         content=content,
         content_hash=_hash_text(content),
         line_count=len(content.splitlines()),
+        scope=scope,
+        scope_id=scope_id,
         last_message_id=consumed[-1].info.id,
     )
     return snapshot, len(consumed) < len(pending)
@@ -619,6 +739,10 @@ def _daily_delta(
     checkpoint: Optional[dict[str, Any]],
     *,
     max_chars: int,
+    scope: MemoryScope = MemoryScope.GLOBAL,
+    scope_id: str = GLOBAL_SCOPE_ID,
+    allowed_session_ids: Optional[set[str]] = None,
+    session_prefixes: Optional[dict[str, Optional[str]]] = None,
 ) -> tuple[Optional[SourceSnapshot], bool]:
     content = path.read_text(encoding="utf-8")
     lines = content.splitlines(keepends=True)
@@ -647,13 +771,34 @@ def _daily_delta(
 
     consumed_count = start_line + len(consumed_lines)
     cursor_content = "".join(lines[:consumed_count])
-    delta_content = "".join(consumed_lines)
+    if allowed_session_ids is None or session_prefixes is None:
+        delta_content = "".join(consumed_lines)
+    else:
+        filtered_lines: list[str] = []
+        current_session_id: Optional[str] = None
+        for index, line in enumerate(lines[:consumed_count]):
+            match = _DAILY_SESSION_HEADER_RE.match(line.strip())
+            if match:
+                current_session_id = session_prefixes.get(
+                    match.group("prefix")
+                )
+            if (
+                index >= start_line
+                and current_session_id in allowed_session_ids
+            ):
+                filtered_lines.append(line)
+        delta_content = _truncate_middle(
+            "".join(filtered_lines),
+            max_chars,
+        )
     snapshot = SourceSnapshot(
         source_type="daily",
         source_key=path.stem,
         content=delta_content,
         content_hash=_hash_text(cursor_content),
         line_count=consumed_count,
+        scope=scope,
+        scope_id=scope_id,
         source_mtime=path.stat().st_mtime,
     )
     return snapshot, consumed_count < current_count
@@ -666,15 +811,59 @@ def _contains_memory_entry(current: str, addition: str) -> bool:
     return addition.strip() in blocks
 
 
+async def list_dream_targets() -> list[DreamTarget]:
+    """List deterministic Dream targets backed by non-deleted user Sessions."""
+    from flocks.session.session import Session
+
+    sessions = await Session.list_all_unfiltered()
+    project_ids = {
+        session.project_id
+        for session in sessions
+        if session.category == "user" and session.status != "deleted"
+    }
+    targets: list[DreamTarget] = []
+    if "default" in project_ids:
+        targets.append(DreamTarget.global_only())
+    targets.extend(
+        DreamTarget.project(project_id)
+        for project_id in sorted(project_ids)
+        if is_registered_project_id(project_id)
+    )
+    return targets
+
+
+def _unique_session_prefixes(sessions: list[Any]) -> dict[str, Optional[str]]:
+    """Map Daily's 16-character Session prefixes when they are unambiguous."""
+    candidates: dict[str, list[str]] = {}
+    for session in sessions:
+        candidates.setdefault(session.id[:16], []).append(session.id)
+    return {
+        prefix: ids[0] if len(ids) == 1 else None
+        for prefix, ids in candidates.items()
+    }
+
+
 async def _collect_dream_sources(
     config: MemoryConfig,
+    target: DreamTarget,
 ) -> tuple[list[SourceSnapshot], bool, list[tuple[str, str]]]:
     """Collect one bounded bridge batch and its MemoryManager sync targets."""
     from flocks.session.session import Session
 
     learning = config.learning
     sessions = await Session.list_all_unfiltered()
-    eligible_sessions = [session for session in sessions if session.category == "user" and session.status != "deleted"]
+    all_eligible_sessions = [
+        session
+        for session in sessions
+        if session.category == "user" and session.status != "deleted"
+    ]
+    eligible_sessions = [
+        session
+        for session in all_eligible_sessions
+        if session.project_id == target.project_id
+    ]
+    eligible_session_ids = {session.id for session in eligible_sessions}
+    session_prefixes = _unique_session_prefixes(all_eligible_sessions)
     session_budget = max(learning.max_input_chars // 3, 1000)
     daily_budget = max(learning.max_input_chars // 3, 1000)
     sources: list[SourceSnapshot] = []
@@ -693,12 +882,16 @@ async def _collect_dream_sources(
             "dream",
             "session",
             session.id,
+            scope=target.scope,
+            scope_id=target.scope_id,
         )
         snapshot, source_backlog = await _session_delta(
             session.id,
             checkpoint,
             max_messages=learning.max_session_messages,
             max_chars=session_budget,
+            scope=target.scope,
+            scope_id=target.scope_id,
         )
         if snapshot is None:
             continue
@@ -719,11 +912,17 @@ async def _collect_dream_sources(
             "dream",
             "daily",
             path.stem,
+            scope=target.scope,
+            scope_id=target.scope_id,
         )
         snapshot, source_backlog = _daily_delta(
             path,
             checkpoint,
             max_chars=daily_budget,
+            scope=target.scope,
+            scope_id=target.scope_id,
+            allowed_session_ids=eligible_session_ids,
+            session_prefixes=session_prefixes,
         )
         if snapshot is None:
             continue
@@ -738,7 +937,9 @@ def _apply_memory_operations(
     current: str,
     response: dict[str, Any],
     *,
-    target: Literal["memory", "user"] = "memory",
+    dream_target: DreamTarget,
+    file_scope: MemoryScope,
+    path: str,
 ) -> str:
     action = response.get("action")
     if action == "skip":
@@ -752,10 +953,23 @@ def _apply_memory_operations(
     for operation in operations:
         if not isinstance(operation, dict):
             raise ValueError("Dream operation must be an object")
-        operation_target = operation.get("target", "memory")
-        if operation_target not in {"memory", "user"}:
-            raise ValueError(f"unsupported Dream target: {operation_target}")
-        if operation_target != target:
+        try:
+            operation_scope = MemoryScope(str(operation.get("scope") or ""))
+        except ValueError as exc:
+            raise ValueError("Dream operation has an invalid scope") from exc
+        operation_path = str(operation.get("path") or "")
+        from flocks.memory.paths import validate_scope_path
+
+        operation_path = validate_scope_path(
+            operation_scope,
+            operation_path,
+        )
+        if (
+            dream_target.scope == MemoryScope.GLOBAL
+            and operation_scope == MemoryScope.PROJECT
+        ):
+            raise ValueError("Global-only Dream cannot update Project Memory")
+        if operation_scope != file_scope or operation_path != path:
             continue
         operation_type = operation.get("type")
         if operation_type == "add":
@@ -782,13 +996,15 @@ def _apply_memory_operations(
 async def _sync_memory_indexes(
     config: MemoryConfig,
     sync_targets: list[tuple[str, str]],
+    *,
+    fallback_project_id: str,
 ) -> None:
     targets_by_project: dict[str, str] = {}
     for project_id, workspace in sync_targets:
         targets_by_project.setdefault(project_id, workspace)
     targets = list(targets_by_project.items())
     if not targets:
-        targets = [("default", ".")]
+        targets = [(fallback_project_id, ".")]
     for project_id, workspace in targets:
         manager = MemoryManager.get_instance(
             project_id=project_id,
@@ -802,29 +1018,29 @@ async def _restore_memory_files_and_indexes(
     *,
     config: MemoryConfig,
     sync_targets: list[tuple[str, str]],
-    memory_path: Path,
-    user_path: Path,
-    memory_existed: bool,
-    user_existed: bool,
-    current_memory: str,
-    current_user: str,
+    fallback_project_id: str,
+    originals: dict[Path, tuple[bool, str]],
 ) -> None:
-    if memory_existed:
-        _atomic_write(memory_path, current_memory)
-    else:
-        memory_path.unlink(missing_ok=True)
-    if user_existed:
-        _atomic_write(user_path, current_user)
-    else:
-        user_path.unlink(missing_ok=True)
+    for path, (existed, content) in originals.items():
+        if existed:
+            _atomic_write(path, content)
+        else:
+            path.unlink(missing_ok=True)
     try:
-        await _sync_memory_indexes(config, sync_targets)
+        await _sync_memory_indexes(
+            config,
+            sync_targets,
+            fallback_project_id=fallback_project_id,
+        )
     except Exception as restore_exc:
         log.warn("dream.restore_reindex_failed", {"error": str(restore_exc)})
 
 
-async def run_dream_bridge() -> DreamBridgeResult:
+async def run_dream_bridge(
+    target: Optional[DreamTarget] = None,
+) -> DreamBridgeResult:
     """Run one incremental Dream batch using the configured default model."""
+    target = target or DreamTarget.global_only()
     app_config = await Config.get()
     config = getattr(app_config, "memory", None)
     if not isinstance(config, MemoryConfig):
@@ -841,7 +1057,10 @@ async def run_dream_bridge() -> DreamBridgeResult:
         raise RuntimeError("no default model is configured for Dream")
 
     async with _PIPELINE_LOCKS["dream"]:
-        sources, backlog, sync_targets = await _collect_dream_sources(config)
+        sources, backlog, sync_targets = await _collect_dream_sources(
+            config,
+            target,
+        )
         if not sources:
             return DreamBridgeResult(False, 0, backlog)
 
@@ -855,78 +1074,136 @@ async def run_dream_bridge() -> DreamBridgeResult:
             return DreamBridgeResult(False, len(sources), backlog)
 
         memory_root = Config.get_data_path() / "memory"
-        memory_path = memory_root / "MEMORY.md"
-        user_path = memory_root / "USER.md"
-        memory_existed = memory_path.exists()
-        user_existed = user_path.exists()
-        current_memory = memory_path.read_text(encoding="utf-8") if memory_existed else ""
-        if user_existed:
-            current_user = user_path.read_text(encoding="utf-8")
-        else:
-            from flocks.memory.bootstrap import INITIAL_USER_PROFILE
+        global_memory_path = memory_file_path(
+            memory_root,
+            MemoryScope.GLOBAL,
+            GLOBAL_SCOPE_ID,
+            GLOBAL_MEMORY_FILENAME,
+        )
+        user_path = memory_file_path(
+            memory_root,
+            MemoryScope.GLOBAL,
+            GLOBAL_SCOPE_ID,
+            USER_FILENAME,
+        )
+        file_targets = {
+            (MemoryScope.GLOBAL, USER_FILENAME): user_path,
+            (
+                MemoryScope.GLOBAL,
+                GLOBAL_MEMORY_FILENAME,
+            ): global_memory_path,
+        }
+        if target.scope == MemoryScope.PROJECT:
+            file_targets[
+                (MemoryScope.PROJECT, GLOBAL_MEMORY_FILENAME)
+            ] = memory_file_path(
+                memory_root,
+                MemoryScope.PROJECT,
+                target.scope_id,
+                GLOBAL_MEMORY_FILENAME,
+            )
 
-            current_user = INITIAL_USER_PROFILE
+        from flocks.memory.bootstrap import INITIAL_USER_PROFILE
+
+        originals: dict[Path, tuple[bool, str]] = {}
+        current_files: dict[tuple[MemoryScope, str], str] = {}
+        for key, file_path in file_targets.items():
+            existed = file_path.exists()
+            if existed:
+                content = file_path.read_text(encoding="utf-8")
+            elif key == (MemoryScope.GLOBAL, USER_FILENAME):
+                content = INITIAL_USER_PROFILE
+            elif key == (MemoryScope.PROJECT, GLOBAL_MEMORY_FILENAME):
+                from flocks.memory.paths import PROJECT_MEMORY_INITIAL_CONTENT
+
+                content = PROJECT_MEMORY_INITIAL_CONTENT
+            else:
+                content = ""
+            originals[file_path] = (existed, content)
+            current_files[key] = content
 
         source_text = "\n\n".join(source_sections)
+        current_sections = "\n\n".join(
+            (
+                f"## {scope.value}/{path}\n"
+                f"{_truncate_tail(content, config.learning.max_input_chars // 6)}"
+            )
+            for (scope, path), content in current_files.items()
+        )
+        target_description = (
+            f"registered project {target.scope_id}"
+            if target.scope == MemoryScope.PROJECT
+            else "default Sessions (Global-only)"
+        )
         response = await _chat_json(
             provider_id=provider_id,
             model_id=model_id,
             max_tokens=config.learning.max_output_tokens,
             system=(
-                "Maintain two durable Markdown stores from incremental evidence. "
-                "USER.md contains stable user identity, preferences, communication "
-                "style, working habits, and technical level. MEMORY.md contains "
-                "environment facts, project conventions, decisions, and reusable "
-                "lessons. Reject transient task details and session summaries. "
+                "Maintain scoped durable Markdown Memory from incremental evidence. "
+                "Global USER.md contains stable user identity, communication "
+                "preferences, and working habits. Global MEMORY.md contains only "
+                "clearly cross-project preferences and reusable rules. Project "
+                "MEMORY.md contains project architecture, conventions, facts, "
+                "decisions, and lessons; project evidence should default there. "
+                "Reject transient task details and session summaries. Never infer "
+                "that project-specific evidence is global. A Global-only Dream "
+                "must skip project-specific information. "
+                "When a Project Dream finds a project-specific entry in Global "
+                "MEMORY.md, move it to Project MEMORY.md only when the current "
+                "project evidence clearly supports that classification; otherwise "
+                "leave the Global entry unchanged. "
                 'Return strict JSON only: {"action":"skip","reason":"..."} '
                 'or {"action":"update","operations":['
-                '{"target":"user|memory","type":"add","content":"..."},'
-                '{"target":"user|memory","type":"replace",'
+                '{"scope":"global|project","path":"USER.md|MEMORY.md",'
+                '"type":"add","content":"..."},'
+                '{"scope":"global|project","path":"USER.md|MEMORY.md",'
+                '"type":"replace",'
                 '"old":"exact text","new":"..."},'
-                '{"target":"user|memory","type":"remove",'
+                '{"scope":"global|project","path":"USER.md|MEMORY.md",'
+                '"type":"remove",'
                 '"old":"exact text"}]}. Copy replace/remove targets verbatim.'
             ),
             user=(
-                "Incremental Session and Daily evidence:\n"
+                f"Dream target: {target_description}\n\n"
+                "Incremental Session and mapped Daily evidence:\n"
                 f"{_truncate_tail(source_text, config.learning.max_input_chars // 2)}"
-                "\n\nCurrent USER.md:\n"
-                f"{_truncate_tail(current_user, config.learning.max_input_chars // 4)}"
-                "\n\nCurrent MEMORY.md:\n"
-                f"{_truncate_tail(current_memory, config.learning.max_input_chars // 4)}"
+                "\n\nCurrent scoped Memory files:\n"
+                f"{current_sections}"
             ),
         )
-        updated_memory = _apply_memory_operations(
-            current_memory,
-            response,
-            target="memory",
+        updated_files = {
+            key: _apply_memory_operations(
+                content,
+                response,
+                dream_target=target,
+                file_scope=key[0],
+                path=key[1],
+            )
+            for key, content in current_files.items()
+        }
+        files_changed = any(
+            updated_files[key] != current_files[key]
+            for key in current_files
         )
-        updated_user = _apply_memory_operations(
-            current_user,
-            response,
-            target="user",
-        )
-        memory_changed = updated_memory != current_memory
-        user_changed = updated_user != current_user
-        files_changed = memory_changed or user_changed
 
         if files_changed:
             try:
-                if memory_changed:
-                    _atomic_write(memory_path, updated_memory)
-                if user_changed or not user_existed:
-                    _atomic_write(user_path, updated_user)
-                await _sync_memory_indexes(config, sync_targets)
+                for key, file_path in file_targets.items():
+                    if updated_files[key] != current_files[key]:
+                        _atomic_write(file_path, updated_files[key])
+                await _sync_memory_indexes(
+                    config,
+                    sync_targets,
+                    fallback_project_id=target.project_id,
+                )
                 await LearningCheckpointStore.commit("dream", sources)
             except BaseException:
                 await _restore_memory_files_and_indexes(
                     config=config,
                     sync_targets=sync_targets,
-                    memory_path=memory_path,
-                    user_path=user_path,
-                    memory_existed=memory_existed,
-                    user_existed=user_existed,
-                    current_memory=current_memory,
-                    current_user=current_user,
+                    fallback_project_id=target.project_id,
+                    originals=originals,
                 )
                 raise
         else:

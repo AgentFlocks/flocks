@@ -3,24 +3,29 @@ Memory Bootstrap - Load memory files at session start
 
 Implements OpenClaw-style memory loading with Hermes-style user profiling:
 1. USER.md - Stable user identity and preferences (auto-injected)
-2. MEMORY.md - Main long-term memory (auto-injected)
-3. memory/daily/YYYY-MM-DD.md - Daily notes for any calendar date
-4. memory_search tool - Search all history
+2. MEMORY.md - Global cross-project memory (auto-injected)
+3. projects/<project_id>/MEMORY.md - Registered Project memory (auto-injected)
+4. daily/YYYY-MM-DD.md - Daily notes for any calendar date
+5. memory_search tool - Search all visible memory and history
 """
 
-from typing import Optional, Dict, Any, List
-from pathlib import Path
 from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
 
+from flocks.memory.paths import (
+    GLOBAL_MEMORY_FILENAME,
+    PROJECT_MEMORY_INITIAL_CONTENT,
+    USER_FILENAME,
+    is_registered_project_id,
+)
 from flocks.utils.file import File
 from flocks.utils.log import Log
 
 log = Log.create(service="memory.bootstrap")
 
 # File names
-MEMORY_FILENAME = "MEMORY.md"
+MEMORY_FILENAME = GLOBAL_MEMORY_FILENAME
 MEMORY_ALT_FILENAME = "memory.md"
-USER_FILENAME = "USER.md"
 
 INITIAL_USER_PROFILE = "# User Profile\n"
 
@@ -30,25 +35,28 @@ MEMORY_INSTRUCTIONS = """
 ## Memory System Guidance
 
 You have access to a persistent memory system for continuity across sessions.
-On-disk memory root (absolute path): `{memory_root}`. The same store is shared across all your sessions.
+On-disk memory root (absolute path): `{memory_root}`.
 
 ### Files Available:
 1. `USER.md` - Stable user profile: identity, preferences, communication style, working habits, and technical level (already injected above)
-2. `MEMORY.md` - Environment facts, project conventions, decisions, and reusable lessons (already injected above)
-3. `daily/YYYY-MM-DD.md` - Daily notes maintained by the session lifecycle and searchable through `memory_search`.
-4. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
+2. `MEMORY.md` - Global cross-project preferences, habits, and reusable rules (already injected above)
+{project_file_instruction}
+4. `daily/YYYY-MM-DD.md` - Daily notes maintained by the session lifecycle and searchable through `memory_search`.
+5. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
 
 ### When to Write Memory:
-- **User profile**: Use `memory(target="user", action=...)` for stable facts about the user
+- **User profile**: Use `memory(scope="global", target="USER.md", action=...)`
 - **Daily notes**: Raw session logs are maintained automatically under `daily/`
-- **Long-term**: Use `memory(target="memory", action=...)` for environment facts, project conventions, decisions, and lessons learned
+- **Global long-term**: Use `memory(scope="global", target="MEMORY.md", action=...)` only for clearly cross-project preferences and reusable rules
+{project_write_instruction}
 - Write memories BEFORE the session ends, especially if important work was done
 - If someone says "remember this", write it down immediately with the `memory` tool
 
 ### Memory Best Practices:
 - Keep `USER.md` about the user, not about individual projects or one-off tasks
 - Use `daily/YYYY-MM-DD.md` for daily logs (system auto-creates if needed)
-- Update `MEMORY.md` for important, lasting information
+- Store project architecture, conventions, decisions, and lessons in Project Memory by default
+- Promote only clearly cross-project information to Global `MEMORY.md`
 - Use `add` for a new entry. For `replace` or `remove`, pass a short unique `old_text` from the existing entry
 - Use `memory_search` tool to find information from all past memories
 - Review old daily files and distill key points into MEMORY.md
@@ -67,14 +75,20 @@ class MemoryBootstrap:
     Uses Flocks' global memory storage: ``<data_dir>/memory`` (see ``Config.get_data_path()``).
     """
     
-    def __init__(self):
-        """Initialize memory bootstrap using global storage"""
+    def __init__(self, project_id: str = "default"):
+        """Initialize Memory bootstrap for a Session project."""
         from flocks.config import Config
-        
-        # Use global data directory (matching Flocks' architecture)
+
+        self.project_id = project_id
+        self.has_project_memory = is_registered_project_id(project_id)
         data_dir = Config.get_data_path()
         self.memory_dir = data_dir / "memory"
         self.daily_dir = self.memory_dir / "daily"
+        self.project_memory_path = (
+            self.memory_dir / "projects" / project_id / MEMORY_FILENAME
+            if self.has_project_memory
+            else None
+        )
     
     async def load_main_memory(self) -> Optional[Dict[str, Any]]:
         """
@@ -143,6 +157,37 @@ class MemoryBootstrap:
             log.warn(
                 "bootstrap.load_user_profile_failed",
                 {"path": str(file_path), "error": str(exc)},
+            )
+            return None
+
+    async def load_project_memory(self) -> Optional[Dict[str, Any]]:
+        """Load the current registered project's MEMORY.md."""
+        if self.project_memory_path is None or not self.project_memory_path.exists():
+            return None
+        try:
+            file_content = await File.read(str(self.project_memory_path))
+            content = (
+                file_content.content
+                if hasattr(file_content, "content")
+                else str(file_content)
+            )
+            if not content:
+                return None
+            relative = f"projects/{self.project_id}/{MEMORY_FILENAME}"
+            log.info(
+                "bootstrap.loaded_project_memory",
+                {"path": relative, "size": len(content)},
+            )
+            return {
+                "path": relative,
+                "abs_path": str(self.project_memory_path),
+                "content": content,
+                "inject": True,
+            }
+        except Exception as exc:
+            log.warn(
+                "bootstrap.load_project_memory_failed",
+                {"path": str(self.project_memory_path), "error": str(exc)},
             )
             return None
     
@@ -232,11 +277,7 @@ class MemoryBootstrap:
         """
         Create memory directory structure if it doesn't exist
         
-        Creates:
-        - .flocks/memory/
-        - .flocks/memory/daily/
-        - .flocks/memory/USER.md (if not exists)
-        - .flocks/memory/MEMORY.md (if not exists)
+        Registered projects also receive ``projects/<project_id>/MEMORY.md``.
         """
         try:
             # Create directories
@@ -274,6 +315,22 @@ This is your curated long-term memory file. Store important information here:
                     "bootstrap.created_user_profile",
                     {"path": USER_FILENAME},
                 )
+
+            if self.project_memory_path is not None:
+                self.project_memory_path.parent.mkdir(parents=True, exist_ok=True)
+                if not self.project_memory_path.exists():
+                    self.project_memory_path.write_text(
+                        PROJECT_MEMORY_INITIAL_CONTENT,
+                        encoding="utf-8",
+                    )
+                    log.info(
+                        "bootstrap.created_project_memory",
+                        {
+                            "path": (
+                                f"projects/{self.project_id}/{MEMORY_FILENAME}"
+                            )
+                        },
+                    )
             
             log.info("bootstrap.structure_ready", {
                 "memory_dir": str(self.memory_dir),
@@ -314,6 +371,34 @@ This is your curated long-term memory file. Store important information here:
 
         memory_root = (Config.get_data_path() / "memory").resolve()
         instructions = MEMORY_INSTRUCTIONS.replace("{memory_root}", str(memory_root))
+        if self.has_project_memory:
+            project_file_instruction = (
+                "3. `projects/"
+                f"{self.project_id}/MEMORY.md` - Current project facts, "
+                "conventions, decisions, and lessons (already injected above)"
+            )
+            project_write_instruction = (
+                "- **Project long-term**: Use "
+                '`memory(scope="project", target="MEMORY.md", action=...)` '
+                "for current project facts, conventions, decisions, and lessons"
+            )
+        else:
+            project_file_instruction = (
+                "3. Project Memory is unavailable because this is not a registered "
+                "project Session"
+            )
+            project_write_instruction = (
+                "- **Project long-term**: unavailable in this default Session; "
+                "do not store project-only facts in Global Memory"
+            )
+        instructions = instructions.replace(
+            "{project_file_instruction}",
+            project_file_instruction,
+        )
+        instructions = instructions.replace(
+            "{project_write_instruction}",
+            project_write_instruction,
+        )
         instructions = instructions.replace("{today}", today)
         instructions = instructions.replace("{yesterday}", yesterday)
 
@@ -342,9 +427,10 @@ This is your curated long-term memory file. Store important information here:
         today_str = now.strftime("%Y-%m-%d")
         yesterday_str = (now - timedelta(days=1)).strftime("%Y-%m-%d")
         
-        result = {
+        result: Dict[str, Any] = {
             "main_memory": None,
             "user_profile": None,
+            "project_memory": None,
             "daily_memories": [],
             "instructions": self.get_agent_instructions(today=today_str, yesterday=yesterday_str),
             "today": today_str,
@@ -355,6 +441,7 @@ This is your curated long-term memory file. Store important information here:
             main = await self.load_main_memory()
             result["main_memory"] = main
             result["user_profile"] = await self.load_user_profile()
+            result["project_memory"] = await self.load_project_memory()
         
         if load_daily:
             dailies = await self.load_daily_memories(days_back=days_back, today=today_str)
@@ -363,6 +450,7 @@ This is your curated long-term memory file. Store important information here:
         log.info("bootstrap.complete", {
             "has_main": result["main_memory"] is not None,
             "has_user_profile": result["user_profile"] is not None,
+            "has_project_memory": result["project_memory"] is not None,
             "daily_count": len(result["daily_memories"]),
         })
         

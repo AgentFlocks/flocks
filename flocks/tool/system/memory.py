@@ -65,7 +65,10 @@ def evict_session_memory(session_id: str) -> None:
 
 @ToolRegistry.register_function(
     name="memory_search",
-    description="Search project memory using a natural language query.",
+    description=(
+        "Search persistent memory globally across Global, Daily, and all "
+        "Project Memory files using a natural language query."
+    ),
     category=ToolCategory.SEARCH,
     parameters=[
         ToolParameter(
@@ -146,18 +149,25 @@ async def memory_search_tool(
 @ToolRegistry.register_function(
     name="memory",
     description=(
-        "Manage persistent curated memory. Use target='user' for stable user "
-        "identity/preferences and target='memory' for durable project knowledge. "
-        "The current snapshots are already present in the system prompt."
+        "Manage persistent curated memory. Use global USER.md for stable user "
+        "identity/preferences, global MEMORY.md for cross-project rules, and "
+        "project MEMORY.md for current project facts and decisions."
     ),
     category=ToolCategory.FILE,
     parameters=[
         ToolParameter(
+            name="scope",
+            type=ParameterType.STRING,
+            description="Visibility scope for the memory.",
+            required=True,
+            enum=["global", "project"],
+        ),
+        ToolParameter(
             name="target",
             type=ParameterType.STRING,
-            description="Curated store to update.",
+            description="Curated file to update: USER.md or MEMORY.md.",
             required=True,
-            enum=["user", "memory"],
+            enum=["USER.md", "MEMORY.md"],
         ),
         ToolParameter(
             name="action",
@@ -185,6 +195,7 @@ async def memory_search_tool(
 )
 async def memory_tool(
     ctx: ToolContext,
+    scope: str,
     target: str,
     action: str,
     content: Optional[str] = None,
@@ -200,7 +211,8 @@ async def memory_tool(
 
     try:
         output = await manager.update_curated_memory(
-            target=target,
+            scope=scope,
+            path=target,
             action=action,
             content=content,
             old_text=old_text,

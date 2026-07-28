@@ -11,7 +11,7 @@ from flocks.memory.manager import MemoryManager
 @pytest.fixture
 def manager(tmp_path):
     return MemoryManager(
-        project_id="test",
+        project_id="prj_test",
         workspace_dir=str(tmp_path),
         config=MemoryConfig(),
     )
@@ -21,23 +21,27 @@ def manager(tmp_path):
 async def test_add_replace_remove_curated_entry(manager, tmp_path) -> None:
     with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
         added = await manager.update_curated_memory(
-            target="user",
+            scope="global",
+            path="USER.md",
             action="add",
             content="Prefers concise answers.",
         )
         duplicate = await manager.update_curated_memory(
-            target="user",
+            scope="global",
+            path="USER.md",
             action="add",
             content="Prefers concise answers.",
         )
         replaced = await manager.update_curated_memory(
-            target="user",
+            scope="global",
+            path="USER.md",
             action="replace",
             old_text="concise",
             content="Prefers answers with examples.",
         )
         removed = await manager.update_curated_memory(
-            target="user",
+            scope="global",
+            path="USER.md",
             action="remove",
             old_text="with examples",
         )
@@ -59,7 +63,8 @@ async def test_replace_rejects_ambiguous_old_text(manager, tmp_path) -> None:
         pytest.raises(ValueError, match="matched multiple entries"),
     ):
         await manager.update_curated_memory(
-            target="memory",
+            scope="global",
+            path="MEMORY.md",
             action="replace",
             old_text="Uses Python",
             content="Uses uv-managed Python.",
@@ -77,7 +82,8 @@ async def test_replace_entry_under_markdown_heading(manager, tmp_path) -> None:
 
     with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
         result = await manager.update_curated_memory(
-            target="memory",
+            scope="global",
+            path="MEMORY.md",
             action="replace",
             old_text="Uses Python",
             content="- Uses uv-managed Python.",
@@ -86,3 +92,74 @@ async def test_replace_entry_under_markdown_heading(manager, tmp_path) -> None:
     assert result["content"] == (
         "# Long-Term Memory\n\n## Preferences\n- Uses uv-managed Python.\n"
     )
+
+
+@pytest.mark.asyncio
+async def test_project_memory_uses_current_registered_project(
+    manager,
+    tmp_path,
+) -> None:
+    with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
+        result = await manager.update_curated_memory(
+            scope="project",
+            path="memory.MD",
+            action="add",
+            content="- Uses Ruff",
+        )
+
+    project_path = (
+        tmp_path / "memory" / "projects" / "prj_test" / "MEMORY.md"
+    )
+    assert project_path.read_text(encoding="utf-8") == "- Uses Ruff\n"
+    assert result["scope"] == "project"
+    assert result["path"] == "MEMORY.md"
+
+
+@pytest.mark.asyncio
+async def test_project_user_and_default_project_are_rejected(tmp_path) -> None:
+    registered = MemoryManager(
+        project_id="prj_test",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(),
+    )
+    default = MemoryManager(
+        project_id="default",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(),
+    )
+
+    with (
+        patch("flocks.config.Config.get_data_path", return_value=tmp_path),
+        pytest.raises(ValueError, match="project scope only supports"),
+    ):
+        await registered.update_curated_memory(
+            scope="project",
+            path="USER.md",
+            action="add",
+            content="invalid",
+        )
+
+    with (
+        patch("flocks.config.Config.get_data_path", return_value=tmp_path),
+        pytest.raises(ValueError, match="registered prj_"),
+    ):
+        await default.update_curated_memory(
+            scope="project",
+            path="MEMORY.md",
+            action="add",
+            content="invalid",
+        )
+
+
+@pytest.mark.asyncio
+async def test_curated_memory_rejects_noncanonical_paths(manager, tmp_path) -> None:
+    with (
+        patch("flocks.config.Config.get_data_path", return_value=tmp_path),
+        pytest.raises(ValueError, match="USER.md or MEMORY.md"),
+    ):
+        await manager.update_curated_memory(
+            scope="global",
+            path="../MEMORY.md",
+            action="add",
+            content="invalid",
+        )

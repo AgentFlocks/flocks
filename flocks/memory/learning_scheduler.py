@@ -9,6 +9,8 @@ from typing import Optional
 from flocks.config import Config
 from flocks.memory.config import MemoryConfig
 from flocks.memory.learning import (
+    DreamTarget,
+    list_dream_targets,
     recover_pending_skill_proposals,
     run_dream_bridge,
 )
@@ -27,7 +29,7 @@ class MemoryLearningScheduler:
     """Run due Dream batches without blocking request or Session lifecycles."""
 
     _task: Optional[asyncio.Task[None]] = None
-    _retry_after_ts: float = 0
+    _retry_after_by_target: dict[str, float] = {}
 
     @classmethod
     async def start(cls) -> None:
@@ -48,7 +50,7 @@ class MemoryLearningScheduler:
         except asyncio.CancelledError:
             pass
         cls._task = None
-        cls._retry_after_ts = 0
+        cls._retry_after_by_target.clear()
 
     @classmethod
     async def _run_loop(cls) -> None:
@@ -81,12 +83,10 @@ class MemoryLearningScheduler:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
-                cls._retry_after_ts = time.time() + _FAILURE_RETRY_SECONDS
                 log.warn(
                     "memory.learning.scheduler_tick_failed",
                     {
                         "error": str(exc),
-                        "retry_after_ts": cls._retry_after_ts,
                     },
                 )
             await asyncio.sleep(_TICK_SECONDS)
@@ -94,8 +94,6 @@ class MemoryLearningScheduler:
     @classmethod
     async def _tick_once(cls, now_ts: Optional[float] = None) -> None:
         now = time.time() if now_ts is None else now_ts
-        if now < cls._retry_after_ts:
-            return
         app_config = await Config.get()
         config = getattr(app_config, "memory", None)
         if not isinstance(config, MemoryConfig):
@@ -103,40 +101,62 @@ class MemoryLearningScheduler:
         if not config.enabled or not config.learning.enabled or not config.learning.dream.enabled:
             return
 
-        raw_last_success = await Storage.get(_LAST_SUCCESS_KEY)
-        last_success = float(raw_last_success) if raw_last_success else None
         interval_seconds = config.learning.dream.interval_hours * 60 * 60
-        if last_success is not None and now - last_success < interval_seconds:
-            return
+        for target in await list_dream_targets():
+            target_key = target.scheduler_key
+            retry_after = cls._retry_after_by_target.get(target_key, 0)
+            if now < retry_after:
+                continue
+            success_key = cls._last_success_key(target)
+            raw_last_success = await Storage.get(success_key)
+            last_success = (
+                float(raw_last_success) if raw_last_success else None
+            )
+            if (
+                last_success is not None
+                and now - last_success < interval_seconds
+            ):
+                continue
 
-        try:
-            result = await run_dream_bridge()
-            cls._retry_after_ts = 0
-            if result.backlog:
+            try:
+                result = await run_dream_bridge(target)
+                cls._retry_after_by_target.pop(target_key, None)
+                if result.backlog:
+                    log.info(
+                        "memory.learning.dream_backlog",
+                        {
+                            "target": target_key,
+                            "processed_sources": result.processed_sources,
+                            "changed": result.changed,
+                        },
+                    )
+                    continue
+                await Storage.set(success_key, now, "number")
                 log.info(
-                    "memory.learning.dream_backlog",
+                    "memory.learning.dream_complete",
                     {
+                        "target": target_key,
                         "processed_sources": result.processed_sources,
                         "changed": result.changed,
                     },
                 )
-                return
-            await Storage.set(_LAST_SUCCESS_KEY, now, "number")
-            log.info(
-                "memory.learning.dream_complete",
-                {
-                    "processed_sources": result.processed_sources,
-                    "changed": result.changed,
-                },
-            )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            cls._retry_after_ts = now + _FAILURE_RETRY_SECONDS
-            log.warn(
-                "memory.learning.dream_failed",
-                {
-                    "error": str(exc),
-                    "retry_after_ts": cls._retry_after_ts,
-                },
-            )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                retry_after = now + _FAILURE_RETRY_SECONDS
+                cls._retry_after_by_target[target_key] = retry_after
+                log.warn(
+                    "memory.learning.dream_failed",
+                    {
+                        "target": target_key,
+                        "error": str(exc),
+                        "retry_after_ts": retry_after,
+                    },
+                )
+
+    @staticmethod
+    def _last_success_key(target: DreamTarget) -> str:
+        """Preserve the legacy Global cursor while isolating Project cadence."""
+        if target.scope.value == "global":
+            return _LAST_SUCCESS_KEY
+        return f"{_LAST_SUCCESS_KEY}:{target.scope.value}:{target.scope_id}"

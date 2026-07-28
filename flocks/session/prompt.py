@@ -950,10 +950,19 @@ class SessionPrompt:
             if memory_content:
                 prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
 
+        project_memory = memory_bootstrap_data.get("project_memory")
+        if project_memory and project_memory.get("inject"):
+            project_content = project_memory.get("content", "")
+            if project_content:
+                prompts.append(
+                    f"## {project_memory['path']}\n\n{project_content}"
+                )
+
         log.debug("prompt.memory_injected", {
             "session_id": session_id,
             "has_user_profile": user_profile is not None,
             "has_main": main_memory is not None,
+            "has_project": project_memory is not None,
         })
         return prompts
 

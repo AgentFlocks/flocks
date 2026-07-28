@@ -148,6 +148,35 @@ class TestMemoryBootstrap:
         assert result["path"] == "USER.md"
         assert result["inject"] is True
         assert "User Profile" in result["content"]
+
+    @pytest.mark.asyncio
+    async def test_registered_project_creates_and_loads_project_memory(self):
+        """Registered Sessions use a shared user-data Project Memory file."""
+        bootstrap = MemoryBootstrap(project_id="prj_scope_test")
+
+        result = await bootstrap.bootstrap(load_daily=False)
+
+        project_path = (
+            bootstrap.memory_dir
+            / "projects"
+            / "prj_scope_test"
+            / "MEMORY.md"
+        )
+        assert project_path.read_text(encoding="utf-8") == "# Project Memory\n"
+        assert result["project_memory"]["path"] == (
+            "projects/prj_scope_test/MEMORY.md"
+        )
+        assert result["project_memory"]["inject"] is True
+
+    @pytest.mark.asyncio
+    async def test_default_session_does_not_create_project_memory(self):
+        """Default Sessions remain Global-only."""
+        bootstrap = MemoryBootstrap(project_id="default")
+
+        result = await bootstrap.bootstrap(load_daily=False)
+
+        assert result["project_memory"] is None
+        assert not (bootstrap.memory_dir / "projects" / "default").exists()
     
     def test_get_daily_memory_paths(self):
         """Test daily memory path generation"""

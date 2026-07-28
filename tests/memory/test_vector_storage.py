@@ -113,8 +113,9 @@ async def test_vector_storage():
             chunks = [
                 {
                     "id": "chunk1",
+                    "scope": "project",
+                    "scope_id": "prj_test_proj",
                     "path": "test.md",
-                    "project_id": "test_proj",
                     "source": "memory",
                     "start_line": 1,
                     "end_line": 5,
@@ -126,8 +127,9 @@ async def test_vector_storage():
                 },
                 {
                     "id": "chunk2",
+                    "scope": "project",
+                    "scope_id": "prj_test_proj",
                     "path": "test.md",
-                    "project_id": "test_proj",
                     "source": "memory",
                     "start_line": 6,
                     "end_line": 10,
@@ -139,8 +141,9 @@ async def test_vector_storage():
                 },
                 {
                     "id": "chunk3",
+                    "scope": "project",
+                    "scope_id": "prj_test_proj",
                     "path": "test.md",
-                    "project_id": "test_proj",
                     "source": "memory",
                     "start_line": 11,
                     "end_line": 15,
@@ -161,7 +164,7 @@ async def test_vector_storage():
             query_embedding = [0.95, 0.48, 0.22, 0.12]
             results = await vector_search(
                 db_path=db_path,
-                project_id="test_proj",
+                project_id="prj_test_proj",
                 embedding=query_embedding,
                 max_results=2,
                 min_score=0.0,

@@ -10,6 +10,7 @@ from flocks.hooks.builtin.session_learning import SessionLearningHook
 from flocks.hooks.pipeline import HookContext, HookStage
 from flocks.memory.config import MemoryConfig
 from flocks.memory.learning import (
+    DreamTarget,
     LearningCheckpointStore,
     SkillProposalStore,
     SourceSnapshot,
@@ -25,6 +26,7 @@ from flocks.memory.learning import (
     recover_pending_skill_proposals,
     run_dream_bridge,
 )
+from flocks.memory.types import MemoryScope
 from flocks.memory.learning_scheduler import (
     MemoryLearningScheduler,
     _LAST_SUCCESS_KEY,
@@ -158,17 +160,40 @@ def test_memory_operations_apply_structured_changes_and_deduplicate() -> None:
         "action": "update",
         "operations": [
             {
+                "scope": "global",
+                "path": "MEMORY.md",
                 "type": "replace",
                 "old": "- editor: vim",
                 "new": "- editor: neovim",
             },
-            {"type": "remove", "old": "- stale fact"},
-            {"type": "add", "content": "- language: Python"},
-            {"type": "add", "content": "- language: Python"},
+            {
+                "scope": "global",
+                "path": "MEMORY.md",
+                "type": "remove",
+                "old": "- stale fact",
+            },
+            {
+                "scope": "global",
+                "path": "MEMORY.md",
+                "type": "add",
+                "content": "- language: Python",
+            },
+            {
+                "scope": "global",
+                "path": "MEMORY.md",
+                "type": "add",
+                "content": "- language: Python",
+            },
         ],
     }
 
-    updated = _apply_memory_operations(current, response)
+    updated = _apply_memory_operations(
+        current,
+        response,
+        dream_target=DreamTarget.global_only(),
+        file_scope=MemoryScope.GLOBAL,
+        path="MEMORY.md",
+    )
 
     assert "- editor: neovim" in updated
     assert "- stale fact" not in updated
@@ -181,9 +206,17 @@ def test_memory_add_does_not_treat_substring_as_duplicate() -> None:
         {
             "action": "update",
             "operations": [
-                {"type": "add", "content": "- language: Python"},
+                {
+                    "scope": "global",
+                    "path": "MEMORY.md",
+                    "type": "add",
+                    "content": "- language: Python",
+                },
             ],
         },
+        dream_target=DreamTarget.global_only(),
+        file_scope=MemoryScope.GLOBAL,
+        path="MEMORY.md",
     )
 
     assert updated.splitlines() == [
@@ -198,12 +231,14 @@ def test_memory_operations_route_user_profile_separately() -> None:
         "action": "update",
         "operations": [
             {
-                "target": "user",
+                "scope": "global",
+                "path": "USER.md",
                 "type": "add",
                 "content": "- Prefers concise answers",
             },
             {
-                "target": "memory",
+                "scope": "global",
+                "path": "MEMORY.md",
                 "type": "add",
                 "content": "- Project uses Ruff",
             },
@@ -213,17 +248,53 @@ def test_memory_operations_route_user_profile_separately() -> None:
     updated_user = _apply_memory_operations(
         "# User Profile\n",
         response,
-        target="user",
+        dream_target=DreamTarget.global_only(),
+        file_scope=MemoryScope.GLOBAL,
+        path="USER.md",
     )
     updated_memory = _apply_memory_operations(
         "# Long-Term Memory\n",
         response,
-        target="memory",
+        dream_target=DreamTarget.global_only(),
+        file_scope=MemoryScope.GLOBAL,
+        path="MEMORY.md",
     )
 
     assert "Prefers concise answers" in updated_user
     assert "Project uses Ruff" not in updated_user
     assert "Project uses Ruff" in updated_memory
+
+
+def test_project_dream_routes_project_memory_and_global_only_rejects_it() -> None:
+    response = {
+        "action": "update",
+        "operations": [
+            {
+                "scope": "project",
+                "path": "MEMORY.md",
+                "type": "add",
+                "content": "- Project uses Ruff",
+            }
+        ],
+    }
+
+    updated = _apply_memory_operations(
+        "# Project Memory\n",
+        response,
+        dream_target=DreamTarget.project("prj_test"),
+        file_scope=MemoryScope.PROJECT,
+        path="MEMORY.md",
+    )
+
+    assert "Project uses Ruff" in updated
+    with pytest.raises(ValueError, match="Global-only"):
+        _apply_memory_operations(
+            "# Long-Term Memory\n",
+            response,
+            dream_target=DreamTarget.global_only(),
+            file_scope=MemoryScope.GLOBAL,
+            path="MEMORY.md",
+        )
 
 
 def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
@@ -237,6 +308,11 @@ def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
             },
             "main_memory": {
                 "path": "MEMORY.md",
+                "content": "Uses concise commits globally.",
+                "inject": True,
+            },
+            "project_memory": {
+                "path": "projects/prj_test/MEMORY.md",
                 "content": "Project uses Ruff.",
                 "inject": True,
             },
@@ -245,7 +321,8 @@ def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
 
     assert prompts == [
         "## USER.md\n\nPrefers concise answers.",
-        "## MEMORY.md\n\nProject uses Ruff.",
+        "## MEMORY.md\n\nUses concise commits globally.",
+        "## projects/prj_test/MEMORY.md\n\nProject uses Ruff.",
     ]
 
 
@@ -360,6 +437,87 @@ def test_daily_delta_uses_appended_suffix_and_detects_rewrite(
     assert rewritten.line_count == 1
 
 
+def test_daily_delta_filters_mapped_session_sections_by_target(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "2026-01-01.md"
+    path.write_text(
+        "# Daily Memory - 2026-01-01\n"
+        "\n## Session ses_alpha_123456… (date)\n\nalpha note\n"
+        "\n## Session ses_beta_1234567… (date)\n\nbeta note\n"
+        "\n## Session unknown_12345678… (date)\n\nunknown note\n",
+        encoding="utf-8",
+    )
+
+    snapshot, backlog = _daily_delta(
+        path,
+        None,
+        max_chars=10_000,
+        scope=MemoryScope.PROJECT,
+        scope_id="prj_alpha",
+        allowed_session_ids={"ses_alpha_123456789"},
+        session_prefixes={
+            "ses_alpha_123456": "ses_alpha_123456789",
+            "ses_beta_1234567": "ses_beta_123456789",
+            "unknown_12345678": None,
+        },
+    )
+
+    assert snapshot is not None
+    assert "alpha note" in snapshot.content
+    assert "beta note" not in snapshot.content
+    assert "unknown note" not in snapshot.content
+    assert snapshot.scope == MemoryScope.PROJECT
+    assert snapshot.scope_id == "prj_alpha"
+    assert snapshot.line_count == len(
+        path.read_text(encoding="utf-8").splitlines(keepends=True)
+    )
+    assert backlog is False
+
+
+@pytest.mark.asyncio
+async def test_checkpoint_cursors_are_independent_by_scope(
+    tmp_path: Path,
+) -> None:
+    await Storage.init(tmp_path / "checkpoint-scope.db")
+    global_source = SourceSnapshot(
+        source_type="session",
+        source_key="ses_shared",
+        content="global",
+        content_hash="global-hash",
+        line_count=1,
+        last_message_id="msg_global",
+    )
+    project_source = SourceSnapshot(
+        source_type="session",
+        source_key="ses_shared",
+        content="project",
+        content_hash="project-hash",
+        line_count=1,
+        scope=MemoryScope.PROJECT,
+        scope_id="prj_test",
+        last_message_id="msg_project",
+    )
+
+    await LearningCheckpointStore.commit("dream", [global_source])
+    await LearningCheckpointStore.commit("dream", [project_source])
+
+    global_row = await LearningCheckpointStore.get(
+        "dream",
+        "session",
+        "ses_shared",
+    )
+    project_row = await LearningCheckpointStore.get(
+        "dream",
+        "session",
+        "ses_shared",
+        scope=MemoryScope.PROJECT,
+        scope_id="prj_test",
+    )
+    assert global_row["last_message_id"] == "msg_global"
+    assert project_row["last_message_id"] == "msg_project"
+
+
 @pytest.mark.asyncio
 async def test_dream_bridge_updates_both_files_and_commits_cursors(
     tmp_path: Path,
@@ -382,12 +540,14 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         "action": "update",
         "operations": [
             {
-                "target": "memory",
+                "scope": "global",
+                "path": "MEMORY.md",
                 "type": "add",
                 "content": "- Project uses Ruff",
             },
             {
-                "target": "user",
+                "scope": "global",
+                "path": "USER.md",
                 "type": "add",
                 "content": "- Prefers concise answers",
             },
@@ -440,6 +600,107 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
 
 
 @pytest.mark.asyncio
+async def test_project_dream_updates_project_and_global_user_memory(
+    tmp_path: Path,
+) -> None:
+    await Storage.init(tmp_path / "project-dream.db")
+    memory_root = tmp_path / "memory"
+    project_path = memory_root / "projects" / "prj_test" / "MEMORY.md"
+    project_path.parent.mkdir(parents=True)
+    (memory_root / "MEMORY.md").write_text(
+        "# Global Memory\n",
+        encoding="utf-8",
+    )
+    (memory_root / "USER.md").write_text("# User\n", encoding="utf-8")
+    project_path.write_text("# Project Memory\n", encoding="utf-8")
+    source = SourceSnapshot(
+        source_type="session",
+        source_key="ses_project",
+        content="user: project uses Ruff",
+        content_hash="delta",
+        line_count=1,
+        scope=MemoryScope.PROJECT,
+        scope_id="prj_test",
+        last_message_id="msg_project",
+    )
+    response = {
+        "action": "update",
+        "operations": [
+            {
+                "scope": "project",
+                "path": "MEMORY.md",
+                "type": "add",
+                "content": "- Project uses Ruff",
+            },
+            {
+                "scope": "global",
+                "path": "USER.md",
+                "type": "add",
+                "content": "- Prefers concise answers",
+            },
+        ],
+    }
+
+    with (
+        patch(
+            "flocks.memory.learning.Config.get",
+            new=AsyncMock(
+                return_value=SimpleNamespace(memory=MemoryConfig())
+            ),
+        ),
+        patch(
+            "flocks.memory.learning.Config.resolve_default_llm",
+            new=AsyncMock(
+                return_value={
+                    "provider_id": "test-provider",
+                    "model_id": "test-model",
+                }
+            ),
+        ),
+        patch(
+            "flocks.memory.learning.Config.get_data_path",
+            return_value=tmp_path,
+        ),
+        patch(
+            "flocks.memory.learning._collect_dream_sources",
+            new=AsyncMock(
+                return_value=(
+                    [source],
+                    False,
+                    [("prj_test", "/workspace")],
+                )
+            ),
+        ),
+        patch(
+            "flocks.memory.learning._chat_json",
+            new=AsyncMock(return_value=response),
+        ),
+        patch(
+            "flocks.memory.learning._sync_memory_indexes",
+            new=AsyncMock(),
+        ),
+    ):
+        result = await run_dream_bridge(DreamTarget.project("prj_test"))
+
+    assert result.changed is True
+    assert "Project uses Ruff" in project_path.read_text(encoding="utf-8")
+    assert "Project uses Ruff" not in (
+        memory_root / "MEMORY.md"
+    ).read_text(encoding="utf-8")
+    assert "Prefers concise answers" in (
+        memory_root / "USER.md"
+    ).read_text(encoding="utf-8")
+    checkpoint = await LearningCheckpointStore.get(
+        "dream",
+        "session",
+        "ses_project",
+        scope=MemoryScope.PROJECT,
+        scope_id="prj_test",
+    )
+    assert checkpoint["last_message_id"] == "msg_project"
+
+
+@pytest.mark.asyncio
 async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
     tmp_path: Path,
 ) -> None:
@@ -463,12 +724,14 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
         "action": "update",
         "operations": [
             {
-                "target": "memory",
+                "scope": "global",
+                "path": "MEMORY.md",
                 "type": "add",
                 "content": "- new memory",
             },
             {
-                "target": "user",
+                "scope": "global",
+                "path": "USER.md",
                 "type": "add",
                 "content": "- new user",
             },
@@ -538,7 +801,8 @@ async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
         "action": "update",
         "operations": [
             {
-                "target": "memory",
+                "scope": "global",
+                "path": "MEMORY.md",
                 "type": "add",
                 "content": "- new memory",
             }
@@ -1113,7 +1377,7 @@ async def test_scheduler_runs_due_dream_and_persists_success(
         processed_sources=0,
         backlog=False,
     )
-    MemoryLearningScheduler._retry_after_ts = 0
+    MemoryLearningScheduler._retry_after_by_target.clear()
 
     with (
         patch(
@@ -1124,11 +1388,15 @@ async def test_scheduler_runs_due_dream_and_persists_success(
             "flocks.memory.learning_scheduler.run_dream_bridge",
             new=AsyncMock(return_value=result),
         ) as run,
+        patch(
+            "flocks.memory.learning_scheduler.list_dream_targets",
+            new=AsyncMock(return_value=[DreamTarget.global_only()]),
+        ),
     ):
         await MemoryLearningScheduler._tick_once(now_ts=1_000)
         await MemoryLearningScheduler._tick_once(now_ts=1_001)
 
-    run.assert_awaited_once()
+    run.assert_awaited_once_with(DreamTarget.global_only())
     assert await Storage.get(_LAST_SUCCESS_KEY) == 1_000
 
 
@@ -1150,7 +1418,7 @@ async def test_scheduler_retries_backlog_without_advancing_interval(
         processed_sources=1,
         backlog=True,
     )
-    MemoryLearningScheduler._retry_after_ts = 0
+    MemoryLearningScheduler._retry_after_by_target.clear()
 
     with (
         patch(
@@ -1161,6 +1429,10 @@ async def test_scheduler_retries_backlog_without_advancing_interval(
             "flocks.memory.learning_scheduler.run_dream_bridge",
             new=AsyncMock(return_value=result),
         ) as run,
+        patch(
+            "flocks.memory.learning_scheduler.list_dream_targets",
+            new=AsyncMock(return_value=[DreamTarget.global_only()]),
+        ),
     ):
         await MemoryLearningScheduler._tick_once(now_ts=1_000)
         await MemoryLearningScheduler._tick_once(now_ts=1_060)
@@ -1175,7 +1447,7 @@ async def test_scheduler_waits_fifteen_minutes_after_failure(
 ) -> None:
     await Storage.init(tmp_path / "scheduler-failure.db")
     config = MemoryConfig()
-    MemoryLearningScheduler._retry_after_ts = 0
+    MemoryLearningScheduler._retry_after_by_target.clear()
 
     with (
         patch(
@@ -1186,9 +1458,60 @@ async def test_scheduler_waits_fifteen_minutes_after_failure(
             "flocks.memory.learning_scheduler.run_dream_bridge",
             new=AsyncMock(side_effect=RuntimeError("provider unavailable")),
         ) as run,
+        patch(
+            "flocks.memory.learning_scheduler.list_dream_targets",
+            new=AsyncMock(return_value=[DreamTarget.global_only()]),
+        ),
     ):
         await MemoryLearningScheduler._tick_once(now_ts=1_000)
         await MemoryLearningScheduler._tick_once(now_ts=1_899)
         await MemoryLearningScheduler._tick_once(now_ts=1_900)
 
     assert run.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_scheduler_isolates_project_target_failures(
+    tmp_path: Path,
+) -> None:
+    await Storage.init(tmp_path / "scheduler-targets.db")
+    config = MemoryConfig()
+    global_target = DreamTarget.global_only()
+    project_target = DreamTarget.project("prj_test")
+    MemoryLearningScheduler._retry_after_by_target.clear()
+
+    async def run(target: DreamTarget) -> SimpleNamespace:
+        if target == global_target:
+            raise RuntimeError("global unavailable")
+        return SimpleNamespace(
+            changed=True,
+            processed_sources=1,
+            backlog=False,
+        )
+
+    with (
+        patch(
+            "flocks.memory.learning_scheduler.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace(memory=config)),
+        ),
+        patch(
+            "flocks.memory.learning_scheduler.list_dream_targets",
+            new=AsyncMock(return_value=[global_target, project_target]),
+        ),
+        patch(
+            "flocks.memory.learning_scheduler.run_dream_bridge",
+            new=AsyncMock(side_effect=run),
+        ) as bridge,
+    ):
+        await MemoryLearningScheduler._tick_once(now_ts=1_000)
+
+    assert bridge.await_args_list[0].args == (global_target,)
+    assert bridge.await_args_list[1].args == (project_target,)
+    assert (
+        MemoryLearningScheduler._retry_after_by_target[
+            global_target.scheduler_key
+        ]
+        == 1_900
+    )
+    project_key = MemoryLearningScheduler._last_success_key(project_target)
+    assert await Storage.get(project_key) == 1_000

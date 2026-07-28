@@ -16,8 +16,9 @@ def test_memory_tool_replaces_legacy_read_write_tools() -> None:
     assert "memory_get" not in tools
     assert "memory_write" not in tools
     schema = tools["memory"].get_schema().to_json_schema()
-    assert schema["required"] == ["target", "action"]
-    assert schema["properties"]["target"]["enum"] == ["user", "memory"]
+    assert schema["required"] == ["scope", "target", "action"]
+    assert schema["properties"]["scope"]["enum"] == ["global", "project"]
+    assert schema["properties"]["target"]["enum"] == ["USER.md", "MEMORY.md"]
     assert schema["properties"]["action"]["enum"] == ["add", "replace", "remove"]
 
 
@@ -26,7 +27,7 @@ async def test_memory_tool_delegates_curated_operation() -> None:
     manager = SimpleNamespace(
         update_curated_memory=AsyncMock(
             return_value={
-                "target": "user",
+                "scope": "global",
                 "action": "add",
                 "path": "USER.md",
                 "changed": True,
@@ -41,14 +42,16 @@ async def test_memory_tool_delegates_curated_operation() -> None:
     ):
         result = await memory_tool(
             ToolContext(session_id="ses_test", message_id="msg_test"),
-            target="user",
+            scope="global",
+            target="USER.md",
             action="add",
             content="Prefers concise answers.",
         )
 
     assert result.success is True
     manager.update_curated_memory.assert_awaited_once_with(
-        target="user",
+        scope="global",
+        path="USER.md",
         action="add",
         content="Prefers concise answers.",
         old_text=None,
@@ -70,7 +73,8 @@ async def test_memory_tool_returns_validation_error() -> None:
     ):
         result = await memory_tool(
             ToolContext(session_id="ses_test", message_id="msg_test"),
-            target="memory",
+            scope="global",
+            target="MEMORY.md",
             action="remove",
         )
 

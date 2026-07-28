@@ -15,6 +15,7 @@ from flocks.memory.daily import DailyMemory
 from flocks.memory.flush import MemoryFlush, extract_and_save
 
 from flocks.memory.types import (
+    MemoryScope,
     MemorySource,
     MemorySearchResult,
     MemorySyncProgress,
@@ -57,6 +58,7 @@ __all__ = [
     "extract_and_save",
     
     # Types
+    "MemoryScope",
     "MemorySource",
     "MemorySearchResult",
     "MemorySyncProgress",

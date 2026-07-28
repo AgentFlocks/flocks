@@ -20,8 +20,10 @@ from flocks.memory.types import (
     MemorySyncProgress,
 )
 from flocks.memory.config import MemoryConfig
+from flocks.memory.paths import memory_file_path, scope_id_for, validate_scope_path
 from flocks.memory.search.hybrid import HybridSearch, decorate_citations
 from flocks.memory.sync.indexer import MemoryIndexer
+from flocks.memory.types import MemoryScope
 from flocks.utils.log import Log
 
 log = Log.create(service="memory.manager")
@@ -212,6 +214,9 @@ class MemoryManager:
                 )
                 
                 self._initialized = True
+                if self.config.sync.on_session_start:
+                    await self.indexer.sync()
+                    self._dirty = False
                 if (
                     "session" in self.config.sources
                     and self.config.sync.sessions.enabled
@@ -224,6 +229,7 @@ class MemoryManager:
                 })
             
             except Exception as e:
+                self._initialized = False
                 log.error("manager.init.failed", {"error": str(e)})
                 raise
     
@@ -452,17 +458,21 @@ class MemoryManager:
     async def update_curated_memory(
         self,
         *,
-        target: Literal["user", "memory"],
+        scope: Literal["global", "project"],
+        path: str,
         action: Literal["add", "replace", "remove"],
         content: Optional[str] = None,
         old_text: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Mutate USER.md or MEMORY.md using Hermes-style entry operations."""
+        """Mutate a scoped curated Memory file using entry operations."""
         from flocks.config import Config
 
-        filenames = {"user": "USER.md", "memory": "MEMORY.md"}
-        if target not in filenames:
-            raise ValueError(f"Unsupported memory target: {target}")
+        try:
+            memory_scope = MemoryScope(scope)
+        except ValueError as exc:
+            raise ValueError(f"Unsupported memory scope: {scope}") from exc
+        normalized_path = validate_scope_path(memory_scope, path)
+        scope_id = scope_id_for(memory_scope, self.project_id)
         if action not in {"add", "replace", "remove"}:
             raise ValueError(f"Unsupported memory action: {action}")
 
@@ -477,9 +487,18 @@ class MemoryManager:
         if action == "add" and clean_old_text:
             raise ValueError("old_text is not allowed for action=add")
 
-        path = Config.get_data_path() / "memory" / filenames[target]
+        file_path = memory_file_path(
+            Config.get_data_path() / "memory",
+            memory_scope,
+            scope_id,
+            normalized_path,
+        )
         async with self._write_lock:
-            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            current = (
+                file_path.read_text(encoding="utf-8")
+                if file_path.exists()
+                else ""
+            )
             changed = True
 
             if action == "add":
@@ -503,11 +522,12 @@ class MemoryManager:
                 ]
                 if not matches:
                     raise ValueError(
-                        f"old_text did not uniquely identify an entry in {filenames[target]}"
+                        "old_text did not uniquely identify an entry in "
+                        f"{normalized_path}"
                     )
                 if len(matches) > 1:
                     raise ValueError(
-                        f"old_text matched multiple entries in {filenames[target]}"
+                        f"old_text matched multiple entries in {normalized_path}"
                     )
                 if action == "replace":
                     lines[matches[0]] = clean_content
@@ -517,21 +537,26 @@ class MemoryManager:
                 if updated:
                     updated += "\n"
             if changed:
-                _atomic_write_text(path, updated)
+                _atomic_write_text(file_path, updated)
                 self._dirty = True
+                if memory_scope == MemoryScope.GLOBAL:
+                    for manager in self._instances.values():
+                        manager._dirty = True
 
         log.info(
             "manager.curated_memory.update",
             {
-                "target": target,
+                "scope": memory_scope.value,
+                "scope_id": scope_id,
+                "path": normalized_path,
                 "action": action,
                 "changed": changed,
             },
         )
         return {
-            "target": target,
+            "scope": memory_scope.value,
             "action": action,
-            "path": filenames[target],
+            "path": normalized_path,
             "changed": changed,
             "content": updated,
         }
