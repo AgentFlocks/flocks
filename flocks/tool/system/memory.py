@@ -198,7 +198,10 @@ async def memory_get_tool(
 
 @ToolRegistry.register_function(
     name="memory_write",
-    description="Write content to memory files for long-term recall.",
+    description=(
+        "Write content to persistent memory. Use target='user' for stable "
+        "identity/preferences and target='memory' for project/environment knowledge."
+    ),
     category=ToolCategory.FILE,
     parameters=[
         ToolParameter(
@@ -210,8 +213,20 @@ async def memory_get_tool(
         ToolParameter(
             name="path",
             type=ParameterType.STRING,
-            description="Target path relative to memory root (default: YYYY-MM-DD.md).",
+            description=(
+                "Custom path relative to memory root. Mutually exclusive with target; "
+                "omit both to use the existing date-based default."
+            ),
             required=False,
+        ),
+        ToolParameter(
+            name="target",
+            type=ParameterType.STRING,
+            description=(
+                "Curated store: user writes USER.md; memory writes MEMORY.md."
+            ),
+            required=False,
+            enum=["user", "memory"],
         ),
         ToolParameter(
             name="append",
@@ -225,8 +240,21 @@ async def memory_write_tool(
     ctx: ToolContext,
     content: str,
     path: Optional[str] = None,
+    target: Optional[str] = None,
     append: Optional[bool] = True,
 ) -> ToolResult:
+    if path and target:
+        return ToolResult(
+            success=False,
+            error="Specify either path or target, not both",
+        )
+    if target == "user":
+        path = "USER.md"
+    elif target == "memory":
+        path = "MEMORY.md"
+    elif target is not None:
+        return ToolResult(success=False, error=f"Unsupported memory target: {target}")
+
     memory, err = await _get_session_memory(ctx)
     if err:
         return err
@@ -241,6 +269,7 @@ async def memory_write_tool(
             success=True,
             output={
                 "path": written_path,
+                "target": target,
                 "length": len(content),
                 "append": bool(append),
             },

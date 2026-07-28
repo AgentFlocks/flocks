@@ -122,6 +122,8 @@ class TestMemoryBootstrap:
         # Check if MEMORY.md was created
         memory_file = bootstrap.memory_dir / "MEMORY.md"
         assert memory_file.exists()
+        user_file = bootstrap.memory_dir / "USER.md"
+        assert user_file.exists()
     
     @pytest.mark.asyncio
     async def test_load_main_memory(self):
@@ -134,6 +136,18 @@ class TestMemoryBootstrap:
         assert "path" in result
         assert "content" in result
         assert result["inject"] is True
+
+    @pytest.mark.asyncio
+    async def test_load_user_profile(self):
+        """Test loading USER.md for prompt injection."""
+        bootstrap = MemoryBootstrap()
+        await bootstrap.create_memory_structure()
+
+        result = await bootstrap.load_user_profile()
+        assert result is not None
+        assert result["path"] == "USER.md"
+        assert result["inject"] is True
+        assert "User Profile" in result["content"]
     
     def test_get_daily_memory_paths(self):
         """Test daily memory path generation"""
@@ -185,6 +199,7 @@ class TestMemoryBootstrap:
         
         assert "Memory System" in instructions
         assert "MEMORY.md" in instructions
+        assert "USER.md" in instructions
         assert "daily/" in instructions
         assert "YYYY-MM-DD" in instructions
         assert "daily/2026-02-09.md" in instructions
@@ -205,6 +220,7 @@ class TestMemoryBootstrap:
         )
         
         assert "main_memory" in result
+        assert "user_profile" in result
         assert "daily_memories" in result
         assert "instructions" in result
         assert "today" in result

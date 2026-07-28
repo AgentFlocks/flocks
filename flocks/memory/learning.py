@@ -277,7 +277,12 @@ def _daily_snapshots(memory_root: Path, limit: int) -> list[SourceSnapshot]:
     return snapshots
 
 
-def _apply_memory_operations(current: str, response: dict[str, Any]) -> str:
+def _apply_memory_operations(
+    current: str,
+    response: dict[str, Any],
+    *,
+    target: Literal["memory", "user"] = "memory",
+) -> str:
     action = response.get("action")
     if action == "skip":
         return current
@@ -290,6 +295,11 @@ def _apply_memory_operations(current: str, response: dict[str, Any]) -> str:
     for operation in operations:
         if not isinstance(operation, dict):
             raise ValueError("Dream operation must be an object")
+        operation_target = operation.get("target", "memory")
+        if operation_target not in {"memory", "user"}:
+            raise ValueError(f"unsupported Dream target: {operation_target}")
+        if operation_target != target:
+            continue
         operation_type = operation.get("type")
         if operation_type == "add":
             content = str(operation.get("content") or "").strip()
@@ -327,7 +337,16 @@ async def _run_dream(
         return False
     memory_root = Config.get_data_path() / "memory"
     memory_path = memory_root / "MEMORY.md"
-    current = memory_path.read_text(encoding="utf-8") if memory_path.exists() else ""
+    user_path = memory_root / "USER.md"
+    memory_existed = memory_path.exists()
+    user_existed = user_path.exists()
+    current = memory_path.read_text(encoding="utf-8") if memory_existed else ""
+    if user_existed:
+        current_user = user_path.read_text(encoding="utf-8")
+    else:
+        from flocks.memory.bootstrap import INITIAL_USER_PROFILE
+
+        current_user = INITIAL_USER_PROFILE
     recent_daily = "\n\n".join(
         f"## daily/{item.source_key}.md\n{item.content}" for item in daily_sources
     )
@@ -336,26 +355,44 @@ async def _run_dream(
         model_id=model_id,
         max_tokens=config.learning.max_output_tokens,
         system=(
-            "You maintain durable long-term memory. Extract only stable preferences, "
-            "facts, decisions, and reusable context. Remove stale or contradicted facts. "
+            "You maintain two durable stores. USER.md contains only stable user identity, "
+            "preferences, communication style, working habits, and technical level. "
+            "MEMORY.md contains environment facts, project conventions, decisions, and "
+            "reusable lessons. Extract only durable information and remove stale or "
+            "contradicted facts. Use concise Markdown bullet entries. "
             "Return strict JSON only: {\"action\":\"skip\",\"reason\":\"...\"} or "
-            "{\"action\":\"update\",\"operations\":[{\"type\":\"add\",\"content\":\"...\"},"
-            "{\"type\":\"replace\",\"old\":\"exact text\",\"new\":\"...\"},"
-            "{\"type\":\"remove\",\"old\":\"exact text\"}]}. Exact targets must be copied "
-            "verbatim from MEMORY.md. Avoid session summaries and transient task details."
+            "{\"action\":\"update\",\"operations\":["
+            "{\"target\":\"user|memory\",\"type\":\"add\",\"content\":\"...\"},"
+            "{\"target\":\"user|memory\",\"type\":\"replace\",\"old\":\"exact text\","
+            "\"new\":\"...\"},{\"target\":\"user|memory\",\"type\":\"remove\","
+            "\"old\":\"exact text\"}]}. Exact targets must be copied verbatim from the "
+            "corresponding file. Never put project facts in USER.md. Avoid session "
+            "summaries and transient task details."
         ),
         user=(
             "New completed session:\n"
-            f"{_truncate_tail(source.content, config.learning.max_input_chars // 3)}\n\n"
+            f"{_truncate_tail(source.content, config.learning.max_input_chars // 4)}\n\n"
             "Recent daily memory:\n"
-            f"{_truncate_tail(recent_daily, config.learning.max_input_chars // 3)}\n\n"
+            f"{_truncate_tail(recent_daily, config.learning.max_input_chars // 4)}\n\n"
+            "Current USER.md:\n"
+            f"{_truncate_tail(current_user, config.learning.max_input_chars // 4)}\n\n"
             "Current MEMORY.md:\n"
-            f"{_truncate_tail(current, config.learning.max_input_chars // 3)}"
+            f"{_truncate_tail(current, config.learning.max_input_chars // 4)}"
         ),
     )
-    updated = _apply_memory_operations(current, response)
-    if updated != current:
-        _atomic_write(memory_path, updated)
+    updated = _apply_memory_operations(current, response, target="memory")
+    updated_user = _apply_memory_operations(
+        current_user,
+        response,
+        target="user",
+    )
+    memory_changed = updated != current
+    user_changed = updated_user != current_user
+    if memory_changed or user_changed:
+        if memory_changed:
+            _atomic_write(memory_path, updated)
+        if user_changed or not user_existed:
+            _atomic_write(user_path, updated_user)
         manager = MemoryManager.get_instance(
             project_id=project_id,
             workspace_dir=workspace,
@@ -364,7 +401,16 @@ async def _run_dream(
         try:
             await manager.sync(reason="dream")
         except BaseException:
-            _atomic_write(memory_path, current)
+            if memory_changed:
+                if memory_existed:
+                    _atomic_write(memory_path, current)
+                else:
+                    memory_path.unlink(missing_ok=True)
+            if user_changed or not user_existed:
+                if user_existed:
+                    _atomic_write(user_path, current_user)
+                else:
+                    user_path.unlink(missing_ok=True)
             try:
                 await manager.sync(reason="dream-restore")
             except Exception as restore_exc:
@@ -374,7 +420,7 @@ async def _run_dream(
                 )
             raise
     await LearningCheckpointStore.commit("dream", sources)
-    return updated != current
+    return memory_changed or user_changed
 
 
 def _skill_catalog() -> list[dict[str, str]]:

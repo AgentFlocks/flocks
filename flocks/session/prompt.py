@@ -936,6 +936,14 @@ class SessionPrompt:
             return []
 
         prompts: List[str] = []
+        user_profile = memory_bootstrap_data.get("user_profile")
+        if user_profile and user_profile.get("inject"):
+            profile_content = user_profile.get("content", "")
+            if profile_content:
+                prompts.append(
+                    f"## {user_profile['path']}\n\n{profile_content}"
+                )
+
         main_memory = memory_bootstrap_data.get("main_memory")
         if main_memory and main_memory.get("inject"):
             memory_content = main_memory.get("content", "")
@@ -944,6 +952,7 @@ class SessionPrompt:
 
         log.debug("prompt.memory_injected", {
             "session_id": session_id,
+            "has_user_profile": user_profile is not None,
             "has_main": main_memory is not None,
         })
         return prompts

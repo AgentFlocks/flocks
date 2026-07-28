@@ -14,6 +14,7 @@ from flocks.memory.learning import (
     _apply_skill_action,
 )
 from flocks.session.background_tasks import pending_background_tasks
+from flocks.session.prompt import SessionPrompt
 from flocks.storage import Storage
 
 
@@ -39,6 +40,63 @@ def test_memory_operations_apply_structured_changes() -> None:
     assert "- editor: neovim" in updated
     assert "- stale fact" not in updated
     assert updated.endswith("- language: Python\n")
+
+
+def test_memory_operations_route_user_profile_separately() -> None:
+    response = {
+        "action": "update",
+        "operations": [
+            {
+                "target": "user",
+                "type": "add",
+                "content": "- Prefers concise answers",
+            },
+            {
+                "target": "memory",
+                "type": "add",
+                "content": "- Project uses Ruff",
+            },
+        ],
+    }
+
+    updated_user = _apply_memory_operations(
+        "# User Profile\n",
+        response,
+        target="user",
+    )
+    updated_memory = _apply_memory_operations(
+        "# Long-Term Memory\n",
+        response,
+        target="memory",
+    )
+
+    assert "Prefers concise answers" in updated_user
+    assert "Project uses Ruff" not in updated_user
+    assert "Project uses Ruff" in updated_memory
+    assert "Prefers concise answers" not in updated_memory
+
+
+def test_prompt_injects_user_profile_before_long_term_memory() -> None:
+    prompts = SessionPrompt._build_memory_bootstrap_prompts(
+        session_id="ses_test",
+        memory_bootstrap_data={
+            "user_profile": {
+                "path": "USER.md",
+                "content": "Prefers concise answers.",
+                "inject": True,
+            },
+            "main_memory": {
+                "path": "MEMORY.md",
+                "content": "Project uses Ruff.",
+                "inject": True,
+            },
+        },
+    )
+
+    assert prompts == [
+        "## USER.md\n\nPrefers concise answers.",
+        "## MEMORY.md\n\nProject uses Ruff.",
+    ]
 
 
 def test_memory_operation_rejects_ambiguous_target() -> None:

@@ -1,10 +1,11 @@
 """
 Memory Bootstrap - Load memory files at session start
 
-Implements OpenClaw-style memory loading:
-1. MEMORY.md - Main long-term memory (auto-injected)
-2. memory/daily/YYYY-MM-DD.md - Daily notes for any calendar date
-3. memory_search tool - Search all history
+Implements OpenClaw-style memory loading with Hermes-style user profiling:
+1. USER.md - Stable user identity and preferences (auto-injected)
+2. MEMORY.md - Main long-term memory (auto-injected)
+3. memory/daily/YYYY-MM-DD.md - Daily notes for any calendar date
+4. memory_search tool - Search all history
 """
 
 from typing import Optional, Dict, Any, List
@@ -19,6 +20,9 @@ log = Log.create(service="memory.bootstrap")
 # File names
 MEMORY_FILENAME = "MEMORY.md"
 MEMORY_ALT_FILENAME = "memory.md"
+USER_FILENAME = "USER.md"
+
+INITIAL_USER_PROFILE = "# User Profile\n"
 
 # Default instructions for agent (similar to OpenClaw's AGENTS.md)
 # Uses global storage paths for Flocks
@@ -29,17 +33,20 @@ You have access to a persistent memory system for continuity across sessions.
 On-disk memory root (absolute path): `{memory_root}`. The same store is shared across all your sessions.
 
 ### Files Available:
-1. `MEMORY.md` - Your long-term curated memory (already injected above)
-2. `daily/YYYY-MM-DD.md` - Daily notes for **any** calendar date; substitute the date you need, then read with `memory_get` (path is relative to the memory root above).
-3. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
+1. `USER.md` - Stable user profile: identity, preferences, communication style, working habits, and technical level (already injected above)
+2. `MEMORY.md` - Environment facts, project conventions, decisions, and reusable lessons (already injected above)
+3. `daily/YYYY-MM-DD.md` - Daily notes for **any** calendar date; substitute the date you need, then read with `memory_get` (path is relative to the memory root above).
+4. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
 
 ### When to Write Memory:
+- **User profile**: Use path `USER.md` for stable facts about the user
 - **Daily notes**: Use path `daily/YYYY-MM-DD.md` - Raw logs of what happened today
-- **Long-term**: Use path `MEMORY.md` - Curated memories, decisions, lessons learned
+- **Long-term**: Use path `MEMORY.md` for environment facts, project conventions, decisions, and lessons learned
 - Write memories BEFORE the session ends, especially if important work was done
-- If someone says "remember this", write it down immediately using memory tools
+- If someone says "remember this", write it down immediately: use `memory_write(target="user", ...)` for personal preferences and identity; use `memory_write(target="memory", ...)` for project or environment knowledge
 
 ### Memory Best Practices:
+- Keep `USER.md` about the user, not about individual projects or one-off tasks
 - Use `daily/YYYY-MM-DD.md` for daily logs (system auto-creates if needed)
 - Update `MEMORY.md` for important, lasting information
 - Use `memory_search` tool to find information from all past memories
@@ -48,7 +55,7 @@ On-disk memory root (absolute path): `{memory_root}`. The same store is shared a
 
 ### Available Tools:
 - `memory_search` - Search all memories semantically
-- `memory_write` - Write to memory files (daily or MEMORY.md)
+- `memory_write` - Write to `USER.md`, `MEMORY.md`, or a daily file
 - Standard `read`/`write` tools also work with memory paths
 """.strip()
 
@@ -107,6 +114,37 @@ class MemoryBootstrap:
         
         log.debug("bootstrap.main_not_found")
         return None
+
+    async def load_user_profile(self) -> Optional[Dict[str, Any]]:
+        """Load the stable USER.md profile for prompt injection."""
+        file_path = self.memory_dir / USER_FILENAME
+        try:
+            if not file_path.exists():
+                return None
+            file_content = await File.read(str(file_path))
+            content = (
+                file_content.content
+                if hasattr(file_content, "content")
+                else str(file_content)
+            )
+            if not content:
+                return None
+            log.info(
+                "bootstrap.loaded_user_profile",
+                {"path": USER_FILENAME, "size": len(content)},
+            )
+            return {
+                "path": USER_FILENAME,
+                "abs_path": str(file_path),
+                "content": content,
+                "inject": True,
+            }
+        except Exception as exc:
+            log.warn(
+                "bootstrap.load_user_profile_failed",
+                {"path": str(file_path), "error": str(exc)},
+            )
+            return None
     
     def get_daily_memory_paths(
         self,
@@ -197,6 +235,7 @@ class MemoryBootstrap:
         Creates:
         - .flocks/memory/
         - .flocks/memory/daily/
+        - .flocks/memory/USER.md (if not exists)
         - .flocks/memory/MEMORY.md (if not exists)
         """
         try:
@@ -227,6 +266,14 @@ This is your curated long-term memory file. Store important information here:
                 log.info("bootstrap.created_memory_file", {
                     "path": MEMORY_FILENAME,
                 })
+
+            user_file = self.memory_dir / USER_FILENAME
+            if not user_file.exists():
+                user_file.write_text(INITIAL_USER_PROFILE, encoding="utf-8")
+                log.info(
+                    "bootstrap.created_user_profile",
+                    {"path": USER_FILENAME},
+                )
             
             log.info("bootstrap.structure_ready", {
                 "memory_dir": str(self.memory_dir),
@@ -297,6 +344,7 @@ This is your curated long-term memory file. Store important information here:
         
         result = {
             "main_memory": None,
+            "user_profile": None,
             "daily_memories": [],
             "instructions": self.get_agent_instructions(today=today_str, yesterday=yesterday_str),
             "today": today_str,
@@ -306,6 +354,7 @@ This is your curated long-term memory file. Store important information here:
         if load_main:
             main = await self.load_main_memory()
             result["main_memory"] = main
+            result["user_profile"] = await self.load_user_profile()
         
         if load_daily:
             dailies = await self.load_daily_memories(days_back=days_back, today=today_str)
@@ -313,6 +362,7 @@ This is your curated long-term memory file. Store important information here:
         
         log.info("bootstrap.complete", {
             "has_main": result["main_memory"] is not None,
+            "has_user_profile": result["user_profile"] is not None,
             "daily_count": len(result["daily_memories"]),
         })
         
