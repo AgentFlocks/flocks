@@ -1455,6 +1455,8 @@ class Message:
         )
 
         async def _sync_search_index(db) -> None:
+            if not Storage.session_search_available():
+                return
             if delete_message or message is None:
                 await delete_message_document(db, message_id)
                 return
@@ -2136,6 +2138,8 @@ class Message:
             from flocks.storage.session_search import delete_session_documents
 
             async def _delete_search_index(db) -> None:
+                if not Storage.session_search_available():
+                    return
                 await delete_session_documents(db, [session_id])
 
             await Storage.mutate_many(

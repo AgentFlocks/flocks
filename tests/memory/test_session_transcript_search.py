@@ -1,6 +1,7 @@
 """Session transcript FTS lifecycle tests."""
 
 from pathlib import Path
+import sqlite3
 from unittest.mock import AsyncMock
 import uuid
 
@@ -16,9 +17,14 @@ from flocks.provider import Provider
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session, SessionInfo
 from flocks.storage.session_search import (
+    SessionSearchUnavailableError,
+    _is_fts5_unavailable_error,
+    ensure_session_index_ready,
+    ensure_session_search_tables,
     reconcile_session_index,
     session_fts_search,
 )
+from flocks.storage import session_search as session_search_module
 from flocks.storage.storage import Storage
 
 
@@ -69,6 +75,145 @@ async def _create_session(tmp_path: Path, project_id: str = "project-search"):
     )
     Session.invalidate_cache()
     return session
+
+
+def test_only_explicit_missing_fts5_errors_are_classified() -> None:
+    assert _is_fts5_unavailable_error(
+        sqlite3.OperationalError("no such module: fts5")
+    )
+    assert _is_fts5_unavailable_error(
+        sqlite3.OperationalError("unknown module: fts5")
+    )
+    assert not _is_fts5_unavailable_error(
+        sqlite3.OperationalError("database is locked")
+    )
+    assert not _is_fts5_unavailable_error(
+        RuntimeError("no such module: fts5")
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_schema_probe_degrades_when_fts5_module_is_missing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    class MissingFtsConnection:
+        def __init__(self):
+            self.statements: list[str] = []
+            self.committed = False
+
+        async def executescript(self, sql: str):
+            self.statements.append(sql)
+
+        async def execute(self, sql: str, _parameters=()):
+            self.statements.append(sql)
+            if "_flocks_session_fts5_probe" in sql:
+                raise sqlite3.OperationalError("no such module: fts5")
+            return None
+
+        async def commit(self):
+            self.committed = True
+
+    class MissingFtsContext:
+        def __init__(self):
+            self.connection = MissingFtsConnection()
+
+        async def __aenter__(self):
+            return self.connection
+
+        async def __aexit__(self, *_args):
+            return None
+
+    context = MissingFtsContext()
+    monkeypatch.setattr(
+        Storage,
+        "connect",
+        classmethod(lambda _cls, _path=None: context),
+    )
+
+    assert not await ensure_session_search_tables(tmp_path / "missing-fts.db")
+    assert context.connection.committed
+    assert any(
+        "DELETE FROM session_transcript_meta" in statement
+        for statement in context.connection.statements
+    )
+
+
+@pytest.mark.asyncio
+async def test_messages_persist_when_session_search_is_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = await _create_session(tmp_path)
+    index_message = AsyncMock(
+        side_effect=AssertionError("Session FTS hook must be disabled")
+    )
+    monkeypatch.setattr(
+        session_search_module,
+        "upsert_session_document",
+        index_message,
+    )
+    monkeypatch.setattr(Storage, "_session_search_available", False)
+
+    message = await Message.create(
+        session.id,
+        MessageRole.USER,
+        "canonical message survives without FTS5",
+    )
+
+    stored = await Message.get(session.id, message.id)
+    assert stored is not None
+    parts = await Message.parts(message.id, session.id)
+    assert [part.text for part in parts if part.type == "text"] == [
+        "canonical message survives without FTS5"
+    ]
+    index_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_session_search_reports_fts5_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(Storage, "_session_search_available", False)
+
+    with pytest.raises(
+        SessionSearchUnavailableError,
+        match="SQLite runtime does not support FTS5",
+    ):
+        await session_fts_search(
+            db_path=Storage.get_db_path(),
+            project_id="default",
+            query="anything",
+            max_results=10,
+        )
+
+
+@pytest.mark.asyncio
+async def test_memory_manager_starts_without_fts5_and_session_search_fails_clearly(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(Provider, "init", AsyncMock())
+    monkeypatch.setattr(Provider, "get", lambda _provider_id: None)
+    monkeypatch.setattr(Storage, "_session_search_available", False)
+
+    manager = MemoryManager(
+        project_id="default",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(sources=["session"]),
+    )
+
+    await manager.initialize()
+
+    assert manager._initialized
+    with pytest.raises(
+        SessionSearchUnavailableError,
+        match="SQLite runtime does not support FTS5",
+    ):
+        await manager.search(
+            query="anything",
+            sources=[MemorySource.SESSION],
+        )
 
 
 @pytest.mark.asyncio
@@ -181,7 +326,6 @@ async def test_reconciliation_restores_history_and_removes_orphans(
 
     async with Storage.connect(Storage.get_db_path()) as db:
         await db.execute("DELETE FROM session_transcript_fts")
-        await db.execute("DELETE FROM session_transcript_index_state")
         await db.execute(
             "INSERT INTO session_transcript_fts(rowid, text) VALUES (999, 'orphan')"
         )
@@ -205,6 +349,114 @@ async def test_reconciliation_restores_history_and_removes_orphans(
             "SELECT count(*) FROM session_transcript_fts WHERE rowid = 999"
         )
         assert (await cursor.fetchone())[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_session_history_backfill_runs_only_once(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    session = await _create_session(tmp_path)
+    message = await Message.create(
+        session.id,
+        MessageRole.USER,
+        "legacy transcript backfill marker",
+    )
+    async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute("DELETE FROM session_transcript_fts")
+        await db.execute("DELETE FROM session_transcript_index_state")
+        await db.commit()
+
+    reconcile = AsyncMock(
+        wraps=session_search_module._reconcile_session_index_unlocked
+    )
+    monkeypatch.setattr(
+        session_search_module,
+        "_reconcile_session_index_unlocked",
+        reconcile,
+    )
+
+    assert await ensure_session_index_ready(batch_size=1)
+    assert not await ensure_session_index_ready(batch_size=1)
+    assert reconcile.await_count == 1
+
+    results = await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id=session.project_id,
+        query="legacy transcript",
+        max_results=10,
+    )
+    assert [result["path"] for result in results] == [
+        f"sessions/{session.id}/messages/{message.id}"
+    ]
+
+
+@pytest.mark.asyncio
+async def test_failed_session_backfill_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_reconcile = session_search_module._reconcile_session_index_unlocked
+    attempts = 0
+
+    async def fail_once(*, project_id=None, batch_size=50):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("injected backfill failure")
+        return await original_reconcile(
+            project_id=project_id,
+            batch_size=batch_size,
+        )
+
+    monkeypatch.setattr(
+        session_search_module,
+        "_reconcile_session_index_unlocked",
+        fail_once,
+    )
+
+    with pytest.raises(RuntimeError, match="injected backfill failure"):
+        await ensure_session_index_ready(batch_size=1)
+
+    assert await ensure_session_index_ready(batch_size=1)
+    assert attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_memory_managers_share_one_global_file_indexer(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(Provider, "init", AsyncMock())
+    monkeypatch.setattr(Provider, "get", lambda _provider_id: None)
+    sync = AsyncMock(
+        return_value={
+            "files_scanned": 0,
+            "files_indexed": 0,
+            "files_skipped": 0,
+            "chunks_created": 0,
+            "embeddings_generated": 0,
+            "cache_hits": 0,
+        }
+    )
+    monkeypatch.setattr("flocks.memory.sync.indexer.MemoryIndexer.sync", sync)
+
+    config = MemoryConfig(sources=["memory"])
+    alpha = MemoryManager.get_instance(
+        project_id="prj_alpha",
+        workspace_dir=str(tmp_path / "alpha"),
+        config=config,
+    )
+    beta = MemoryManager.get_instance(
+        project_id="prj_beta",
+        workspace_dir=str(tmp_path / "beta"),
+        config=config,
+    )
+
+    await alpha.initialize()
+    await beta.initialize()
+
+    assert alpha.indexer is beta.indexer
+    assert sync.await_count == 1
 
 
 @pytest.mark.asyncio

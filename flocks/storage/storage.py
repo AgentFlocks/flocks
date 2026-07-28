@@ -73,6 +73,7 @@ class Storage:
     _log = Log.create(service="storage")
     _db_path: Optional[Path] = None
     _initialized = False
+    _session_search_available = True
     _db_identity: Optional[Tuple[int, int]] = None
     # PID of the process that called ``init()``.  Used by ``_ensure_init`` to
     # detect ``fork()`` (uvicorn ``--reload`` / multiprocessing workers) and
@@ -151,6 +152,11 @@ class Storage:
             return cls._db_path
         data_dir = Config.get_data_path()
         return data_dir / "flocks.db"
+
+    @classmethod
+    def session_search_available(cls) -> bool:
+        """Return whether Session FTS is supported by the active SQLite runtime."""
+        return cls._session_search_available
 
     @staticmethod
     def _file_identity(db_path: Path) -> Optional[Tuple[int, int]]:
@@ -1355,12 +1361,19 @@ class Storage:
         except Exception as e:
             cls._log.warn("storage.vector.init.failed", {"error": str(e)})
 
-        try:
-            from flocks.storage.session_search import ensure_session_search_tables
+        from flocks.storage.session_search import ensure_session_search_tables
 
-            await ensure_session_search_tables(cls._db_path)
-        except Exception as e:
-            cls._log.warn("storage.session_search.init.failed", {"error": str(e)})
+        cls._session_search_available = await ensure_session_search_tables(
+            cls._db_path
+        )
+        if not cls._session_search_available:
+            cls._log.warn(
+                "storage.session_search.disabled",
+                {
+                    "reason": "SQLite runtime does not support FTS5",
+                    "db_path": str(cls._db_path),
+                },
+            )
 
         # Create model management tables
         await cls._create_model_management_tables()

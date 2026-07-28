@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
+import sqlite3
 from typing import Any, Iterable, Optional, Sequence
 
 import aiosqlite
@@ -13,6 +15,38 @@ from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
 log = Log.create(service="storage.session_search")
+
+_SESSION_BACKFILL_KEY = "history-v1"
+_reconcile_locks: dict[str, asyncio.Lock] = {}
+
+_SESSION_SEARCH_UNAVAILABLE_MESSAGE = (
+    "Session search is unavailable because this SQLite runtime does not "
+    "support FTS5. Session messages will continue to be stored normally."
+)
+
+
+class SessionSearchUnavailableError(RuntimeError):
+    """Raised when the active SQLite runtime cannot provide Session FTS."""
+
+
+def _is_fts5_unavailable_error(error: BaseException) -> bool:
+    """Return whether an SQLite failure specifically means FTS5 is absent."""
+    current: Optional[BaseException] = error
+    while current is not None:
+        if isinstance(current, sqlite3.OperationalError):
+            message = str(current).casefold()
+            if "fts5" in message and (
+                "no such module" in message or "unknown module" in message
+            ):
+                return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
+def require_session_search_available() -> None:
+    """Raise a stable, user-facing error when Session FTS is disabled."""
+    if not Storage.session_search_available():
+        raise SessionSearchUnavailableError(_SESSION_SEARCH_UNAVAILABLE_MESSAGE)
 
 
 SESSION_SEARCH_SCHEMA_SQL = """
@@ -37,6 +71,15 @@ CREATE INDEX IF NOT EXISTS idx_session_transcript_state_project
 CREATE VIRTUAL TABLE IF NOT EXISTS session_transcript_fts USING fts5(
     text,
     tokenize = 'unicode61 remove_diacritics 2'
+);
+"""
+
+
+SESSION_SEARCH_META_SCHEMA_SQL = """
+CREATE TABLE IF NOT EXISTS session_transcript_meta (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 """
 
@@ -99,11 +142,116 @@ def build_session_document(
     }
 
 
-async def ensure_session_search_tables(db_path: Path) -> None:
-    """Create the derived transcript search tables."""
+async def ensure_session_search_tables(db_path: Path) -> bool:
+    """Create Session search tables if the SQLite runtime supports FTS5.
+
+    Returns:
+        ``True`` when Session FTS is available and the schema is ready.
+        ``False`` only when SQLite explicitly reports that the FTS5 module is
+        unavailable. All other database errors are propagated.
+    """
     async with Storage.connect(db_path) as db:
+        await db.executescript(SESSION_SEARCH_META_SCHEMA_SQL)
+        try:
+            await db.execute(
+                """
+                CREATE VIRTUAL TABLE temp._flocks_session_fts5_probe
+                USING fts5(text)
+                """
+            )
+            await db.execute(
+                "DROP TABLE temp._flocks_session_fts5_probe"
+            )
+        except sqlite3.OperationalError as exc:
+            if _is_fts5_unavailable_error(exc):
+                # Messages may be created, updated, or deleted while Session
+                # indexing is disabled. Force a complete reconciliation if a
+                # future runtime restores FTS5 support.
+                await db.execute(
+                    "DELETE FROM session_transcript_meta WHERE key = ?",
+                    (_SESSION_BACKFILL_KEY,),
+                )
+                await db.commit()
+                return False
+            raise
+
+        cursor = await db.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE name IN (
+                'session_transcript_index_state',
+                'session_transcript_fts'
+            )
+            """
+        )
+        existing_tables = {row[0] for row in await cursor.fetchall()}
         await db.executescript(SESSION_SEARCH_SCHEMA_SQL)
+        if existing_tables != {
+            "session_transcript_index_state",
+            "session_transcript_fts",
+        }:
+            await db.execute(
+                "DELETE FROM session_transcript_meta WHERE key = ?",
+                (_SESSION_BACKFILL_KEY,),
+            )
         await db.commit()
+    return True
+
+
+def _reconcile_lock(db_path: Path) -> asyncio.Lock:
+    """Return the process-local reconcile owner for one SQLite database."""
+    key = str(db_path.resolve())
+    lock = _reconcile_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _reconcile_locks[key] = lock
+    return lock
+
+
+async def _session_index_is_ready(db_path: Path) -> bool:
+    async with Storage.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM session_transcript_meta WHERE key = ?",
+            (_SESSION_BACKFILL_KEY,),
+        )
+        return await cursor.fetchone() is not None
+
+
+async def _mark_session_index_ready(db_path: Path) -> None:
+    now = int(datetime.now(UTC).timestamp() * 1000)
+    async with Storage.connect(db_path) as db:
+        await db.execute(
+            """
+            INSERT INTO session_transcript_meta (key, value, updated_at)
+            VALUES (?, 'complete', ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value = excluded.value,
+                updated_at = excluded.updated_at
+            """,
+            (_SESSION_BACKFILL_KEY, now),
+        )
+        await db.commit()
+
+
+async def ensure_session_index_ready(*, batch_size: int = 50) -> bool:
+    """Backfill legacy transcripts once, then use realtime message indexing.
+
+    Returns ``True`` when this call performed the historical backfill and
+    ``False`` when a previous successful pass already made the index ready.
+    """
+    require_session_search_available()
+    db_path = Storage.get_db_path()
+    if await _session_index_is_ready(db_path):
+        return False
+
+    async with _reconcile_lock(db_path):
+        if await _session_index_is_ready(db_path):
+            return False
+        stats = await _reconcile_session_index_unlocked(batch_size=batch_size)
+        await _mark_session_index_ready(db_path)
+        log.info("session_search.backfill.complete", stats)
+        return True
 
 
 async def upsert_session_document(
@@ -153,7 +301,13 @@ async def upsert_session_document(
         document["content_hash"],
     )
     if unchanged:
-        return False
+        cursor = await db.execute(
+            "SELECT text FROM session_transcript_fts WHERE rowid = ?",
+            (existing[0],),
+        )
+        indexed = await cursor.fetchone()
+        if indexed is not None and indexed[0] == document["text"]:
+            return False
 
     indexed_at = int(datetime.now(UTC).timestamp() * 1000)
     if existing is None:
@@ -269,6 +423,24 @@ async def reconcile_session_index(
     batch_size: int = 50,
 ) -> dict[str, int]:
     """Rebuild missing/stale rows and remove orphaned derived rows."""
+    require_session_search_available()
+    db_path = Storage.get_db_path()
+    async with _reconcile_lock(db_path):
+        stats = await _reconcile_session_index_unlocked(
+            project_id=project_id,
+            batch_size=batch_size,
+        )
+        if project_id is None:
+            await _mark_session_index_ready(db_path)
+        return stats
+
+
+async def _reconcile_session_index_unlocked(
+    *,
+    project_id: Optional[str] = None,
+    batch_size: int = 50,
+) -> dict[str, int]:
+    """Repair Session FTS while bounding loaded TextParts to one batch."""
     from flocks.session.message import Message
     from flocks.session.session import Session
 
@@ -278,84 +450,152 @@ async def reconcile_session_index(
         if session.status != "deleted"
         and (project_id is None or session.project_id == project_id)
     ]
-    documents: list[tuple[str, Any, Sequence[Any]]] = []
-    desired_ids: set[str] = set()
-    for session in sessions:
-        for item in await Message.list_with_parts(
-            session.id,
-            include_archived=True,
-        ):
-            document = build_session_document(item.info, item.parts)
-            if document is not None:
-                desired_ids.add(document["message_id"])
-            documents.append((session.project_id, item.info, item.parts))
-
-    stats = {"scanned": len(documents), "updated": 0, "deleted": 0}
+    stats = {"scanned": 0, "updated": 0, "deleted": 0}
     effective_batch_size = max(1, batch_size)
-    for offset in range(0, len(documents), effective_batch_size):
-        batch = documents[offset : offset + effective_batch_size]
-        async with Storage.connect(Storage.get_db_path()) as db:
-            try:
-                await db.execute("BEGIN IMMEDIATE")
-                for document_project_id, message, parts in batch:
-                    if await upsert_session_document(
-                        db,
-                        project_id=document_project_id,
-                        message=message,
-                        parts=parts,
-                    ):
-                        stats["updated"] += 1
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
 
     async with Storage.connect(Storage.get_db_path()) as db:
+        await db.execute(
+            """
+            CREATE TEMP TABLE session_transcript_reconcile_seen (
+                message_id TEXT PRIMARY KEY
+            )
+            """
+        )
+        if project_id is None:
+            await db.execute(
+                """
+                CREATE TEMP TABLE session_transcript_reconcile_candidates AS
+                SELECT id, message_id
+                FROM session_transcript_index_state
+                """
+            )
+        else:
+            await db.execute(
+                """
+                CREATE TEMP TABLE session_transcript_reconcile_candidates AS
+                SELECT id, message_id
+                FROM session_transcript_index_state
+                WHERE project_id = ?
+                """,
+                (project_id,),
+            )
+        await db.execute(
+            """
+            CREATE TEMP TABLE session_transcript_reconcile_fts_candidates AS
+            SELECT rowid
+            FROM session_transcript_fts
+            """
+        )
+
+        for session in sessions:
+            # Session deletion owns this same lifecycle lock. Holding it while
+            # rebuilding prevents a deleted transcript from being reinserted
+            # after its transactional FTS cleanup.
+            async with Session.lifecycle_lock(session.id):
+                current = await Session.get_by_id_unfiltered(session.id)
+                if (
+                    current is None
+                    or current.status == "deleted"
+                    or Session.is_lifecycle_transitioning(session.id)
+                ):
+                    continue
+
+                messages = await Message.list(
+                    session.id,
+                    include_archived=True,
+                )
+                for offset in range(0, len(messages), effective_batch_size):
+                    batch_messages = messages[
+                        offset : offset + effective_batch_size
+                    ]
+                    batch = []
+                    for message in batch_messages:
+                        item = await Message.get_with_parts_lazy(
+                            session.id,
+                            message.id,
+                        )
+                        if item is not None:
+                            batch.append(item)
+
+                    stats["scanned"] += len(batch)
+                    try:
+                        await db.execute("BEGIN IMMEDIATE")
+                        for item in batch:
+                            document = build_session_document(
+                                item.info,
+                                item.parts,
+                            )
+                            if document is not None:
+                                await db.execute(
+                                    """
+                                    INSERT OR IGNORE INTO
+                                        session_transcript_reconcile_seen (
+                                            message_id
+                                        )
+                                    VALUES (?)
+                                    """,
+                                    (document["message_id"],),
+                                )
+                            if await upsert_session_document(
+                                db,
+                                project_id=session.project_id,
+                                message=item.info,
+                                parts=item.parts,
+                            ):
+                                stats["updated"] += 1
+                        await db.commit()
+                    except BaseException:
+                        await db.rollback()
+                        raise
+
         try:
             await db.execute("BEGIN IMMEDIATE")
-            if project_id is None:
-                cursor = await db.execute(
-                    """
-                    SELECT id, message_id
-                    FROM session_transcript_index_state
-                    """
-                )
-            else:
-                cursor = await db.execute(
-                    """
-                    SELECT id, message_id
-                    FROM session_transcript_index_state
-                    WHERE project_id = ?
-                    """,
-                    (project_id,),
-                )
-            stale_rowids = [
-                rowid
-                for rowid, message_id in await cursor.fetchall()
-                if message_id not in desired_ids
-            ]
-            if stale_rowids:
-                placeholders = ",".join("?" for _ in stale_rowids)
+            cursor = await db.execute(
+                """
+                SELECT count(*)
+                FROM session_transcript_reconcile_candidates AS candidate
+                LEFT JOIN session_transcript_reconcile_seen AS seen
+                    ON seen.message_id = candidate.message_id
+                WHERE seen.message_id IS NULL
+                """
+            )
+            stale_count = int((await cursor.fetchone())[0])
+            if stale_count:
                 await db.execute(
-                    f"""
+                    """
                     DELETE FROM session_transcript_fts
-                    WHERE rowid IN ({placeholders})
-                    """,
-                    tuple(stale_rowids),
+                    WHERE rowid IN (
+                        SELECT candidate.id
+                        FROM session_transcript_reconcile_candidates AS candidate
+                        LEFT JOIN session_transcript_reconcile_seen AS seen
+                            ON seen.message_id = candidate.message_id
+                        WHERE seen.message_id IS NULL
+                    )
+                    """
                 )
                 await db.execute(
-                    f"""
+                    """
                     DELETE FROM session_transcript_index_state
-                    WHERE id IN ({placeholders})
-                    """,
-                    tuple(stale_rowids),
+                    WHERE id IN (
+                        SELECT candidate.id
+                        FROM session_transcript_reconcile_candidates AS candidate
+                        LEFT JOIN session_transcript_reconcile_seen AS seen
+                            ON seen.message_id = candidate.message_id
+                        WHERE seen.message_id IS NULL
+                    )
+                    """
                 )
-                stats["deleted"] += len(stale_rowids)
+                stats["deleted"] += stale_count
+
             cursor = await db.execute(
                 """
                 DELETE FROM session_transcript_fts
-                WHERE rowid NOT IN (
-                    SELECT id FROM session_transcript_index_state
+                WHERE rowid IN (
+                    SELECT candidate.rowid
+                    FROM session_transcript_reconcile_fts_candidates AS candidate
+                    WHERE candidate.rowid NOT IN (
+                        SELECT id FROM session_transcript_index_state
+                    )
                 )
                 """
             )
@@ -382,6 +622,7 @@ async def session_fts_search(
     """Search all indexed session messages using FTS5 BM25 ranking."""
     from flocks.storage.vector import build_fts_query
 
+    require_session_search_available()
     del project_id  # Retained for API compatibility; Session search is global.
     fts_query = build_fts_query(query)
     if not fts_query:

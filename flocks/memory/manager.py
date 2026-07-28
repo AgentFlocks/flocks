@@ -53,6 +53,74 @@ def _atomic_write_text(path: Path, content: str) -> None:
             os.unlink(temp_name)
 
 
+class _MemoryIndexCoordinator:
+    """Own the process-wide Memory file indexer for one SQLite database."""
+
+    def __init__(self) -> None:
+        self.indexer: Optional[MemoryIndexer] = None
+        self.signature: Optional[tuple[Any, ...]] = None
+        self.initialized = False
+        self.dirty = True
+        self.sync_lock = asyncio.Lock()
+        self.write_lock = asyncio.Lock()
+
+    def configure(
+        self,
+        *,
+        workspace_dir: Path,
+        provider_id: Optional[str],
+        embedding_model: str,
+        config: MemoryConfig,
+    ) -> MemoryIndexer:
+        """Create or reuse the one global file indexer."""
+        signature = (
+            provider_id,
+            embedding_model,
+            config.chunking.model_dump_json(),
+            config.batch.model_dump_json(),
+            config.cache.model_dump_json(),
+            tuple(config.extra_paths),
+        )
+        if self.indexer is not None and self.signature == signature:
+            return self.indexer
+
+        self.indexer = MemoryIndexer(
+            project_id="global",
+            workspace_dir=workspace_dir,
+            provider_id=provider_id,
+            embedding_model=embedding_model,
+            config=config,
+        )
+        self.signature = signature
+        self.initialized = False
+        self.dirty = True
+        return self.indexer
+
+    async def sync(
+        self,
+        *,
+        force: bool = False,
+        only_if_needed: bool = False,
+        progress_callback: Optional[
+            Callable[[MemorySyncProgress], None]
+        ] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Serialize global scans and optionally skip an already-clean index."""
+        async with self.sync_lock:
+            if only_if_needed and self.initialized and not self.dirty:
+                return None
+            if self.indexer is None:
+                raise RuntimeError("Memory file indexer is not configured")
+            async with self.write_lock:
+                stats = await self.indexer.sync(
+                    force=force,
+                    progress_callback=progress_callback,
+                )
+                self.initialized = True
+                self.dirty = False
+                return stats
+
+
 class MemoryManager:
     """
     Memory manager - orchestrates memory system
@@ -65,6 +133,7 @@ class MemoryManager:
     
     # Singleton cache by project_id
     _instances: Dict[str, "MemoryManager"] = {}
+    _index_coordinators: Dict[str, _MemoryIndexCoordinator] = {}
     
     def __init__(
         self,
@@ -99,9 +168,38 @@ class MemoryManager:
         # State
         self._initialized = False
         self._dirty = False
-        self._sync_lock = asyncio.Lock()
         self._init_lock = asyncio.Lock()
-        self._write_lock = asyncio.Lock()
+        self._index_coordinator: Optional[_MemoryIndexCoordinator] = None
+
+    @classmethod
+    def _coordinator_for_active_db(cls) -> _MemoryIndexCoordinator:
+        """Return the global Memory index owner for the active database."""
+        key = str(Storage.get_db_path().resolve())
+        coordinator = cls._index_coordinators.get(key)
+        if coordinator is None:
+            coordinator = _MemoryIndexCoordinator()
+            cls._index_coordinators[key] = coordinator
+        return coordinator
+
+    def _mark_index_dirty(self) -> None:
+        """Mark the shared file index dirty for every project manager."""
+        coordinator = self._index_coordinator or self._coordinator_for_active_db()
+        coordinator.dirty = True
+        for manager in self._instances.values():
+            manager._dirty = True
+        self._dirty = True
+
+    def _mark_index_clean(self, coordinator: _MemoryIndexCoordinator) -> None:
+        """Clear dirty flags for managers sharing this index owner."""
+        if coordinator.dirty:
+            return
+        for manager in self._instances.values():
+            if (
+                manager._index_coordinator is None
+                or manager._index_coordinator is coordinator
+            ):
+                manager._dirty = False
+        self._dirty = False
     
     @classmethod
     def get_instance(
@@ -205,23 +303,41 @@ class MemoryManager:
                     config=self.config.query,
                 )
                 
-                self.indexer = MemoryIndexer(
-                    project_id=self.project_id,
+                coordinator = self._coordinator_for_active_db()
+                self._index_coordinator = coordinator
+                previous_indexer = coordinator.indexer
+                self.indexer = coordinator.configure(
                     workspace_dir=self.workspace_dir,
                     provider_id=self.provider_id,
                     embedding_model=self.embedding_model,
                     config=self.config,
                 )
+                if self.indexer is not previous_indexer:
+                    for manager in self._instances.values():
+                        if manager._index_coordinator is coordinator:
+                            manager.indexer = self.indexer
+                            manager._dirty = True
                 
                 self._initialized = True
                 if self.config.sync.on_session_start:
-                    await self.indexer.sync()
-                    self._dirty = False
+                    await coordinator.sync(only_if_needed=True)
+                    self._mark_index_clean(coordinator)
                 if (
                     "session" in self.config.sources
                     and self.config.sync.sessions.enabled
                 ):
-                    await self._reconcile_sessions()
+                    if Storage.session_search_available():
+                        await self._ensure_session_index_ready()
+                    else:
+                        log.warn(
+                            "manager.session_search.disabled",
+                            {
+                                "project_id": self.project_id,
+                                "reason": (
+                                    "SQLite runtime does not support FTS5"
+                                ),
+                            },
+                        )
                 log.info("manager.init.complete", {
                     "project_id": self.project_id,
                     "provider": self.provider_id or "fts",
@@ -275,7 +391,8 @@ class MemoryManager:
             await self._persist_session_source()
 
         # Trigger Memory file sync if configured and dirty.
-        if self.config.sync.on_search and self._dirty:
+        coordinator = self._index_coordinator or self._coordinator_for_active_db()
+        if self.config.sync.on_search and (self._dirty or coordinator.dirty):
             await self.sync(reason="search")
 
         results: List[MemorySearchResult] = []
@@ -299,7 +416,7 @@ class MemoryManager:
 
         if MemorySource.SESSION in selected_sources:
             try:
-                await self._reconcile_sessions()
+                await self._ensure_session_index_ready()
                 from flocks.storage.session_search import session_fts_search
 
                 raw_results = await session_fts_search(
@@ -328,6 +445,15 @@ class MemoryManager:
                 log.warn("manager.search.session_failed", {"error": str(exc)})
 
         if successful_sources == 0 and errors:
+            from flocks.storage.session_search import (
+                SessionSearchUnavailableError,
+            )
+
+            if len(errors) == 1 and isinstance(
+                errors[0],
+                SessionSearchUnavailableError,
+            ):
+                raise errors[0]
             raise RuntimeError(
                 "All requested memory sources failed: "
                 + "; ".join(str(error) for error in errors)
@@ -354,13 +480,13 @@ class MemoryManager:
         await asyncio.to_thread(ConfigWriter.enable_memory_source, "session")
         self.config.sources.append("session")
 
-    async def _reconcile_sessions(self) -> None:
-        """Synchronize historical transcript FTS rows across all projects."""
+    async def _ensure_session_index_ready(self) -> None:
+        """Run the one-time historical Session backfill when required."""
         if not self.config.sync.sessions.enabled:
             return
-        from flocks.storage.session_search import reconcile_session_index
+        from flocks.storage.session_search import ensure_session_index_ready
 
-        await reconcile_session_index(
+        await ensure_session_index_ready(
             batch_size=self.config.sync.sessions.delta_messages,
         )
     
@@ -436,7 +562,8 @@ class MemoryManager:
         file_path = _safe_resolve_memory_path(memory_root, path)
         file_path.parent.mkdir(parents=True, exist_ok=True)
         
-        async with self._write_lock:
+        coordinator = self._index_coordinator or self._coordinator_for_active_db()
+        async with coordinator.write_lock:
             if append:
                 needs_separator = file_path.exists() and file_path.stat().st_size > 0
                 with open(file_path, "a", encoding="utf-8") as f:
@@ -446,9 +573,8 @@ class MemoryManager:
             else:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
-        
-        # Mark as dirty for next sync
-        self._dirty = True
+            # Mark as dirty before releasing the shared write/sync barrier.
+            self._mark_index_dirty()
         
         log.info("manager.write", {"path": path, "append": append, "length": len(content)})
         
@@ -492,7 +618,8 @@ class MemoryManager:
             scope_id,
             normalized_path,
         )
-        async with self._write_lock:
+        coordinator = self._index_coordinator or self._coordinator_for_active_db()
+        async with coordinator.write_lock:
             current = (
                 file_path.read_text(encoding="utf-8")
                 if file_path.exists()
@@ -537,10 +664,7 @@ class MemoryManager:
                     updated += "\n"
             if changed:
                 _atomic_write_text(file_path, updated)
-                self._dirty = True
-                if memory_scope == MemoryScope.GLOBAL:
-                    for manager in self._instances.values():
-                        manager._dirty = True
+                self._mark_index_dirty()
 
         log.info(
             "manager.curated_memory.update",
@@ -580,27 +704,27 @@ class MemoryManager:
         if not self._initialized:
             await self.initialize()
         
-        async with self._sync_lock:
-            log.info("manager.sync.start", {
-                "project_id": self.project_id,
-                "reason": reason,
-                "force": force,
-            })
-            
-            try:
-                stats = await self.indexer.sync(
-                    force=force,
-                    progress_callback=progress_callback,
-                )
-                
-                self._dirty = False
-                
-                log.info("manager.sync.complete", stats)
-                return stats
-            
-            except Exception as e:
-                log.error("manager.sync.failed", {"error": str(e)})
-                raise
+        coordinator = self._index_coordinator or self._coordinator_for_active_db()
+        log.info("manager.sync.start", {
+            "project_id": self.project_id,
+            "reason": reason,
+            "force": force,
+        })
+
+        try:
+            stats = await coordinator.sync(
+                force=force,
+                progress_callback=progress_callback,
+            )
+            self._mark_index_clean(coordinator)
+
+            result = stats or {}
+            log.info("manager.sync.complete", result)
+            return result
+
+        except Exception as e:
+            log.error("manager.sync.failed", {"error": str(e)})
+            raise
     
     def status(self) -> MemoryProviderStatus:
         """
@@ -610,6 +734,7 @@ class MemoryManager:
             Status information
         """
         # TODO: Implement comprehensive status collection
+        coordinator = self._index_coordinator or self._coordinator_for_active_db()
         return MemoryProviderStatus(
             enabled=self.config.enabled,
             provider=self.provider_id or "fts",
@@ -617,7 +742,7 @@ class MemoryManager:
             requested_provider=self.config.embedding.provider,
             workspace_dir=str(self.workspace_dir),
             sources=[MemorySource(s) for s in self.config.sources],
-            dirty=self._dirty,
+            dirty=self._dirty or coordinator.dirty,
             cache={"enabled": self.config.cache.enabled},
             fts={"enabled": True},  # Always available
             vector={"enabled": self.provider_id is not None},
@@ -625,12 +750,21 @@ class MemoryManager:
     
     async def close(self) -> None:
         """Close and cleanup manager"""
+        coordinator = self._index_coordinator
         self._initialized = False
         self.search_engine = None
         self.indexer = None
+        self._index_coordinator = None
         self._instances.pop(self.project_id, None)
+        if coordinator is not None and not any(
+            manager._index_coordinator is coordinator
+            for manager in self._instances.values()
+        ):
+            for key, candidate in list(self._index_coordinators.items()):
+                if candidate is coordinator:
+                    self._index_coordinators.pop(key, None)
         log.info("manager.closed", {"project_id": self.project_id})
     
     def mark_dirty(self) -> None:
         """Mark as needing sync"""
-        self._dirty = True
+        self._mark_index_dirty()

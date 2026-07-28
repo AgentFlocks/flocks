@@ -783,6 +783,8 @@ class Session:
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
 
             async def _delete_search_index(db) -> None:
+                if not Storage.session_search_available():
+                    return
                 await delete_session_documents(db, session_ids)
 
             await Storage.mutate_many(
