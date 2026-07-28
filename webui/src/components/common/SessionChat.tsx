@@ -1652,6 +1652,7 @@ export default function SessionChat({
   const initialMessageSentRef = useRef('');
   const abortingRef = useRef(false);
   const sessionBusyRef = useRef(false);
+  const sessionStatusRevisionRef = useRef(0);
   const goalHydrationVersionRef = useRef(0);
   // ID of the assistant message that was aborted; used to ignore its finish event
   const abortedMessageIdRef = useRef<string | null>(null);
@@ -1822,6 +1823,7 @@ export default function SessionChat({
         case 'ignore':
           return;
         case 'session-cleared':
+          sessionStatusRevisionRef.current += 1;
           abortingRef.current = false;
           sessionBusyRef.current = false;
           activeToolPartIdsRef.current.clear();
@@ -1834,6 +1836,7 @@ export default function SessionChat({
           void refreshContextUsage({ clear: true });
           return;
         case 'session-status':
+          sessionStatusRevisionRef.current += 1;
           if (action.statusType === 'busy') {
             sessionBusyRef.current = true;
             if (
@@ -2045,11 +2048,52 @@ export default function SessionChat({
     [onError, submitReject, t, toast],
   );
 
+  const reconcileSessionStatusAfterReconnect = useCallback(async () => {
+    if (!sessionId) return;
+    const statusRevision = sessionStatusRevisionRef.current;
+
+    try {
+      const response = await client.get('/api/session/status');
+      if (statusRevision !== sessionStatusRevisionRef.current) return;
+
+      const status = response.data?.[sessionId];
+      if (isActiveSessionStatus(status)) {
+        sessionBusyRef.current = true;
+        if (!abortingRef.current && !suppressStreamingUntilIdleRef.current) {
+          setIsStreaming(true);
+        }
+        if (status?.type === 'compacting') {
+          setIsCompacting(true);
+          isCompactingRef.current = true;
+          setCompactingMessage(status.message || t('chat.compacting'));
+        } else {
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+          setCompactingMessage('');
+          setCompactionStages([]);
+        }
+        return;
+      }
+
+      sessionBusyRef.current = false;
+      activeToolPartIdsRef.current.clear();
+      setSending(false);
+      setIsStreaming(false);
+      setIsCompacting(false);
+      isCompactingRef.current = false;
+      setCompactingMessage('');
+      setCompactionStages([]);
+    } catch {
+      // Keep the current activity state when reconnect status cannot be verified.
+    }
+  }, [sessionId, t]);
+
   const { status: sseStatus } = useSSE({
     url: `${getApiBase()}/api/event`,
     onEvent: handleSSEEvent,
     onReconnect: () => {
       if (!sessionId) return;
+      void reconcileSessionStatusAfterReconnect();
       refetch();
       refreshContextUsage();
       fetchPromptQueue();
@@ -2120,6 +2164,7 @@ export default function SessionChat({
     abortedMessageIdRef.current = null;
     suppressStreamingUntilIdleRef.current = false;
     sessionBusyRef.current = false;
+    sessionStatusRevisionRef.current += 1;
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
     clearPendingQuestions();

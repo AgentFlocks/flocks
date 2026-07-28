@@ -31,6 +31,7 @@ from flocks.cli.service_control import (
     read_logs,
     read_supervisor_status,
     request_restart,
+    request_restart_backend,
     request_stop,
     stream_logs,
     supervisor_is_running,
@@ -1565,6 +1566,21 @@ def restart_all(config: ServiceConfig, console) -> None:
     with service_lock(paths):
         _stop_all_unlocked(console, paths=paths)
         _start_all_unlocked(config, console, paths=paths)
+
+
+def restart_server(console) -> None:
+    """Restart only the backend through the running supervisor daemon."""
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        if not supervisor_is_running(paths):
+            raise ServiceError("Flocks daemon 未运行；请执行 `flocks restart` 进行全量重启。")
+        try:
+            status = request_restart_backend(paths=paths)
+        except Exception as error:
+            raise ServiceError(f"Flocks server 重启请求失败：{error}") from error
+        _print_status_payload(status.raw, console, include_daemon_step=False)
+        if not _startup_payload_is_ready(status.raw):
+            raise ServiceError(_startup_failure_message(status.raw))
 
 
 def _print_static_port_migration_hint(config: ServiceConfig, console) -> None:

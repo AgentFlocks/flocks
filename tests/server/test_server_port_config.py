@@ -307,6 +307,22 @@ class TestCommandLinePortConfiguration:
         assert captured["config"].frontend_port == 5273
         assert captured["config"].legacy_backend_port == 9100
 
+    def test_restart_server_only_does_not_restart_daemon(self, monkeypatch):
+        """Test server-only restart leaves the supervisor daemon running."""
+        calls = []
+
+        monkeypatch.setattr(cli_main, "restart_server", lambda _console: calls.append("server"))
+        monkeypatch.setattr(
+            cli_main,
+            "restart_all",
+            lambda _config, _console: calls.append("all"),
+        )
+
+        result = CliRunner().invoke(cli_main.app, ["restart", "--server-only"])
+
+        assert result.exit_code == 0
+        assert calls == ["server"]
+
     def test_restart_accepts_public_host_and_port(self, monkeypatch):
         """Test restart command accepts the unified public host/port options."""
         captured = {}
