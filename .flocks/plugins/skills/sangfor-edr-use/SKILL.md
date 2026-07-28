@@ -47,9 +47,9 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 ## EDR 交互协议
 
 1. 从 Secret Manager 与 `auth-state.json` 加载成套认证，并校验 base URL 和 Cookie 指纹。
-2. 使用 Cookie 与 `login_token` 调用 `list_auth_info`：
-   - HTTP 200、无登录页重定向、响应成功且包含预期用户/授权数据（`list_auth_info.auth_info`）：认证有效，跳过登录。
-   - Cookie 缺失或不匹配、401/403、重定向、非 200、响应无预期用户/授权数据：认证失效。
+2. 使用 Cookie 与 `login_token` 调用威胁终端概览接口 `get_agent_overview`：
+   - HTTP 200、无登录页重定向、响应成功且包含终端概览数据：认证有效，跳过登录。
+   - Cookie 缺失或不匹配、401/403、重定向、非 200、响应无终端概览数据：认证失效。
 3. 默认重新登录流程：访问登录页，获取 RSA 公钥和验证码，提交 `dlogin`，再调用 `launch_login.php`。
 4. 登录成功后将 Cookie 写入 `auth-state.json`，将 `login_token` 写入 Secret Manager，并更新配对指纹。
 5. 仪表盘 API 只能使用通过上述探测的同一套 Cookie/token；禁止从不同 state 或 Secret 拼接。
@@ -66,6 +66,7 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 ## 执行约束
 
 - 运行本 Skill 提供的 Python 脚本时，必须使用 Flocks 虚拟环境；禁止使用系统 Python。
+- 不得假设 Flocks 项目、插件或虚拟环境的绝对路径；代码必须通过当前运行时加载的模块、`Path.home()`、`~/.flocks` 或显式配置/环境变量解析路径。
 - 需要具体 CDP 命令、浏览器启动方式、验证码识别、selector、tab/iframe 处理或页面关键词时，必须先阅读 [references/cdp-workflow.md](references/cdp-workflow.md)，不要在本文件重复展开。
 - `bu.port` 是 Flocks browser daemon 的 IPC 端口文件，不是 Chrome remote-debugging 端口；禁止手工创建或修改。
 - 默认认证和仪表盘采集不得启动 browser daemon；只有用户明确选择 `browser_login` 或执行 `validate_auth_state`、`complete_manual_login` 时，才允许使用 browser/CDP。
