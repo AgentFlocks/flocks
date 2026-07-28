@@ -9,6 +9,13 @@ const { listWorkspacesMock } = vi.hoisted(() => ({
   listWorkspacesMock: vi.fn(),
 }));
 
+vi.mock('@/api/uiConfig', () => ({
+  uiConfigApi: {
+    getDisplay: vi.fn().mockResolvedValue({ displayName: 'Flocks', theme: null }),
+    update: vi.fn(),
+  },
+}));
+
 vi.mock('@/api/webuiContractPages', () => ({
   webuiContractPagesAPI: {
     listWorkspaces: listWorkspacesMock,

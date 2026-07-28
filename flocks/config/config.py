@@ -349,6 +349,20 @@ class ToolOutputConfig(BaseModel):
     )
 
 
+class ToolFailureConfig(BaseModel):
+    """Repeated tool-failure handling."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        True,
+        alias="disableOnRepeatedFailure",
+        description=(
+            "Disable a standalone custom tool after repeated identical failures."
+        ),
+    )
+
+
 class EnterpriseConfig(BaseModel):
     """Enterprise configuration"""
 
@@ -374,6 +388,10 @@ class UIConfig(BaseModel):
         alias="faviconPath",
         max_length=256,
         description="Relative path to a custom WebUI favicon stored in the user config directory.",
+    )
+    theme: Optional[Literal["light", "dark"]] = Field(
+        None,
+        description="WebUI theme preference. Persisted server-side so it survives browser/origin changes.",
     )
 
     @field_validator("display_name", mode="before")
@@ -674,6 +692,11 @@ class ConfigInfo(BaseModel):
         None,
         alias="toolOutput",
         description="Tool output size limits (read, truncation caps).",
+    )
+    tool_failure: Optional[ToolFailureConfig] = Field(
+        None,
+        alias="toolFailure",
+        description="Repeated tool-failure handling.",
     )
     experimental: Optional[ExperimentalConfig] = None
     
@@ -1372,7 +1395,13 @@ class Config:
         return None
 
     @classmethod
-    async def update(cls, config: ConfigInfo, project_dir: Optional[Path] = None) -> None:
+    async def update(
+        cls,
+        config: ConfigInfo,
+        project_dir: Optional[Path] = None,
+        *,
+        channel_allow_from_deletions: Optional[set[str]] = None,
+    ) -> None:
         """
         Update configuration
         
@@ -1380,6 +1409,9 @@ class Config:
             config: New configuration
             project_dir: Deprecated and ignored. Config is always written to
                 the unified user config directory.
+            channel_allow_from_deletions: Channel IDs whose persisted
+                allowFrom field should be removed after a successful full
+                config validation and merge.
         """
         _ = project_dir
 
@@ -1396,6 +1428,13 @@ class Config:
         
         # Write
         config_data = merged.model_dump(by_alias=True, exclude_none=True, mode="json")
+        if channel_allow_from_deletions:
+            channels = config_data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channel_allow_from_deletions:
+                    channel_cfg = channels.get(channel_id)
+                    if isinstance(channel_cfg, dict):
+                        channel_cfg.pop("allowFrom", None)
         config_file.write_text(json.dumps(config_data, indent=2), encoding="utf-8")
         
         # Clear cache

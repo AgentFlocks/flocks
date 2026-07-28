@@ -4,10 +4,12 @@ export interface UIDisplayConfig {
   displayName: string;
   configuredDisplayName?: string | null;
   faviconUrl?: string | null;
+  theme?: 'light' | 'dark' | null;
 }
 
 export interface UIConfigUpdate {
   displayName?: string | null;
+  theme?: 'light' | 'dark' | null;
 }
 
 export const uiConfigApi = {

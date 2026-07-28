@@ -19,7 +19,7 @@ Flocks TUI expects Config format:
 import re
 import xml.etree.ElementTree as ET
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Literal
 from fastapi import APIRouter, File, HTTPException, UploadFile, status
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
@@ -33,6 +33,36 @@ from flocks.utils.log import Log
 
 router = APIRouter()
 log = Log.create(service="routes.config")
+
+
+def _channel_allow_from_deletion_ids(config_data: Dict[str, Any]) -> set[str]:
+    """Return channel IDs whose PATCH explicitly removes allowFrom."""
+    channels = config_data.get("channels")
+    if not isinstance(channels, dict):
+        return set()
+
+    return {
+        channel_id
+        for channel_id, channel_cfg in channels.items()
+        if isinstance(channel_cfg, dict)
+        and "allowFrom" in channel_cfg
+        and channel_cfg.get("allowFrom") is None
+    }
+
+
+def _normalize_slack_dm_policy(config_data: Dict[str, Any]) -> None:
+    """Keep Slack allowFrom and dmPolicy aligned for DM access control."""
+    channels = config_data.get("channels")
+    if not isinstance(channels, dict):
+        return
+    slack = channels.get("slack")
+    if not isinstance(slack, dict) or "allowFrom" not in slack:
+        return
+    allow_from = slack.get("allowFrom")
+    if isinstance(allow_from, list) and len(allow_from) > 0:
+        slack["dmPolicy"] = "allowlist"
+    else:
+        slack["dmPolicy"] = "open"
 
 
 def _build_model_from_config(
@@ -131,6 +161,7 @@ class UIDisplayResponse(BaseModel):
     display_name: str = Field(alias="displayName")
     configured_display_name: Optional[str] = Field(None, alias="configuredDisplayName")
     favicon_url: Optional[str] = Field(None, alias="faviconUrl")
+    theme: Optional[Literal["light", "dark"]] = Field(None)
 
 
 class UIConfigUpdateRequest(BaseModel):
@@ -139,6 +170,18 @@ class UIConfigUpdateRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
     display_name: Optional[str] = Field(None, alias="displayName")
+    theme: Optional[Literal["light", "dark"]] = Field(None)
+
+
+class ToolFailurePreference(BaseModel):
+    """Repeated tool-failure preference exposed to the WebUI."""
+
+    model_config = {"populate_by_name": True}
+
+    disable_on_repeated_failure: bool = Field(
+        ...,
+        alias="disableOnRepeatedFailure",
+    )
 
 
 DEFAULT_UI_DISPLAY_NAME = "Flocks"
@@ -400,16 +443,24 @@ def _persist_ui_section(data: Dict[str, Any], ui_section: Dict[str, Any]) -> Non
     ConfigWriter._write_raw(data)
 
 
+def _effective_tool_failure_preference(config: ConfigInfoModel) -> bool:
+    if config.tool_failure is None:
+        return True
+    return config.tool_failure.disable_on_repeated_failure
+
+
 @router.get("/ui-display", response_model=UIDisplayResponse, summary="Get public UI display name")
 async def get_ui_display() -> UIDisplayResponse:
     """Return only the effective WebUI display name for public screens."""
     try:
         complete_config = await Config.get()
         display_name, configured_display_name = _effective_display_name(complete_config)
+        theme = complete_config.ui.theme if complete_config.ui else None
         return UIDisplayResponse(
             displayName=display_name,
             configuredDisplayName=configured_display_name,
             faviconUrl=_favicon_url(complete_config),
+            theme=theme,
         )
     except Exception as e:
         log.error("config.ui_display.get.error", {"error": str(e)})
@@ -420,7 +471,10 @@ async def get_ui_display() -> UIDisplayResponse:
 async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
     """Update visible WebUI display preferences."""
     try:
-        ui_config = UIConfig.model_validate({"displayName": request.display_name})
+        ui_config = UIConfig.model_validate({
+            "displayName": request.display_name,
+            "theme": request.theme,
+        })
         data = ConfigWriter._read_raw()
         ui_section = _get_or_create_ui_section(data)
 
@@ -428,6 +482,11 @@ async def update_ui_config(request: UIConfigUpdateRequest) -> UIDisplayResponse:
             ui_section["displayName"] = ui_config.display_name
         else:
             ui_section.pop("displayName", None)
+
+        if ui_config.theme is not None:
+            ui_section["theme"] = ui_config.theme
+        else:
+            ui_section.pop("theme", None)
 
         _persist_ui_section(data, ui_section)
         return await get_ui_display()
@@ -521,6 +580,47 @@ async def reset_ui_favicon() -> UIDisplayResponse:
     return await get_ui_display()
 
 
+@router.get(
+    "/tool-failure",
+    response_model=ToolFailurePreference,
+    summary="Get repeated tool-failure preference",
+)
+async def get_tool_failure_preference() -> ToolFailurePreference:
+    """Return whether repeated identical failures automatically disable tools."""
+    try:
+        config = await Config.get()
+        return ToolFailurePreference(
+            disableOnRepeatedFailure=_effective_tool_failure_preference(config)
+        )
+    except Exception as e:
+        log.error("config.tool_failure.get.error", {"error": str(e)})
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@router.patch(
+    "/tool-failure",
+    response_model=ToolFailurePreference,
+    summary="Update repeated tool-failure preference",
+)
+async def update_tool_failure_preference(
+    request: ToolFailurePreference,
+) -> ToolFailurePreference:
+    """Update only the repeated-failure switch in flocks.json."""
+    try:
+        data = ConfigWriter._read_raw()
+        existing = data.get("toolFailure", data.get("tool_failure", {}))
+        section = dict(existing) if isinstance(existing, dict) else {}
+        section.pop("disable_on_repeated_failure", None)
+        section["disableOnRepeatedFailure"] = request.disable_on_repeated_failure
+        data.pop("tool_failure", None)
+        data["toolFailure"] = section
+        ConfigWriter._write_raw(data)
+        return await get_tool_failure_preference()
+    except Exception as e:
+        log.error("config.tool_failure.update.error", {"error": str(e)})
+        raise HTTPException(status_code=400, detail=str(e))
+
+
 @router.get("", summary="Get configuration")
 async def get_config() -> Dict[str, Any]:
     """
@@ -554,6 +654,9 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
     flocks.json, so that plaintext secrets never land in that file.
     """
     try:
+        channel_allow_from_deletions = _channel_allow_from_deletion_ids(config_data)
+        _normalize_slack_dm_policy(config_data)
+
         # Extract channel sensitive fields into .secret.json before persisting
         if "channels" in config_data and isinstance(config_data.get("channels"), dict):
             from flocks.security.channel_secrets import extract_channel_secrets
@@ -563,7 +666,10 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         config = ConfigInfoModel.model_validate(config_data)
         
         # Update project config
-        await Config.update(config)
+        await Config.update(
+            config,
+            channel_allow_from_deletions=channel_allow_from_deletions,
+        )
         
         # Clear cache to reload
         Config.clear_cache()

@@ -1,4 +1,5 @@
 import { createContext, useCallback, useEffect, useLayoutEffect, useMemo, useState, type ReactNode } from 'react';
+import { uiConfigApi } from '@/api/uiConfig';
 
 export type Theme = 'light' | 'dark';
 
@@ -23,11 +24,34 @@ const ThemeContext = createContext<ThemeContextValue>({
 function getInitialTheme(): Theme {
   if (typeof window === 'undefined') return 'light';
 
-  const storage = window.localStorage;
-  const stored = typeof storage?.getItem === 'function' ? storage.getItem(THEME_STORAGE_KEY) : null;
-  if (stored === 'light' || stored === 'dark') return stored;
+  try {
+    const stored = window.localStorage?.getItem(THEME_STORAGE_KEY);
+    if (stored === 'light' || stored === 'dark') return stored;
+
+    // Match index.html behavior: respect system preference when no stored value.
+    if (
+      typeof window.matchMedia === 'function' &&
+      window.matchMedia('(prefers-color-scheme: dark)').matches
+    ) {
+      return 'dark';
+    }
+  } catch {
+    // localStorage may be unavailable in restricted browser contexts.
+  }
 
   return 'light';
+}
+
+function saveThemeToStorage(theme: Theme): boolean {
+  try {
+    if (typeof window.localStorage?.setItem === 'function') {
+      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
+      return true;
+    }
+  } catch {
+    // Storage full, private browsing, or other restriction — non-fatal.
+  }
+  return false;
 }
 
 function applyTheme(theme: Theme) {
@@ -39,17 +63,49 @@ function applyTheme(theme: Theme) {
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setThemeState] = useState<Theme>(getInitialTheme);
   const [temporaryThemeOverride, setTemporaryThemeOverride] = useState<Theme | null>(null);
+  const [serverThemeLoaded, setServerThemeLoaded] = useState(false);
   const effectiveTheme = temporaryThemeOverride ?? theme;
 
   useLayoutEffect(() => {
     applyTheme(effectiveTheme);
   }, [effectiveTheme]);
 
+  // Persist to localStorage on every change (fast, sync — used by index.html anti-flash script).
   useEffect(() => {
-    if (typeof window.localStorage?.setItem === 'function') {
-      window.localStorage.setItem(THEME_STORAGE_KEY, theme);
-    }
+    saveThemeToStorage(theme);
   }, [theme]);
+
+  // On mount, fetch server-side theme preference (durable across browsers / origins).
+  useEffect(() => {
+    let cancelled = false;
+    uiConfigApi
+      .getDisplay()
+      .then((config) => {
+        if (cancelled) return;
+        if (config.theme && (config.theme === 'light' || config.theme === 'dark')) {
+          setThemeState(config.theme);
+          saveThemeToStorage(config.theme);
+        }
+      })
+      .catch(() => {
+        // Server unavailable — localStorage value is the fallback, already applied.
+      })
+      .finally(() => {
+        if (!cancelled) setServerThemeLoaded(true);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Persist to server on every change (after initial load, to avoid re-saving the fetched value).
+  useEffect(() => {
+    if (!serverThemeLoaded) return;
+    uiConfigApi.update({ theme }).catch(() => {
+      // Non-critical — localStorage already holds the latest value.
+    });
+  }, [theme, serverThemeLoaded]);
 
   const setTheme = useCallback((nextTheme: Theme) => {
     setThemeState(nextTheme);

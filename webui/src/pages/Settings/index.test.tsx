@@ -1,18 +1,30 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { render, screen, within } from '@testing-library/react';
+import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import SettingsPage from './index';
 import { ThemeContext, type Theme } from '@/contexts/ThemeContext';
 import { ToastProvider } from '@/components/common/Toast';
 
-const { changeLanguage, flocksproUsersApi, setTheme, useAuth } = vi.hoisted(() => ({
+const { changeLanguage, flocksproUsersApi, setTheme, toolFailureConfigApi, uiConfigApi, useAuth } = vi.hoisted(() => ({
   changeLanguage: vi.fn(),
   flocksproUsersApi: {
     hasCapability: vi.fn(),
   },
   setTheme: vi.fn(),
+  toolFailureConfigApi: {
+    get: vi.fn(),
+    update: vi.fn(),
+  },
+  uiConfigApi: {
+    getDisplay: vi.fn().mockResolvedValue({ displayName: 'Flocks', theme: null }),
+    update: vi.fn().mockResolvedValue({ displayName: 'Flocks', theme: 'dark' }),
+  },
   useAuth: vi.fn(),
+}));
+
+vi.mock('@/api/uiConfig', () => ({
+  uiConfigApi,
 }));
 
 vi.mock('react-i18next', () => ({
@@ -31,6 +43,10 @@ vi.mock('@/contexts/AuthContext', () => ({
 
 vi.mock('@/api/flocksproUsers', () => ({
   flocksproUsersApi,
+}));
+
+vi.mock('@/api/toolFailureConfig', () => ({
+  toolFailureConfigApi,
 }));
 
 vi.mock('@/pages/Config', () => ({
@@ -92,6 +108,10 @@ describe('SettingsPage', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     flocksproUsersApi.hasCapability.mockResolvedValue(true);
+    toolFailureConfigApi.get.mockResolvedValue({ disableOnRepeatedFailure: true });
+    toolFailureConfigApi.update.mockImplementation(async (disableOnRepeatedFailure: boolean) => ({
+      disableOnRepeatedFailure,
+    }));
     useAuth.mockReturnValue({
       user: {
         id: 'user-1',
@@ -115,6 +135,27 @@ describe('SettingsPage', () => {
 
     await user.click(screen.getByRole('button', { name: 'darkTheme' }));
     expect(setTheme).toHaveBeenCalledWith('dark');
+  });
+
+  it('loads and updates repeated tool failure auto-disable', async () => {
+    const user = userEvent.setup();
+    toolFailureConfigApi.get.mockResolvedValue({ disableOnRepeatedFailure: false });
+
+    renderSettings('/settings/preferences');
+
+    const autoDisableSwitch = await screen.findByRole('switch', {
+      name: 'toolFailureAutoDisable',
+    });
+    await waitFor(() => {
+      expect(autoDisableSwitch).toHaveAttribute('aria-checked', 'false');
+    });
+
+    await user.click(autoDisableSwitch);
+
+    await waitFor(() => {
+      expect(toolFailureConfigApi.update).toHaveBeenCalledWith(true);
+      expect(autoDisableSwitch).toHaveAttribute('aria-checked', 'true');
+    });
   });
 
   it('redirects legacy model and channel settings URLs to workspace pages', async () => {
@@ -196,7 +237,7 @@ describe('SettingsPage', () => {
     renderSettings('/settings/flockspro');
 
     expect(await screen.findByRole('heading', { name: 'settingsPreferences' })).toBeInTheDocument();
-    expect(screen.queryByRole('link', { name: 'Flocks' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: 'Flocks Pro' })).not.toBeInTheDocument();
     expect(screen.queryByRole('link', { name: 'auditLogs' })).not.toBeInTheDocument();
   });
 });
