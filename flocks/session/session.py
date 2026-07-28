@@ -1069,23 +1069,6 @@ class Session:
                 "project_id": project_id,
                 "count": len(sessions),
             })
-            try:
-                from flocks.hooks.builtin.session_learning import (
-                    schedule_session_learning,
-                )
-
-                for session in changed:
-                    schedule_session_learning(
-                        session_id=session.id,
-                        workspace=session.directory,
-                        provider_id=session.provider,
-                        model_id=session.model,
-                    )
-            except Exception as exc:
-                log.warn("session.archive.learning_schedule_error", {
-                    "id": session_id,
-                    "error": str(exc),
-                })
             return True
         finally:
             if prompt_queue_paused and not archive_committed:

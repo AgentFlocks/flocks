@@ -185,7 +185,12 @@ class MemoryDreamConfig(BaseModel):
 
     enabled: bool = Field(
         True,
-        description="Extract durable facts from completed sessions and daily memory",
+        description="Extract durable facts from incremental sessions and daily memory",
+    )
+    interval_hours: float = Field(
+        12,
+        gt=0,
+        description="Hours between successful background Dream bridging runs",
     )
     recent_daily_days: int = Field(
         7,
@@ -195,11 +200,16 @@ class MemoryDreamConfig(BaseModel):
 
 
 class MemorySkillEvolutionConfig(BaseModel):
-    """Session-driven skill evolution configuration."""
+    """Turn-driven skill evolution configuration."""
 
     enabled: bool = Field(
         True,
-        description="Create or update user skills from completed sessions",
+        description="Create or update user skills from successful tool turns",
+    )
+    min_completed_tools: int = Field(
+        10,
+        ge=1,
+        description="Completed tool calls in one turn that trigger a skill review",
     )
     max_related_skills: int = Field(
         3,
@@ -214,7 +224,7 @@ class MemoryLearningConfig(BaseModel):
 
     enabled: bool = Field(
         True,
-        description="Enable post-session Dream and skill evolution",
+        description="Enable scheduled Dream and turn-driven skill evolution",
     )
     max_session_messages: int = Field(
         100,
@@ -234,7 +244,10 @@ class MemoryLearningConfig(BaseModel):
     catch_up_sessions: int = Field(
         20,
         ge=0,
-        description="Recent sessions checked for missed learning runs at startup",
+        description=(
+            "Maximum changed sessions included in one Dream bridge batch; "
+            "zero means unlimited"
+        ),
     )
     dream: MemoryDreamConfig = Field(default_factory=MemoryDreamConfig)
     skill: MemorySkillEvolutionConfig = Field(
@@ -367,7 +380,7 @@ class MemoryConfig(BaseModel):
     )
     learning: MemoryLearningConfig = Field(
         default_factory=MemoryLearningConfig,
-        description="Post-session Dream and skill self-evolution",
+        description="Scheduled Dream and turn-driven skill self-evolution",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,

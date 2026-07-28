@@ -136,6 +136,7 @@ def test_get_stats(registry):
 
 def test_register_builtin_hooks_is_idempotent():
     from flocks.hooks.builtin import register_builtin_hooks
+    from flocks.hooks.pipeline import HookPipeline
 
     HookRegistry.reset_instance()
     try:
@@ -143,11 +144,10 @@ def test_register_builtin_hooks_is_idempotent():
         register_builtin_hooks()
 
         stats = HookRegistry.get_instance().get_stats()
-        assert stats["event_keys"]["command:new"]["handler_count"] == 1
-        assert stats["event_keys"]["command:new"]["handlers"] == [
-            "_handle_new_command"
-        ]
+        assert "command:new" not in stats["event_keys"]
+        assert HookPipeline.list_hooks().count("builtin.session-learning") == 1
     finally:
+        HookPipeline.unregister("builtin.session-learning")
         HookRegistry.get_instance().clear()
         HookRegistry.reset_instance()
 
