@@ -84,6 +84,8 @@ FILTER_FIELDS = frozenset(
         "_source_type",
         "net_type",
         "direction",
+        "threat_severity",
+        "threat_level",
         "threat_name",
         "threat_type",
         "threat_phase",

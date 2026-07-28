@@ -631,7 +631,7 @@ function RightColumn({ stats }) {
       h('div', { className: 'loop-diagram', key: 'diagram' }, [
         h('div', { className: 'loop-node primary', key: 'valid' }, [h('b', { key: 'v' }, compactNumber(stats.triage.attackTotal)), h('span', { key: 'l' }, '有效事件')]),
         h('div', { className: 'loop-node', key: 'auto' }, [h('b', { key: 'v' }, compactNumber(stats.closedLoop.autoClosed)), h('span', { key: 'l' }, '自动闭环')]),
-        h('div', { className: 'loop-node warn', key: 'manual' }, [h('b', { key: 'v' }, compactNumber(stats.closedLoop.manualDecision)), h('span', { key: 'l' }, '人工决策')]),
+        h('div', { className: 'loop-node warn', key: 'manual' }, [h('b', { key: 'v' }, compactNumber(stats.closedLoop.manualDecision)), h('span', { key: 'l' }, 'AI转人工')]),
         h('div', { className: 'loop-node hot', key: 'pending' }, [h('b', { key: 'v' }, compactNumber(stats.closedLoop.pending)), h('span', { key: 'l' }, '待处理')]),
       ]),
       h(Gauge, { label: '闭环率', value: stats.closedLoop.resolutionRate, color: '#2ee6a6', key: 'gauge' }),
@@ -864,7 +864,11 @@ function AiCore({ stats, activity }) {
       h('small', { key: 'label' }, coreLabel),
       activeEvent ? h('div', { className: 'ai-operation-window', key: `operation-${activeEvent.eventId}` }, [
         h('div', { className: 'ai-operation-track', key: 'track' }, [...operations, operations[0]].map((operation, index) => h('span', { key: `${operation}-${index}` }, operation))),
-      ]) : h('div', { className: 'ai-operation-idle', key: 'operation-idle' }, '等待新的处理任务'),
+      ]) : h('div', {
+        className: 'ai-operation-idle',
+        title: 'AI 新完成且未使用缓存、复用或失败的研判数量',
+        key: 'operation-idle',
+      }, `AI新增研判 ${compactNumber(stats.triage.newTriaged)}`),
     ]),
     activeEvent ? h('div', { className: 'ai-evidence-field', key: `evidence-${activeEvent.eventId}` }, evidenceItems.map((item, index) => h('div', {
       className: `ai-evidence-card evidence-${index + 1}`,
@@ -1417,9 +1421,27 @@ function CommandGraph({ stats, activity }) {
       h(AiCore, { stats, activity, key: 'sphere' }),
     ]),
     h('div', { className: 'outcome-stack', key: 'outcomes' }, [
-      h('div', { title: 'AI 新完成且未使用缓存、复用或失败的研判数量', key: 'auto' }, [h(AnimatedNumber, { tag: 'b', value: stats.triage.newTriaged, key: 'value' }), h('span', { key: 'label' }, 'AI自主研判')]),
-      h('div', { className: cx('primary', triageActive && 'processing'), title: '研判结论为攻击成功、攻击行为或攻击失败的事件数量', key: 'events' }, [h(AnimatedNumber, { tag: 'b', value: stats.triage.attackTotal, key: 'value' }), h('span', { key: 'label' }, triageActive ? '结果生成中' : '安全事件')]),
-      h('div', { key: 'manual' }, [h(AnimatedNumber, { tag: 'b', value: stats.closedLoop.manualDecision, key: 'value' }), h('span', { key: 'label' }, '人工研判')]),
+      h('div', { className: cx('primary', triageActive && 'processing'), title: 'AI 研判结论为攻击成功、攻击行为或攻击失败的事件数量', key: 'events' }, [
+        h(AnimatedNumber, { tag: 'b', value: stats.triage.attackTotal, key: 'value' }),
+        h('span', { className: cx('outcome-label', triageActive && 'is-processing'), key: 'label' }, [
+          h('i', { key: 'ai' }, triageActive ? 'AI研判' : 'AI判定'),
+          h('em', { key: 'text' }, triageActive ? '处理中' : '安全事件'),
+        ]),
+      ]),
+      h('div', { title: 'AI 研判结论为良性的事件数量', key: 'benign' }, [
+        h(AnimatedNumber, { tag: 'b', value: stats.triage.benign, key: 'value' }),
+        h('span', { className: 'outcome-label', key: 'label' }, [
+          h('i', { key: 'ai' }, 'AI判定'),
+          h('em', { key: 'text' }, '非安全事件'),
+        ]),
+      ]),
+      h('div', { title: 'AI 判定需要进入人工复核的事件数量', key: 'manual' }, [
+        h(AnimatedNumber, { tag: 'b', value: stats.closedLoop.pending, key: 'value' }),
+        h('span', { className: 'outcome-label', key: 'label' }, [
+          h('i', { key: 'ai' }, 'AI判定'),
+          h('em', { key: 'text' }, '待人工复核'),
+        ]),
+      ]),
     ]),
     h('div', { className: 'severity-stack', key: 'severity' }, severities.map((item) => h('div', {
       className: cx(`severity-node severity-${item.tone}`, item.tone === activeSeverityTone && 'active-target', !activeSeverityTone && item.tone === recentSeverityTone && 'recent-target'),
@@ -3746,6 +3768,28 @@ const CSS = `
 .outcome-stack > div { display: flex; flex-direction: column; min-width: 90px; }
 .outcome-stack b { color: #eef1f0; font-size: 23px; line-height: 1; }
 .outcome-stack span { margin-top: 6px; color: #78837f; font-size: 12px; }
+.outcome-stack span.outcome-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.outcome-label i {
+  padding: 1px 4px;
+  border: 1px solid rgba(43,231,255,.3);
+  border-radius: 3px;
+  color: #62cbe8;
+  background: rgba(43,231,255,.07);
+  font-size: 9px;
+  font-style: normal;
+  line-height: 14px;
+}
+.outcome-label em { color: #86a7b8; font-size: 12px; font-style: normal; }
+.outcome-label.is-processing i {
+  border-color: rgba(155,140,255,.38);
+  color: #aa9cff;
+  background: rgba(155,140,255,.1);
+}
 .outcome-stack .primary b { color: #4bdbae; }
 .severity-stack {
   position: absolute;

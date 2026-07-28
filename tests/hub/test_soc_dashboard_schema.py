@@ -171,6 +171,77 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     assert schema_version == "2"
 
 
+def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
+    db_path = tmp_path / "soc.db"
+    asset_date = "2026-07-14"
+    records = [
+        {"triage_status": "ok", "attack_verdict": "attack_success", "attack_success": True},
+        {"triage_status": "ok", "attack_verdict": "attack"},
+        {"triage_status": "ok", "attack_verdict": "attack_failed"},
+        {"triage_status": "ok", "attack_verdict": "benign"},
+        {"triage_status": "ok", "attack_verdict": "unknown"},
+        {"triage_status": "failed", "attack_verdict": "unknown"},
+        {"triage_status": "failed", "attack_verdict": "benign"},
+        {"triage_status": "ok", "attack_verdict": "legacy", "attack_success": True},
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            [
+                (json.dumps(record), asset_date, 1784014800 + index)
+                for index, record in enumerate(records)
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+
+    assert handlers._ensure_sqlite_schema() is True
+    sources = handlers._find_sqlite_sources(
+        asset_date,
+        asset_date,
+        1784014800,
+        1784014800 + len(records),
+    )
+    triage = handlers._read_triage(sources)
+    closed_loop = handlers._build_closed_loop(triage)
+    with sqlite3.connect(db_path) as conn:
+        timeline = handlers._sqlite_timeline(
+            conn,
+            handlers._sqlite_settings(),
+            "asset_date = ? AND event_time BETWEEN ? AND ?",
+            [asset_date, 1784014800, 1784014800 + len(records)],
+            [asset_date],
+            1784014800,
+            1784014800 + len(records),
+        )
+
+    assert triage["totalRecords"] == 8
+    assert triage["newTriaged"] == 6
+    assert triage["attackSuccess"] == 2
+    assert triage["attack"] == 1
+    assert triage["attackFailed"] == 1
+    assert triage["attackTotal"] == 4
+    assert triage["benign"] == 1
+    assert triage["unknown"] == 1
+    assert triage["triageFailed"] == 2
+    assert closed_loop["pending"] == 3
+    assert triage["attackTotal"] + triage["benign"] + closed_loop["pending"] == 8
+    assert sum(timeline["attack"]) == triage["attackTotal"]
+
+
 def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
     with sqlite3.connect(workflow_db) as conn:

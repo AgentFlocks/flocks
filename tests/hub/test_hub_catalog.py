@@ -270,6 +270,45 @@ def test_catalog_ignores_stale_record_when_legacy_install_is_inferred(
     assert local.get_record("device", plugin_id) is None
 
 
+def test_catalog_uses_webui_workspace_version_for_inferred_installs(
+    isolated_hub_env,
+):
+    from flocks.hub.catalog import clear_catalog_caches
+
+    webui_dir = (
+        isolated_hub_env["home"]
+        / ".flocks"
+        / "plugins"
+        / "contracts"
+        / "webui"
+        / "soc_ui"
+    )
+    webui_dir.mkdir(parents=True)
+    workspace_path = webui_dir / "workspace.json"
+    workspace = {
+        "id": "soc_ui",
+        "version": "1.0.0",
+        "title": "SOC 工作区",
+        "placement": "sceneWorkspace",
+    }
+    workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
+    clear_catalog_caches()
+
+    entry = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
+
+    assert entry.version == "1.1.2"
+    assert entry.state == "updateAvailable"
+    assert entry.installedVersion == "1.0.0"
+
+    workspace["version"] = "1.1.2"
+    workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
+
+    refreshed = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
+
+    assert refreshed.state == "installed"
+    assert refreshed.installedVersion == "1.1.2"
+
+
 def test_pentest_agents_are_listed_in_agent_catalog():
     entries = list_catalog(plugin_type="agent")
     ids = {entry.id for entry in entries}
@@ -381,6 +420,7 @@ async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pyt
     webui_dir = home_plugins / "contracts" / "webui" / "soc_ui"
     access_dir = home_plugins / "contracts" / "access" / "soc_ui"
     dashboard_manifest = json.loads((webui_dir / "soc_dashboard" / "manifest.json").read_text(encoding="utf-8"))
+    workspace_manifest = json.loads((webui_dir / "workspace.json").read_text(encoding="utf-8"))
 
     assert (webui_dir / "workspace.json").is_file()
     assert (webui_dir / "soc_alerts" / "dist" / "page.js").is_file()
@@ -390,6 +430,7 @@ async def test_hub_installs_soc_webui_package(isolated_hub_env, monkeypatch: pyt
     assert (access_dir / "soc_alerts_operations.py").is_file()
     assert set(built_pages) == {"soc-alerts", "soc-dashboard", "soc-overview"}
     assert dashboard_manifest["id"] == "soc-dashboard"
+    assert workspace_manifest["version"] == record.version == load_manifest("webui", "soc_ui").version
     assert record.installPath == str(webui_dir)
 
     removed = await uninstall_plugin("webui", "soc_ui")
@@ -475,6 +516,8 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
         "threat_rule_id": "D1181087257",
         "threat_name": "SQL injection",
         "threat_msg": "Detected SQL injection attempt.",
+        "threat_severity": "critical",
+        "threat_level": "high",
         "threat_phase": "exploit",
         "threat_type": "exploit",
         "threat_result": "failed",
@@ -545,6 +588,44 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     assert response.body["summary"]["attackFailed"] == 1
     assert response.body["incidents"][0]["id"] == "alert-1"
     assert response.body["incidents"][0]["tableCells"]["_source_type"]["value"] == "tdp"
+    assert response.body["incidents"][0]["tableCells"]["threat_severity"]["value"] == "critical"
+    assert response.body["incidents"][0]["tableCells"]["threat_level"]["value"] == "high"
+
+    filtered = runtime.execute(
+        page_id="soc-alerts",
+        contract_id="soc.alerts.operations",
+        operation_name="list",
+        payload={
+            "params": {
+                "filters": {
+                    "threat_severity": ["critical"],
+                    "threat_level": ["high"],
+                },
+                "limit": 10,
+            }
+        },
+        principal=AuthUser(id="u1", username="admin", role="admin"),
+    )
+
+    assert filtered.status_code == 200
+    assert filtered.body["summary"]["representativeCount"] == 1
+    assert [incident["id"] for incident in filtered.body["incidents"]] == ["alert-1"]
+
+    for filters in (
+        {"threat_severity": ["low"]},
+        {"threat_level": ["low"]},
+    ):
+        excluded = runtime.execute(
+            page_id="soc-alerts",
+            contract_id="soc.alerts.operations",
+            operation_name="list",
+            payload={"params": {"filters": filters, "limit": 10}},
+            principal=AuthUser(id="u1", username="admin", role="admin"),
+        )
+
+        assert excluded.status_code == 200
+        assert excluded.body["summary"]["representativeCount"] == 0
+        assert excluded.body["incidents"] == []
 
 
 async def test_hub_installs_soc_workspace_component_children(isolated_hub_env, monkeypatch: pytest.MonkeyPatch):

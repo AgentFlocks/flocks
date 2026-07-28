@@ -2025,8 +2025,12 @@ def _sqlite_timeline(conn, settings, where_clause, query_params, dates, start_ti
         f"COUNT(*) AS raw_count, "
         f"COALESCE(SUM(CASE WHEN is_duplicate = 0 THEN 1 ELSE 0 END), 0) AS unique_count, "
         f"COALESCE(SUM(has_triage), 0) AS triage_count, "
-        f"COALESCE(SUM(CASE WHEN has_triage = 1 AND LOWER(verdict) IN "
-        f"('attack_success', 'attack', 'attack_failed') THEN 1 ELSE 0 END), 0) AS attack_count "
+        f"COALESCE(SUM(CASE WHEN has_triage = 1 "
+        f"AND LOWER(triage_status) NOT IN ('failed', 'error') "
+        f"AND (LOWER(verdict) IN ('attack_success', 'attack', 'attack_failed') "
+        f"OR (attack_success = 1 AND LOWER(verdict) NOT IN "
+        f"('attack_success', 'attack', 'attack_failed', 'benign'))) "
+        f"THEN 1 ELSE 0 END), 0) AS attack_count "
         f"FROM {settings['facts_table']} WHERE {where_clause} AND event_time IS NOT NULL "
         f"GROUP BY bucket_index ORDER BY bucket_index",
         (bucket_start, bucket_seconds, *query_params),
@@ -2135,24 +2139,37 @@ def _read_sqlite_triage(paths):
         where_clause += " AND event_time BETWEEN ? AND ?"
         query_params.extend((start_time, end_time))
     triage_where = f"{where_clause} AND has_triage = 1"
+    cache_condition = "(LOWER(triage_source) = 'cache' OR LOWER(triage_status) = 'cached')"
+    follower_condition = (
+        "(LOWER(triage_source) IN ('follower', 'followers', 'follower_reused') "
+        "OR LOWER(triage_status) = 'follower_reused')"
+    )
+    failed_condition = "LOWER(triage_status) IN ('failed', 'error')"
+    resolved_condition = f"NOT ({failed_condition})"
+    new_triage_condition = (
+        f"NOT {cache_condition} AND NOT {follower_condition} AND NOT ({failed_condition})"
+    )
     try:
         with sqlite3.connect(settings["db_path"]) as conn:
             row = conn.execute(
                 f"SELECT COUNT(*), "
-                f"COALESCE(SUM(CASE WHEN LOWER(triage_source) = 'cache' "
-                f"OR LOWER(triage_status) = 'cached' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(triage_source) IN "
-                f"('follower', 'followers', 'follower_reused') "
-                f"OR LOWER(triage_status) = 'follower_reused' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(triage_status) IN ('failed', 'error') "
+                f"COALESCE(SUM(CASE WHEN {cache_condition} THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {follower_condition} THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {failed_condition} "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'attack_success' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'attack' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'attack_failed' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'benign' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) NOT IN "
-                f"('attack_success', 'attack', 'attack_failed', 'benign') THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN attack_success = 1 AND LOWER(verdict) <> 'attack_success' "
+                f"COALESCE(SUM(CASE WHEN {new_triage_condition} "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND "
+                f"(LOWER(verdict) = 'attack_success' OR (attack_success = 1 AND LOWER(verdict) NOT IN "
+                f"('attack_success', 'attack', 'attack_failed', 'benign'))) THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack' "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack_failed' "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'benign' "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) NOT IN "
+                f"('attack_success', 'attack', 'attack_failed', 'benign') AND attack_success <> 1 "
                 f"THEN 1 ELSE 0 END), 0), MIN(event_time), MAX(event_time), "
                 f"COALESCE(ROUND(AVG(CASE WHEN triage_ms > 0 THEN triage_ms END)), 0) "
                 f"FROM {settings['facts_table']} WHERE {triage_where}",
@@ -2191,11 +2208,12 @@ def _read_sqlite_triage(paths):
     cache_hit = _safe_int(row[1])
     followers_reused = _safe_int(row[2])
     triage_failed = _safe_int(row[3])
-    attack_success = _safe_int(row[4]) + _safe_int(row[9])
-    attack = _safe_int(row[5])
-    attack_failed = _safe_int(row[6])
-    benign = _safe_int(row[7])
-    unknown = _safe_int(row[8])
+    new_triaged = _safe_int(row[4])
+    attack_success = _safe_int(row[5])
+    attack = _safe_int(row[6])
+    attack_failed = _safe_int(row[7])
+    benign = _safe_int(row[8])
+    unknown = _safe_int(row[9])
     attack_total = attack_success + attack + attack_failed
     avg_triage_ms = _safe_int(row[12])
     profile_counters = _new_profile_counters()
@@ -2217,7 +2235,7 @@ def _read_sqlite_triage(paths):
     return {
         "totalRecords": total_records,
         "batchTotal": 0,
-        "newTriaged": max(total_records - cache_hit - followers_reused - triage_failed, 0),
+        "newTriaged": new_triaged,
         "cacheHit": cache_hit,
         "triageFailed": triage_failed,
         "followersReused": followers_reused,
@@ -2268,7 +2286,6 @@ def _read_triage(paths):
     fallback_cache = 0
     fallback_failed = 0
     fallback_followers = 0
-    extra_success = 0
     series_total = []
     series_attack = []
     triage_ms_total = 0
@@ -2298,12 +2315,6 @@ def _read_triage(paths):
             verdict = _norm(obj.get("attack_verdict") or "unknown")
             if verdict not in {"attack_success", "attack", "attack_failed", "benign", "unknown"}:
                 verdict = "unknown"
-            verdict_counter[verdict] += 1
-            if obj.get("attack_success") is True and verdict != "attack_success":
-                extra_success += 1
-            if verdict in {"attack_success", "attack", "attack_failed"}:
-                file_attack += 1
-
             source = _norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))
             source_counter[source] += 1
             threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
@@ -2317,14 +2328,22 @@ def _read_triage(paths):
             triage_source = _norm(obj.get("triage_source"))
             triage_status = _norm(obj.get("triage_status"))
             status_counter[triage_status or triage_source] += 1
+            triage_failed = triage_status in {"failed", "error"}
+
+            if not triage_failed:
+                if verdict == "unknown" and obj.get("attack_success") is True:
+                    verdict = "attack_success"
+                verdict_counter[verdict] += 1
+                if verdict in {"attack_success", "attack", "attack_failed"}:
+                    file_attack += 1
+            else:
+                fallback_failed += 1
 
             if triage_source == "cache" or triage_status == "cached":
                 fallback_cache += 1
             elif triage_source in {"follower", "followers", "follower_reused"} or triage_status == "follower_reused":
                 fallback_followers += 1
-            elif triage_status in {"failed", "error"}:
-                fallback_failed += 1
-            else:
+            elif not triage_failed:
                 fallback_new += 1
 
         series_total.append(file_total)
@@ -2339,7 +2358,7 @@ def _read_triage(paths):
     triage_failed = fallback_failed
     followers_reused = fallback_followers
 
-    attack_success = verdict_counter["attack_success"] + extra_success
+    attack_success = verdict_counter["attack_success"]
     attack = verdict_counter["attack"]
     attack_failed = verdict_counter["attack_failed"]
     attack_total = attack_success + attack + attack_failed
