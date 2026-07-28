@@ -1,0 +1,15 @@
+name: learn
+description: Hidden temporary agent that learns reusable user Skills from successful Session trajectories.
+mode: subagent
+hidden: true
+tags: [system, evolution]
+delegatable: false
+steps: 24
+tools:
+  - read
+  - write
+  - edit
+  - glob
+  - grep
+  - bash
+  - skill_load

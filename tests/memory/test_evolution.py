@@ -12,28 +12,20 @@ from flocks.memory.config import MemoryConfig
 from flocks.memory.evolution import (
     DreamTarget,
     EvolutionCheckpointStore,
-    SkillProposalStore,
     SourceSnapshot,
     MemoryEvolutionScheduler,
     process_skill_turn,
-    recover_pending_skill_proposals,
     run_dream_bridge,
 )
 from flocks.memory.evolution.common import (
-    _apply_pending_proposal,
     _build_turn_review,
-    _chat_text,
     _daily_delta,
     _hash_text,
-    _prepare_skill_proposal,
     _redact_sensitive,
     _session_delta,
 )
-from flocks.memory.evolution.dream import (
-    DREAM_SYSTEM_PROMPT,
-    _dream_memory_tool_definition,
-    _run_dream_agent,
-)
+from flocks.memory.evolution.dream import DREAM_SYSTEM_PROMPT
+from flocks.memory.evolution.skill import SKILL_SYSTEM_PROMPT
 from flocks.memory.evolution.scheduler import (
     _LAST_SUCCESS_KEY,
     _TICK_SECONDS,
@@ -184,184 +176,18 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
         assert heading in DREAM_SYSTEM_PROMPT
     assert "Return strict JSON" not in DREAM_SYSTEM_PROMPT
     assert "Do not output JSON" in DREAM_SYSTEM_PROMPT
-    assert "`memory` tool" in DREAM_SYSTEM_PROMPT
+    assert "Use `memory`" in DREAM_SYSTEM_PROMPT
     assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
 
-def test_dream_memory_tool_scope_matches_target() -> None:
-    global_tool = _dream_memory_tool_definition(DreamTarget.global_only())
-    project_tool = _dream_memory_tool_definition(DreamTarget.project("prj_test"))
-    global_scope = global_tool["function"]["parameters"]["properties"]["scope"]["enum"]
-    project_scope = project_tool["function"]["parameters"]["properties"]["scope"]["enum"]
-
-    assert global_scope == ["global"]
-    assert project_scope == ["global", "project"]
-
-
-@pytest.mark.asyncio
-async def test_dream_agent_applies_memory_tool_calls() -> None:
-    provider = SimpleNamespace(
-        chat=AsyncMock(
-            side_effect=[
-                SimpleNamespace(
-                    content="",
-                    finish_reason="tool_calls",
-                    tool_calls=[
-                        {
-                            "id": "call_1",
-                            "type": "function",
-                            "function": {
-                                "name": "memory",
-                                "arguments": (
-                                    '{"scope":"global","target":"USER.md","action":"add","content":"- Concise"}'
-                                ),
-                            },
-                        },
-                        {
-                            "id": "call_2",
-                            "type": "function",
-                            "function": {
-                                "name": "memory",
-                                "arguments": {
-                                    "scope": "project",
-                                    "target": "MEMORY.md",
-                                    "action": "add",
-                                    "content": "- Uses Ruff",
-                                },
-                            },
-                        },
-                    ],
-                ),
-                SimpleNamespace(
-                    content="Updated user and project memory.",
-                    finish_reason="stop",
-                    tool_calls=None,
-                ),
-            ]
-        )
-    )
-    update = AsyncMock(
-        side_effect=[
-            {"success": True, "changed": True},
-            {"success": True, "changed": True},
-        ]
-    )
-    with (
-        patch(
-            "flocks.memory.evolution.dream.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace()),
-        ),
-        patch(
-            "flocks.memory.evolution.dream.Provider.apply_config",
-            new=AsyncMock(),
-        ),
-        patch(
-            "flocks.memory.evolution.dream.Provider.get",
-            return_value=provider,
-        ),
-        patch(
-            "flocks.memory.evolution.dream.build_provider_options",
-            return_value={},
-        ),
-    ):
-        changed = await _run_dream_agent(
-            provider_id="test-provider",
-            model_id="test-model",
-            max_tokens=1000,
-            target=DreamTarget.project("prj_test"),
-            user_prompt="evidence",
-            update_memory=update,
-        )
-
-    assert changed is True
-    assert update.await_count == 2
-    assert update.await_args_list[0].args[0]["target"] == "USER.md"
-    assert update.await_args_list[1].args[0]["scope"] == "project"
-    second_messages = provider.chat.await_args_list[1].kwargs["messages"]
-    tool_messages = [message for message in second_messages if message.role == "tool"]
-    assert [message.tool_call_id for message in tool_messages] == [
-        "call_1",
-        "call_2",
-    ]
-
-
-@pytest.mark.asyncio
-async def test_dream_agent_accepts_explicit_no_changes() -> None:
-    provider = SimpleNamespace(
-        chat=AsyncMock(
-            return_value=SimpleNamespace(
-                content="NO_CHANGES",
-                finish_reason="stop",
-                tool_calls=None,
-            )
-        )
-    )
-    with (
-        patch(
-            "flocks.memory.evolution.dream.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace()),
-        ),
-        patch(
-            "flocks.memory.evolution.dream.Provider.apply_config",
-            new=AsyncMock(),
-        ),
-        patch(
-            "flocks.memory.evolution.dream.Provider.get",
-            return_value=provider,
-        ),
-        patch(
-            "flocks.memory.evolution.dream.build_provider_options",
-            return_value={},
-        ),
-    ):
-        changed = await _run_dream_agent(
-            provider_id="test-provider",
-            model_id="test-model",
-            max_tokens=1000,
-            target=DreamTarget.global_only(),
-            user_prompt="evidence",
-            update_memory=AsyncMock(),
-        )
-
-    assert changed is False
-
-
-@pytest.mark.asyncio
-async def test_evolution_text_call_rejects_truncated_output() -> None:
-    provider = SimpleNamespace(
-        chat=AsyncMock(
-            return_value=SimpleNamespace(
-                content="A partial response that reached the token limit.",
-                finish_reason="length",
-            )
-        )
-    )
-    with (
-        patch(
-            "flocks.memory.evolution.common.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace()),
-        ),
-        patch(
-            "flocks.memory.evolution.common.Provider.apply_config",
-            new=AsyncMock(),
-        ),
-        patch(
-            "flocks.memory.evolution.common.Provider.get",
-            return_value=provider,
-        ),
-        patch(
-            "flocks.memory.evolution.common.build_provider_options",
-            return_value={},
-        ),
-    ):
-        with pytest.raises(ValueError, match="truncated"):
-            await _chat_text(
-                provider_id="test-provider",
-                model_id="test-model",
-                system="system",
-                user="user",
-                max_tokens=10,
-            )
+def test_evolution_prompts_use_agent_workflows_without_proposals() -> None:
+    for prompt in (DREAM_SYSTEM_PROMPT, SKILL_SYSTEM_PROMPT):
+        assert "# Role" in prompt
+        assert "# Workflow" in prompt
+        assert "# Tool use" in prompt
+        assert "NO_CHANGES" in prompt
+        assert "Return strict JSON" not in prompt
+    assert "proposal" not in SKILL_SYSTEM_PROMPT.lower()
 
 
 def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
@@ -601,69 +427,15 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         last_message_id="msg_2",
     )
     config = MemoryConfig()
-    provider = SimpleNamespace(
-        chat=AsyncMock(
-            side_effect=[
-                SimpleNamespace(
-                    content="",
-                    finish_reason="tool_calls",
-                    tool_calls=[
-                        {
-                            "id": "call_memory",
-                            "function": {
-                                "name": "memory",
-                                "arguments": (
-                                    '{"scope":"global",'
-                                    '"target":"MEMORY.md",'
-                                    '"action":"add",'
-                                    '"content":"- Project uses Ruff"}'
-                                ),
-                            },
-                        },
-                        {
-                            "id": "call_user",
-                            "function": {
-                                "name": "memory",
-                                "arguments": (
-                                    '{"scope":"global",'
-                                    '"target":"USER.md",'
-                                    '"action":"add",'
-                                    '"content":"- Prefers concise answers"}'
-                                ),
-                            },
-                        },
-                    ],
-                ),
-                SimpleNamespace(
-                    content="Updated durable memory.",
-                    finish_reason="stop",
-                    tool_calls=None,
-                ),
-            ],
-        ),
-    )
-
-    async def update_curated_memory(**arguments: object) -> dict[str, object]:
-        path = str(arguments["path"])
-        file_path = memory_root / path
-        current = file_path.read_text(encoding="utf-8").rstrip()
-        file_path.write_text(
-            current + "\n\n" + str(arguments["content"]) + "\n",
+    async def run_agent(**_: object) -> None:
+        (memory_root / "MEMORY.md").write_text(
+            "# Memory\n\n- Project uses Ruff\n",
             encoding="utf-8",
         )
-        return {
-            "scope": arguments["scope"],
-            "path": path,
-            "action": arguments["action"],
-            "changed": True,
-        }
-
-    manager = SimpleNamespace(
-        initialize=AsyncMock(),
-        update_curated_memory=AsyncMock(
-            side_effect=update_curated_memory,
-        ),
-    )
+        (memory_root / "USER.md").write_text(
+            "# User\n\n- Prefers concise answers\n",
+            encoding="utf-8",
+        )
 
     with (
         patch(
@@ -688,20 +460,8 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
             new=AsyncMock(return_value=([source], False, [("project", "/workspace")])),
         ),
         patch(
-            "flocks.memory.evolution.dream.Provider.apply_config",
-            new=AsyncMock(),
-        ),
-        patch(
-            "flocks.memory.evolution.dream.Provider.get",
-            return_value=provider,
-        ),
-        patch(
-            "flocks.memory.evolution.dream.build_provider_options",
-            return_value={},
-        ),
-        patch(
-            "flocks.memory.evolution.dream.MemoryManager.get_instance",
-            return_value=manager,
+            "flocks.memory.evolution.dream.run_evolution_agent",
+            new=AsyncMock(side_effect=run_agent),
         ),
         patch(
             "flocks.memory.evolution.dream._sync_memory_indexes",
@@ -713,8 +473,6 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
     assert result.changed is True
     assert "Project uses Ruff" in (memory_root / "MEMORY.md").read_text()
     assert "Prefers concise answers" in (memory_root / "USER.md").read_text()
-    manager.initialize.assert_awaited_once()
-    assert manager.update_curated_memory.await_count == 2
     checkpoint = await EvolutionCheckpointStore.get(
         "dream",
         "session",
@@ -775,7 +533,7 @@ async def test_dream_bridge_supplies_complete_memory_and_syncs_no_changes(
             new=collect,
         ),
         patch(
-            "flocks.memory.evolution.dream._run_dream_agent",
+            "flocks.memory.evolution.dream.run_evolution_agent",
             new=agent_run,
         ),
         patch(
@@ -786,7 +544,7 @@ async def test_dream_bridge_supplies_complete_memory_and_syncs_no_changes(
         result = await run_dream_bridge()
 
     assert result.changed is False
-    user_prompt = agent_run.await_args.kwargs["user_prompt"]
+    user_prompt = agent_run.await_args.kwargs["prompt"]
     assert "- head-marker" in user_prompt
     assert "- tail-marker" in user_prompt
     assert "do-not-send" not in user_prompt
@@ -867,7 +625,7 @@ async def test_project_dream_updates_project_and_global_user_memory(
             ),
         ),
         patch(
-            "flocks.memory.evolution.dream._run_dream_agent",
+            "flocks.memory.evolution.dream.run_evolution_agent",
             new=AsyncMock(side_effect=apply_dream_updates),
         ),
         patch(
@@ -941,7 +699,7 @@ async def test_dream_bridge_retries_without_rolling_back_when_index_sync_fails(
             new=AsyncMock(return_value=([source], False, [])),
         ),
         patch(
-            "flocks.memory.evolution.dream._run_dream_agent",
+            "flocks.memory.evolution.dream.run_evolution_agent",
             new=AsyncMock(side_effect=apply_dream_updates),
         ),
         patch(
@@ -1004,7 +762,7 @@ async def test_dream_bridge_retries_without_rolling_back_when_checkpoint_commit_
             new=AsyncMock(return_value=([source], False, [])),
         ),
         patch(
-            "flocks.memory.evolution.dream._run_dream_agent",
+            "flocks.memory.evolution.dream.run_evolution_agent",
             new=AsyncMock(side_effect=apply_dream_updates),
         ),
         patch(
@@ -1142,329 +900,55 @@ def test_redaction_handles_nested_keys_and_inline_secrets() -> None:
     assert "secret-token" not in redacted["nested"]["cmd"]
 
 
-def test_prepare_create_patch_and_edit_proposals(tmp_path: Path) -> None:
-    review = _review()
-    create = _prepare_skill_proposal(
-        response={
-            "action": "create",
-            "skill_name": "pytest-workflow",
-            "content": _skill_document("pytest-workflow"),
-        },
-        review=review,
-        catalog=[],
-        related={},
-        skill_root=tmp_path,
-    )
-    assert create is not None
-    assert create.action == "create"
-
-    skill_path = tmp_path / "pytest-workflow" / "SKILL.md"
-    skill_path.parent.mkdir()
-    skill_path.write_text(_skill_document("pytest-workflow"), encoding="utf-8")
-    catalog = [
-        {
-            "name": "pytest-workflow",
-            "description": "test",
-            "location": str(skill_path),
-            "source": "user",
-        }
-    ]
-    related = {
-        "pytest-workflow": {
-            **catalog[0],
-            "content": skill_path.read_text(encoding="utf-8"),
-        }
-    }
-    patched = _prepare_skill_proposal(
-        response={
-            "action": "patch",
-            "skill_name": "pytest-workflow",
-            "path": "SKILL.md",
-            "old": "Run the proven workflow.",
-            "new": "Run the proven workflow and verify the result.",
-        },
-        review=review,
-        catalog=catalog,
-        related=related,
-        skill_root=tmp_path,
-    )
-    edited = _prepare_skill_proposal(
-        response={
-            "action": "edit",
-            "skill_name": "pytest-workflow",
-            "content": _skill_document(
-                "pytest-workflow",
-                "Run the edited workflow.",
-            ),
-        },
-        review=review,
-        catalog=catalog,
-        related=related,
-        skill_root=tmp_path,
-    )
-
-    assert patched is not None
-    assert "verify the result" in patched.proposed_content
-    assert edited is not None
-    assert "edited workflow" in edited.proposed_content
-
-
-def test_proposal_rejects_protected_skill_and_name_shadowing(
+@pytest.mark.asyncio
+async def test_evolution_schema_removes_legacy_proposal_table(
     tmp_path: Path,
 ) -> None:
-    review = _review()
-    protected_path = tmp_path.parent / "protected" / "SKILL.md"
-    protected_path.parent.mkdir()
-    protected_path.write_text(_skill_document("protected"), encoding="utf-8")
-    catalog = [
-        {
-            "name": "protected",
-            "description": "protected",
-            "location": str(protected_path),
-            "source": "project",
-        }
-    ]
-    related = {
-        "protected": {
-            **catalog[0],
-            "content": protected_path.read_text(encoding="utf-8"),
-        }
-    }
-
-    with pytest.raises(ValueError, match="only user-managed"):
-        _prepare_skill_proposal(
-            response={
-                "action": "edit",
-                "skill_name": "protected",
-                "content": _skill_document("protected", "changed"),
-            },
-            review=review,
-            catalog=catalog,
-            related=related,
-            skill_root=tmp_path,
+    await Storage.init(tmp_path / "evolution-schema.db")
+    async with Storage.connect() as db:
+        await db.execute(
+            "CREATE TABLE memory_skill_proposals (id TEXT PRIMARY KEY)"
         )
-    with pytest.raises(ValueError, match="cannot shadow"):
-        _prepare_skill_proposal(
-            response={
-                "action": "create",
-                "skill_name": "protected",
-                "content": _skill_document("protected", "changed"),
-            },
-            review=review,
-            catalog=catalog,
-            related={},
-            skill_root=tmp_path,
+        await db.commit()
+
+    await EvolutionCheckpointStore.ensure_schema()
+
+    async with Storage.connect() as db:
+        cursor = await db.execute(
+            """
+            SELECT name
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'memory_skill_proposals'
+            """
         )
-
-
-def test_proposal_rejects_symlinked_skill_file(tmp_path: Path) -> None:
-    review = _review()
-    skill_root = tmp_path / "skills"
-    skill_dir = skill_root / "linked-skill"
-    real_dir = skill_root / "real-skill"
-    skill_dir.mkdir(parents=True)
-    real_dir.mkdir(parents=True)
-    real_path = real_dir / "SKILL.md"
-    real_path.write_text(_skill_document("linked-skill"), encoding="utf-8")
-    linked_path = skill_dir / "SKILL.md"
-    linked_path.symlink_to(real_path)
-    catalog = [
-        {
-            "name": "linked-skill",
-            "description": "linked",
-            "location": str(linked_path),
-            "source": "user",
-        }
-    ]
-
-    with pytest.raises(ValueError, match="symbolic link"):
-        _prepare_skill_proposal(
-            response={
-                "action": "edit",
-                "skill_name": "linked-skill",
-                "content": _skill_document("linked-skill", "changed"),
-            },
-            review=review,
-            catalog=catalog,
-            related={
-                "linked-skill": {
-                    **catalog[0],
-                    "content": real_path.read_text(encoding="utf-8"),
-                }
-            },
-            skill_root=skill_root,
-        )
-
-
-def test_proposal_requires_strict_frontmatter_and_trigger_description(
-    tmp_path: Path,
-) -> None:
-    review = _review()
-    invalid_yaml = "---\nname: invalid-skill\ndescription: [unterminated\n---\n\n# Invalid\n"
-    with pytest.raises(ValueError, match="invalid YAML"):
-        _prepare_skill_proposal(
-            response={
-                "action": "create",
-                "skill_name": "invalid-skill",
-                "content": invalid_yaml,
-            },
-            review=review,
-            catalog=[],
-            related={},
-            skill_root=tmp_path,
-        )
-
-    vague_description = "---\nname: vague-skill\ndescription: Manages things reliably.\n---\n\n# Vague\n"
-    with pytest.raises(ValueError, match="what it does and when"):
-        _prepare_skill_proposal(
-            response={
-                "action": "create",
-                "skill_name": "vague-skill",
-                "content": vague_description,
-            },
-            review=review,
-            catalog=[],
-            related={},
-            skill_root=tmp_path,
-        )
-
-
-def test_proposal_rejects_symlinked_skill_root(tmp_path: Path) -> None:
-    real_root = tmp_path / "real-skills"
-    real_root.mkdir()
-    linked_root = tmp_path / "linked-skills"
-    linked_root.symlink_to(real_root, target_is_directory=True)
-
-    with pytest.raises(ValueError, match="root cannot be a symbolic link"):
-        _prepare_skill_proposal(
-            response={
-                "action": "create",
-                "skill_name": "linked-root-skill",
-                "content": _skill_document("linked-root-skill"),
-            },
-            review=_review(),
-            catalog=[],
-            related={},
-            skill_root=linked_root,
-        )
+        assert await cursor.fetchone() is None
 
 
 @pytest.mark.asyncio
-async def test_proposal_is_persisted_before_apply_and_recovers(
-    tmp_path: Path,
-) -> None:
-    await Storage.init(tmp_path / "proposal.db")
-    skill_root = tmp_path / "skills"
-    proposal = _prepare_skill_proposal(
-        response={
-            "action": "create",
-            "skill_name": "pytest-workflow",
-            "content": _skill_document("pytest-workflow"),
-        },
-        review=_review(),
-        catalog=[],
-        related={},
-        skill_root=skill_root,
-    )
-    assert proposal is not None
-    stored = await SkillProposalStore.create_pending(proposal)
-    assert stored.status == "pending"
-
-    target = skill_root / "pytest-workflow" / "SKILL.md"
-    target.parent.mkdir(parents=True)
-    target.write_text(proposal.proposed_content, encoding="utf-8")
-    recovered = await recover_pending_skill_proposals(skill_root=skill_root)
-
-    assert recovered == 1
-    final = await SkillProposalStore.get_by_assistant_message("msg_2")
-    assert final is not None
-    assert final.status == "applied"
-    checkpoint = await EvolutionCheckpointStore.get(
-        "skill",
-        "session",
-        "ses_test",
-    )
-    assert checkpoint is not None
-    assert checkpoint["last_message_id"] == "msg_2"
-
-
-@pytest.mark.asyncio
-async def test_proposal_conflict_does_not_overwrite_user_skill(
-    tmp_path: Path,
-) -> None:
-    await Storage.init(tmp_path / "proposal-conflict.db")
-    skill_root = tmp_path / "skills"
-    skill_path = skill_root / "pytest-workflow" / "SKILL.md"
-    skill_path.parent.mkdir(parents=True)
-    original = _skill_document("pytest-workflow")
-    skill_path.write_text(original, encoding="utf-8")
-    catalog = [
-        {
-            "name": "pytest-workflow",
-            "description": "test",
-            "location": str(skill_path),
-            "source": "user",
-        }
-    ]
-    related = {
-        "pytest-workflow": {
-            **catalog[0],
-            "content": original,
-        }
-    }
-    proposal = _prepare_skill_proposal(
-        response={
-            "action": "edit",
-            "skill_name": "pytest-workflow",
-            "content": _skill_document("pytest-workflow", "proposal version"),
-        },
-        review=_review(),
-        catalog=catalog,
-        related=related,
-        skill_root=skill_root,
-    )
-    assert proposal is not None
-    stored = await SkillProposalStore.create_pending(proposal)
-    user_version = _skill_document("pytest-workflow", "user version")
-    skill_path.write_text(user_version, encoding="utf-8")
-
-    applied = await _apply_pending_proposal(stored, skill_root=skill_root)
-
-    assert applied is False
-    assert skill_path.read_text(encoding="utf-8") == user_version
-    final = await SkillProposalStore.get_by_assistant_message("msg_2")
-    assert final is not None
-    assert final.status == "conflict"
-
-
-@pytest.mark.asyncio
-async def test_process_skill_turn_creates_proposal_before_live_skill(
+async def test_process_skill_turn_runs_temporary_agent_and_commits_checkpoint(
     tmp_path: Path,
 ) -> None:
     await Storage.init(tmp_path / "skill-turn.db")
     config = MemoryConfig()
     review = _review()
     skill_root = tmp_path / "skills"
-    chat = AsyncMock(
-        side_effect=[
-            {
-                "action": "evolve",
-                "skill_names": [],
-                "reason": "new reusable workflow",
-            },
-            {
-                "action": "create",
-                "skill_name": "pytest-workflow",
-                "content": _skill_document("pytest-workflow"),
-            },
-        ]
-    )
+    skill_path = skill_root / "pytest-workflow" / "SKILL.md"
     session = SimpleNamespace(
         id="ses_test",
         category="user",
         status="active",
+        project_id="default",
+        directory=str(tmp_path),
     )
 
+    async def run_agent(**_: object) -> None:
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text(
+            _skill_document("pytest-workflow"),
+            encoding="utf-8",
+        )
+
+    agent_run = AsyncMock(side_effect=run_agent)
     with (
         patch(
             "flocks.memory.evolution.skill.Config.get",
@@ -1480,11 +964,14 @@ async def test_process_skill_turn_creates_proposal_before_live_skill(
         ),
         patch(
             "flocks.memory.evolution.skill._skill_catalog",
-            return_value=[],
+            new=AsyncMock(return_value=[]),
         ),
         patch(
-            "flocks.memory.evolution.skill._chat_json",
-            new=chat,
+            "flocks.memory.evolution.skill.run_evolution_agent",
+            new=agent_run,
+        ),
+        patch(
+            "flocks.memory.evolution.skill._invalidate_skill_caches",
         ),
     ):
         changed = await process_skill_turn(
@@ -1497,11 +984,16 @@ async def test_process_skill_turn_creates_proposal_before_live_skill(
         )
 
     assert changed is True
-    assert (skill_root / "pytest-workflow" / "SKILL.md").exists()
-    stored = await SkillProposalStore.get_by_assistant_message("msg_2")
-    assert stored is not None
-    assert stored.status == "applied"
-    assert chat.await_count == 2
+    assert skill_path.exists()
+    agent_run.assert_awaited_once()
+    assert agent_run.await_args.kwargs["agent_name"] == "learn"
+    checkpoint = await EvolutionCheckpointStore.get(
+        "skill",
+        "session",
+        "ses_test",
+    )
+    assert checkpoint is not None
+    assert checkpoint["last_message_id"] == "msg_2"
 
 
 @pytest.mark.asyncio
@@ -1536,6 +1028,26 @@ async def test_turn_finish_schedules_only_skill_review_without_blocking() -> Non
         provider_id="test-provider",
         model_id="test-model",
     )
+
+
+@pytest.mark.asyncio
+async def test_turn_finish_skips_temporary_agent_sessions() -> None:
+    hook = SessionEvolutionHook()
+
+    with patch(
+        "flocks.hooks.builtin.session_evolution.schedule_skill_review"
+    ) as schedule:
+        await hook.turn_finish(
+            HookContext(
+                stage=HookStage.TURN_FINISH,
+                input={
+                    "sessionID": "ses_evolution",
+                    "sessionCategory": "task",
+                },
+            )
+        )
+
+    schedule.assert_not_called()
 
 
 @pytest.mark.asyncio

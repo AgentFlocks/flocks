@@ -1,0 +1,15 @@
+name: dream
+description: Hidden Memory evolution agent that consolidates durable Global and Project Memory.
+mode: subagent
+hidden: true
+tags: [system, evolution]
+delegatable: false
+steps: 24
+tools:
+  - read
+  - write
+  - edit
+  - glob
+  - grep
+  - memory
+  - bash

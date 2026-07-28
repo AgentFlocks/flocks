@@ -173,6 +173,83 @@ async def run_direct_command(
             prompt=GoalManager.goal_prompt(state.objective),
         )
 
+    if name == "dream":
+        if not session_id:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /dream requires an active session.",
+            )
+        from flocks.memory.evolution.common import DreamTarget
+        from flocks.memory.evolution.dream import run_dream_bridge
+        from flocks.memory.paths import is_registered_project_id
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id(session_id)
+        if session is None:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Session not found.",
+            )
+        target = (
+            DreamTarget.project(session.project_id)
+            if is_registered_project_id(session.project_id)
+            else DreamTarget.global_only()
+        )
+        try:
+            result = await run_dream_bridge(
+                target,
+                parent_session_id=session.id,
+            )
+        except Exception as exc:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text=f"Dream failed: {exc}",
+            )
+        if result.processed_sources == 0:
+            return DirectCommandResult(
+                handled=True,
+                text="Dream completed: no new Memory evidence.",
+            )
+        outcome = "Memory updated" if result.changed else "no Memory changes"
+        return DirectCommandResult(
+            handled=True,
+            text=(
+                f"Dream completed: {outcome}; "
+                f"processed {result.processed_sources} source(s)."
+            ),
+        )
+
+    if name == "learn":
+        if not session_id:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /learn requires an active session.",
+            )
+        from flocks.memory.evolution.skill import (
+            run_manual_skill_evolution,
+        )
+
+        try:
+            changed = await run_manual_skill_evolution(session_id)
+        except Exception as exc:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text=f"Skill learning failed: {exc}",
+            )
+        return DirectCommandResult(
+            handled=True,
+            text=(
+                "Skill learning completed: Skill updated."
+                if changed
+                else "Skill learning completed: no Skill changes."
+            ),
+        )
+
     if name == "tools":
         if not args or args == "list":
             return DirectCommandResult(handled=True, text=build_tools_catalog_summary())

@@ -1,10 +1,4 @@
-"""Shared persistence, models, and helpers for Memory evolution.
-
-Dream consumes incremental user/assistant messages and daily memory on a
-background cadence. Skill evolution reviews only eligible successful turns,
-persists a validated proposal, and then atomically applies the resulting
-user-managed ``SKILL.md``.
-"""
+"""Shared persistence, source collection, and trigger helpers for evolution."""
 
 from __future__ import annotations
 
@@ -13,12 +7,9 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
-import tempfile
 from typing import Any, Literal, Optional
-import uuid
 
 from flocks.config import Config
 from flocks.memory.config import MemoryConfig
@@ -28,10 +19,7 @@ from flocks.memory.paths import (
     is_registered_project_id,
 )
 from flocks.memory.types import MemoryScope
-from flocks.provider import ChatMessage, Provider
-from flocks.provider.options import build_provider_options
 from flocks.session.message import Message, TextPart, ToolPart
-from flocks.skill.skill import Skill
 from flocks.storage import Storage
 from flocks.utils.log import Log
 
@@ -39,9 +27,7 @@ from flocks.utils.log import Log
 log = Log.create(service="memory.evolution")
 Pipeline = Literal["dream", "skill"]
 SourceType = Literal["session", "daily"]
-_SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
 _PIPELINE_LOCKS = {"dream": asyncio.Lock(), "skill": asyncio.Lock()}
-_MAX_SKILL_LINES = 500
 _TOOL_PAYLOAD_MIN_CHARS = 256
 
 _CORRECTION_RE = re.compile(
@@ -70,12 +56,6 @@ _SENSITIVE_VALUE_PATTERNS = (
         r"[a-z0-9_]*)(\s*=\s*)[^\s,;]+"
     ),
 )
-_DESCRIPTION_TRIGGER_RE = re.compile(
-    r"(?:\bwhen\b|\bwhenever\b|\btrigger(?:s|ed)?\b|"
-    r"\buse (?:this )?skill\b|\bfor (?:tasks?|requests?|users?)\b|"
-    r"当.+时|用于|适用于|用户(?:要求|需要)|请求)",
-    re.IGNORECASE,
-)
 _DAILY_SESSION_HEADER_RE = re.compile(r"^## Session (?P<prefix>[A-Za-z0-9_-]+)(?:…|\.\.\.)?")
 
 _SCHEMA_DDL = """
@@ -96,25 +76,8 @@ CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
 ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at);
 
-CREATE TABLE IF NOT EXISTS memory_skill_proposals (
-    id TEXT PRIMARY KEY,
-    session_id TEXT NOT NULL,
-    user_message_id TEXT NOT NULL,
-    assistant_message_id TEXT NOT NULL UNIQUE,
-    trigger_reasons TEXT NOT NULL,
-    skill_name TEXT NOT NULL,
-    action TEXT NOT NULL,
-    base_hash TEXT,
-    operation_json TEXT NOT NULL,
-    proposed_content TEXT NOT NULL,
-    proposed_hash TEXT NOT NULL,
-    status TEXT NOT NULL,
-    error TEXT,
-    created_at TEXT NOT NULL,
-    applied_at TEXT
-);
-CREATE INDEX IF NOT EXISTS idx_memory_skill_proposals_status
-ON memory_skill_proposals(status, created_at);
+DROP INDEX IF EXISTS idx_memory_skill_proposals_status;
+DROP TABLE IF EXISTS memory_skill_proposals;
 """
 
 
@@ -177,27 +140,6 @@ class TurnReview:
     assistant_message_id: str
     trigger_reasons: tuple[str, ...]
     content: str
-
-
-@dataclass(frozen=True)
-class SkillProposal:
-    """Validated full-document skill proposal."""
-
-    id: str
-    session_id: str
-    user_message_id: str
-    assistant_message_id: str
-    trigger_reasons: tuple[str, ...]
-    skill_name: str
-    action: Literal["create", "patch", "edit"]
-    base_hash: Optional[str]
-    operation_json: str
-    proposed_content: str
-    proposed_hash: str
-    status: str = "pending"
-    error: Optional[str] = None
-    created_at: str = ""
-    applied_at: Optional[str] = None
 
 
 class EvolutionCheckpointStore:
@@ -336,172 +278,12 @@ class EvolutionCheckpointStore:
         )
 
 
-class SkillProposalStore:
-    """Durable proposal boundary for idempotent skill application."""
-
-    _SELECT_COLUMNS = """
-        id, session_id, user_message_id, assistant_message_id,
-        trigger_reasons, skill_name, action, base_hash, operation_json,
-        proposed_content, proposed_hash, status, error, created_at, applied_at
-    """
-
-    @classmethod
-    async def create_pending(cls, proposal: SkillProposal) -> SkillProposal:
-        await EvolutionCheckpointStore.ensure_schema()
-        now = proposal.created_at or _now_iso()
-        async with Storage.connect() as db:
-            await db.execute(
-                """
-                INSERT OR IGNORE INTO memory_skill_proposals (
-                    id, session_id, user_message_id, assistant_message_id,
-                    trigger_reasons, skill_name, action, base_hash,
-                    operation_json, proposed_content, proposed_hash,
-                    status, error, created_at, applied_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', NULL, ?, NULL)
-                """,
-                (
-                    proposal.id,
-                    proposal.session_id,
-                    proposal.user_message_id,
-                    proposal.assistant_message_id,
-                    json.dumps(
-                        list(proposal.trigger_reasons),
-                        ensure_ascii=False,
-                    ),
-                    proposal.skill_name,
-                    proposal.action,
-                    proposal.base_hash,
-                    proposal.operation_json,
-                    proposal.proposed_content,
-                    proposal.proposed_hash,
-                    now,
-                ),
-            )
-            await db.commit()
-        stored = await cls.get_by_assistant_message(proposal.assistant_message_id)
-        if stored is None:
-            raise RuntimeError("failed to persist skill proposal")
-        return stored
-
-    @classmethod
-    async def get_by_assistant_message(
-        cls,
-        assistant_message_id: str,
-    ) -> Optional[SkillProposal]:
-        await EvolutionCheckpointStore.ensure_schema()
-        async with Storage.connect() as db:
-            cursor = await db.execute(
-                f"""
-                SELECT {cls._SELECT_COLUMNS}
-                FROM memory_skill_proposals
-                WHERE assistant_message_id = ?
-                """,
-                (assistant_message_id,),
-            )
-            row = await cursor.fetchone()
-        return cls._from_row(row) if row else None
-
-    @classmethod
-    async def list_pending(cls) -> list[SkillProposal]:
-        await EvolutionCheckpointStore.ensure_schema()
-        async with Storage.connect() as db:
-            cursor = await db.execute(
-                f"""
-                SELECT {cls._SELECT_COLUMNS}
-                FROM memory_skill_proposals
-                WHERE status = 'pending'
-                ORDER BY created_at ASC
-                """
-            )
-            rows = await cursor.fetchall()
-        return [cls._from_row(row) for row in rows]
-
-    @classmethod
-    async def finish(
-        cls,
-        proposal: SkillProposal,
-        source: SourceSnapshot,
-        *,
-        status: Literal["applied", "conflict"],
-        error: Optional[str] = None,
-    ) -> None:
-        """Finalize a proposal and its Session review checkpoint together."""
-        await EvolutionCheckpointStore.ensure_schema()
-        now = _now_iso()
-        applied_at = now if status == "applied" else None
-        async with Storage.connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                await db.execute(
-                    """
-                    UPDATE memory_skill_proposals
-                    SET status = ?, error = ?, applied_at = ?
-                    WHERE id = ?
-                    """,
-                    (status, error, applied_at, proposal.id),
-                )
-                await EvolutionCheckpointStore._upsert_in_transaction(
-                    db,
-                    "skill",
-                    source,
-                    now,
-                )
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
-
-    @classmethod
-    async def record_pending_error(
-        cls,
-        proposal_id: str,
-        error: str,
-    ) -> None:
-        await EvolutionCheckpointStore.ensure_schema()
-        async with Storage.connect() as db:
-            await db.execute(
-                """
-                UPDATE memory_skill_proposals
-                SET error = ?
-                WHERE id = ? AND status = 'pending'
-                """,
-                (error, proposal_id),
-            )
-            await db.commit()
-
-    @staticmethod
-    def _from_row(row: Any) -> SkillProposal:
-        reasons = json.loads(row[4])
-        return SkillProposal(
-            id=row[0],
-            session_id=row[1],
-            user_message_id=row[2],
-            assistant_message_id=row[3],
-            trigger_reasons=tuple(str(item) for item in reasons),
-            skill_name=row[5],
-            action=row[6],
-            base_hash=row[7],
-            operation_json=row[8],
-            proposed_content=row[9],
-            proposed_hash=row[10],
-            status=row[11],
-            error=row[12],
-            created_at=row[13],
-            applied_at=row[14],
-        )
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
 
 def _hash_text(content: str) -> str:
     return hashlib.sha256(content.encode("utf-8")).hexdigest()
-
-
-def _user_skill_root() -> Path:
-    """Return the canonical user-managed skill directory."""
-    return Path.home() / ".flocks" / "plugins" / "skills"
 
 
 def _truncate_tail(content: str, limit: int) -> str:
@@ -517,104 +299,6 @@ def _truncate_middle(content: str, limit: int) -> str:
     available = max(limit - len(marker), 2)
     head = available // 2
     return content[:head] + marker + content[-(available - head) :]
-
-
-def _atomic_write(path: Path, content: str) -> None:
-    """Write UTF-8 text by replacing a same-directory temporary file."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
-            handle.write(content)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, path)
-    except BaseException:
-        try:
-            os.unlink(temporary)
-        except FileNotFoundError:
-            pass
-        raise
-
-
-def _parse_json_object(raw: str) -> dict[str, Any]:
-    text = (raw or "").strip()
-    if text.startswith("```"):
-        lines = text.splitlines()
-        text = "\n".join(lines[1:-1]).strip()
-    value = json.loads(text)
-    if not isinstance(value, dict):
-        raise ValueError("evolution response must be a JSON object")
-    return value
-
-
-async def _chat_json(
-    *,
-    provider_id: str,
-    model_id: str,
-    system: str,
-    user: str,
-    max_tokens: int,
-) -> dict[str, Any]:
-    return _parse_json_object(
-        await _chat_text(
-            provider_id=provider_id,
-            model_id=model_id,
-            system=system,
-            user=user,
-            max_tokens=max_tokens,
-        )
-    )
-
-
-async def _chat_text(
-    *,
-    provider_id: str,
-    model_id: str,
-    system: str,
-    user: str,
-    max_tokens: int,
-) -> str:
-    """Run one evolution model call and return its plain-text response."""
-    config = await Config.get()
-    await Provider.apply_config(config, provider_id=provider_id)
-    provider = Provider.get(provider_id)
-    if provider is None:
-        raise RuntimeError(f"provider not found: {provider_id}")
-    options = build_provider_options(provider_id, model_id)
-    options.pop("max_tokens", None)
-    response = await provider.chat(
-        model_id=model_id,
-        messages=[
-            ChatMessage(
-                role="system",
-                content=system,
-                reasoning=None,
-                reasoning_content=None,
-                reasoning_details=None,
-                reasoning_source=None,
-                tool_calls=None,
-                tool_call_id=None,
-                name=None,
-            ),
-            ChatMessage(
-                role="user",
-                content=user,
-                reasoning=None,
-                reasoning_content=None,
-                reasoning_details=None,
-                reasoning_source=None,
-                tool_calls=None,
-                tool_call_id=None,
-                name=None,
-            ),
-        ],
-        **options,
-        max_tokens=max_tokens,
-    )
-    if response.finish_reason in {"length", "max_tokens"}:
-        raise ValueError("evolution response was truncated")
-    return response.content
 
 
 def _message_role(message: Any) -> str:
@@ -940,6 +624,7 @@ async def _build_turn_review(
     user_message_id: str,
     assistant_message_id: str,
     config: MemoryConfig,
+    force: bool = False,
 ) -> Optional[TurnReview]:
     messages = await Message.list_with_parts(session_id, include_archived=True)
     positions = {message.info.id: index for index, message in enumerate(messages)}
@@ -978,6 +663,8 @@ async def _build_turn_review(
         trigger_reasons.append("failure_then_success")
     if _is_user_correction(user_text):
         trigger_reasons.append("user_correction")
+    if force and not trigger_reasons:
+        trigger_reasons.append("manual")
     if not trigger_reasons:
         return None
 
@@ -1028,227 +715,3 @@ async def _build_turn_review(
         trigger_reasons=tuple(trigger_reasons),
         content=content,
     )
-
-
-def _skill_catalog() -> list[dict[str, str]]:
-    return [
-        {
-            "name": skill.name,
-            "description": skill.description,
-            "location": skill.location,
-            "source": str(skill.source or ""),
-        }
-        for skill in Skill._all_sync()
-    ]
-
-
-def _related_skill_contents(
-    names: list[str],
-    catalog: list[dict[str, str]],
-    limit: int,
-) -> dict[str, dict[str, str]]:
-    entries = {item["name"]: item for item in catalog}
-    result: dict[str, dict[str, str]] = {}
-    for name in names[:limit]:
-        item = entries.get(name)
-        if not item:
-            continue
-        result[name] = {
-            **item,
-            "content": Path(item["location"]).read_text(encoding="utf-8"),
-        }
-    return result
-
-
-def _validate_skill_document(content: str, expected_name: str) -> None:
-    if len(content.splitlines()) > _MAX_SKILL_LINES:
-        raise ValueError("SKILL.md exceeds the 500 line limit")
-    lines = content.splitlines()
-    if not lines or lines[0].strip() != "---":
-        raise ValueError("SKILL.md requires YAML frontmatter")
-    closing_index = next(
-        (index for index, line in enumerate(lines[1:], start=1) if line.strip() == "---"),
-        None,
-    )
-    if closing_index is None:
-        raise ValueError("SKILL.md YAML frontmatter is not closed")
-    try:
-        import yaml  # type: ignore[import-untyped]
-
-        metadata = yaml.safe_load("\n".join(lines[1:closing_index]))
-    except Exception as exc:
-        raise ValueError("SKILL.md contains invalid YAML frontmatter") from exc
-    if not isinstance(metadata, dict):
-        raise ValueError("SKILL.md YAML frontmatter must be an object")
-    if metadata.get("name") != expected_name:
-        raise ValueError("SKILL.md frontmatter name does not match target skill")
-    if not Skill._is_valid_name(expected_name):
-        raise ValueError("invalid skill name")
-    description = str(metadata.get("description") or "")
-    if not Skill._is_valid_description(description):
-        raise ValueError("invalid skill description")
-    if len(description.strip()) < 20 or not _DESCRIPTION_TRIGGER_RE.search(description):
-        raise ValueError("skill description must explain what it does and when to use it")
-
-
-def _safe_skill_path(root: Path, skill_name: str) -> Path:
-    if not _SKILL_NAME_RE.fullmatch(skill_name):
-        raise ValueError("invalid skill name")
-    if root.is_symlink():
-        raise ValueError("user skill root cannot be a symbolic link")
-    resolved_root = root.resolve()
-    skill_dir = root / skill_name
-    if skill_dir.is_symlink():
-        raise ValueError("skill directory cannot be a symbolic link")
-    resolved_skill_dir = skill_dir.resolve()
-    raw_target = skill_dir / "SKILL.md"
-    if raw_target.is_symlink():
-        raise ValueError("SKILL.md cannot be a symbolic link")
-    target = raw_target.resolve()
-    if resolved_root not in resolved_skill_dir.parents:
-        raise ValueError("skill directory escaped the configured user skill root")
-    if resolved_skill_dir not in target.parents:
-        raise ValueError("skill path escaped the configured user skill root")
-    return target
-
-
-def _prepare_skill_proposal(
-    *,
-    response: dict[str, Any],
-    review: TurnReview,
-    catalog: list[dict[str, str]],
-    related: dict[str, dict[str, str]],
-    skill_root: Path,
-) -> Optional[SkillProposal]:
-    action = response.get("action")
-    if action == "skip":
-        return None
-    if action not in {"create", "patch", "edit"}:
-        raise ValueError("skill proposal action must be create, patch, edit, or skip")
-    skill_name = str(response.get("skill_name") or "")
-    target = _safe_skill_path(skill_root, skill_name)
-    catalog_entry = next(
-        (item for item in catalog if item["name"] == skill_name),
-        None,
-    )
-
-    base_hash: Optional[str]
-    if action == "create":
-        if catalog_entry is not None or target.exists():
-            raise ValueError("create cannot shadow an existing skill")
-        base_hash = None
-        proposed_content = str(response.get("content") or "")
-    else:
-        selected = related.get(skill_name)
-        if selected is None:
-            raise ValueError("skill edit target was not selected for review")
-        if selected.get("source") != "user":
-            raise ValueError("only user-managed skills can be changed")
-        selected_path = Path(selected["location"]).resolve()
-        if selected_path != target:
-            raise ValueError("selected skill is outside the user skill root")
-        current = target.read_text(encoding="utf-8")
-        base_hash = _hash_text(current)
-        if action == "edit":
-            proposed_content = str(response.get("content") or "")
-        else:
-            path = str(response.get("path") or "SKILL.md")
-            if path != "SKILL.md":
-                raise ValueError("skill proposals may only patch SKILL.md")
-            old = str(response.get("old") or "")
-            if not old or current.count(old) != 1:
-                raise ValueError("skill patch target must match exactly once")
-            proposed_content = current.replace(
-                old,
-                str(response.get("new") or ""),
-                1,
-            )
-
-    _validate_skill_document(proposed_content, skill_name)
-    operation_json = json.dumps(response, ensure_ascii=False, sort_keys=True)
-    return SkillProposal(
-        id=f"skill-proposal-{uuid.uuid4().hex}",
-        session_id=review.source.source_key,
-        user_message_id=review.user_message_id,
-        assistant_message_id=review.assistant_message_id,
-        trigger_reasons=review.trigger_reasons,
-        skill_name=skill_name,
-        action=action,
-        base_hash=base_hash,
-        operation_json=operation_json,
-        proposed_content=proposed_content,
-        proposed_hash=_hash_text(proposed_content),
-        created_at=_now_iso(),
-    )
-
-
-def _proposal_source(proposal: SkillProposal) -> SourceSnapshot:
-    return SourceSnapshot(
-        source_type="session",
-        source_key=proposal.session_id,
-        content=proposal.proposed_content,
-        content_hash=proposal.proposed_hash,
-        line_count=len(proposal.proposed_content.splitlines()),
-        last_message_id=proposal.assistant_message_id,
-    )
-
-
-def _invalidate_skill_caches() -> None:
-    Skill.clear_cache()
-    try:
-        from flocks.agent.registry import Agent
-
-        Agent.invalidate_cache()
-    except Exception as exc:
-        log.warn("skill_proposal.agent_cache_failed", {"error": str(exc)})
-
-
-async def _apply_pending_proposal(
-    proposal: SkillProposal,
-    *,
-    skill_root: Path,
-) -> bool:
-    target = _safe_skill_path(skill_root, proposal.skill_name)
-    current = target.read_text(encoding="utf-8") if target.exists() else None
-    current_hash = _hash_text(current) if current is not None else None
-    source = _proposal_source(proposal)
-
-    if current_hash == proposal.proposed_hash:
-        _invalidate_skill_caches()
-        await SkillProposalStore.finish(
-            proposal,
-            source,
-            status="applied",
-        )
-        return True
-
-    base_matches = (
-        proposal.action == "create"
-        and current is None
-        or proposal.action != "create"
-        and current_hash == proposal.base_hash
-    )
-    if not base_matches:
-        await SkillProposalStore.finish(
-            proposal,
-            source,
-            status="conflict",
-            error="target changed after proposal creation",
-        )
-        return False
-
-    try:
-        _atomic_write(target, proposal.proposed_content)
-        _invalidate_skill_caches()
-        await SkillProposalStore.finish(
-            proposal,
-            source,
-            status="applied",
-        )
-    except BaseException as exc:
-        await SkillProposalStore.record_pending_error(
-            proposal.id,
-            str(exc),
-        )
-        raise
-    return True

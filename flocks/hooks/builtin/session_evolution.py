@@ -16,6 +16,11 @@ class SessionEvolutionHook(HookBase):
     """Schedule a background skill review after a successful assistant turn."""
 
     async def turn_finish(self, ctx: HookContext) -> None:
+        session_category = str(
+            ctx.input.get("sessionCategory") or ""
+        )
+        if session_category and session_category != "user":
+            return
         session_id = str(ctx.input.get("sessionID") or "")
         model = ctx.input.get("model") or {}
         provider_id = str(model.get("providerID") or "")

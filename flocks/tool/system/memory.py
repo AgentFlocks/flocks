@@ -43,7 +43,12 @@ async def _get_session_memory(ctx: ToolContext) -> tuple[Optional[SessionMemory]
     memory = SessionMemory(
         session_id=session.id,
         project_id=session.project_id,
-        workspace_dir=Instance.get_directory() or session.directory,
+        workspace_dir=(
+            session.directory
+            or ctx.extra.get("workspace_dir")
+            or Instance.get_directory()
+            or "."
+        ),
         enabled=session.memory_enabled,
     )
 

@@ -200,7 +200,7 @@ class MemoryDreamConfig(BaseModel):
 
 
 class MemorySkillEvolutionConfig(BaseModel):
-    """Turn-driven skill evolution configuration."""
+    """Turn-driven Skill Agent configuration."""
 
     enabled: bool = Field(
         True,
@@ -210,12 +210,6 @@ class MemorySkillEvolutionConfig(BaseModel):
         10,
         ge=1,
         description="Completed tool calls in one turn that trigger a skill review",
-    )
-    max_related_skills: int = Field(
-        3,
-        ge=1,
-        le=10,
-        description="Maximum number of existing skills supplied in full to the model",
     )
 
 
@@ -235,11 +229,6 @@ class MemoryEvolutionConfig(BaseModel):
         60000,
         ge=1000,
         description="Maximum source characters supplied to each evolution prompt",
-    )
-    max_output_tokens: int = Field(
-        4000,
-        ge=256,
-        description="Maximum model output tokens for an evolution operation",
     )
     catch_up_sessions: int = Field(
         20,

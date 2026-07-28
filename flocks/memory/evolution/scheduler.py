@@ -1,4 +1,4 @@
-"""Background scheduler for Dream bridging and Skill proposal recovery."""
+"""Background scheduler for Dream Agent bridging."""
 
 from __future__ import annotations
 
@@ -12,9 +12,6 @@ from flocks.memory.evolution.common import DreamTarget
 from flocks.memory.evolution.dream import (
     list_dream_targets,
     run_dream_bridge,
-)
-from flocks.memory.evolution.skill import (
-    recover_pending_skill_proposals,
 )
 from flocks.storage import Storage
 from flocks.utils.log import Log
@@ -56,29 +53,6 @@ class MemoryEvolutionScheduler:
 
     @classmethod
     async def _run_loop(cls) -> None:
-        try:
-            app_config = await Config.get()
-            config = getattr(app_config, "memory", None)
-            skill_recovery_enabled = (
-                isinstance(config, MemoryConfig)
-                and config.enabled
-                and config.evolution.enabled
-                and config.evolution.skill.enabled
-            )
-            recovered = await recover_pending_skill_proposals() if skill_recovery_enabled else 0
-            if recovered:
-                log.info(
-                    "memory.evolution.proposals_recovered",
-                    {"count": recovered},
-                )
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.warn(
-                "memory.evolution.proposal_recovery_failed",
-                {"error": str(exc)},
-            )
-
         while True:
             try:
                 await cls._tick_once()

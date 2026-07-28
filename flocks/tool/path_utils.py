@@ -90,8 +90,17 @@ async def resolve_tool_path(
     - reject path traversal and symlink escapes
     """
     raw_path = path
-    resolved_base = normalize_user_path(base_dir or get_tool_base_dir())
-    resolved_worktree = normalize_user_path(worktree or get_tool_worktree())
+    context_workspace = (
+        ctx.extra.get("workspace_dir")
+        if isinstance(ctx.extra, dict)
+        else None
+    )
+    resolved_base = normalize_user_path(
+        base_dir or context_workspace or get_tool_base_dir()
+    )
+    resolved_worktree = normalize_user_path(
+        worktree or context_workspace or get_tool_worktree()
+    )
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     sandbox_root = sandbox.get("workspace_dir") if isinstance(sandbox, dict) else None
