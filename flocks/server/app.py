@@ -265,16 +265,20 @@ async def lifespan(app: FastAPI):
         # configured at all; in that case there is nothing to register.
         memory_cfg = getattr(config, "memory", None)
         memory_enabled = bool(getattr(memory_cfg, "enabled", False)) if memory_cfg else False
-        learning_cfg = getattr(memory_cfg, "learning", None) if memory_cfg else None
-        learning_enabled = (
-            bool(getattr(learning_cfg, "enabled", False))
-            if learning_cfg
+        evolution_cfg = (
+            getattr(memory_cfg, "evolution", None)
+            if memory_cfg
+            else None
+        )
+        evolution_enabled = (
+            bool(getattr(evolution_cfg, "enabled", False))
+            if evolution_cfg
             else False
         )
-        if memory_enabled and learning_enabled:
+        if memory_enabled and evolution_enabled:
             from flocks.hooks.builtin import register_builtin_hooks
-            from flocks.memory.learning_scheduler import (
-                MemoryLearningScheduler,
+            from flocks.memory.evolution.scheduler import (
+                MemoryEvolutionScheduler,
             )
 
             await _run_startup_phase(
@@ -284,8 +288,8 @@ async def lifespan(app: FastAPI):
             )
             await _run_startup_phase(
                 log,
-                "memory.learning.start",
-                MemoryLearningScheduler.start,
+                "memory.evolution.start",
+                MemoryEvolutionScheduler.start,
             )
             log.info("hooks.registered")
     except Exception as e:
@@ -512,11 +516,11 @@ async def lifespan(app: FastAPI):
         log.warning("console.sync.stop_failed", {"error": str(exc)})
 
     try:
-        from flocks.memory.learning_scheduler import MemoryLearningScheduler
+        from flocks.memory.evolution.scheduler import MemoryEvolutionScheduler
 
-        await MemoryLearningScheduler.stop()
+        await MemoryEvolutionScheduler.stop()
     except Exception as exc:
-        log.warning("memory.learning.stop_failed", {"error": str(exc)})
+        log.warning("memory.evolution.stop_failed", {"error": str(exc)})
 
     # Notify SSE clients before stopping sessions, MCP transports, and other
     # long-lived runtime services so browser listeners see the shutdown event.

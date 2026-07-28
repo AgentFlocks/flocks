@@ -1,4 +1,4 @@
-"""Tests for scheduled Dream bridging and turn-driven skill evolution."""
+"""Tests for scheduled Dream bridging and turn-driven Skill evolution."""
 
 from pathlib import Path
 from types import SimpleNamespace
@@ -6,14 +6,20 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from flocks.hooks.builtin.session_learning import SessionLearningHook
+from flocks.hooks.builtin.session_evolution import SessionEvolutionHook
 from flocks.hooks.pipeline import HookContext, HookStage
 from flocks.memory.config import MemoryConfig
-from flocks.memory.learning import (
+from flocks.memory.evolution import (
     DreamTarget,
-    LearningCheckpointStore,
+    EvolutionCheckpointStore,
     SkillProposalStore,
     SourceSnapshot,
+    MemoryEvolutionScheduler,
+    process_skill_turn,
+    recover_pending_skill_proposals,
+    run_dream_bridge,
+)
+from flocks.memory.evolution.common import (
     _apply_memory_operations,
     _apply_pending_proposal,
     _build_turn_review,
@@ -22,16 +28,12 @@ from flocks.memory.learning import (
     _prepare_skill_proposal,
     _redact_sensitive,
     _session_delta,
-    process_skill_turn,
-    recover_pending_skill_proposals,
-    run_dream_bridge,
 )
-from flocks.memory.types import MemoryScope
-from flocks.memory.learning_scheduler import (
-    MemoryLearningScheduler,
+from flocks.memory.evolution.scheduler import (
     _LAST_SUCCESS_KEY,
     _TICK_SECONDS,
 )
+from flocks.memory.types import MemoryScope
 from flocks.session.background_tasks import pending_background_tasks
 from flocks.session.message import (
     TextPart,
@@ -41,6 +43,16 @@ from flocks.session.message import (
 )
 from flocks.session.prompt import SessionPrompt
 from flocks.storage import Storage
+
+
+def test_memory_config_exposes_evolution_without_learning_alias() -> None:
+    properties = MemoryConfig.model_json_schema()["properties"]
+
+    assert "evolution" in properties
+    assert "learning" not in properties
+    config = MemoryConfig()
+    assert config.evolution.dream.interval_hours == 24
+    assert not hasattr(config, "learning")
 
 
 def _message(
@@ -330,7 +342,7 @@ def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
 async def test_checkpoint_is_pipeline_specific_and_detects_changes(
     tmp_path: Path,
 ) -> None:
-    await Storage.init(tmp_path / "learning.db")
+    await Storage.init(tmp_path / "evolution.db")
     source = SourceSnapshot(
         source_type="session",
         source_key="ses_test",
@@ -340,10 +352,10 @@ async def test_checkpoint_is_pipeline_specific_and_detects_changes(
         last_message_id="msg_1",
     )
 
-    assert not await LearningCheckpointStore.is_current("dream", source)
-    await LearningCheckpointStore.commit("dream", [source])
-    assert await LearningCheckpointStore.is_current("dream", source)
-    assert not await LearningCheckpointStore.is_current("skill", source)
+    assert not await EvolutionCheckpointStore.is_current("dream", source)
+    await EvolutionCheckpointStore.commit("dream", [source])
+    assert await EvolutionCheckpointStore.is_current("dream", source)
+    assert not await EvolutionCheckpointStore.is_current("skill", source)
 
 
 @pytest.mark.asyncio
@@ -362,7 +374,7 @@ async def test_session_delta_is_incremental_and_filters_non_text() -> None:
     checkpoint = {"last_message_id": "msg_1"}
 
     with patch(
-        "flocks.memory.learning.Message.list_with_parts",
+        "flocks.memory.evolution.common.Message.list_with_parts",
         new=AsyncMock(return_value=messages),
     ):
         snapshot, backlog = await _session_delta(
@@ -399,7 +411,7 @@ async def test_session_delta_keeps_normal_user_summary_but_skips_compaction() ->
     ]
 
     with patch(
-        "flocks.memory.learning.Message.list_with_parts",
+        "flocks.memory.evolution.common.Message.list_with_parts",
         new=AsyncMock(return_value=messages),
     ):
         snapshot, _ = await _session_delta(
@@ -469,9 +481,7 @@ def test_daily_delta_filters_mapped_session_sections_by_target(
     assert "unknown note" not in snapshot.content
     assert snapshot.scope == MemoryScope.PROJECT
     assert snapshot.scope_id == "prj_alpha"
-    assert snapshot.line_count == len(
-        path.read_text(encoding="utf-8").splitlines(keepends=True)
-    )
+    assert snapshot.line_count == len(path.read_text(encoding="utf-8").splitlines(keepends=True))
     assert backlog is False
 
 
@@ -499,15 +509,15 @@ async def test_checkpoint_cursors_are_independent_by_scope(
         last_message_id="msg_project",
     )
 
-    await LearningCheckpointStore.commit("dream", [global_source])
-    await LearningCheckpointStore.commit("dream", [project_source])
+    await EvolutionCheckpointStore.commit("dream", [global_source])
+    await EvolutionCheckpointStore.commit("dream", [project_source])
 
-    global_row = await LearningCheckpointStore.get(
+    global_row = await EvolutionCheckpointStore.get(
         "dream",
         "session",
         "ses_shared",
     )
-    project_row = await LearningCheckpointStore.get(
+    project_row = await EvolutionCheckpointStore.get(
         "dream",
         "session",
         "ses_shared",
@@ -556,11 +566,11 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
 
     with (
         patch(
-            "flocks.memory.learning.Config.get",
+            "flocks.memory.evolution.dream.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
-            "flocks.memory.learning.Config.resolve_default_llm",
+            "flocks.memory.evolution.dream.Config.resolve_default_llm",
             new=AsyncMock(
                 return_value={
                     "provider_id": "test-provider",
@@ -569,19 +579,19 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
             ),
         ),
         patch(
-            "flocks.memory.learning.Config.get_data_path",
+            "flocks.memory.evolution.dream.Config.get_data_path",
             return_value=tmp_path,
         ),
         patch(
-            "flocks.memory.learning._collect_dream_sources",
+            "flocks.memory.evolution.dream._collect_dream_sources",
             new=AsyncMock(return_value=([source], False, [("project", "/workspace")])),
         ),
         patch(
-            "flocks.memory.learning._chat_json",
+            "flocks.memory.evolution.dream._chat_json",
             new=AsyncMock(return_value=response),
         ),
         patch(
-            "flocks.memory.learning._sync_memory_indexes",
+            "flocks.memory.evolution.dream._sync_memory_indexes",
             new=AsyncMock(),
         ),
     ):
@@ -590,7 +600,7 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
     assert result.changed is True
     assert "Project uses Ruff" in (memory_root / "MEMORY.md").read_text()
     assert "Prefers concise answers" in (memory_root / "USER.md").read_text()
-    checkpoint = await LearningCheckpointStore.get(
+    checkpoint = await EvolutionCheckpointStore.get(
         "dream",
         "session",
         "ses_test",
@@ -643,13 +653,11 @@ async def test_project_dream_updates_project_and_global_user_memory(
 
     with (
         patch(
-            "flocks.memory.learning.Config.get",
-            new=AsyncMock(
-                return_value=SimpleNamespace(memory=MemoryConfig())
-            ),
+            "flocks.memory.evolution.dream.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace(memory=MemoryConfig())),
         ),
         patch(
-            "flocks.memory.learning.Config.resolve_default_llm",
+            "flocks.memory.evolution.dream.Config.resolve_default_llm",
             new=AsyncMock(
                 return_value={
                     "provider_id": "test-provider",
@@ -658,11 +666,11 @@ async def test_project_dream_updates_project_and_global_user_memory(
             ),
         ),
         patch(
-            "flocks.memory.learning.Config.get_data_path",
+            "flocks.memory.evolution.dream.Config.get_data_path",
             return_value=tmp_path,
         ),
         patch(
-            "flocks.memory.learning._collect_dream_sources",
+            "flocks.memory.evolution.dream._collect_dream_sources",
             new=AsyncMock(
                 return_value=(
                     [source],
@@ -672,11 +680,11 @@ async def test_project_dream_updates_project_and_global_user_memory(
             ),
         ),
         patch(
-            "flocks.memory.learning._chat_json",
+            "flocks.memory.evolution.dream._chat_json",
             new=AsyncMock(return_value=response),
         ),
         patch(
-            "flocks.memory.learning._sync_memory_indexes",
+            "flocks.memory.evolution.dream._sync_memory_indexes",
             new=AsyncMock(),
         ),
     ):
@@ -684,13 +692,9 @@ async def test_project_dream_updates_project_and_global_user_memory(
 
     assert result.changed is True
     assert "Project uses Ruff" in project_path.read_text(encoding="utf-8")
-    assert "Project uses Ruff" not in (
-        memory_root / "MEMORY.md"
-    ).read_text(encoding="utf-8")
-    assert "Prefers concise answers" in (
-        memory_root / "USER.md"
-    ).read_text(encoding="utf-8")
-    checkpoint = await LearningCheckpointStore.get(
+    assert "Project uses Ruff" not in (memory_root / "MEMORY.md").read_text(encoding="utf-8")
+    assert "Prefers concise answers" in (memory_root / "USER.md").read_text(encoding="utf-8")
+    checkpoint = await EvolutionCheckpointStore.get(
         "dream",
         "session",
         "ses_project",
@@ -741,11 +745,11 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
 
     with (
         patch(
-            "flocks.memory.learning.Config.get",
+            "flocks.memory.evolution.dream.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
-            "flocks.memory.learning.Config.resolve_default_llm",
+            "flocks.memory.evolution.dream.Config.resolve_default_llm",
             new=AsyncMock(
                 return_value={
                     "provider_id": "test-provider",
@@ -754,19 +758,19 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
             ),
         ),
         patch(
-            "flocks.memory.learning.Config.get_data_path",
+            "flocks.memory.evolution.dream.Config.get_data_path",
             return_value=tmp_path,
         ),
         patch(
-            "flocks.memory.learning._collect_dream_sources",
+            "flocks.memory.evolution.dream._collect_dream_sources",
             new=AsyncMock(return_value=([source], False, [])),
         ),
         patch(
-            "flocks.memory.learning._chat_json",
+            "flocks.memory.evolution.dream._chat_json",
             new=AsyncMock(return_value=response),
         ),
         patch(
-            "flocks.memory.learning._sync_memory_indexes",
+            "flocks.memory.evolution.dream._sync_memory_indexes",
             new=sync,
         ),
     ):
@@ -775,7 +779,7 @@ async def test_dream_bridge_rolls_back_files_when_index_sync_fails(
 
     assert memory_path.read_text() == "old memory\n"
     assert user_path.read_text() == "old user\n"
-    assert await LearningCheckpointStore.get("dream", "session", "ses_test") is None
+    assert await EvolutionCheckpointStore.get("dream", "session", "ses_test") is None
 
 
 @pytest.mark.asyncio
@@ -811,11 +815,11 @@ async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
 
     with (
         patch(
-            "flocks.memory.learning.Config.get",
+            "flocks.memory.evolution.dream.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=MemoryConfig())),
         ),
         patch(
-            "flocks.memory.learning.Config.resolve_default_llm",
+            "flocks.memory.evolution.dream.Config.resolve_default_llm",
             new=AsyncMock(
                 return_value={
                     "provider_id": "test-provider",
@@ -824,23 +828,23 @@ async def test_dream_bridge_rolls_back_files_when_checkpoint_commit_fails(
             ),
         ),
         patch(
-            "flocks.memory.learning.Config.get_data_path",
+            "flocks.memory.evolution.dream.Config.get_data_path",
             return_value=tmp_path,
         ),
         patch(
-            "flocks.memory.learning._collect_dream_sources",
+            "flocks.memory.evolution.dream._collect_dream_sources",
             new=AsyncMock(return_value=([source], False, [])),
         ),
         patch(
-            "flocks.memory.learning._chat_json",
+            "flocks.memory.evolution.dream._chat_json",
             new=AsyncMock(return_value=response),
         ),
         patch(
-            "flocks.memory.learning._sync_memory_indexes",
+            "flocks.memory.evolution.dream._sync_memory_indexes",
             new=AsyncMock(),
         ),
         patch.object(
-            LearningCheckpointStore,
+            EvolutionCheckpointStore,
             "commit",
             new=AsyncMock(side_effect=RuntimeError("checkpoint failed")),
         ),
@@ -871,10 +875,10 @@ async def test_turn_review_detects_failure_recovery_and_redacts_trace() -> None:
             finish="stop",
         ),
     ]
-    config = MemoryConfig(learning={"skill": {"min_completed_tools": 10}})
+    config = MemoryConfig(evolution={"skill": {"min_completed_tools": 10}})
 
     with patch(
-        "flocks.memory.learning.Message.list_with_parts",
+        "flocks.memory.evolution.common.Message.list_with_parts",
         new=AsyncMock(return_value=messages),
     ):
         review = await _build_turn_review(
@@ -912,10 +916,10 @@ async def test_turn_review_requires_a_configured_signal() -> None:
             finish="stop",
         ),
     ]
-    config = MemoryConfig(learning={"skill": {"min_completed_tools": 2}})
+    config = MemoryConfig(evolution={"skill": {"min_completed_tools": 2}})
 
     with patch(
-        "flocks.memory.learning.Message.list_with_parts",
+        "flocks.memory.evolution.common.Message.list_with_parts",
         new=AsyncMock(return_value=messages),
     ):
         review = await _build_turn_review(
@@ -935,10 +939,10 @@ async def test_turn_review_triggers_at_completed_tool_threshold() -> None:
         _message("msg_1", "user", _text("msg_1", "run the workflow")),
         _message("msg_2", "assistant", *tools, finish="stop"),
     ]
-    config = MemoryConfig(learning={"skill": {"min_completed_tools": 10}})
+    config = MemoryConfig(evolution={"skill": {"min_completed_tools": 10}})
 
     with patch(
-        "flocks.memory.learning.Message.list_with_parts",
+        "flocks.memory.evolution.common.Message.list_with_parts",
         new=AsyncMock(return_value=messages),
     ):
         review = await _build_turn_review(
@@ -1207,7 +1211,7 @@ async def test_proposal_is_persisted_before_apply_and_recovers(
     final = await SkillProposalStore.get_by_assistant_message("msg_2")
     assert final is not None
     assert final.status == "applied"
-    checkpoint = await LearningCheckpointStore.get(
+    checkpoint = await EvolutionCheckpointStore.get(
         "skill",
         "session",
         "ses_test",
@@ -1295,7 +1299,7 @@ async def test_process_skill_turn_creates_proposal_before_live_skill(
 
     with (
         patch(
-            "flocks.memory.learning.Config.get",
+            "flocks.memory.evolution.skill.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
@@ -1303,15 +1307,15 @@ async def test_process_skill_turn_creates_proposal_before_live_skill(
             new=AsyncMock(return_value=session),
         ),
         patch(
-            "flocks.memory.learning._build_turn_review",
+            "flocks.memory.evolution.skill._build_turn_review",
             new=AsyncMock(return_value=review),
         ),
         patch(
-            "flocks.memory.learning._skill_catalog",
+            "flocks.memory.evolution.skill._skill_catalog",
             return_value=[],
         ),
         patch(
-            "flocks.memory.learning._chat_json",
+            "flocks.memory.evolution.skill._chat_json",
             new=chat,
         ),
     ):
@@ -1334,11 +1338,11 @@ async def test_process_skill_turn_creates_proposal_before_live_skill(
 
 @pytest.mark.asyncio
 async def test_turn_finish_schedules_only_skill_review_without_blocking() -> None:
-    hook = SessionLearningHook()
+    hook = SessionEvolutionHook()
     review = AsyncMock(return_value=False)
     before = set(pending_background_tasks())
 
-    with patch("flocks.memory.learning.process_skill_turn", review):
+    with patch("flocks.memory.evolution.skill.process_skill_turn", review):
         await hook.turn_finish(
             HookContext(
                 stage=HookStage.TURN_FINISH,
@@ -1377,24 +1381,24 @@ async def test_scheduler_runs_due_dream_and_persists_success(
         processed_sources=0,
         backlog=False,
     )
-    MemoryLearningScheduler._retry_after_by_target.clear()
+    MemoryEvolutionScheduler._retry_after_by_target.clear()
 
     with (
         patch(
-            "flocks.memory.learning_scheduler.Config.get",
+            "flocks.memory.evolution.scheduler.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
-            "flocks.memory.learning_scheduler.run_dream_bridge",
+            "flocks.memory.evolution.scheduler.run_dream_bridge",
             new=AsyncMock(return_value=result),
         ) as run,
         patch(
-            "flocks.memory.learning_scheduler.list_dream_targets",
+            "flocks.memory.evolution.scheduler.list_dream_targets",
             new=AsyncMock(return_value=[DreamTarget.global_only()]),
         ),
     ):
-        await MemoryLearningScheduler._tick_once(now_ts=1_000)
-        await MemoryLearningScheduler._tick_once(now_ts=1_001)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_000)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_001)
 
     run.assert_awaited_once_with(DreamTarget.global_only())
     assert await Storage.get(_LAST_SUCCESS_KEY) == 1_000
@@ -1403,7 +1407,7 @@ async def test_scheduler_runs_due_dream_and_persists_success(
 def test_scheduler_defaults_to_daily_run_and_half_hour_checks() -> None:
     config = MemoryConfig()
 
-    assert config.learning.dream.interval_hours == 24
+    assert config.evolution.dream.interval_hours == 24
     assert _TICK_SECONDS == 30 * 60
 
 
@@ -1418,24 +1422,24 @@ async def test_scheduler_retries_backlog_without_advancing_interval(
         processed_sources=1,
         backlog=True,
     )
-    MemoryLearningScheduler._retry_after_by_target.clear()
+    MemoryEvolutionScheduler._retry_after_by_target.clear()
 
     with (
         patch(
-            "flocks.memory.learning_scheduler.Config.get",
+            "flocks.memory.evolution.scheduler.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
-            "flocks.memory.learning_scheduler.run_dream_bridge",
+            "flocks.memory.evolution.scheduler.run_dream_bridge",
             new=AsyncMock(return_value=result),
         ) as run,
         patch(
-            "flocks.memory.learning_scheduler.list_dream_targets",
+            "flocks.memory.evolution.scheduler.list_dream_targets",
             new=AsyncMock(return_value=[DreamTarget.global_only()]),
         ),
     ):
-        await MemoryLearningScheduler._tick_once(now_ts=1_000)
-        await MemoryLearningScheduler._tick_once(now_ts=1_060)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_000)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_060)
 
     assert run.await_count == 2
     assert await Storage.get(_LAST_SUCCESS_KEY) is None
@@ -1447,25 +1451,25 @@ async def test_scheduler_waits_fifteen_minutes_after_failure(
 ) -> None:
     await Storage.init(tmp_path / "scheduler-failure.db")
     config = MemoryConfig()
-    MemoryLearningScheduler._retry_after_by_target.clear()
+    MemoryEvolutionScheduler._retry_after_by_target.clear()
 
     with (
         patch(
-            "flocks.memory.learning_scheduler.Config.get",
+            "flocks.memory.evolution.scheduler.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
-            "flocks.memory.learning_scheduler.run_dream_bridge",
+            "flocks.memory.evolution.scheduler.run_dream_bridge",
             new=AsyncMock(side_effect=RuntimeError("provider unavailable")),
         ) as run,
         patch(
-            "flocks.memory.learning_scheduler.list_dream_targets",
+            "flocks.memory.evolution.scheduler.list_dream_targets",
             new=AsyncMock(return_value=[DreamTarget.global_only()]),
         ),
     ):
-        await MemoryLearningScheduler._tick_once(now_ts=1_000)
-        await MemoryLearningScheduler._tick_once(now_ts=1_899)
-        await MemoryLearningScheduler._tick_once(now_ts=1_900)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_000)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_899)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_900)
 
     assert run.await_count == 2
 
@@ -1478,7 +1482,7 @@ async def test_scheduler_isolates_project_target_failures(
     config = MemoryConfig()
     global_target = DreamTarget.global_only()
     project_target = DreamTarget.project("prj_test")
-    MemoryLearningScheduler._retry_after_by_target.clear()
+    MemoryEvolutionScheduler._retry_after_by_target.clear()
 
     async def run(target: DreamTarget) -> SimpleNamespace:
         if target == global_target:
@@ -1491,27 +1495,22 @@ async def test_scheduler_isolates_project_target_failures(
 
     with (
         patch(
-            "flocks.memory.learning_scheduler.Config.get",
+            "flocks.memory.evolution.scheduler.Config.get",
             new=AsyncMock(return_value=SimpleNamespace(memory=config)),
         ),
         patch(
-            "flocks.memory.learning_scheduler.list_dream_targets",
+            "flocks.memory.evolution.scheduler.list_dream_targets",
             new=AsyncMock(return_value=[global_target, project_target]),
         ),
         patch(
-            "flocks.memory.learning_scheduler.run_dream_bridge",
+            "flocks.memory.evolution.scheduler.run_dream_bridge",
             new=AsyncMock(side_effect=run),
         ) as bridge,
     ):
-        await MemoryLearningScheduler._tick_once(now_ts=1_000)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_000)
 
     assert bridge.await_args_list[0].args == (global_target,)
     assert bridge.await_args_list[1].args == (project_target,)
-    assert (
-        MemoryLearningScheduler._retry_after_by_target[
-            global_target.scheduler_key
-        ]
-        == 1_900
-    )
-    project_key = MemoryLearningScheduler._last_success_key(project_target)
+    assert MemoryEvolutionScheduler._retry_after_by_target[global_target.scheduler_key] == 1_900
+    project_key = MemoryEvolutionScheduler._last_success_key(project_target)
     assert await Storage.get(project_key) == 1_000

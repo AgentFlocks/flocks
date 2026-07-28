@@ -4,7 +4,9 @@ Builtin hooks initialization
 Registers all built-in hooks that come with Flocks.
 """
 
-from flocks.hooks.builtin.session_learning import register_session_learning_hook
+from flocks.hooks.builtin.session_evolution import (
+    register_session_evolution_hook,
+)
 from flocks.utils.log import Log
 
 log = Log.create(service="hooks.builtin")
@@ -19,7 +21,7 @@ def register_builtin_hooks() -> None:
     log.info("hooks.builtin.registering")
     
     try:
-        register_session_learning_hook()
+        register_session_evolution_hook()
         
         # Future: Register additional built-in hooks here
         # register_command_logger_hook()

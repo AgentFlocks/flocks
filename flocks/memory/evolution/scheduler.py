@@ -1,4 +1,4 @@
-"""Background scheduler for Dream bridging and proposal recovery."""
+"""Background scheduler for Dream bridging and Skill proposal recovery."""
 
 from __future__ import annotations
 
@@ -8,11 +8,13 @@ from typing import Optional
 
 from flocks.config import Config
 from flocks.memory.config import MemoryConfig
-from flocks.memory.learning import (
-    DreamTarget,
+from flocks.memory.evolution.common import DreamTarget
+from flocks.memory.evolution.dream import (
     list_dream_targets,
-    recover_pending_skill_proposals,
     run_dream_bridge,
+)
+from flocks.memory.evolution.skill import (
+    recover_pending_skill_proposals,
 )
 from flocks.storage import Storage
 from flocks.utils.log import Log
@@ -20,12 +22,12 @@ from flocks.utils.log import Log
 
 _TICK_SECONDS = 30 * 60
 _FAILURE_RETRY_SECONDS = 15 * 60
-_LAST_SUCCESS_KEY = "memory:learning:dream:last_success_ts"
+_LAST_SUCCESS_KEY = "memory:evolution:dream:last_success_ts"
 
-log = Log.create(service="memory.learning.scheduler")
+log = Log.create(service="memory.evolution.scheduler")
 
 
-class MemoryLearningScheduler:
+class MemoryEvolutionScheduler:
     """Run due Dream batches without blocking request or Session lifecycles."""
 
     _task: Optional[asyncio.Task[None]] = None
@@ -37,7 +39,7 @@ class MemoryLearningScheduler:
             return
         cls._task = asyncio.create_task(
             cls._run_loop(),
-            name="memory-learning-scheduler",
+            name="memory-evolution-scheduler",
         )
 
     @classmethod
@@ -60,20 +62,20 @@ class MemoryLearningScheduler:
             skill_recovery_enabled = (
                 isinstance(config, MemoryConfig)
                 and config.enabled
-                and config.learning.enabled
-                and config.learning.skill.enabled
+                and config.evolution.enabled
+                and config.evolution.skill.enabled
             )
             recovered = await recover_pending_skill_proposals() if skill_recovery_enabled else 0
             if recovered:
                 log.info(
-                    "memory.learning.proposals_recovered",
+                    "memory.evolution.proposals_recovered",
                     {"count": recovered},
                 )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
             log.warn(
-                "memory.learning.proposal_recovery_failed",
+                "memory.evolution.proposal_recovery_failed",
                 {"error": str(exc)},
             )
 
@@ -84,7 +86,7 @@ class MemoryLearningScheduler:
                 raise
             except Exception as exc:
                 log.warn(
-                    "memory.learning.scheduler_tick_failed",
+                    "memory.evolution.scheduler_tick_failed",
                     {
                         "error": str(exc),
                     },
@@ -98,10 +100,10 @@ class MemoryLearningScheduler:
         config = getattr(app_config, "memory", None)
         if not isinstance(config, MemoryConfig):
             return
-        if not config.enabled or not config.learning.enabled or not config.learning.dream.enabled:
+        if not config.enabled or not config.evolution.enabled or not config.evolution.dream.enabled:
             return
 
-        interval_seconds = config.learning.dream.interval_hours * 60 * 60
+        interval_seconds = config.evolution.dream.interval_hours * 60 * 60
         for target in await list_dream_targets():
             target_key = target.scheduler_key
             retry_after = cls._retry_after_by_target.get(target_key, 0)
@@ -109,13 +111,8 @@ class MemoryLearningScheduler:
                 continue
             success_key = cls._last_success_key(target)
             raw_last_success = await Storage.get(success_key)
-            last_success = (
-                float(raw_last_success) if raw_last_success else None
-            )
-            if (
-                last_success is not None
-                and now - last_success < interval_seconds
-            ):
+            last_success = float(raw_last_success) if raw_last_success else None
+            if last_success is not None and now - last_success < interval_seconds:
                 continue
 
             try:
@@ -123,7 +120,7 @@ class MemoryLearningScheduler:
                 cls._retry_after_by_target.pop(target_key, None)
                 if result.backlog:
                     log.info(
-                        "memory.learning.dream_backlog",
+                        "memory.evolution.dream_backlog",
                         {
                             "target": target_key,
                             "processed_sources": result.processed_sources,
@@ -133,7 +130,7 @@ class MemoryLearningScheduler:
                     continue
                 await Storage.set(success_key, now, "number")
                 log.info(
-                    "memory.learning.dream_complete",
+                    "memory.evolution.dream_complete",
                     {
                         "target": target_key,
                         "processed_sources": result.processed_sources,
@@ -146,7 +143,7 @@ class MemoryLearningScheduler:
                 retry_after = now + _FAILURE_RETRY_SECONDS
                 cls._retry_after_by_target[target_key] = retry_after
                 log.warn(
-                    "memory.learning.dream_failed",
+                    "memory.evolution.dream_failed",
                     {
                         "target": target_key,
                         "error": str(exc),
@@ -156,7 +153,7 @@ class MemoryLearningScheduler:
 
     @staticmethod
     def _last_success_key(target: DreamTarget) -> str:
-        """Preserve the legacy Global cursor while isolating Project cadence."""
+        """Keep one cadence key per Global or Project Dream target."""
         if target.scope.value == "global":
             return _LAST_SUCCESS_KEY
         return f"{_LAST_SUCCESS_KEY}:{target.scope.value}:{target.scope_id}"

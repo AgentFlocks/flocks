@@ -7,7 +7,7 @@ from unittest.mock import patch
 import pytest
 
 from flocks.memory.config import MemoryConfig
-from flocks.memory.learning import LearningCheckpointStore
+from flocks.memory.evolution import EvolutionCheckpointStore
 from flocks.memory.sync.indexer import MemoryIndexer
 from flocks.memory.types import MemoryScope
 from flocks.storage import (
@@ -210,52 +210,21 @@ async def test_old_memory_index_schema_is_rebuilt_without_other_data(
 
 
 @pytest.mark.asyncio
-async def test_old_dream_checkpoint_is_copied_to_global_scope(
+async def test_evolution_checkpoint_schema_uses_scoped_primary_key(
     tmp_path: Path,
 ) -> None:
-    db_path = tmp_path / "legacy-checkpoint.db"
+    db_path = tmp_path / "evolution-checkpoint.db"
     await Storage.init(db_path)
+    await EvolutionCheckpointStore.ensure_schema()
+
     async with Storage.connect(db_path) as db:
-        await db.execute(
-            """
-            CREATE TABLE memory_learning_checkpoints (
-                pipeline TEXT NOT NULL,
-                source_type TEXT NOT NULL,
-                source_key TEXT NOT NULL,
-                content_hash TEXT NOT NULL,
-                line_count INTEGER NOT NULL DEFAULT 0,
-                last_message_id TEXT,
-                source_mtime REAL,
-                processed_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL,
-                PRIMARY KEY (pipeline, source_type, source_key)
-            )
-            """
+        cursor = await db.execute(
+            "PRAGMA table_info(memory_evolution_checkpoints)"
         )
-        await db.execute(
-            """
-            INSERT INTO memory_learning_checkpoints
-            VALUES (
-                'dream', 'session', 'ses_old', 'hash', 1, 'msg_old',
-                NULL, 'now', 'now'
-            )
-            """
-        )
-        await db.commit()
+        columns = {row[1]: row[5] for row in await cursor.fetchall()}
 
-    await LearningCheckpointStore.ensure_schema()
-
-    global_row = await LearningCheckpointStore.get(
-        "dream",
-        "session",
-        "ses_old",
-    )
-    project_row = await LearningCheckpointStore.get(
-        "dream",
-        "session",
-        "ses_old",
-        scope=MemoryScope.PROJECT,
-        scope_id="prj_test",
-    )
-    assert global_row["last_message_id"] == "msg_old"
-    assert project_row is None
+    assert columns["pipeline"] == 1
+    assert columns["scope"] == 2
+    assert columns["scope_id"] == 3
+    assert columns["source_type"] == 4
+    assert columns["source_key"] == 5

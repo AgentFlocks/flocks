@@ -1,4 +1,4 @@
-"""Scheduled Dream bridging and turn-driven skill self-evolution.
+"""Shared persistence, models, and helpers for Memory evolution.
 
 Dream consumes incremental user/assistant messages and daily memory on a
 background cadence. Skill evolution reviews only eligible successful turns,
@@ -24,11 +24,8 @@ from flocks.config import Config
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
 from flocks.memory.paths import (
-    GLOBAL_MEMORY_FILENAME,
     GLOBAL_SCOPE_ID,
-    USER_FILENAME,
     is_registered_project_id,
-    memory_file_path,
 )
 from flocks.memory.types import MemoryScope
 from flocks.provider import ChatMessage, Provider
@@ -39,7 +36,7 @@ from flocks.storage import Storage
 from flocks.utils.log import Log
 
 
-log = Log.create(service="memory.learning")
+log = Log.create(service="memory.evolution")
 Pipeline = Literal["dream", "skill"]
 SourceType = Literal["session", "daily"]
 _SKILL_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9-]{0,63}$")
@@ -79,12 +76,10 @@ _DESCRIPTION_TRIGGER_RE = re.compile(
     r"当.+时|用于|适用于|用户(?:要求|需要)|请求)",
     re.IGNORECASE,
 )
-_DAILY_SESSION_HEADER_RE = re.compile(
-    r"^## Session (?P<prefix>[A-Za-z0-9_-]+)(?:…|\.\.\.)?"
-)
+_DAILY_SESSION_HEADER_RE = re.compile(r"^## Session (?P<prefix>[A-Za-z0-9_-]+)(?:…|\.\.\.)?")
 
 _SCHEMA_DDL = """
-CREATE TABLE IF NOT EXISTS memory_learning_checkpoints (
+CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
     pipeline TEXT NOT NULL,
     scope TEXT NOT NULL,
     scope_id TEXT NOT NULL,
@@ -98,8 +93,8 @@ CREATE TABLE IF NOT EXISTS memory_learning_checkpoints (
     updated_at TEXT NOT NULL,
     PRIMARY KEY (pipeline, scope, scope_id, source_type, source_key)
 );
-CREATE INDEX IF NOT EXISTS idx_memory_learning_checkpoint_updated
-ON memory_learning_checkpoints(pipeline, scope, scope_id, updated_at);
+CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
+ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at);
 
 CREATE TABLE IF NOT EXISTS memory_skill_proposals (
     id TEXT PRIMARY KEY,
@@ -205,7 +200,7 @@ class SkillProposal:
     applied_at: Optional[str] = None
 
 
-class LearningCheckpointStore:
+class EvolutionCheckpointStore:
     """SQLite cursors shared by Dream and skill review."""
 
     _schema_lock = asyncio.Lock()
@@ -215,59 +210,7 @@ class LearningCheckpointStore:
         await Storage._ensure_init()
         async with cls._schema_lock:
             async with Storage.connect() as db:
-                cursor = await db.execute(
-                    "PRAGMA table_info(memory_learning_checkpoints)"
-                )
-                columns = {row[1] for row in await cursor.fetchall()}
-                if columns and not {"scope", "scope_id"}.issubset(columns):
-                    legacy_exists = await db.execute(
-                        """
-                        SELECT 1 FROM sqlite_master
-                        WHERE type = 'table'
-                            AND name = 'memory_learning_checkpoints_legacy'
-                        """
-                    )
-                    if await legacy_exists.fetchone() is None:
-                        await db.execute(
-                            """
-                            ALTER TABLE memory_learning_checkpoints
-                            RENAME TO memory_learning_checkpoints_legacy
-                            """
-                        )
                 await db.executescript(_SCHEMA_DDL)
-                legacy_cursor = await db.execute(
-                    """
-                    SELECT 1 FROM sqlite_master
-                    WHERE type = 'table'
-                        AND name = 'memory_learning_checkpoints_legacy'
-                    """
-                )
-                if await legacy_cursor.fetchone() is not None:
-                    await db.execute(
-                        """
-                        INSERT OR IGNORE INTO memory_learning_checkpoints (
-                            pipeline, scope, scope_id, source_type, source_key,
-                            content_hash, line_count, last_message_id,
-                            source_mtime, processed_at, updated_at
-                        )
-                        SELECT pipeline, 'global', '', source_type, source_key,
-                               content_hash, line_count, last_message_id,
-                               source_mtime, processed_at, updated_at
-                        FROM memory_learning_checkpoints_legacy
-                        """
-                    )
-                    await db.execute(
-                        "DROP TABLE memory_learning_checkpoints_legacy"
-                    )
-                    await db.execute(
-                        """
-                        CREATE INDEX IF NOT EXISTS
-                            idx_memory_learning_checkpoint_updated
-                        ON memory_learning_checkpoints(
-                            pipeline, scope, scope_id, updated_at
-                        )
-                        """
-                    )
                 await db.commit()
 
     @classmethod
@@ -286,7 +229,7 @@ class LearningCheckpointStore:
                 """
                 SELECT content_hash, line_count, last_message_id, source_mtime,
                        processed_at, updated_at
-                FROM memory_learning_checkpoints
+                FROM memory_evolution_checkpoints
                 WHERE pipeline = ? AND scope = ? AND scope_id = ?
                     AND source_type = ? AND source_key = ?
                 """,
@@ -362,7 +305,7 @@ class LearningCheckpointStore:
     ) -> None:
         await db.execute(
             """
-            INSERT INTO memory_learning_checkpoints (
+            INSERT INTO memory_evolution_checkpoints (
                 pipeline, scope, scope_id, source_type, source_key, content_hash,
                 line_count, last_message_id, source_mtime,
                 processed_at, updated_at
@@ -404,7 +347,7 @@ class SkillProposalStore:
 
     @classmethod
     async def create_pending(cls, proposal: SkillProposal) -> SkillProposal:
-        await LearningCheckpointStore.ensure_schema()
+        await EvolutionCheckpointStore.ensure_schema()
         now = proposal.created_at or _now_iso()
         async with Storage.connect() as db:
             await db.execute(
@@ -445,7 +388,7 @@ class SkillProposalStore:
         cls,
         assistant_message_id: str,
     ) -> Optional[SkillProposal]:
-        await LearningCheckpointStore.ensure_schema()
+        await EvolutionCheckpointStore.ensure_schema()
         async with Storage.connect() as db:
             cursor = await db.execute(
                 f"""
@@ -460,7 +403,7 @@ class SkillProposalStore:
 
     @classmethod
     async def list_pending(cls) -> list[SkillProposal]:
-        await LearningCheckpointStore.ensure_schema()
+        await EvolutionCheckpointStore.ensure_schema()
         async with Storage.connect() as db:
             cursor = await db.execute(
                 f"""
@@ -483,7 +426,7 @@ class SkillProposalStore:
         error: Optional[str] = None,
     ) -> None:
         """Finalize a proposal and its Session review checkpoint together."""
-        await LearningCheckpointStore.ensure_schema()
+        await EvolutionCheckpointStore.ensure_schema()
         now = _now_iso()
         applied_at = now if status == "applied" else None
         async with Storage.connect() as db:
@@ -497,7 +440,7 @@ class SkillProposalStore:
                     """,
                     (status, error, applied_at, proposal.id),
                 )
-                await LearningCheckpointStore._upsert_in_transaction(
+                await EvolutionCheckpointStore._upsert_in_transaction(
                     db,
                     "skill",
                     source,
@@ -514,7 +457,7 @@ class SkillProposalStore:
         proposal_id: str,
         error: str,
     ) -> None:
-        await LearningCheckpointStore.ensure_schema()
+        await EvolutionCheckpointStore.ensure_schema()
         async with Storage.connect() as db:
             await db.execute(
                 """
@@ -570,7 +513,7 @@ def _truncate_tail(content: str, limit: int) -> str:
 def _truncate_middle(content: str, limit: int) -> str:
     if len(content) <= limit:
         return content
-    marker = "\n...[truncated for learning context]...\n"
+    marker = "\n...[truncated for evolution context]...\n"
     available = max(limit - len(marker), 2)
     head = available // 2
     return content[:head] + marker + content[-(available - head) :]
@@ -601,7 +544,7 @@ def _parse_json_object(raw: str) -> dict[str, Any]:
         text = "\n".join(lines[1:-1]).strip()
     value = json.loads(text)
     if not isinstance(value, dict):
-        raise ValueError("learning response must be a JSON object")
+        raise ValueError("evolution response must be a JSON object")
     return value
 
 
@@ -779,13 +722,8 @@ def _daily_delta(
         for index, line in enumerate(lines[:consumed_count]):
             match = _DAILY_SESSION_HEADER_RE.match(line.strip())
             if match:
-                current_session_id = session_prefixes.get(
-                    match.group("prefix")
-                )
-            if (
-                index >= start_line
-                and current_session_id in allowed_session_ids
-            ):
+                current_session_id = session_prefixes.get(match.group("prefix"))
+            if index >= start_line and current_session_id in allowed_session_ids:
                 filtered_lines.append(line)
         delta_content = _truncate_middle(
             "".join(filtered_lines),
@@ -817,17 +755,13 @@ async def list_dream_targets() -> list[DreamTarget]:
 
     sessions = await Session.list_all_unfiltered()
     project_ids = {
-        session.project_id
-        for session in sessions
-        if session.category == "user" and session.status != "deleted"
+        session.project_id for session in sessions if session.category == "user" and session.status != "deleted"
     }
     targets: list[DreamTarget] = []
     if "default" in project_ids:
         targets.append(DreamTarget.global_only())
     targets.extend(
-        DreamTarget.project(project_id)
-        for project_id in sorted(project_ids)
-        if is_registered_project_id(project_id)
+        DreamTarget.project(project_id) for project_id in sorted(project_ids) if is_registered_project_id(project_id)
     )
     return targets
 
@@ -837,10 +771,7 @@ def _unique_session_prefixes(sessions: list[Any]) -> dict[str, Optional[str]]:
     candidates: dict[str, list[str]] = {}
     for session in sessions:
         candidates.setdefault(session.id[:16], []).append(session.id)
-    return {
-        prefix: ids[0] if len(ids) == 1 else None
-        for prefix, ids in candidates.items()
-    }
+    return {prefix: ids[0] if len(ids) == 1 else None for prefix, ids in candidates.items()}
 
 
 async def _collect_dream_sources(
@@ -850,35 +781,29 @@ async def _collect_dream_sources(
     """Collect one bounded bridge batch and its MemoryManager sync targets."""
     from flocks.session.session import Session
 
-    learning = config.learning
+    evolution = config.evolution
     sessions = await Session.list_all_unfiltered()
     all_eligible_sessions = [
-        session
-        for session in sessions
-        if session.category == "user" and session.status != "deleted"
+        session for session in sessions if session.category == "user" and session.status != "deleted"
     ]
-    eligible_sessions = [
-        session
-        for session in all_eligible_sessions
-        if session.project_id == target.project_id
-    ]
+    eligible_sessions = [session for session in all_eligible_sessions if session.project_id == target.project_id]
     eligible_session_ids = {session.id for session in eligible_sessions}
     session_prefixes = _unique_session_prefixes(all_eligible_sessions)
-    session_budget = max(learning.max_input_chars // 3, 1000)
-    daily_budget = max(learning.max_input_chars // 3, 1000)
+    session_budget = max(evolution.max_input_chars // 3, 1000)
+    daily_budget = max(evolution.max_input_chars // 3, 1000)
     sources: list[SourceSnapshot] = []
     sync_targets = [(session.project_id, session.directory) for session in eligible_sessions]
     backlog = False
     changed_sessions = 0
 
     for session in eligible_sessions:
-        if learning.catch_up_sessions > 0 and changed_sessions >= learning.catch_up_sessions:
+        if evolution.catch_up_sessions > 0 and changed_sessions >= evolution.catch_up_sessions:
             backlog = True
             break
         if session_budget <= 0:
             backlog = True
             break
-        checkpoint = await LearningCheckpointStore.get(
+        checkpoint = await EvolutionCheckpointStore.get(
             "dream",
             "session",
             session.id,
@@ -888,7 +813,7 @@ async def _collect_dream_sources(
         snapshot, source_backlog = await _session_delta(
             session.id,
             checkpoint,
-            max_messages=learning.max_session_messages,
+            max_messages=evolution.max_session_messages,
             max_chars=session_budget,
             scope=target.scope,
             scope_id=target.scope_id,
@@ -903,12 +828,12 @@ async def _collect_dream_sources(
     memory_root = Config.get_data_path() / "memory"
     for path in _recent_daily_paths(
         memory_root,
-        learning.dream.recent_daily_days,
+        evolution.dream.recent_daily_days,
     ):
         if daily_budget <= 0:
             backlog = True
             break
-        checkpoint = await LearningCheckpointStore.get(
+        checkpoint = await EvolutionCheckpointStore.get(
             "dream",
             "daily",
             path.stem,
@@ -964,10 +889,7 @@ def _apply_memory_operations(
             operation_scope,
             operation_path,
         )
-        if (
-            dream_target.scope == MemoryScope.GLOBAL
-            and operation_scope == MemoryScope.PROJECT
-        ):
+        if dream_target.scope == MemoryScope.GLOBAL and operation_scope == MemoryScope.PROJECT:
             raise ValueError("Global-only Dream cannot update Project Memory")
         if operation_scope != file_scope or operation_path != path:
             continue
@@ -1034,182 +956,6 @@ async def _restore_memory_files_and_indexes(
         )
     except Exception as restore_exc:
         log.warn("dream.restore_reindex_failed", {"error": str(restore_exc)})
-
-
-async def run_dream_bridge(
-    target: Optional[DreamTarget] = None,
-) -> DreamBridgeResult:
-    """Run one incremental Dream batch using the configured default model."""
-    target = target or DreamTarget.global_only()
-    app_config = await Config.get()
-    config = getattr(app_config, "memory", None)
-    if not isinstance(config, MemoryConfig):
-        return DreamBridgeResult(False, 0, False)
-    if not config.enabled or not config.learning.enabled:
-        return DreamBridgeResult(False, 0, False)
-    if not config.learning.dream.enabled:
-        return DreamBridgeResult(False, 0, False)
-
-    default_model = await Config.resolve_default_llm()
-    provider_id = default_model.get("provider_id") if default_model else None
-    model_id = default_model.get("model_id") if default_model else None
-    if not provider_id or not model_id:
-        raise RuntimeError("no default model is configured for Dream")
-
-    async with _PIPELINE_LOCKS["dream"]:
-        sources, backlog, sync_targets = await _collect_dream_sources(
-            config,
-            target,
-        )
-        if not sources:
-            return DreamBridgeResult(False, 0, backlog)
-
-        source_sections = [
-            (f"## {source.source_type}/{source.source_key}\n{source.content}")
-            for source in sources
-            if source.content.strip()
-        ]
-        if not source_sections:
-            await LearningCheckpointStore.commit("dream", sources)
-            return DreamBridgeResult(False, len(sources), backlog)
-
-        memory_root = Config.get_data_path() / "memory"
-        global_memory_path = memory_file_path(
-            memory_root,
-            MemoryScope.GLOBAL,
-            GLOBAL_SCOPE_ID,
-            GLOBAL_MEMORY_FILENAME,
-        )
-        user_path = memory_file_path(
-            memory_root,
-            MemoryScope.GLOBAL,
-            GLOBAL_SCOPE_ID,
-            USER_FILENAME,
-        )
-        file_targets = {
-            (MemoryScope.GLOBAL, USER_FILENAME): user_path,
-            (
-                MemoryScope.GLOBAL,
-                GLOBAL_MEMORY_FILENAME,
-            ): global_memory_path,
-        }
-        if target.scope == MemoryScope.PROJECT:
-            file_targets[
-                (MemoryScope.PROJECT, GLOBAL_MEMORY_FILENAME)
-            ] = memory_file_path(
-                memory_root,
-                MemoryScope.PROJECT,
-                target.scope_id,
-                GLOBAL_MEMORY_FILENAME,
-            )
-
-        from flocks.memory.bootstrap import INITIAL_USER_PROFILE
-
-        originals: dict[Path, tuple[bool, str]] = {}
-        current_files: dict[tuple[MemoryScope, str], str] = {}
-        for key, file_path in file_targets.items():
-            existed = file_path.exists()
-            if existed:
-                content = file_path.read_text(encoding="utf-8")
-            elif key == (MemoryScope.GLOBAL, USER_FILENAME):
-                content = INITIAL_USER_PROFILE
-            elif key == (MemoryScope.PROJECT, GLOBAL_MEMORY_FILENAME):
-                from flocks.memory.paths import PROJECT_MEMORY_INITIAL_CONTENT
-
-                content = PROJECT_MEMORY_INITIAL_CONTENT
-            else:
-                content = ""
-            originals[file_path] = (existed, content)
-            current_files[key] = content
-
-        source_text = "\n\n".join(source_sections)
-        current_sections = "\n\n".join(
-            (
-                f"## {scope.value}/{path}\n"
-                f"{_truncate_tail(content, config.learning.max_input_chars // 6)}"
-            )
-            for (scope, path), content in current_files.items()
-        )
-        target_description = (
-            f"registered project {target.scope_id}"
-            if target.scope == MemoryScope.PROJECT
-            else "default Sessions (Global-only)"
-        )
-        response = await _chat_json(
-            provider_id=provider_id,
-            model_id=model_id,
-            max_tokens=config.learning.max_output_tokens,
-            system=(
-                "Maintain scoped durable Markdown Memory from incremental evidence. "
-                "Global USER.md contains stable user identity, communication "
-                "preferences, and working habits. Global MEMORY.md contains only "
-                "clearly cross-project preferences and reusable rules. Project "
-                "MEMORY.md contains project architecture, conventions, facts, "
-                "decisions, and lessons; project evidence should default there. "
-                "Reject transient task details and session summaries. Never infer "
-                "that project-specific evidence is global. A Global-only Dream "
-                "must skip project-specific information. "
-                "When a Project Dream finds a project-specific entry in Global "
-                "MEMORY.md, move it to Project MEMORY.md only when the current "
-                "project evidence clearly supports that classification; otherwise "
-                "leave the Global entry unchanged. "
-                'Return strict JSON only: {"action":"skip","reason":"..."} '
-                'or {"action":"update","operations":['
-                '{"scope":"global|project","path":"USER.md|MEMORY.md",'
-                '"type":"add","content":"..."},'
-                '{"scope":"global|project","path":"USER.md|MEMORY.md",'
-                '"type":"replace",'
-                '"old":"exact text","new":"..."},'
-                '{"scope":"global|project","path":"USER.md|MEMORY.md",'
-                '"type":"remove",'
-                '"old":"exact text"}]}. Copy replace/remove targets verbatim.'
-            ),
-            user=(
-                f"Dream target: {target_description}\n\n"
-                "Incremental Session and mapped Daily evidence:\n"
-                f"{_truncate_tail(source_text, config.learning.max_input_chars // 2)}"
-                "\n\nCurrent scoped Memory files:\n"
-                f"{current_sections}"
-            ),
-        )
-        updated_files = {
-            key: _apply_memory_operations(
-                content,
-                response,
-                dream_target=target,
-                file_scope=key[0],
-                path=key[1],
-            )
-            for key, content in current_files.items()
-        }
-        files_changed = any(
-            updated_files[key] != current_files[key]
-            for key in current_files
-        )
-
-        if files_changed:
-            try:
-                for key, file_path in file_targets.items():
-                    if updated_files[key] != current_files[key]:
-                        _atomic_write(file_path, updated_files[key])
-                await _sync_memory_indexes(
-                    config,
-                    sync_targets,
-                    fallback_project_id=target.project_id,
-                )
-                await LearningCheckpointStore.commit("dream", sources)
-            except BaseException:
-                await _restore_memory_files_and_indexes(
-                    config=config,
-                    sync_targets=sync_targets,
-                    fallback_project_id=target.project_id,
-                    originals=originals,
-                )
-                raise
-        else:
-            await LearningCheckpointStore.commit("dream", sources)
-
-        return DreamBridgeResult(files_changed, len(sources), backlog)
 
 
 def _redact_sensitive(value: Any, *, key: Optional[str] = None) -> Any:
@@ -1281,7 +1027,7 @@ async def _build_turn_review(
 
     user_text = _real_text(messages[user_index])
     trigger_reasons: list[str] = []
-    if completed_count >= config.learning.skill.min_completed_tools:
+    if completed_count >= config.evolution.skill.min_completed_tools:
         trigger_reasons.append("completed_tool_threshold")
     if recovered_after_error:
         trigger_reasons.append("failure_then_success")
@@ -1290,7 +1036,7 @@ async def _build_turn_review(
     if not trigger_reasons:
         return None
 
-    context_messages = messages[: assistant_index + 1][-config.learning.max_session_messages :]
+    context_messages = messages[: assistant_index + 1][-config.evolution.max_session_messages :]
     context_blocks: list[str] = []
     for message in context_messages:
         role = _message_role(message)
@@ -1299,10 +1045,10 @@ async def _build_turn_review(
         text = _real_text(message)
         if text:
             context_blocks.append(f"{role}: {text}")
-    context_budget = max(config.learning.max_input_chars // 6, 1000)
+    context_budget = max(config.evolution.max_input_chars // 6, 1000)
     context = _truncate_tail("\n\n".join(context_blocks), context_budget)
 
-    trace_budget = max(config.learning.max_input_chars // 2, 1000)
+    trace_budget = max(config.evolution.max_input_chars // 2, 1000)
     per_tool_budget = max(
         trace_budget // max(len(tool_parts), 1),
         _TOOL_PAYLOAD_MIN_CHARS,
@@ -1561,145 +1307,3 @@ async def _apply_pending_proposal(
         )
         raise
     return True
-
-
-async def recover_pending_skill_proposals(
-    *,
-    skill_root: Optional[Path] = None,
-) -> int:
-    """Idempotently finish proposals interrupted before their DB finalization."""
-    root = skill_root or _user_skill_root()
-    recovered = 0
-    for proposal in await SkillProposalStore.list_pending():
-        try:
-            if await _apply_pending_proposal(proposal, skill_root=root):
-                recovered += 1
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            log.warn(
-                "skill_proposal.recovery_failed",
-                {"proposal_id": proposal.id, "error": str(exc)},
-            )
-    return recovered
-
-
-async def process_skill_turn(
-    *,
-    session_id: str,
-    user_message_id: str,
-    assistant_message_id: str,
-    provider_id: str,
-    model_id: str,
-    skill_root: Optional[Path] = None,
-) -> bool:
-    """Review one successful turn and apply a validated skill proposal."""
-    app_config = await Config.get()
-    config = getattr(app_config, "memory", None)
-    if not isinstance(config, MemoryConfig):
-        return False
-    if not config.enabled or not config.learning.enabled or not config.learning.skill.enabled:
-        return False
-
-    from flocks.session.session import Session
-
-    session = await Session.get_by_id(session_id)
-    if session is None or session.category != "user" or session.status == "deleted":
-        return False
-
-    async with _PIPELINE_LOCKS["skill"]:
-        checkpoint = await LearningCheckpointStore.get(
-            "skill",
-            "session",
-            session_id,
-        )
-        last_reviewed = checkpoint.get("last_message_id") if checkpoint else None
-        if last_reviewed and last_reviewed >= assistant_message_id:
-            return False
-
-        existing = await SkillProposalStore.get_by_assistant_message(assistant_message_id)
-        root = skill_root or _user_skill_root()
-        if existing is not None:
-            if existing.status == "pending":
-                return await _apply_pending_proposal(existing, skill_root=root)
-            return existing.status == "applied"
-
-        review = await _build_turn_review(
-            session_id=session_id,
-            user_message_id=user_message_id,
-            assistant_message_id=assistant_message_id,
-            config=config,
-        )
-        if review is None:
-            return False
-
-        catalog = _skill_catalog()
-        selection = await _chat_json(
-            provider_id=provider_id,
-            model_id=model_id,
-            max_tokens=1000,
-            system=(
-                "Review a successful tool turn for a reusable workflow. "
-                "Prefer improving an existing skill over creating a duplicate. "
-                'Return strict JSON only: {"action":"skip","reason":"..."} '
-                'or {"action":"evolve","skill_names":["existing-name"],'
-                '"reason":"..."}. Select at most the few skills whose full '
-                "contents are needed. A new workflow may use an empty list."
-            ),
-            user=(
-                f"Trigger evidence: {', '.join(review.trigger_reasons)}\n\n"
-                f"{review.content}"
-                "\n\nAvailable skills:\n"
-                f"{_truncate_tail(json.dumps(catalog, ensure_ascii=False), config.learning.max_input_chars // 3)}"
-            ),
-        )
-        if selection.get("action") == "skip":
-            await LearningCheckpointStore.commit("skill", [review.source])
-            return False
-        if selection.get("action") != "evolve":
-            raise ValueError("skill review action must be skip or evolve")
-        names = selection.get("skill_names")
-        if not isinstance(names, list) or not all(isinstance(name, str) for name in names):
-            raise ValueError("skill_names must be a string list")
-        related = _related_skill_contents(
-            names,
-            catalog,
-            config.learning.skill.max_related_skills,
-        )
-
-        response = await _chat_json(
-            provider_id=provider_id,
-            model_id=model_id,
-            max_tokens=config.learning.max_output_tokens,
-            system=(
-                "Create one validated skill proposal from proven behavior. "
-                "Return strict JSON only. Actions: skip; "
-                "create(skill_name, content=complete SKILL.md); "
-                "edit(skill_name, content=complete SKILL.md); "
-                "patch(skill_name, path='SKILL.md', old, new), where old "
-                "matches exactly once. The SKILL.md frontmatter must contain "
-                "the matching name and a description that states both what "
-                "the skill does and when it should trigger. Keep the document "
-                "under 500 lines, generalize the workflow, explain why steps "
-                "matter, and do not encode secrets or transient facts. Only "
-                "selected source='user' skills may be edited; never shadow "
-                "project, bundled, or installed skills."
-            ),
-            user=(
-                f"{review.content}"
-                "\n\nSelected existing skills:\n"
-                f"{_truncate_tail(json.dumps(related, ensure_ascii=False), config.learning.max_input_chars // 3)}"
-            ),
-        )
-        proposal = _prepare_skill_proposal(
-            response=response,
-            review=review,
-            catalog=catalog,
-            related=related,
-            skill_root=root,
-        )
-        if proposal is None:
-            await LearningCheckpointStore.commit("skill", [review.source])
-            return False
-        stored = await SkillProposalStore.create_pending(proposal)
-        return await _apply_pending_proposal(stored, skill_root=root)

@@ -219,8 +219,8 @@ class MemorySkillEvolutionConfig(BaseModel):
     )
 
 
-class MemoryLearningConfig(BaseModel):
-    """Shared Dream and skill self-evolution configuration."""
+class MemoryEvolutionConfig(BaseModel):
+    """Shared Dream and Skill evolution configuration."""
 
     enabled: bool = Field(
         True,
@@ -234,12 +234,12 @@ class MemoryLearningConfig(BaseModel):
     max_input_chars: int = Field(
         60000,
         ge=1000,
-        description="Maximum source characters supplied to each learning prompt",
+        description="Maximum source characters supplied to each evolution prompt",
     )
     max_output_tokens: int = Field(
         4000,
         ge=256,
-        description="Maximum model output tokens for a learning operation",
+        description="Maximum model output tokens for an evolution operation",
     )
     catch_up_sessions: int = Field(
         20,
@@ -378,9 +378,9 @@ class MemoryConfig(BaseModel):
         default_factory=MemoryAutoFlushConfig,
         description="Auto flush configuration"
     )
-    learning: MemoryLearningConfig = Field(
-        default_factory=MemoryLearningConfig,
-        description="Scheduled Dream and turn-driven skill self-evolution",
+    evolution: MemoryEvolutionConfig = Field(
+        default_factory=MemoryEvolutionConfig,
+        description="Scheduled Dream and turn-driven Skill evolution",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,

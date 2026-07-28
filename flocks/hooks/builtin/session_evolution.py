@@ -1,4 +1,4 @@
-"""Lifecycle hook for turn-driven skill self-evolution."""
+"""Lifecycle hook for turn-driven Skill evolution."""
 
 from __future__ import annotations
 
@@ -9,10 +9,10 @@ from flocks.session.background_tasks import track_background_task
 from flocks.utils.log import Log
 
 
-log = Log.create(service="hooks.session_learning")
+log = Log.create(service="hooks.session_evolution")
 
 
-class SessionLearningHook(HookBase):
+class SessionEvolutionHook(HookBase):
     """Schedule a background skill review after a successful assistant turn."""
 
     async def turn_finish(self, ctx: HookContext) -> None:
@@ -56,7 +56,7 @@ def schedule_skill_review(
 
     async def run() -> None:
         try:
-            from flocks.memory.learning import process_skill_turn
+            from flocks.memory.evolution.skill import process_skill_turn
 
             await process_skill_turn(
                 session_id=session_id,
@@ -84,11 +84,11 @@ def schedule_skill_review(
     track_background_task(task, session_id=session_id)
 
 
-def register_session_learning_hook() -> None:
+def register_session_evolution_hook() -> None:
     """Register the skill review hook idempotently."""
     HookPipeline.register(
-        "builtin.session-learning",
-        SessionLearningHook(),
+        "builtin.session-evolution",
+        SessionEvolutionHook(),
         order=200,
         timeout_seconds=2.0,
     )

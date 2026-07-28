@@ -145,9 +145,9 @@ def test_register_builtin_hooks_is_idempotent():
 
         stats = HookRegistry.get_instance().get_stats()
         assert "command:new" not in stats["event_keys"]
-        assert HookPipeline.list_hooks().count("builtin.session-learning") == 1
+        assert HookPipeline.list_hooks().count("builtin.session-evolution") == 1
     finally:
-        HookPipeline.unregister("builtin.session-learning")
+        HookPipeline.unregister("builtin.session-evolution")
         HookRegistry.get_instance().clear()
         HookRegistry.reset_instance()
 
