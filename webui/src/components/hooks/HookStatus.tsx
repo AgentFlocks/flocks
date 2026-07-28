@@ -6,7 +6,7 @@
 
 import { useTranslation } from 'react-i18next';
 import { useHooks } from '@/hooks/useHooks';
-import { Rocket, CheckCircle, XCircle, Info, Activity } from 'lucide-react';
+import { Rocket, CheckCircle, XCircle, Activity } from 'lucide-react';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 
 export default function HookStatus() {
@@ -86,61 +86,6 @@ export default function HookStatus() {
               <p className="text-lg font-semibold">{status.stats.total_event_keys}</p>
             </div>
           </div>
-        </div>
-
-        {/* Session Memory Hook */}
-        <div className="border border-gray-200 rounded-lg p-4">
-          <div className="flex items-center justify-between mb-4">
-            <h3 className="text-sm font-semibold text-gray-800">Session Memory Hook</h3>
-            <span className={`px-2 py-1 text-xs rounded-full ${
-              status.session_memory.enabled 
-                ? 'bg-green-100 text-green-700' 
-                : 'bg-gray-100 text-gray-600'
-            }`}>
-              {status.session_memory.enabled ? t('hookStatus.enabled') : t('hookStatus.disabled')}
-            </span>
-          </div>
-
-          <div className="grid grid-cols-2 gap-4 mb-4">
-            <div>
-              <label className="text-xs text-gray-500">{t('hookStatus.autoSaveLabel')}</label>
-              <div className="flex items-center gap-2 mt-1">
-                {status.session_memory.enabled ? (
-                  <CheckCircle className="w-4 h-4 text-green-600" />
-                ) : (
-                  <XCircle className="w-4 h-4 text-gray-400" />
-                )}
-                <span className="text-sm">{status.session_memory.enabled ? t('hookStatus.yes') : t('hookStatus.no')}</span>
-              </div>
-            </div>
-            
-            <div>
-              <label className="text-xs text-gray-500">{t('hookStatus.messageCount')}</label>
-              <p className="text-sm mt-1">{status.session_memory.message_count} {t('hookStatus.messageCountLabel')}</p>
-            </div>
-            
-            <div>
-              <label className="text-xs text-gray-500">{t('hookStatus.useLlmSlugLabel')}</label>
-              <p className="text-sm mt-1">{status.session_memory.use_llm_slug ? t('hookStatus.yes') : t('hookStatus.no')}</p>
-            </div>
-            
-            <div>
-              <label className="text-xs text-gray-500">{t('hookStatus.slugTimeout')}</label>
-              <p className="text-sm mt-1">{status.session_memory.slug_timeout} {t('hookStatus.slugTimeoutLabel')}</p>
-            </div>
-          </div>
-
-          {status.session_memory.enabled && (
-            <div className="bg-red-50 border border-red-200 rounded-lg p-3 flex gap-2">
-              <Info className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
-              <div className="text-sm text-red-800">
-                <p className="font-medium">{t('hookStatus.autoSaveEnabled')}</p>
-                <p className="text-xs text-red-700 mt-1">
-                  {t('hookStatus.autoSaveDesc')}
-                </p>
-              </div>
-            </div>
-          )}
         </div>
 
         {/* Registered Hooks */}

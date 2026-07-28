@@ -52,21 +52,11 @@ async def get_hooks_status() -> Dict[str, Any]:
         config = await Config.get()
         memory_config = config.memory
         
-        # Get hook configuration
-        hooks_config = getattr(memory_config, 'hooks', {})
-        session_memory_config = getattr(hooks_config, 'session_memory', {})
-        
         # Get stats
         stats = get_hook_stats()
         
         return {
-            "enabled": memory_config.enabled,
-            "session_memory": {
-                "enabled": getattr(session_memory_config, 'enabled', False),
-                "message_count": getattr(session_memory_config, 'message_count', 5),
-                "use_llm_slug": getattr(session_memory_config, 'use_llm_slug', True),
-                "slug_timeout": getattr(session_memory_config, 'slug_timeout', 15),
-            },
+            "enabled": getattr(memory_config, "enabled", False),
             "stats": stats,
         }
         

@@ -4,7 +4,6 @@ Builtin hooks initialization
 Registers all built-in hooks that come with Flocks.
 """
 
-from flocks.hooks.builtin.session_memory import register_session_memory_hook
 from flocks.hooks.builtin.session_learning import register_session_learning_hook
 from flocks.utils.log import Log
 
@@ -20,8 +19,6 @@ def register_builtin_hooks() -> None:
     log.info("hooks.builtin.registering")
     
     try:
-        # Register session memory hook
-        register_session_memory_hook()
         register_session_learning_hook()
         
         # Future: Register additional built-in hooks here

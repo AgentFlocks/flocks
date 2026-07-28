@@ -56,34 +56,6 @@ class MemorySyncSessionConfig(BaseModel):
     )
 
 
-class MemoryHooksSessionMemoryConfig(BaseModel):
-    """Session memory hook configuration"""
-    enabled: bool = Field(
-        True,
-        description="Enable session memory hook"
-    )
-    message_count: int = Field(
-        5,
-        description="Number of recent messages to save"
-    )
-    use_llm_slug: bool = Field(
-        True,
-        description="Use LLM to generate slug"
-    )
-    slug_timeout: int = Field(
-        15,
-        description="Slug generation timeout (seconds)"
-    )
-
-
-class MemoryHooksConfig(BaseModel):
-    """Hooks configuration"""
-    session_memory: MemoryHooksSessionMemoryConfig = Field(
-        default_factory=MemoryHooksSessionMemoryConfig,
-        description="Session memory hook configuration"
-    )
-
-
 class MemorySyncConfig(BaseModel):
     """Sync operation configuration"""
     on_session_start: bool = Field(
@@ -365,10 +337,6 @@ class MemoryConfig(BaseModel):
     )
     
     # Sub-configurations
-    hooks: MemoryHooksConfig = Field(
-        default_factory=MemoryHooksConfig,
-        description="Hooks configuration"
-    )
     embedding: MemoryEmbeddingConfig = Field(
         default_factory=MemoryEmbeddingConfig,
         description="Embedding configuration"

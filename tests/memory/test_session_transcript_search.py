@@ -7,7 +7,6 @@ import uuid
 import pytest
 
 from flocks.config.config import Config
-from flocks.hooks.builtin.session_memory import SessionMemoryHook
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
 from flocks.memory.search.hybrid import HybridSearch
@@ -177,31 +176,6 @@ async def test_synthetic_text_is_not_indexed(tmp_path: Path) -> None:
         query="compaction",
         max_results=10,
     )
-
-
-@pytest.mark.asyncio
-async def test_new_snapshot_reads_last_five_canonical_messages(
-    tmp_path: Path,
-) -> None:
-    session = await _create_session(tmp_path)
-    for index in range(7):
-        await Message.create(
-            session.id,
-            MessageRole.USER if index % 2 == 0 else MessageRole.ASSISTANT,
-            f"message {index}",
-        )
-
-    messages = await SessionMemoryHook._read_session_messages(
-        session.id,
-        message_count=5,
-    )
-    assert [message["content"] for message in messages] == [
-        "message 2",
-        "message 3",
-        "message 4",
-        "message 5",
-        "message 6",
-    ]
 
 
 @pytest.mark.asyncio
