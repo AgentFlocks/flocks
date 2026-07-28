@@ -312,6 +312,25 @@ class Session:
                 raise SessionInactiveError(f"Session {session_id} is not active")
             return await operation()
 
+    @classmethod
+    async def _clear_project_move_metadata_locked(cls, session_id: str) -> bool:
+        """Remove a stale replay boundary while the session write lock is held."""
+
+        session = await cls.get_by_id_unfiltered(session_id)
+        if session is None:
+            raise SessionNotFoundError(f"Session {session_id} not found")
+        metadata = dict(getattr(session, "metadata", {}) or {})
+        if "projectMove" not in metadata:
+            return False
+
+        metadata.pop("projectMove")
+        updated_session = session.model_copy(update={"metadata": metadata})
+        storage_key = f"session:{session.project_id}:{session.id}"
+        await Storage.set(storage_key, updated_session, "session")
+        cls._id_index[session.id] = storage_key
+        cls._sync_list_cache(updated_session)
+        return True
+
     @staticmethod
     def has_pinned_model(session: Optional[SessionInfo]) -> bool:
         """Return whether a session has an explicit model lock."""

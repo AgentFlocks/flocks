@@ -213,6 +213,69 @@ async def test_move_blocks_replay_of_messages_from_previous_project(
 
 
 @pytest.mark.asyncio
+async def test_clear_resets_move_boundary_for_new_message_replay(
+    client: AsyncClient,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import session as session_routes
+
+    worktree = tmp_path / "clear-move-target"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Clear Move Target", "worktree": str(worktree)},
+        )
+    ).json()
+    session = (await client.post("/api/session", json={"title": "Clear History"})).json()
+    assert (
+        await client.post(
+            f"/api/session/{session['id']}/message",
+            json={"parts": [{"type": "text", "text": "Before moving"}], "noReply": True},
+        )
+    ).status_code == status.HTTP_200_OK
+    assert (
+        await client.patch(
+            f"/api/session/{session['id']}/project",
+            json={"projectID": project["id"]},
+        )
+    ).status_code == status.HTTP_200_OK
+    assert (
+        await client.post(f"/api/session/{session['id']}/clear")
+    ).status_code == status.HTTP_200_OK
+
+    moved = await Session.get(project["id"], session["id"])
+    assert moved is not None
+    assert "projectMove" not in moved.metadata
+
+    assert (
+        await client.post(
+            f"/api/session/{session['id']}/message",
+            json={"parts": [{"type": "text", "text": "After clearing"}], "noReply": True},
+        )
+    ).status_code == status.HTTP_200_OK
+    messages = (await client.get(f"/api/session/{session['id']}/message")).json()
+    user_message = next(item for item in messages if item["info"]["role"] == "user")
+    text_part = next(part for part in user_message["parts"] if part["type"] == "text")
+    scheduled_coroutines = []
+
+    def close_scheduled_coro(coro, **_kwargs):
+        scheduled_coroutines.append(coro)
+        coro.close()
+
+    monkeypatch.setattr(session_routes, "_schedule_background_coro", close_scheduled_coro)
+
+    replay_response = await client.post(
+        f"/api/session/{session['id']}/message/{user_message['info']['id']}/resend",
+        json={"text": "Replay after clearing", "partID": text_part["id"]},
+    )
+
+    assert replay_response.status_code == status.HTTP_202_ACCEPTED
+    assert len(scheduled_coroutines) == 1
+
+
+@pytest.mark.asyncio
 async def test_restore_archived_task_keeps_project_removed_when_directory_is_missing(
     client: AsyncClient,
     tmp_path: Path,

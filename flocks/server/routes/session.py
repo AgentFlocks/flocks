@@ -5011,7 +5011,9 @@ async def _clear_session_history(
 
     async def clear_persisted_history() -> int:
         await GoalManager.clear(sessionID)
-        return await Message.clear(sessionID)
+        deleted_count = await Message.clear(sessionID)
+        await Session._clear_project_move_metadata_locked(sessionID)
+        return deleted_count
 
     deleted_count = await _persist_active_session_write(
         sessionID,
