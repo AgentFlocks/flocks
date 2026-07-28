@@ -157,7 +157,7 @@ def bm25_rank_to_score(rank: float) -> float:
     Returns:
         Normalized score
     """
-    normalized = max(0, rank) if math.isfinite(rank) else 999
+    normalized = abs(rank) if math.isfinite(rank) else 999
     return 1 / (1 + normalized)
 
 
@@ -254,7 +254,7 @@ def build_fts_query(raw: str) -> Optional[str]:
     """
     Build FTS5 query string from raw text
     
-    Extracts alphanumeric tokens and combines with AND.
+    Extracts Unicode word tokens and combines them with AND.
     
     Args:
         raw: Raw query text
@@ -264,8 +264,9 @@ def build_fts_query(raw: str) -> Optional[str]:
     """
     import re
     
-    # Extract alphanumeric tokens
-    tokens = re.findall(r'[A-Za-z0-9_]+', raw)
+    # Python's Unicode-aware ``\w`` keeps CJK and other scripts intact while
+    # quoting prevents user input from becoming FTS5 syntax.
+    tokens = re.findall(r"\w+", raw, flags=re.UNICODE)
     tokens = [t.strip() for t in tokens if t.strip()]
     
     if not tokens:
@@ -401,6 +402,13 @@ async def insert_chunks(
             
             # Insert into FTS5 table (if exists)
             try:
+                chunk_ids = [chunk["id"] for chunk in chunks]
+                if chunk_ids:
+                    placeholders = ",".join("?" for _ in chunk_ids)
+                    await db.execute(
+                        f"DELETE FROM memory_fts WHERE chunk_id IN ({placeholders})",
+                        tuple(chunk_ids),
+                    )
                 await db.executemany("""
                     INSERT OR REPLACE INTO memory_fts
                     (chunk_id, path, source, project_id, start_line, end_line, text)
@@ -428,6 +436,106 @@ async def insert_chunks(
     except Exception as e:
         log.error("chunks.insert.failed", {"error": str(e)})
         raise
+
+
+async def replace_memory_file_index(
+    db_path: Path,
+    *,
+    file_entry: Dict[str, Any],
+    chunks: List[Dict[str, Any]],
+) -> int:
+    """Atomically replace one Memory file's metadata, chunks, and FTS rows."""
+    project_id = file_entry["project_id"]
+    path = file_entry["path"]
+    now = datetime.now().timestamp()
+    async with Storage.connect(db_path) as db:
+        try:
+            await db.execute("BEGIN IMMEDIATE")
+            await db.execute(
+                """
+                DELETE FROM memory_fts
+                WHERE project_id = ? AND source = 'memory' AND path = ?
+                """,
+                (project_id, path),
+            )
+            await db.execute(
+                """
+                DELETE FROM memory_chunks
+                WHERE project_id = ? AND source = 'memory' AND path = ?
+                """,
+                (project_id, path),
+            )
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO memory_files (
+                    path, project_id, source, hash, mtime, size, indexed_at
+                ) VALUES (?, ?, 'memory', ?, ?, ?, ?)
+                """,
+                (
+                    path,
+                    project_id,
+                    file_entry["hash"],
+                    file_entry["mtime"],
+                    file_entry["size"],
+                    now,
+                ),
+            )
+            await db.executemany(
+                """
+                INSERT INTO memory_chunks (
+                    id, path, project_id, source, start_line, end_line, hash,
+                    text, embedding, embedding_model, embedding_dims,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        chunk["id"],
+                        chunk["path"],
+                        chunk["project_id"],
+                        chunk["source"],
+                        chunk["start_line"],
+                        chunk["end_line"],
+                        chunk["hash"],
+                        chunk["text"],
+                        (
+                            json.dumps(chunk["embedding"])
+                            if chunk.get("embedding")
+                            else None
+                        ),
+                        chunk.get("embedding_model"),
+                        chunk.get("embedding_dims"),
+                        now,
+                        now,
+                    )
+                    for chunk in chunks
+                ],
+            )
+            await db.executemany(
+                """
+                INSERT INTO memory_fts (
+                    chunk_id, path, source, project_id, start_line, end_line,
+                    text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                [
+                    (
+                        chunk["id"],
+                        chunk["path"],
+                        chunk["source"],
+                        chunk["project_id"],
+                        chunk["start_line"],
+                        chunk["end_line"],
+                        chunk["text"],
+                    )
+                    for chunk in chunks
+                ],
+            )
+            await db.commit()
+            return len(chunks)
+        except BaseException:
+            await db.rollback()
+            raise
 
 
 async def get_embedding_from_cache(

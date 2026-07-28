@@ -145,7 +145,7 @@ class SessionMemory:
                 "session_id": self.session_id,
                 "error": str(e),
             })
-            return []
+            raise
     
     async def write(
         self,

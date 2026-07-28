@@ -778,8 +778,13 @@ class Session:
             session_ids = [session.id for session in sessions]
 
             from flocks.permission.next import PermissionNext
+            from flocks.storage.session_search import delete_session_documents
 
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
+
+            async def _delete_search_index(db) -> None:
+                await delete_session_documents(db, session_ids)
+
             await Storage.mutate_many(
                 delete_keys=[
                     key
@@ -803,6 +808,7 @@ class Session:
                         f"system_prompts:{session.id}:",
                     )
                 ],
+                transaction_hook=_delete_search_index,
             )
             PermissionNext.clear_session_runtime(session_ids)
 

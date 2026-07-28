@@ -83,7 +83,8 @@ class MemoryManager:
         self.config = config
         
         # Provider configuration
-        self.provider_id = config.embedding.provider
+        self._requested_provider = config.embedding.provider
+        self.provider_id: Optional[str] = config.embedding.provider
         if self.provider_id == "auto":
             self.provider_id = "openai"  # Default fallback
         
@@ -127,19 +128,20 @@ class MemoryManager:
 
         if project_id in cls._instances:
             instance = cls._instances[project_id]
-            old_provider = instance.provider_id
+            old_provider = instance._requested_provider
             old_model = instance.embedding_model
 
             instance.config = config
             instance.workspace_dir = Path(workspace_dir)
 
             new_provider = config.embedding.provider
-            if new_provider == "auto":
-                new_provider = "openai"
             new_model = config.embedding.model
 
             if new_provider != old_provider or new_model != old_model:
-                instance.provider_id = new_provider
+                instance._requested_provider = new_provider
+                instance.provider_id = (
+                    "openai" if new_provider == "auto" else new_provider
+                )
                 instance.embedding_model = new_model
                 instance._initialized = False
                 instance.search_engine = None
@@ -173,14 +175,11 @@ class MemoryManager:
             log.info("manager.init.start", {"project_id": self.project_id})
             
             try:
-                await Storage.init()
+                await Storage._ensure_init()
                 await Provider.init()
                 
-                provider = Provider.get(self.provider_id)
-                if not provider:
-                    raise ValueError(f"Provider {self.provider_id} not found")
-                
-                if not provider.supports_embeddings():
+                provider = Provider.get(self.provider_id) if self.provider_id else None
+                if not provider or not provider.supports_embeddings():
                     for fallback_id in ["openai", "google"]:
                         fallback = Provider.get(fallback_id)
                         if fallback and fallback.supports_embeddings():
@@ -191,7 +190,11 @@ class MemoryManager:
                             self.provider_id = fallback_id
                             break
                     else:
-                        raise ValueError("No provider with embeddings support available")
+                        log.info(
+                            "manager.embedding.unavailable",
+                            {"project_id": self.project_id},
+                        )
+                        self.provider_id = None
                 
                 self.search_engine = HybridSearch(
                     project_id=self.project_id,
@@ -209,9 +212,14 @@ class MemoryManager:
                 )
                 
                 self._initialized = True
+                if (
+                    "session" in self.config.sources
+                    and self.config.sync.sessions.enabled
+                ):
+                    await self._reconcile_sessions()
                 log.info("manager.init.complete", {
                     "project_id": self.project_id,
-                    "provider": self.provider_id,
+                    "provider": self.provider_id or "fts",
                     "model": self.embedding_model,
                 })
             
@@ -241,23 +249,115 @@ class MemoryManager:
         if not self._initialized:
             await self.initialize()
         
-        # Trigger sync if configured and dirty
+        selected_sources = (
+            list(sources)
+            if sources is not None
+            else [MemorySource(source) for source in self.config.sources]
+        )
+        limit = (
+            max_results
+            if max_results is not None
+            else self.config.query.max_results
+        )
+        threshold = (
+            min_score
+            if min_score is not None
+            else self.config.query.min_score
+        )
+
+        if sources is not None and MemorySource.SESSION in selected_sources:
+            await self._persist_session_source()
+
+        # Trigger Memory file sync if configured and dirty.
         if self.config.sync.on_search and self._dirty:
             await self.sync(reason="search")
-        
-        # Execute search
-        results = await self.search_engine.search(
-            query=query,
-            max_results=max_results or self.config.query.max_results,
-            min_score=min_score or self.config.query.min_score,
-            sources=sources or [MemorySource(s) for s in self.config.sources],
-        )
+
+        results: List[MemorySearchResult] = []
+        errors: List[Exception] = []
+        successful_sources = 0
+
+        if MemorySource.MEMORY in selected_sources:
+            try:
+                results.extend(
+                    await self.search_engine.search(
+                        query=query,
+                        max_results=limit,
+                        min_score=threshold,
+                        sources=[MemorySource.MEMORY],
+                    )
+                )
+                successful_sources += 1
+            except Exception as exc:
+                errors.append(exc)
+                log.warn("manager.search.memory_failed", {"error": str(exc)})
+
+        if MemorySource.SESSION in selected_sources:
+            try:
+                await self._reconcile_sessions()
+                from flocks.storage.session_search import session_fts_search
+
+                raw_results = await session_fts_search(
+                    db_path=Storage.get_db_path(),
+                    project_id=self.project_id,
+                    query=query,
+                    max_results=limit
+                    * self.config.query.hybrid.candidate_multiplier,
+                )
+                results.extend(
+                    MemorySearchResult(
+                        path=result["path"],
+                        start_line=result["start_line"],
+                        end_line=result["end_line"],
+                        score=result["score"],
+                        snippet=result["text"][:700],
+                        source=MemorySource.SESSION,
+                        citation=result["citation"],
+                    )
+                    for result in raw_results
+                    if result["score"] >= threshold
+                )
+                successful_sources += 1
+            except Exception as exc:
+                errors.append(exc)
+                log.warn("manager.search.session_failed", {"error": str(exc)})
+
+        if successful_sources == 0 and errors:
+            raise RuntimeError(
+                "All requested memory sources failed: "
+                + "; ".join(str(error) for error in errors)
+            )
+
+        deduplicated: Dict[str, MemorySearchResult] = {}
+        for result in sorted(results, key=lambda item: item.score, reverse=True):
+            key = f"{result.source.value}:{result.path}"
+            deduplicated.setdefault(key, result)
+        results = list(deduplicated.values())[:limit]
         
         # Decorate citations if enabled
         if self.config.citations != "off":
             results = decorate_citations(results, mode=self.config.citations)
         
         return results
+
+    async def _persist_session_source(self) -> None:
+        """Persist explicit Session search opt-in without touching other config."""
+        if "session" in self.config.sources:
+            return
+        from flocks.config.config_writer import ConfigWriter
+
+        await asyncio.to_thread(ConfigWriter.enable_memory_source, "session")
+        self.config.sources.append("session")
+
+    async def _reconcile_sessions(self) -> None:
+        """Synchronize historical transcript FTS rows for this project."""
+        if not self.config.sync.sessions.enabled:
+            return
+        from flocks.storage.session_search import reconcile_session_index
+
+        await reconcile_session_index(
+            project_id=self.project_id,
+            batch_size=self.config.sync.sessions.delta_messages,
+        )
     
     async def read_file(
         self,
@@ -488,7 +588,7 @@ class MemoryManager:
         # TODO: Implement comprehensive status collection
         return MemoryProviderStatus(
             enabled=self.config.enabled,
-            provider=self.provider_id,
+            provider=self.provider_id or "fts",
             model=self.embedding_model,
             requested_provider=self.config.embedding.provider,
             workspace_dir=str(self.workspace_dir),
@@ -496,7 +596,7 @@ class MemoryManager:
             dirty=self._dirty,
             cache={"enabled": self.config.cache.enabled},
             fts={"enabled": True},  # Always available
-            vector={"enabled": True},  # Always available
+            vector={"enabled": self.provider_id is not None},
         )
     
     async def close(self) -> None:

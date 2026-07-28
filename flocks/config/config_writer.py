@@ -136,6 +136,24 @@ class ConfigWriter:
 
         log.debug("config_writer.written", {"path": str(path)})
 
+    @classmethod
+    def enable_memory_source(cls, source: str) -> bool:
+        """Persist a Memory source without rewriting unrelated config."""
+        data = cls._read_raw()
+        memory = data.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        sources = memory.get("sources")
+        if not isinstance(sources, list):
+            sources = ["memory"]
+        if source in sources:
+            return False
+        memory["sources"] = [*sources, source]
+        data["memory"] = memory
+        cls._write_raw(data)
+        log.info("config_writer.memory_source_enabled", {"source": source})
+        return True
+
     # ------------------------------------------------------------------
     # Provider-level CRUD
     # ------------------------------------------------------------------

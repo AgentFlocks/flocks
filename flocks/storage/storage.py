@@ -25,6 +25,7 @@ from flocks.config.config import Config
 
 T = TypeVar("T", bound=BaseModel)
 DDLScript = str | Callable[[aiosqlite.Connection], Awaitable[None]]
+TransactionHook = Callable[[aiosqlite.Connection], Awaitable[None]]
 R = TypeVar("R")
 
 
@@ -1354,6 +1355,13 @@ class Storage:
         except Exception as e:
             cls._log.warn("storage.vector.init.failed", {"error": str(e)})
 
+        try:
+            from flocks.storage.session_search import ensure_session_search_tables
+
+            await ensure_session_search_tables(cls._db_path)
+        except Exception as e:
+            cls._log.warn("storage.session_search.init.failed", {"error": str(e)})
+
         # Create model management tables
         await cls._create_model_management_tables()
 
@@ -1555,12 +1563,22 @@ class Storage:
         set_entries: Sequence[Tuple[str, Any, str]] = (),
         delete_keys: Sequence[str] = (),
         delete_prefixes: Sequence[str] = (),
+        transaction_hook: Optional[TransactionHook] = None,
     ) -> int:
-        """Apply related set/delete operations in one SQLite transaction."""
+        """Apply related set/delete operations in one SQLite transaction.
+
+        ``transaction_hook`` is reserved for derived relational indexes that
+        must commit atomically with their canonical KV records.
+        """
         entries = list(set_entries)
         keys_to_delete = list(delete_keys)
         prefixes_to_delete = list(delete_prefixes)
-        if not entries and not keys_to_delete and not prefixes_to_delete:
+        if (
+            not entries
+            and not keys_to_delete
+            and not prefixes_to_delete
+            and transaction_hook is None
+        ):
             return 0
 
         routing_paths = {
@@ -1568,6 +1586,8 @@ class Storage:
             *(cls.route_db_path_for_key(key) for key in keys_to_delete),
             *(cls.route_db_path_for_prefix(prefix) for prefix in prefixes_to_delete),
         }
+        if not routing_paths:
+            routing_paths = {cls.get_db_path()}
         if len(routing_paths) != 1:
             raise ValueError("Storage.mutate_many operations must target the same database")
 
@@ -1614,6 +1634,8 @@ class Storage:
                             (cls._like_prefix_pattern(prefix),),
                         )
                         deleted += max(cursor.rowcount, 0)
+                    if transaction_hook is not None:
+                        await transaction_hook(db)
                     await db.commit()
                     return deleted
                 except BaseException:

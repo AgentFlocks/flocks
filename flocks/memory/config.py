@@ -52,7 +52,7 @@ class MemorySyncSessionConfig(BaseModel):
     )
     delta_messages: int = Field(
         50,
-        description="Number of new messages to trigger sync"
+        description="Batch size for session transcript reconciliation"
     )
 
 
@@ -63,7 +63,7 @@ class MemoryHooksSessionMemoryConfig(BaseModel):
         description="Enable session memory hook"
     )
     message_count: int = Field(
-        15,
+        5,
         description="Number of recent messages to save"
     )
     use_llm_slug: bool = Field(

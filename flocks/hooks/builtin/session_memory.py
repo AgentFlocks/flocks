@@ -8,11 +8,9 @@ Inspired by OpenClaw's session-memory hook.
 from typing import Optional, List, Dict, Any
 from pathlib import Path
 from datetime import datetime, timezone
-import json
 
 from flocks.hooks.types import HookEvent
 from flocks.hooks.registry import register_hook
-from flocks.session.recorder import Recorder
 from flocks.memory.manager import MemoryManager
 from flocks.memory.config import MemoryConfig
 from flocks.config import Config
@@ -25,7 +23,7 @@ class SessionMemoryHook:
     """Session memory save hook"""
     
     # Configuration
-    DEFAULT_MESSAGE_COUNT = 15  # Default: extract last 15 messages
+    DEFAULT_MESSAGE_COUNT = 5
     
     @staticmethod
     async def handler(event: HookEvent) -> None:
@@ -96,7 +94,7 @@ class SessionMemoryHook:
         Save session to memory file
         
         Steps:
-        1. Read session JSONL records
+        1. Read authoritative Message/TextPart records
         2. Extract last N messages
         3. Generate slug using LLM
         4. Construct Markdown content
@@ -141,51 +139,30 @@ class SessionMemoryHook:
         message_count: int,
     ) -> List[Dict[str, str]]:
         """
-        Read recent messages from JSONL records
+        Read recent user/assistant messages from canonical session storage.
         
         Returns:
             List of {role: str, content: str}
         """
         try:
-            # Get session record file path
-            paths = Recorder.paths()
-            session_file = paths.session_dir / f"{session_id}.jsonl"
-            
-            if not session_file.exists():
-                log.warn("session_memory.file_not_found", {
-                    "session_id": session_id,
-                    "path": str(session_file),
-                })
-                return []
-            
-            # Read and parse JSONL
+            from flocks.session.message import Message
+            from flocks.storage.session_search import build_session_document
+
             messages = []
-            content = session_file.read_text(encoding='utf-8')
-            
-            for line in content.strip().split('\n'):
-                if not line.strip():
+            for item in await Message.list_with_parts(
+                session_id,
+                include_archived=True,
+            ):
+                document = build_session_document(item.info, item.parts)
+                if document is None or document["text"].startswith("/"):
                     continue
-                
-                try:
-                    entry = json.loads(line)
-                    
-                    # Extract session.message type entries
-                    if entry.get('type') == 'session.message':
-                        role = entry.get('role', '')
-                        text = entry.get('text', '')
-                        
-                        # Only keep user and assistant messages
-                        # Skip command messages (starting with /)
-                        if role in ['user', 'assistant'] and text and not text.startswith('/'):
-                            messages.append({
-                                'role': role,
-                                'content': text,
-                            })
-                
-                except json.JSONDecodeError:
-                    continue
-            
-            # Return last N messages
+                messages.append(
+                    {
+                        "role": document["role"],
+                        "content": document["text"],
+                    }
+                )
+
             recent_messages = messages[-message_count:] if messages else []
             
             log.debug("session_memory.messages_read", {

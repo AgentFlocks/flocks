@@ -6,12 +6,16 @@ Implements incremental indexing of memory files with embedding generation.
 
 from typing import List, Optional, Callable, Dict, Any
 from pathlib import Path
-from datetime import datetime
 import asyncio
 import uuid
 
 from flocks.provider import Provider
-from flocks.storage import Storage, insert_chunks, get_embedding_from_cache, put_embedding_to_cache
+from flocks.storage import (
+    Storage,
+    get_embedding_from_cache,
+    put_embedding_to_cache,
+    replace_memory_file_index,
+)
 from flocks.memory.types import MemoryFileEntry, MemoryChunk, MemorySyncProgress
 from flocks.memory.config import MemoryConfig
 from flocks.memory.utils.hash import compute_hash, compute_text_hash
@@ -29,7 +33,7 @@ class MemoryIndexer:
         self,
         project_id: str,
         workspace_dir: Path,
-        provider_id: str,
+        provider_id: Optional[str],
         embedding_model: str,
         config: MemoryConfig,
     ):
@@ -226,7 +230,7 @@ class MemoryIndexer:
                 cursor = await db.execute("""
                     SELECT path, hash, mtime, size
                     FROM memory_files
-                    WHERE project_id = ?
+                    WHERE project_id = ? AND source = 'memory'
                 """, (self.project_id,))
                 
                 rows = await cursor.fetchall()
@@ -268,24 +272,44 @@ class MemoryIndexer:
                 log.warn("indexer.no_chunks", {"path": file_entry.path})
                 return stats
             
-            # Generate embeddings for chunks
+            # FTS indexing is always available. Embeddings are optional.
             chunk_records = []
-            
-            # Use batch processing if enabled
-            if self.config.batch.enabled and len(chunks) > 1:
-                chunk_records = await self._generate_embeddings_batch(
-                    chunks, file_entry, stats
-                )
+            if self.provider_id is None:
+                chunk_records = [
+                    self._create_chunk_record(chunk, file_entry, None, None)
+                    for chunk in chunks
+                ]
             else:
-                chunk_records = await self._generate_embeddings_sequential(
-                    chunks, file_entry, stats
-                )
+                try:
+                    if self.config.batch.enabled and len(chunks) > 1:
+                        chunk_records = await self._generate_embeddings_batch(
+                            chunks, file_entry, stats
+                        )
+                    else:
+                        chunk_records = await self._generate_embeddings_sequential(
+                            chunks, file_entry, stats
+                        )
+                except Exception as exc:
+                    log.warn(
+                        "indexer.embedding.failed_fts_fallback",
+                        {"path": file_entry.path, "error": str(exc)},
+                    )
+                    chunk_records = [
+                        self._create_chunk_record(chunk, file_entry, None, None)
+                        for chunk in chunks
+                    ]
             
-            await self._delete_file_chunks(file_entry.path)
-            await insert_chunks(Storage.get_db_path(), chunk_records)
-            
-            # Update file entry in database
-            await self._update_file_entry(file_entry)
+            await replace_memory_file_index(
+                Storage.get_db_path(),
+                file_entry={
+                    "path": file_entry.path,
+                    "project_id": self.project_id,
+                    "hash": file_entry.hash,
+                    "mtime": file_entry.mtime_ms / 1000,
+                    "size": file_entry.size,
+                },
+                chunks=chunk_records,
+            )
             
             log.info("indexer.file.indexed", {
                 "path": file_entry.path,
@@ -392,8 +416,8 @@ class MemoryIndexer:
         self,
         chunk: MemoryChunk,
         file_entry: MemoryFileEntry,
-        embedding: List[float],
-        dims: int,
+        embedding: Optional[List[float]],
+        dims: Optional[int],
     ) -> Dict[str, Any]:
         """Create chunk record for database"""
         return {
@@ -444,45 +468,6 @@ class MemoryIndexer:
             dims=dims,
         )
     
-    async def _delete_file_chunks(self, path: str) -> None:
-        """Delete all existing chunks for a file before re-indexing."""
-        import aiosqlite
-        
-        try:
-            async with Storage.connect(Storage.get_db_path()) as db:
-                await db.execute(
-                    "DELETE FROM memory_chunks WHERE project_id = ? AND path = ?",
-                    (self.project_id, path),
-                )
-                await db.commit()
-        except Exception as e:
-            log.error("indexer.delete_chunks.failed", {"path": path, "error": str(e)})
-    
-    async def _update_file_entry(self, file_entry: MemoryFileEntry) -> None:
-        """Update file entry in database"""
-        import aiosqlite
-        
-        now = datetime.now().timestamp()
-        
-        try:
-            async with Storage.connect(Storage.get_db_path()) as db:
-                await db.execute("""
-                    INSERT OR REPLACE INTO memory_files
-                    (path, project_id, source, hash, mtime, size, indexed_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
-                """, (
-                    file_entry.path,
-                    self.project_id,
-                    "memory",
-                    file_entry.hash,
-                    file_entry.mtime_ms / 1000,
-                    file_entry.size,
-                    now,
-                ))
-                await db.commit()
-        except Exception as e:
-            log.error("indexer.update_file.failed", {"path": file_entry.path, "error": str(e)})
-    
     async def _clean_deleted_files(self, current_files: List[str]) -> int:
         """
         Clean up deleted files from database
@@ -498,7 +483,8 @@ class MemoryIndexer:
         try:
             async with Storage.connect(Storage.get_db_path()) as db:
                 cursor = await db.execute("""
-                    SELECT path FROM memory_files WHERE project_id = ?
+                    SELECT path FROM memory_files
+                    WHERE project_id = ? AND source = 'memory'
                 """, (self.project_id,))
                 
                 indexed_paths = [row[0] for row in await cursor.fetchall()]
@@ -513,13 +499,21 @@ class MemoryIndexer:
                 params = (self.project_id, *deleted)
                 
                 await db.execute(f"""
+                    DELETE FROM memory_fts
+                    WHERE project_id = ? AND source = 'memory'
+                        AND path IN ({placeholders})
+                """, params)
+
+                await db.execute(f"""
                     DELETE FROM memory_chunks
-                    WHERE project_id = ? AND path IN ({placeholders})
+                    WHERE project_id = ? AND source = 'memory'
+                        AND path IN ({placeholders})
                 """, params)
                 
                 await db.execute(f"""
                     DELETE FROM memory_files
-                    WHERE project_id = ? AND path IN ({placeholders})
+                    WHERE project_id = ? AND source = 'memory'
+                        AND path IN ({placeholders})
                 """, params)
                 
                 await db.commit()
