@@ -1,7 +1,7 @@
 import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   Plus, Trash2, Archive,
-  ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
+  ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X,
@@ -539,6 +539,9 @@ export default function SessionPage() {
   const [batchArchiving, setBatchArchiving] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [movePickerSessionId, setMovePickerSessionId] = useState<string | null>(null);
+  const [movingSessionId, setMovingSessionId] = useState<string | null>(null);
+  const [movingTargetProjectId, setMovingTargetProjectId] = useState<string | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
@@ -1235,6 +1238,7 @@ export default function SessionPage() {
       if (!target.closest('[data-session-actions]') && !target.closest('[data-session-menu-portal]')) {
         setOpenMenuSessionId(null);
         setMenuAnchor(null);
+        setMovePickerSessionId(null);
       }
     };
     document.addEventListener('mousedown', handle);
@@ -1250,6 +1254,7 @@ export default function SessionPage() {
   useEffect(() => {
     if (!selectMode) return;
     setOpenMenuSessionId(null);
+    setMovePickerSessionId(null);
     setRenamingSessionId(null);
     setRenameValue('');
   }, [selectMode]);
@@ -1815,6 +1820,41 @@ export default function SessionPage() {
     }
   }, [refetchSessions, t, toast]);
 
+  const handleMoveSessionToProject = useCallback(async (
+    sessionId: string,
+    project: ProjectSummary,
+  ) => {
+    if (movingSessionId) return;
+    setMovingSessionId(sessionId);
+    setMovingTargetProjectId(project.id);
+    try {
+      await sessionApi.moveToProject(sessionId, project.id);
+      setOpenMenuSessionId(null);
+      setMenuAnchor(null);
+      setMovePickerSessionId(null);
+      setProjectsSectionCollapsed(false);
+      setCollapsedProjectIds((current) => {
+        const next = new Set(current);
+        next.delete(project.id);
+        return next;
+      });
+      toast.success(t('moveToProjectSuccess', { project: getProjectLabel(project) }));
+      await Promise.allSettled([
+        refetchSessions(),
+        fetchProjects(undefined, searchQuery),
+      ]);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(
+        t('moveToProjectFailed'),
+        typeof detail === 'string' ? detail : err?.message,
+      );
+    } finally {
+      setMovingSessionId(null);
+      setMovingTargetProjectId(null);
+    }
+  }, [fetchProjects, movingSessionId, refetchSessions, searchQuery, t, toast]);
+
   const handleEnterSelectMode = useCallback(() => {
     setSelectMode(true);
     setCheckedIds(new Set());
@@ -1841,6 +1881,7 @@ export default function SessionPage() {
     }
   }, [handleToggleCheck, selectMode]);
   const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
+    setMovePickerSessionId(null);
     setOpenMenuSessionId((current) => {
       if (current === sessionId) {
         setMenuAnchor(null);
@@ -3132,13 +3173,81 @@ export default function SessionPage() {
         const sid = openMenuSessionId;
         const session = sessions.find(s => s.id === sid);
         if (!session) return null;
+        const currentProjectId = session.effectiveProjectID || session.projectID;
+        const showMovePicker = movePickerSessionId === session.id;
+        const moveTargetProjects = projects.filter((project) => (
+          project.id.startsWith('prj_')
+          && project.canWrite !== false
+          && project.pathStatus !== 'missing'
+          && project.pathStatus !== 'unreadable'
+        ));
+        const movePickerHeight = Math.min(
+          272,
+          48 + Math.max(44, moveTargetProjects.length * 34),
+        );
+        const menuTop = showMovePicker
+          ? Math.max(8, Math.min(menuAnchor.top, window.innerHeight - movePickerHeight - 8))
+          : menuAnchor.top;
         return (
           <div
-            className="fixed z-50 grid w-[132px] gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
-            style={{ top: menuAnchor.top, right: menuAnchor.right }}
+            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] ${
+              showMovePicker ? 'w-[220px]' : 'w-[132px]'
+            }`}
+            style={{
+              top: menuTop,
+              right: menuAnchor.right,
+              maxHeight: showMovePicker ? 'calc(100vh - 16px)' : undefined,
+            }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
+            {showMovePicker ? (
+              <>
+                <div className="flex h-8 items-center gap-1 border-b border-black/[0.07] px-1 pb-1 dark:border-white/[0.08]">
+                  <button
+                    type="button"
+                    onClick={() => setMovePickerSessionId(null)}
+                    className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-[#6f757c] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#aeb8c3] dark:hover:bg-white/[0.07] dark:hover:text-white"
+                    aria-label={t('moveToProjectBack')}
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="min-w-0 truncate text-xs font-semibold text-[#34383d] dark:text-[#e3e8ee]">
+                    {t('moveToProjectTitle')}
+                  </span>
+                </div>
+                <div className="session-sidebar-scrollbar min-h-0 max-h-56 overflow-y-auto py-0.5" role="menu" aria-label={t('moveToProjectTitle')}>
+                  {moveTargetProjects.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-xs leading-5 text-[#858a91] dark:text-[#8f9ba8]">
+                      {t('moveToProjectEmpty')}
+                    </div>
+                  ) : moveTargetProjects.map((project) => {
+                    const isCurrent = project.id === currentProjectId;
+                    const isMovingHere = (
+                      movingSessionId === session.id
+                      && movingTargetProjectId === project.id
+                    );
+                    return (
+                      <button
+                        key={project.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void handleMoveSessionToProject(session.id, project)}
+                        disabled={isCurrent || Boolean(movingSessionId)}
+                        title={project.worktree}
+                        className="flex min-h-[34px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-default disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      >
+                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <span className="min-w-0 flex-1 truncate">{getProjectLabel(project)}</span>
+                        {isCurrent && <Check className="h-3.5 w-3.5 shrink-0 text-blue-500" />}
+                        {!isCurrent && isMovingHere && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-500" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
@@ -3162,6 +3271,15 @@ export default function SessionPage() {
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setMovePickerSessionId(session.id); }}
+              disabled={session.canWrite === false || runningSessionIds.has(session.id)}
+              title={runningSessionIds.has(session.id) ? t('moveToProjectRunning') : undefined}
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              <span className="truncate">{t('moveToProjectAction')}</span>
+            </button>
             <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleArchiveSession(session.id); }}
@@ -3171,6 +3289,8 @@ export default function SessionPage() {
               <Archive className="w-3.5 h-3.5" />
               <span>{t('archiveAction')}</span>
             </button>
+              </>
+            )}
           </div>
         );
       })()}

@@ -41,6 +41,7 @@ const {
     delete: vi.fn(),
     get: vi.fn(),
     getMessages: vi.fn(),
+    moveToProject: vi.fn(),
     update: vi.fn(),
   },
   updateSessionTitle: vi.fn(),
@@ -393,6 +394,12 @@ describe('SessionPage session actions menu', () => {
     hubAPI.installStream.mockResolvedValue(undefined);
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
+    sessionApi.moveToProject.mockResolvedValue({
+      ...session,
+      projectID: 'prj_labs',
+      effectiveProjectID: 'prj_labs',
+      directory: '/tmp/labs',
+    });
     client.patch.mockResolvedValue({ data: { id: 'prj_project2', worktree: '/tmp/labs', name: 'Renamed Project' } });
     client.post.mockResolvedValue({ data: secondSession });
     sessionApi.get.mockResolvedValue(session);
@@ -1397,7 +1404,150 @@ describe('SessionPage session actions menu', () => {
     expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'moveToProjectAction' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'archiveAction' })).toBeInTheDocument();
+  });
+
+  it('moves a regular task into a selected project', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Labs' }));
+
+    await waitFor(() => {
+      expect(sessionApi.moveToProject).toHaveBeenCalledWith('session-1', 'prj_labs');
+    });
+    expect(refetchSessions).toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith('moveToProjectSuccess');
+  });
+
+  it('keeps the project picker inside the viewport near the bottom edge', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
+    vi.spyOn(actionsTrigger, 'getBoundingClientRect').mockReturnValue({
+      bottom: 380,
+      right: 300,
+    } as DOMRect);
+    await user.click(actionsTrigger);
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+
+    const menu = document.querySelector('[data-session-menu-portal]') as HTMLElement;
+    expect(menu.style.top).toBe('300px');
+    expect(menu.style.maxHeight).toBe('calc(100vh - 16px)');
+
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: originalInnerHeight,
+    });
+  });
+
+  it('shows the backend detail when moving a task fails', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    sessionApi.moveToProject.mockRejectedValue({
+      message: 'Request failed with status code 409',
+      response: { data: { detail: '任务正在运行，请稍后再移动' } },
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Labs' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'moveToProjectFailed',
+        '任务正在运行，请稍后再移动',
+      );
+    });
+  });
+
+  it('shows the move spinner only on the selected target project', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+        { id: 'prj_docs', worktree: '/tmp/docs', name: 'Docs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    sessionApi.moveToProject.mockImplementation(() => new Promise(() => {}));
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    const labsTarget = screen.getByRole('menuitem', { name: 'Labs' });
+    const docsTarget = screen.getByRole('menuitem', { name: 'Docs' });
+    await user.click(labsTarget);
+
+    await waitFor(() => {
+      expect(labsTarget.querySelector('.animate-spin')).not.toBeNull();
+    });
+    expect(docsTarget.querySelector('.animate-spin')).toBeNull();
+  });
+
+  it('moves a project task to a different project and marks its current project', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_source', worktree: '/tmp/source', name: 'Source', canWrite: true, pathStatus: 'available' },
+        { id: 'prj_target', worktree: '/tmp/target', name: 'Target', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        projectID: 'prj_source',
+        effectiveProjectID: 'prj_source',
+        directory: '/tmp/source',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    expect(screen.getByRole('menuitem', { name: 'Source' })).toBeDisabled();
+    await user.click(screen.getByRole('menuitem', { name: 'Target' }));
+
+    await waitFor(() => {
+      expect(sessionApi.moveToProject).toHaveBeenCalledWith('session-1', 'prj_target');
+    });
   });
 
   it('shows a compact relative session timestamp and keeps the actions trigger background-free', async () => {

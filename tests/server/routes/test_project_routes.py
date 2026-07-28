@@ -101,6 +101,118 @@ async def test_create_project_creates_missing_directory(
 
 
 @pytest.mark.asyncio
+async def test_move_regular_task_into_project(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    worktree = tmp_path / "move-target"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Move Target", "worktree": str(worktree)},
+        )
+    ).json()
+    session = (
+        await client.post(
+            "/api/session",
+            json={"title": "Move me"},
+        )
+    ).json()
+
+    response = await client.patch(
+        f"/api/session/{session['id']}/project",
+        json={"projectID": project["id"]},
+    )
+
+    assert response.status_code == status.HTTP_200_OK
+    assert response.json()["projectID"] == project["id"]
+    assert response.json()["effectiveProjectID"] == project["id"]
+    assert response.json()["directory"] == str(worktree.resolve())
+    assert await Session.get(session["projectID"], session["id"]) is None
+    moved = await Session.get(project["id"], session["id"])
+    assert moved is not None and moved.directory == str(worktree.resolve())
+
+
+@pytest.mark.asyncio
+async def test_move_rejects_active_prompt_chain(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    from flocks.server.routes import session as session_routes
+
+    worktree = tmp_path / "busy-move-target"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "Busy Move Target", "worktree": str(worktree)},
+        )
+    ).json()
+    session = (await client.post("/api/session", json={"title": "Busy"})).json()
+
+    session_routes._set_prompt_chain_active(session["id"], True)
+    try:
+        response = await client.patch(
+            f"/api/session/{session['id']}/project",
+            json={"projectID": project["id"]},
+        )
+    finally:
+        session_routes._set_prompt_chain_active(session["id"], False)
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert await Session.get(session["projectID"], session["id"]) is not None
+
+
+@pytest.mark.asyncio
+async def test_move_blocks_replay_of_messages_from_previous_project(
+    client: AsyncClient,
+    tmp_path: Path,
+):
+    worktree = tmp_path / "history-move-target"
+    worktree.mkdir()
+    project = (
+        await client.post(
+            "/api/project",
+            json={"name": "History Move Target", "worktree": str(worktree)},
+        )
+    ).json()
+    session = (await client.post("/api/session", json={"title": "History"})).json()
+    assert (
+        await client.post(
+            f"/api/session/{session['id']}/message",
+            json={
+                "parts": [{"type": "text", "text": "Before moving"}],
+                "noReply": True,
+                "mockReply": "Old project reply",
+            },
+        )
+    ).status_code == status.HTTP_200_OK
+    messages = (await client.get(f"/api/session/{session['id']}/message")).json()
+    user_message = next(item for item in messages if item["info"]["role"] == "user")
+    text_part = next(part for part in user_message["parts"] if part["type"] == "text")
+    assert (
+        await client.patch(
+            f"/api/session/{session['id']}/project",
+            json={"projectID": project["id"]},
+        )
+    ).status_code == status.HTTP_200_OK
+
+    response = await client.post(
+        f"/api/session/{session['id']}/message/{user_message['info']['id']}/resend",
+        json={"text": "Do not replay", "partID": text_part["id"]},
+    )
+
+    assert response.status_code == status.HTTP_409_CONFLICT
+    assert "移动项目前" in response.text
+    revert_response = await client.post(
+        f"/api/session/{session['id']}/revert",
+        json={"messageID": user_message["info"]["id"]},
+    )
+    assert revert_response.status_code == status.HTTP_409_CONFLICT
+
+
+@pytest.mark.asyncio
 async def test_restore_archived_task_keeps_project_removed_when_directory_is_missing(
     client: AsyncClient,
     tmp_path: Path,

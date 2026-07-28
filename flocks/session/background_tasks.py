@@ -52,3 +52,9 @@ def pending_background_tasks() -> set[asyncio.Task[Any]]:
     """Return the live task set for compatibility with route-level drains."""
 
     return _pending_tasks
+
+
+def has_pending_session_tasks(session_id: str) -> bool:
+    """Return whether tracked asynchronous work is still active for a session."""
+
+    return any(not task.done() for task in _tasks_by_session.get(session_id, ()))
