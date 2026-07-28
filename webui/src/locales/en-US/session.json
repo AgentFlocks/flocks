@@ -114,7 +114,7 @@
   },
   "agentPicker": {
     "title": "Choose Chat Agent",
-    "hint": "New chats start with Rex; type @Agent to route one message",
+    "hint": "Rex is the default; selections route the current message as a subagent reference",
     "filter": {
       "all": "All",
       "builtin": "Built-in",
@@ -297,6 +297,24 @@
       "errorGeneric": "Upload failed. Please try again.",
       "imageNotSupported": "The current model does not support image analysis. Please select a vision-capable model in the model settings.",
       "imageNotSupportedBanner": "Image analysis is not supported by the current model"
+    },
+    "addMenu": {
+      "title": "Add",
+      "files": "Files and images",
+      "agent": "Agent",
+      "workflows": "Workflows",
+      "skills": "Skills",
+      "selectWorkflow": "Select workflow",
+      "selectSkill": "Select skill",
+      "noWorkflows": "No workflows available",
+      "noSkills": "No skills available"
+    },
+    "references": {
+      "selected": "Selected resources",
+      "subagent": "Subagent",
+      "skill": "Skill",
+      "workflow": "Workflow",
+      "remove": "Remove {{type}} {{name}}"
     },
     "tool": {
       "pending": "Pending",
