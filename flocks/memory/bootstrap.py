@@ -35,28 +35,28 @@ On-disk memory root (absolute path): `{memory_root}`. The same store is shared a
 ### Files Available:
 1. `USER.md` - Stable user profile: identity, preferences, communication style, working habits, and technical level (already injected above)
 2. `MEMORY.md` - Environment facts, project conventions, decisions, and reusable lessons (already injected above)
-3. `daily/YYYY-MM-DD.md` - Daily notes for **any** calendar date; substitute the date you need, then read with `memory_get` (path is relative to the memory root above).
+3. `daily/YYYY-MM-DD.md` - Daily notes maintained by the session lifecycle and searchable through `memory_search`.
 4. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
 
 ### When to Write Memory:
-- **User profile**: Use path `USER.md` for stable facts about the user
-- **Daily notes**: Use path `daily/YYYY-MM-DD.md` - Raw logs of what happened today
-- **Long-term**: Use path `MEMORY.md` for environment facts, project conventions, decisions, and lessons learned
+- **User profile**: Use `memory(target="user", action=...)` for stable facts about the user
+- **Daily notes**: Raw session logs are maintained automatically under `daily/`
+- **Long-term**: Use `memory(target="memory", action=...)` for environment facts, project conventions, decisions, and lessons learned
 - Write memories BEFORE the session ends, especially if important work was done
-- If someone says "remember this", write it down immediately: use `memory_write(target="user", ...)` for personal preferences and identity; use `memory_write(target="memory", ...)` for project or environment knowledge
+- If someone says "remember this", write it down immediately with the `memory` tool
 
 ### Memory Best Practices:
 - Keep `USER.md` about the user, not about individual projects or one-off tasks
 - Use `daily/YYYY-MM-DD.md` for daily logs (system auto-creates if needed)
 - Update `MEMORY.md` for important, lasting information
+- Use `add` for a new entry. For `replace` or `remove`, pass a short unique `old_text` from the existing entry
 - Use `memory_search` tool to find information from all past memories
 - Review old daily files and distill key points into MEMORY.md
 - Don't keep secrets unless explicitly asked
 
 ### Available Tools:
 - `memory_search` - Search all memories semantically
-- `memory_write` - Write to `USER.md`, `MEMORY.md`, or a daily file
-- Standard `read`/`write` tools also work with memory paths
+- `memory` - Add, replace, or remove entries in `USER.md` and `MEMORY.md`
 """.strip()
 
 

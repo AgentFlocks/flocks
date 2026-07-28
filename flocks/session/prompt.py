@@ -29,7 +29,7 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
-MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory_get", "memory_search", "memory_write"})
+MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory", "memory_search"})
 
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]

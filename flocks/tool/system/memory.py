@@ -1,7 +1,7 @@
 """
 Memory tools for agents.
 
-Expose memory_search/memory_get/memory_write via ToolRegistry.
+Expose memory_search and a Hermes-style curated memory tool via ToolRegistry.
 """
 
 from typing import Dict, List, Optional
@@ -144,35 +144,51 @@ async def memory_search_tool(
 
 
 @ToolRegistry.register_function(
-    name="memory_get",
-    description="Retrieve memory file content by path, optionally filtered by line range.",
+    name="memory",
+    description=(
+        "Manage persistent curated memory. Use target='user' for stable user "
+        "identity/preferences and target='memory' for durable project knowledge. "
+        "The current snapshots are already present in the system prompt."
+    ),
     category=ToolCategory.FILE,
     parameters=[
         ToolParameter(
-            name="path",
+            name="target",
             type=ParameterType.STRING,
-            description="Memory file path relative to memory root.",
+            description="Curated store to update.",
             required=True,
+            enum=["user", "memory"],
         ),
         ToolParameter(
-            name="from_line",
-            type=ParameterType.INTEGER,
-            description="Starting line number (1-based).",
+            name="action",
+            type=ParameterType.STRING,
+            description="Entry operation to perform.",
+            required=True,
+            enum=["add", "replace", "remove"],
+        ),
+        ToolParameter(
+            name="content",
+            type=ParameterType.STRING,
+            description="New entry content. Required for add and replace.",
             required=False,
         ),
         ToolParameter(
-            name="lines",
-            type=ParameterType.INTEGER,
-            description="Number of lines to return.",
+            name="old_text",
+            type=ParameterType.STRING,
+            description=(
+                "Short unique text from the existing entry. Required for replace "
+                "and remove."
+            ),
             required=False,
         ),
     ],
 )
-async def memory_get_tool(
+async def memory_tool(
     ctx: ToolContext,
-    path: str,
-    from_line: Optional[int] = None,
-    lines: Optional[int] = None,
+    target: str,
+    action: str,
+    content: Optional[str] = None,
+    old_text: Optional[str] = None,
 ) -> ToolResult:
     memory, err = await _get_session_memory(ctx)
     if err:
@@ -183,97 +199,15 @@ async def memory_get_tool(
         return ToolResult(success=False, error="Memory manager not available")
 
     try:
-        output = await manager.read_file(
-            rel_path=path,
-            from_line=from_line,
-            lines=lines,
+        output = await manager.update_curated_memory(
+            target=target,
+            action=action,
+            content=content,
+            old_text=old_text,
         )
         return ToolResult(success=True, output=output)
-    except FileNotFoundError:
-        return ToolResult(success=False, error=f"File not found: {path}")
+    except ValueError as e:
+        return ToolResult(success=False, error=str(e))
     except Exception as e:
-        log.error("memory_get.failed", {"path": path, "error": str(e)})
-        return ToolResult(success=False, error=f"Memory get failed: {str(e)}")
-
-
-@ToolRegistry.register_function(
-    name="memory_write",
-    description=(
-        "Write content to persistent memory. Use target='user' for stable "
-        "identity/preferences and target='memory' for project/environment knowledge."
-    ),
-    category=ToolCategory.FILE,
-    parameters=[
-        ToolParameter(
-            name="content",
-            type=ParameterType.STRING,
-            description="Content to write to memory.",
-            required=True,
-        ),
-        ToolParameter(
-            name="path",
-            type=ParameterType.STRING,
-            description=(
-                "Custom path relative to memory root. Mutually exclusive with target; "
-                "omit both to use the existing date-based default."
-            ),
-            required=False,
-        ),
-        ToolParameter(
-            name="target",
-            type=ParameterType.STRING,
-            description=(
-                "Curated store: user writes USER.md; memory writes MEMORY.md."
-            ),
-            required=False,
-            enum=["user", "memory"],
-        ),
-        ToolParameter(
-            name="append",
-            type=ParameterType.BOOLEAN,
-            description="Append to existing file (default: true).",
-            required=False,
-        ),
-    ],
-)
-async def memory_write_tool(
-    ctx: ToolContext,
-    content: str,
-    path: Optional[str] = None,
-    target: Optional[str] = None,
-    append: Optional[bool] = True,
-) -> ToolResult:
-    if path and target:
-        return ToolResult(
-            success=False,
-            error="Specify either path or target, not both",
-        )
-    if target == "user":
-        path = "USER.md"
-    elif target == "memory":
-        path = "MEMORY.md"
-    elif target is not None:
-        return ToolResult(success=False, error=f"Unsupported memory target: {target}")
-
-    memory, err = await _get_session_memory(ctx)
-    if err:
-        return err
-
-    try:
-        written_path = await memory.write(
-            content=content,
-            path=path,
-            append=bool(append),
-        )
-        return ToolResult(
-            success=True,
-            output={
-                "path": written_path,
-                "target": target,
-                "length": len(content),
-                "append": bool(append),
-            },
-        )
-    except Exception as e:
-        log.error("memory_write.failed", {"error": str(e)})
-        return ToolResult(success=False, error=f"Memory write failed: {str(e)}")
+        log.error("memory.failed", {"error": str(e)})
+        return ToolResult(success=False, error=f"Memory update failed: {str(e)}")

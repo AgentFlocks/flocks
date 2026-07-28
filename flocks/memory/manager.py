@@ -4,10 +4,11 @@ Memory Manager - Core orchestrator for memory system
 Coordinates all memory system components: indexing, search, and sync.
 """
 
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Literal
 from pathlib import Path
 import asyncio
 import os
+import tempfile
 
 from flocks.provider import Provider
 from flocks.storage import Storage
@@ -33,6 +34,21 @@ def _safe_resolve_memory_path(memory_root: Path, rel_path: str) -> Path:
     if not (resolved == root_resolved or os.path.commonpath([resolved, root_resolved]) == str(root_resolved)):
         raise ValueError(f"Path traversal detected: {rel_path}")
     return resolved
+
+
+def _atomic_write_text(path: Path, content: str) -> None:
+    """Atomically replace a UTF-8 text file in its current directory."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as file:
+            file.write(content)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_name, path)
+    finally:
+        if os.path.exists(temp_name):
+            os.unlink(temp_name)
 
 
 class MemoryManager:
@@ -332,6 +348,93 @@ class MemoryManager:
         log.info("manager.write", {"path": path, "append": append, "length": len(content)})
         
         return path
+
+    async def update_curated_memory(
+        self,
+        *,
+        target: Literal["user", "memory"],
+        action: Literal["add", "replace", "remove"],
+        content: Optional[str] = None,
+        old_text: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Mutate USER.md or MEMORY.md using Hermes-style entry operations."""
+        from flocks.config import Config
+
+        filenames = {"user": "USER.md", "memory": "MEMORY.md"}
+        if target not in filenames:
+            raise ValueError(f"Unsupported memory target: {target}")
+        if action not in {"add", "replace", "remove"}:
+            raise ValueError(f"Unsupported memory action: {action}")
+
+        clean_content = content.strip() if content else ""
+        clean_old_text = old_text.strip() if old_text else ""
+        if action in {"add", "replace"} and not clean_content:
+            raise ValueError(f"content is required for action={action}")
+        if action in {"replace", "remove"} and not clean_old_text:
+            raise ValueError(f"old_text is required for action={action}")
+        if action == "remove" and clean_content:
+            raise ValueError("content is not allowed for action=remove")
+        if action == "add" and clean_old_text:
+            raise ValueError("old_text is not allowed for action=add")
+
+        path = Config.get_data_path() / "memory" / filenames[target]
+        async with self._write_lock:
+            current = path.read_text(encoding="utf-8") if path.exists() else ""
+            changed = True
+
+            if action == "add":
+                existing_entries = {
+                    line.strip()
+                    for line in current.splitlines()
+                    if line.strip() and not line.lstrip().startswith("#")
+                }
+                if clean_content in existing_entries:
+                    changed = False
+                    updated = current
+                else:
+                    prefix = current.rstrip()
+                    updated = prefix + ("\n\n" if prefix else "") + clean_content + "\n"
+            else:
+                lines = current.splitlines()
+                matches = [
+                    index
+                    for index, line in enumerate(lines)
+                    if clean_old_text in line and not line.lstrip().startswith("#")
+                ]
+                if not matches:
+                    raise ValueError(
+                        f"old_text did not uniquely identify an entry in {filenames[target]}"
+                    )
+                if len(matches) > 1:
+                    raise ValueError(
+                        f"old_text matched multiple entries in {filenames[target]}"
+                    )
+                if action == "replace":
+                    lines[matches[0]] = clean_content
+                else:
+                    lines.pop(matches[0])
+                updated = "\n".join(lines).rstrip()
+                if updated:
+                    updated += "\n"
+            if changed:
+                _atomic_write_text(path, updated)
+                self._dirty = True
+
+        log.info(
+            "manager.curated_memory.update",
+            {
+                "target": target,
+                "action": action,
+                "changed": changed,
+            },
+        )
+        return {
+            "target": target,
+            "action": action,
+            "path": filenames[target],
+            "changed": changed,
+            "content": updated,
+        }
     
     async def sync(
         self,
