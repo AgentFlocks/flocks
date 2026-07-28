@@ -284,7 +284,7 @@ def test_dashboard_request_definitions_use_dynamic_base_inputs(tmp_path):
     assert vulner_payload["token"] == "token-value"
 
 
-def test_auth_probe_requires_http_200_and_expected_user(tmp_path, monkeypatch):
+def test_auth_probe_requires_http_200_and_agent_overview_data(tmp_path, monkeypatch):
     handler = _load_handler()
     cfg = _cfg(handler, tmp_path / "auth-state.json")
     monkeypatch.setattr(handler, "_load_verified_auth_pair", lambda cfg: ({"cookies": []}, "token"))
@@ -294,12 +294,15 @@ def test_auth_probe_requires_http_200_and_expected_user(tmp_path, monkeypatch):
         headers = {}
 
         def json(self):
-            return {"success": True, "data": {"user_name": "admin"}}
+            return {"success": True, "data": {"total": 12, "online": 10}}
 
     class Session:
         def post(self, *args, **kwargs):
             assert kwargs["allow_redirects"] is False
-            assert kwargs["json"]["app_args"]["option"] == {}
+            assert args[0].endswith("opr=get_agent_overview")
+            assert kwargs["json"]["app_args"]["options"] == {}
+            assert kwargs["json"]["opr"] == "get_agent_overview"
+            assert "date_range" in kwargs["json"]
             return Response()
 
     monkeypatch.setattr(handler, "_dashboard_session", lambda cfg, state: Session())
@@ -310,14 +313,13 @@ def test_auth_probe_requires_http_200_and_expected_user(tmp_path, monkeypatch):
         "valid": True,
         "reason": "auth_probe_succeeded",
         "http_status": 200,
-        "user_verified": True,
+        "agent_overview_verified": True,
     }
 
 
-def test_auth_probe_accepts_real_list_auth_info_shape_without_username(tmp_path, monkeypatch):
+def test_auth_probe_rejects_success_without_agent_overview_data(tmp_path, monkeypatch):
     handler = _load_handler()
     cfg = _cfg(handler, tmp_path / "auth-state.json")
-    cfg.username = ""
     monkeypatch.setattr(handler, "_load_verified_auth_pair", lambda cfg: ({"cookies": []}, "token"))
 
     class Response:
@@ -325,7 +327,7 @@ def test_auth_probe_accepts_real_list_auth_info_shape_without_username(tmp_path,
         headers = {}
 
         def json(self):
-            return {"success": True, "auth_info": {"id": "device-license-id", "auth_status": "normal"}}
+            return {"success": True, "message": "ok"}
 
     class Session:
         def post(self, *args, **kwargs):
@@ -335,7 +337,10 @@ def test_auth_probe_accepts_real_list_auth_info_shape_without_username(tmp_path,
 
     result = handler._probe_auth_pair(cfg)
 
-    assert result["valid"] is True
+    assert result == {
+        "valid": False,
+        "reason": "auth_probe_expected_agent_data_missing",
+    }
 
 
 def test_auth_probe_rejects_login_redirect(tmp_path, monkeypatch):

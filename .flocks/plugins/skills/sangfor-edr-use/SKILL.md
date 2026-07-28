@@ -47,9 +47,9 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 ## EDR 交互协议
 
 1. 从 Secret Manager 与 `auth-state.json` 加载成套认证，并校验 base URL 和 Cookie 指纹。
-2. 使用 Cookie 与 `login_token` 调用 `list_auth_info`：
-   - HTTP 200、无登录页重定向、响应成功且包含预期用户/授权数据（`list_auth_info.auth_info`）：认证有效，跳过登录。
-   - Cookie 缺失或不匹配、401/403、重定向、非 200、响应无预期用户/授权数据：认证失效。
+2. 使用 Cookie 与 `login_token` 调用威胁终端概览接口 `get_agent_overview`：
+   - HTTP 200、无登录页重定向、响应成功且包含终端概览数据：认证有效，跳过登录。
+   - Cookie 缺失或不匹配、401/403、重定向、非 200、响应无终端概览数据：认证失效。
 3. 默认重新登录流程：访问登录页，获取 RSA 公钥和验证码，提交 `dlogin`，再调用 `launch_login.php`。
 4. 登录成功后将 Cookie 写入 `auth-state.json`，将 `login_token` 写入 Secret Manager，并更新配对指纹。
 5. 仪表盘 API 只能使用通过上述探测的同一套 Cookie/token；禁止从不同 state 或 Secret 拼接。

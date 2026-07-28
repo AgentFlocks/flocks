@@ -500,29 +500,20 @@ def _load_verified_auth_pair(cfg: RuntimeConfig) -> tuple[dict[str, Any], str]:
     return state, token
 
 
-def _response_contains_user_data(payload: Any, username: str) -> bool:
-    expected = username.strip().lower()
-    if isinstance(payload, dict):
-        auth_info = payload.get("auth_info")
-        if isinstance(auth_info, dict):
-            # list_auth_info identifies the logged-in user through the
-            # authorization/license object, not through the login username.
-            if any(
-                key in auth_info and auth_info.get(key) not in (None, "", [], {})
-                for key in ("id", "auth_status", "auth_type", "is_authorized")
-            ):
-                return True
-        for key, value in payload.items():
-            if str(key).lower() in {"user", "username", "user_name", "uid", "account", "account_name"}:
-                if expected and str(value).strip().lower() == expected:
-                    return True
-                if not expected and value not in (None, "", [], {}):
-                    return True
-            if _response_contains_user_data(value, username):
-                return True
-    elif isinstance(payload, list):
-        return any(_response_contains_user_data(item, username) for item in payload)
-    return False
+def _response_contains_agent_overview(payload: Any) -> bool:
+    """Return whether a successful threat-terminal response has data content."""
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return False
+    return any(
+        key in payload and payload.get(key) is not None
+        for key in ("data", "result", "agent_overview", "agent_total", "total", "count")
+    )
+
+
+def _unix_date_range(days: int = 7) -> dict[str, int]:
+    end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0)
+    start = (end - timedelta(days=max(1, days) - 1)).replace(hour=0, minute=0, second=0)
+    return {"start": int(start.timestamp()), "end": int(end.timestamp())}
 
 
 def _probe_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
@@ -534,12 +525,13 @@ def _probe_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
     session = _dashboard_session(cfg, state)
     try:
         response = session.post(
-            _url(cfg, f"/launch.php?s={token}&opr=list_auth_info"),
+            _url(cfg, f"/launch.php?s={token}&opr=get_agent_overview"),
             headers=_http_headers(cfg),
             json={
-                "app_args": {"name": "app.web.common.bubble", "option": {}},
-                "opr": "list_auth_info",
+                "app_args": {"name": "app.web.event_center.head", "options": {}},
                 "auto": 1,
+                "opr": "get_agent_overview",
+                "date_range": _unix_date_range(),
                 "query_id": _query_id(),
             },
             timeout=cfg.timeout,
@@ -574,13 +566,13 @@ def _probe_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
         return {"valid": False, "reason": "auth_probe_invalid_json", "error": str(exc)}
     if not isinstance(payload, dict) or not payload.get("success"):
         return {"valid": False, "reason": "auth_probe_rejected"}
-    if not _response_contains_user_data(payload, cfg.username):
-        return {"valid": False, "reason": "auth_probe_expected_user_missing"}
+    if not _response_contains_agent_overview(payload):
+        return {"valid": False, "reason": "auth_probe_expected_agent_data_missing"}
     return {
         "valid": True,
         "reason": "auth_probe_succeeded",
         "http_status": 200,
-        "user_verified": True,
+        "agent_overview_verified": True,
     }
 
 
@@ -1462,7 +1454,7 @@ def _dashboard_requests(
 ) -> dict[str, tuple[str, dict[str, Any]]]:
     end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0)
     start = (end - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0)
-    unix_range = {"start": int(start.timestamp()), "end": int(end.timestamp())}
+    unix_range = _unix_date_range(days)
     text_range = {
         "start": start.strftime("%Y-%m-%d %H:%M:%S"),
         "end": end.strftime("%Y-%m-%d %H:%M:%S"),
