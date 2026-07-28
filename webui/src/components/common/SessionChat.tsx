@@ -3958,10 +3958,10 @@ export default function SessionChat({
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
                       aria-expanded={showComposerAddMenu}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'border-zinc-300 bg-white text-zinc-900 shadow-[0_2px_8px_rgba(22,27,34,0.08)] dark:border-white/[0.14] dark:bg-white/[0.09] dark:text-white'
-                          : 'border-transparent text-zinc-500 hover:border-zinc-200 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:border-white/[0.10] dark:hover:bg-white/[0.07] dark:hover:text-white'
+                          ? 'bg-white text-zinc-900 dark:bg-white/[0.09] dark:text-white'
+                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
                       }`}
                     >
                       <Plus className="h-[17px] w-[17px]" strokeWidth={2} />
@@ -3985,7 +3985,7 @@ export default function SessionChat({
                           }}
                           className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
-                          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                          <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
                             <Paperclip className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
