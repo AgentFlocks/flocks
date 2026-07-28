@@ -143,7 +143,7 @@ def test_register_builtin_hooks_is_idempotent():
         register_builtin_hooks()
 
         stats = HookRegistry.get_instance().get_stats()
-        assert stats["event_keys"]["command:new"]["handler_count"] == 1
+        assert stats["event_keys"]["command:new"]["handler_count"] == 2
     finally:
         HookRegistry.get_instance().clear()
         HookRegistry.reset_instance()

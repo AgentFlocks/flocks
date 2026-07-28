@@ -208,6 +208,68 @@ class MemoryAutoFlushConfig(BaseModel):
     )
 
 
+class MemoryDreamConfig(BaseModel):
+    """Long-term memory extraction configuration."""
+
+    enabled: bool = Field(
+        True,
+        description="Extract durable facts from completed sessions and daily memory",
+    )
+    recent_daily_days: int = Field(
+        7,
+        ge=0,
+        description="Number of recent daily memory files included in extraction",
+    )
+
+
+class MemorySkillEvolutionConfig(BaseModel):
+    """Session-driven skill evolution configuration."""
+
+    enabled: bool = Field(
+        True,
+        description="Create or update user skills from completed sessions",
+    )
+    max_related_skills: int = Field(
+        3,
+        ge=1,
+        le=10,
+        description="Maximum number of existing skills supplied in full to the model",
+    )
+
+
+class MemoryLearningConfig(BaseModel):
+    """Shared Dream and skill self-evolution configuration."""
+
+    enabled: bool = Field(
+        True,
+        description="Enable post-session Dream and skill evolution",
+    )
+    max_session_messages: int = Field(
+        100,
+        ge=1,
+        description="Maximum recent session messages processed per run",
+    )
+    max_input_chars: int = Field(
+        60000,
+        ge=1000,
+        description="Maximum source characters supplied to each learning prompt",
+    )
+    max_output_tokens: int = Field(
+        4000,
+        ge=256,
+        description="Maximum model output tokens for a learning operation",
+    )
+    catch_up_sessions: int = Field(
+        20,
+        ge=0,
+        description="Recent sessions checked for missed learning runs at startup",
+    )
+    dream: MemoryDreamConfig = Field(default_factory=MemoryDreamConfig)
+    skill: MemorySkillEvolutionConfig = Field(
+        default_factory=MemorySkillEvolutionConfig,
+    )
+
+
 class CompactionConfig(BaseModel):
     """
     Dynamic compaction configuration.
@@ -334,6 +396,10 @@ class MemoryConfig(BaseModel):
     auto_flush: MemoryAutoFlushConfig = Field(
         default_factory=MemoryAutoFlushConfig,
         description="Auto flush configuration"
+    )
+    learning: MemoryLearningConfig = Field(
+        default_factory=MemoryLearningConfig,
+        description="Post-session Dream and skill self-evolution",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,

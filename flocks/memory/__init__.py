@@ -33,6 +33,9 @@ from flocks.memory.config import (
     MemoryCacheConfig,
     MemoryBatchConfig,
     MemoryAutoFlushConfig,
+    MemoryLearningConfig,
+    MemoryDreamConfig,
+    MemorySkillEvolutionConfig,
 )
 
 from flocks.memory.utils import (
@@ -71,6 +74,9 @@ __all__ = [
     "MemoryCacheConfig",
     "MemoryBatchConfig",
     "MemoryAutoFlushConfig",
+    "MemoryLearningConfig",
+    "MemoryDreamConfig",
+    "MemorySkillEvolutionConfig",
     
     # Utils
     "compute_hash",
