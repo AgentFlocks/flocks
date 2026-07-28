@@ -230,7 +230,7 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
     record = row.raw
     record_id = _record_id(record)
     observed_at = _observed_at(record)
-    threat_name = _first_text(record, "threat_name", "_threat_type", "report_title") or "SOC alert"
+    threat_name = _first_text(record, "threat_name", "report_title") or "SOC alert"
     threat_msg = _first_text(record, "threat_msg", "report_title", "threat_type")
     verdict = _verdict_bucket(record)
     table_cells = _table_cells(record)
@@ -427,7 +427,7 @@ def _verdict_bucket(record: dict[str, Any]) -> str:
         return "success"
     raw = " ".join(
         _text(record.get(key)).lower()
-        for key in ("attack_verdict", "threat_result", "risk_level", "threat_level")
+        for key in ("attack_verdict", "threat_result")
     )
     if any(marker in raw for marker in ("success", "attack_success", "succeeded")):
         return "success"

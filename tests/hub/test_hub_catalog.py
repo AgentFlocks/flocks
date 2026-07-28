@@ -296,17 +296,17 @@ def test_catalog_uses_webui_workspace_version_for_inferred_installs(
 
     entry = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
-    assert entry.version == "1.1.2"
+    assert entry.version == "1.1.4"
     assert entry.state == "updateAvailable"
     assert entry.installedVersion == "1.0.0"
 
-    workspace["version"] = "1.1.2"
+    workspace["version"] = "1.1.4"
     workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
 
     refreshed = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
     assert refreshed.state == "installed"
-    assert refreshed.installedVersion == "1.1.2"
+    assert refreshed.installedVersion == "1.1.4"
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():

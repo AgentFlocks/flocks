@@ -1,3 +1,5 @@
+import { severityKey, severityRows } from './severityValues';
+
 function getSdk() {
   const sdk = globalThis.__FLOCKS_WEBUI_CONTRACT_SDK__;
   if (!sdk || !sdk.React || !sdk.api) {
@@ -74,7 +76,8 @@ const EMPTY_STATS = {
   closedLoop: { autoClosed: 0, resolved: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
   verdicts: [],
   attackProfile: [],
-  topThreats: [],
+  topThreatTypes: [],
+  severityLevels: [],
   riskLevels: [],
   timeline: { denoiseRaw: [], denoiseUnique: [], triageTotal: [], triageAttack: [] },
 };
@@ -620,7 +623,7 @@ function CenterColumn({ stats, activity }) {
 }
 
 function RightColumn({ stats }) {
-  const threatRows = stats.topThreats || [];
+  const threatRows = stats.topThreatTypes || [];
   const threatRankLabel = threatRows.length ? `Top ${threatRows.length}` : '排行';
   const threatTotal = threatRows.reduce((sum, item) => sum + (item.value || 0), 0);
   const threatBase = stats.triage.totalRecords || stats.triage.attackTotal || threatTotal;
@@ -1379,26 +1382,12 @@ function CommandActivityLane({ kind, lane }) {
   ]);
 }
 
-function severityRows(stats) {
-  return [
-    { key: 'critical', label: '严重', value: stats.triage.attackSuccess || 0, tone: 'critical' },
-    { key: 'high', label: '高危', value: stats.triage.attack || 0, tone: 'high' },
-    { key: 'medium', label: '中危', value: stats.triage.attackFailed || 0, tone: 'medium' },
-    { key: 'low', label: '低危', value: stats.triage.benign || 0, tone: 'low' },
-  ];
-}
-
 function CommandGraph({ stats, activity }) {
   const denoiseActive = Boolean(activity.denoise.current);
   const triageActive = Boolean(activity.triage.current);
   const severityToneFor = (event) => {
     if (!event) return '';
-    if (event.result?.verdict === 'attack_success') return 'critical';
-    const risk = String(event.result?.riskLevel || '').toLowerCase();
-    if (risk === 'high') return 'high';
-    if (risk === 'medium') return 'medium';
-    if (risk === 'low' || event.result?.verdict === 'benign') return 'low';
-    return '';
+    return severityKey(event.result?.threatSeverity);
   };
   const activeSeverityTone = severityToneFor(activity.triage.current);
   const recentSeverityTone = severityToneFor(activity.triage.last);

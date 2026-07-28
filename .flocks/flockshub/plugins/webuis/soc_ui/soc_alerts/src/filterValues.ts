@@ -63,25 +63,6 @@ const FILTER_VALUE_TEXT: Record<string, Record<string, string>> = {
     normal: '正常',
     unknown: '未知',
   },
-  threat_type: {
-    exploit: '漏洞利用',
-    web_attack: 'Web 攻击',
-    'web-attack': 'Web 攻击',
-    'sql injection': 'SQL 注入',
-    sql_injection: 'SQL 注入',
-    'sql-injection': 'SQL 注入',
-    xss: '跨站脚本',
-    scanner: '漏洞扫描',
-    vulnerability_scan: '漏洞扫描',
-    crawler: '自动化爬虫',
-    remote_code_execution: '远程代码执行',
-    'remote-code-execution': '远程代码执行',
-    path_traversal: '目录穿越',
-    'path-traversal': '目录穿越',
-    deserialization: '反序列化',
-    credential_stuffing: '凭据填充',
-    'credential-stuffing': '凭据填充',
-  },
 };
 
 function normalized(value: string) {
