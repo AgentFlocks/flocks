@@ -330,13 +330,21 @@ class TestScanAndLoad:
         expected = [
             "rex", "hephaestus", "explore",
             "oracle", "librarian", "prometheus", "multimodal-looker",
-            "self-enhance", "rex-junior",
+            "rex-junior",
         ]
         for name in expected:
             assert name in result, f"Built-in agent '{name}' missing from scan"
             assert result[name].native is True, (
                 f"Agent '{name}' should be native=True when loaded from _BUILTIN_AGENTS_DIR"
             )
+
+    def test_capability_gap_agent_is_not_builtin(self):
+        """The retired self-enhance capability-gap agent must not be discoverable."""
+        from flocks.agent.agent_factory import _BUILTIN_AGENTS_DIR
+
+        result = scan_and_load(dirs=[_BUILTIN_AGENTS_DIR])
+
+        assert "self-enhance" not in result
 
     def test_returns_agent_info_objects(self):
         result = scan_and_load()
@@ -477,7 +485,7 @@ class TestInjectDynamicPrompts:
         """Built-in agents with prompt.md should have non-empty prompts."""
         from flocks.agent.registry import Agent
         # Only built-in agents (native=True) — not dependent on local plugin installation
-        for name in ["explore", "oracle", "prometheus", "self-enhance", "multimodal-looker"]:
+        for name in ["explore", "oracle", "prometheus", "multimodal-looker"]:
             agent = await Agent.get(name)
             assert agent is not None, f"Agent '{name}' not found"
             assert agent.prompt is not None, f"Agent '{name}' should have a prompt from prompt.md"
