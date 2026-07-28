@@ -38,6 +38,16 @@ inputSchema:
     password:
       type: string
       description: Optional password to save as a secret before running auth.
+    auto_ocr_code:
+      type: boolean
+      default: true
+      description: Whether to recognize the HTTP/browser captcha with OCR when captcha_code is omitted.
+    max_captcha_retry:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 5
+      description: Maximum number of HTTP/browser login attempts when captcha validation fails.
     auth_state_path:
       type: string
       description: Optional auth-state path. Defaults to ~/.flocks/browser/sangfor-edr/auth-state.json.

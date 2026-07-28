@@ -334,6 +334,19 @@ def _safe_error(exc: Exception, *sensitive_values: str) -> str:
     return message
 
 
+def _http_failure_detail(phase: str, exc: Exception, cfg: RuntimeConfig) -> str:
+    response = getattr(exc, "response", None)
+    status = getattr(response, "status_code", None)
+    status_text = f"; http_status={status}" if status is not None else ""
+    return f"phase={phase}{status_text}; detail={_safe_error(exc, cfg.username, cfg.password)}"
+
+
+def _is_captcha_failure(login_result: dict[str, Any]) -> bool:
+    message = str(login_result.get("msg") or "")
+    data = login_result.get("data") if isinstance(login_result.get("data"), dict) else {}
+    return "验证码" in message or data.get("code") is True
+
+
 def _nonzero_random(length: int) -> bytes:
     result = bytearray()
     while len(result) < length:
@@ -581,8 +594,11 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
             "missing": missing,
         }
     session = _http_session(cfg)
+    phase = "session_init"
     try:
+        phase = "login_page"
         session.get(_login_url(cfg), headers=_http_headers(cfg), timeout=cfg.timeout).raise_for_status()
+        phase = "rsakey"
         rsa_response = session.post(
             _url(cfg, "/login"),
             headers=_http_headers(cfg),
@@ -605,6 +621,7 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
                         "status": "http_login_captcha_required",
                         "reason": "captcha_code_required",
                     }
+                phase = "captcha"
                 captcha_response = session.get(
                     _url(cfg, f"/ui/randcode.php?{_now_ms()}"),
                     headers=_http_headers(cfg, image=True),
@@ -613,6 +630,7 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
                 captcha_response.raise_for_status()
                 code = _ocr_verify_code(captcha_response.content)
 
+            phase = "dlogin"
             login_response = session.post(
                 _url(cfg, "/login"),
                 headers=_http_headers(cfg),
@@ -630,8 +648,12 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
             login_response.raise_for_status()
             login_result = login_response.json()
             if not login_result.get("success") or login_result.get("key") in (None, ""):
-                raise RuntimeError(str(login_result.get("msg") or "EDR dlogin failed."))
+                last_error = str(login_result.get("msg") or "EDR dlogin failed.")
+                if captcha_code or not _is_captcha_failure(login_result):
+                    raise RuntimeError(last_error)
+                continue
 
+            phase = "launch_login"
             launch_response = session.post(
                 _url(cfg, "/launch_login.php"),
                 headers=_http_headers(cfg),
@@ -652,6 +674,7 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
             if launch_result.get("success") and token and any(
                 cookie["name"].lower() == "sessionid" for cookie in cookies
             ):
+                phase = "save_auth_pair"
                 saved = _save_auth_pair(
                     cfg,
                     {"cookies": cookies, "origins": []},
@@ -675,7 +698,8 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
             "valid": False,
             "status": "http_login_failed",
             "reason": "http_login_failed",
-            "error": str(exc),
+            "error": _http_failure_detail(phase, exc, cfg),
+            "phase": phase,
         }
 
 
@@ -1504,7 +1528,8 @@ def _collect_dashboard(
     auth = _ensure_http_auth_pair(cfg)
     if not auth.get("success"):
         raise RuntimeError(
-            f"EDR authentication refresh failed: {auth.get('reason') or auth.get('status')}"
+            "EDR authentication refresh failed: "
+            f"{auth.get('error') or auth.get('reason') or auth.get('status')}"
         )
     state, token = _load_verified_auth_pair(cfg)
     session = _dashboard_session(cfg, state)
@@ -1598,7 +1623,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
             return ToolResult(
                 success=bool(result.get("success")),
                 output=result,
-                error=None if result.get("success") else result.get("reason"),
+                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         if action == "browser_login":
@@ -1632,7 +1657,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
             return ToolResult(
                 success=bool(result.get("success")),
                 output=result,
-                error=None if result.get("success") else result.get("reason"),
+                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         if action not in {"ensure_auth_state", "refresh_auth_state"}:
@@ -1652,7 +1677,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
         return ToolResult(
             success=bool(result.get("success")),
             output=result,
-            error=None if result.get("success") else result.get("reason"),
+            error=None if result.get("success") else str(result.get("error") or result.get("reason")),
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))

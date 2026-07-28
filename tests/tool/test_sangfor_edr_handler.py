@@ -412,3 +412,69 @@ def test_dashboard_error_redacts_login_token():
 
     assert "secret-token" not in error
     assert "<redacted>" in error
+
+
+def test_http_login_reports_failure_phase(tmp_path, monkeypatch):
+    handler = _load_handler()
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+
+    class Session:
+        def get(self, *args, **kwargs):
+            raise handler.requests.ConnectionError("connection refused")
+
+    monkeypatch.setattr(handler, "_http_session", lambda cfg: Session())
+
+    result = handler._http_login(cfg)
+
+    assert result["status"] == "http_login_failed"
+    assert result["phase"] == "login_page"
+    assert "phase=login_page" in result["error"]
+    assert "connection refused" in result["error"]
+
+
+def test_http_login_retries_captcha_dlogin_failure(tmp_path, monkeypatch):
+    handler = _load_handler()
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    cfg.max_captcha_retry = 2
+
+    class Response:
+        def __init__(self, payload):
+            self.payload = payload
+            self.content = b"captcha"
+
+        def raise_for_status(self):
+            return None
+
+        def json(self):
+            return self.payload
+
+    class Session:
+        def __init__(self):
+            self.cookies = handler.requests.cookies.RequestsCookieJar()
+            self.cookies.set("sessionid", "cookie-value", domain="edr.example.com", path="/")
+            self.dlogin_count = 0
+
+        def get(self, url, **kwargs):
+            return Response({})
+
+        def post(self, url, **kwargs):
+            payload = kwargs.get("json") or {}
+            if payload.get("opr") == "rsakey":
+                return Response({"success": True, "key": "c7" * 64})
+            if url.endswith("/login"):
+                self.dlogin_count += 1
+                if self.dlogin_count == 1:
+                    return Response({"success": False, "msg": "验证码错误"})
+                return Response({"success": True, "key": 7})
+            return Response({"success": True, "data": {"token": "token-value"}})
+
+    session = Session()
+    monkeypatch.setattr(handler, "_http_session", lambda cfg: session)
+    monkeypatch.setattr(handler, "_ocr_verify_code", lambda content: "1234")
+    monkeypatch.setattr(handler, "_save_auth_pair", lambda cfg, state, token: {"pair_verified": True})
+
+    result = handler._http_login(cfg)
+
+    assert result["success"] is True
+    assert result["attempt"] == 2
+    assert session.dlogin_count == 2
