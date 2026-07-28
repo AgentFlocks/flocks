@@ -62,6 +62,8 @@ def main() -> int:
         manifest = load_json(manifest_path)
         if manifest.get("id") != plugin_id or manifest.get("type") != plugin_type:
             fail(f"Manifest id/type mismatch: {manifest_rel}")
+        if manifest.get("version") != entry.get("version"):
+            fail(f"Index/manifest version mismatch: {manifest_rel}")
         if manifest.get("category") not in categories:
             fail(f"Unknown category in {manifest_rel}: {manifest.get('category')}")
         unknown_tags = set(manifest.get("tags", [])) - tags
@@ -75,6 +77,11 @@ def main() -> int:
             fail(f"Unknown risk level in {manifest_rel}: {risk_level}")
 
         package_dir = manifest_path.parent
+        workspace_path = package_dir / "workspace.json"
+        if plugin_type == "webui" and workspace_path.is_file():
+            workspace = load_json(workspace_path)
+            if workspace.get("version") != manifest.get("version"):
+                fail(f"WebUI workspace/manifest version mismatch: {manifest_rel}")
         for entrypoint in manifest.get("entrypoints", []):
             ensure_relative(entrypoint)
             if not (package_dir / entrypoint).exists():

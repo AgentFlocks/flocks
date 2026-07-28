@@ -86,6 +86,8 @@ def _plugin_manifest_signature(plugin_type: PluginType, root: Path) -> tuple[tup
         candidates = [root / "agent.yaml"]
     elif plugin_type == "workflow":
         candidates = [root / "workflow.json", root / "workflow.md"]
+    elif plugin_type == "webui":
+        candidates = [root / "workspace.json", root / "manifest.json"]
     else:
         try:
             candidates = [
@@ -741,6 +743,7 @@ def _version_tuple(value: str) -> tuple[int, ...]:
 
 
 def _catalog_install_state(
+    plugin_type: PluginType,
     install_path: Optional[Path],
     record: Optional[local.InstalledPluginRecord],
     available_version: str,
@@ -748,10 +751,15 @@ def _catalog_install_state(
     if install_path is None:
         return "available", None
     if record is None:
-        # An inferred install has no trustworthy package version because Hub
-        # manifests are not copied into the install directory. Reconcile it
-        # through the update path instead of assuming it is already current.
-        return "updateAvailable", None
+        installed_version = local.installed_payload_version(plugin_type, install_path)
+        if installed_version is None:
+            # Legacy inferred installs have no trustworthy package version.
+            # Reconcile them through the update path instead of assuming they
+            # are already current.
+            return "updateAvailable", None
+        if _version_tuple(installed_version) < _version_tuple(available_version):
+            return "updateAvailable", installed_version
+        return "installed", installed_version
     if _version_tuple(record.version) < _version_tuple(available_version):
         return "updateAvailable", record.version
     return "installed", record.version
@@ -776,6 +784,7 @@ def _entry_from_manifest(manifest: HubPluginManifest) -> HubCatalogEntry:
     )
 
     state, installed_version = _catalog_install_state(
+        manifest.type,
         install_path,
         record,
         manifest.version,
@@ -838,6 +847,7 @@ def _entry_from_index(
     )
 
     state, installed_version = _catalog_install_state(
+        item.type,
         install_path,
         record,
         item.version,
@@ -920,6 +930,7 @@ def _entry_from_bundled_tool(
     )
 
     state, installed_version = _catalog_install_state(
+        manifest.type,
         install_path,
         record,
         manifest.version,

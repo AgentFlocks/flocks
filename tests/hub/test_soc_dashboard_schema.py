@@ -30,11 +30,59 @@ def _load_dashboard_handlers():
     return module
 
 
+def _load_overview_handlers():
+    handler_path = (
+        Path(__file__).resolve().parents[2]
+        / ".flocks"
+        / "flockshub"
+        / "plugins"
+        / "webuis"
+        / "soc_ui"
+        / "soc_overview"
+        / "api"
+        / "handlers.py"
+    )
+    spec = importlib.util.spec_from_file_location("soc_overview_fields_test", handler_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
+def _load_alert_operations():
+    operations_path = (
+        Path(__file__).resolve().parents[2]
+        / ".flocks"
+        / "flockshub"
+        / "plugins"
+        / "webuis"
+        / "soc_ui"
+        / "access"
+        / "soc_alerts_operations.py"
+    )
+    spec = importlib.util.spec_from_file_location("soc_alert_operations_test", operations_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    previous = sys.dont_write_bytecode
+    try:
+        sys.dont_write_bytecode = True
+        spec.loader.exec_module(module)
+    finally:
+        sys.dont_write_bytecode = previous
+    return module
+
+
 def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     db_path = tmp_path / "soc.db"
     first_record = {
         "_source_type": "tdp",
         "threat_name": "SQL injection",
+        "_threat_type": "web_attack",
         "triage_status": "ok",
         "_triage_persisted_at": "2026-07-14T13:00:00",
         "attack_verdict": "attack",
@@ -74,6 +122,7 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     second_record = {
         "_source_type": "hids",
         "threat_name": "Malware download",
+        "threat_type": "malware",
         "triage_status": "ok",
         "_triage_persisted_at": "2026-07-14T13:01:00",
     }
@@ -127,7 +176,7 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         columns = {row[1] for row in conn.execute("PRAGMA table_info(alert_records)")}
         indexes = {row[1] for row in conn.execute("PRAGMA index_list(alert_records)")}
         facts = conn.execute(
-            "SELECT alert_row_id, row_key, source_type, threat_name, has_triage "
+            "SELECT alert_row_id, row_key, source_type, threat_name, threat_type, has_triage "
             "FROM soc_dashboard_alert_facts ORDER BY alert_row_id"
         ).fetchall()
         source_rows = conn.execute(
@@ -163,12 +212,189 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     } <= indexes
     assert source_rows == [(1, "1", 0), (2, "2", 0)]
     assert facts == [
-        (1, "1", "tdp", "SQL injection", 1),
-        (2, "2", "hids", "Malware download", 1),
+        (1, "1", "tdp", "SQL injection", "web_attack", 1),
+        (2, "2", "hids", "Malware download", "malware", 1),
     ]
     assert "COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT))" in trigger_sql
     assert updated_fact == ("2026-07-14T13:02:00", "attack")
-    assert schema_version == "2"
+    assert schema_version == "3"
+
+
+def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
+    db_path = tmp_path / "soc.db"
+    asset_date = "2026-07-14"
+    records = [
+        {"triage_status": "ok", "attack_verdict": "attack_success", "attack_success": True},
+        {"triage_status": "ok", "attack_verdict": "attack"},
+        {"triage_status": "ok", "attack_verdict": "attack_failed"},
+        {"triage_status": "ok", "attack_verdict": "benign"},
+        {"triage_status": "ok", "attack_verdict": "unknown"},
+        {"triage_status": "failed", "attack_verdict": "unknown"},
+        {"triage_status": "failed", "attack_verdict": "benign"},
+        {"triage_status": "ok", "attack_verdict": "legacy", "attack_success": True},
+    ]
+    severity_values = ["low", "critical", "high", "medium", "low", "critical", "high", "medium"]
+    for index, record in enumerate(records):
+        record.update(
+            {
+                "threat_name": f"threat-name-{index}",
+                "_threat_type": f"threat-type-{index}",
+                "threat_type": f"fallback-type-{index}",
+                "threat_severity": severity_values[index],
+                "threat_level": "ignored-threat-level",
+                "risk_level": "High",
+            }
+        )
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            """
+            CREATE TABLE alert_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                record_json TEXT NOT NULL,
+                asset_date TEXT NOT NULL,
+                event_time INTEGER NOT NULL
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO alert_records(record_json, asset_date, event_time) VALUES (?, ?, ?)",
+            [
+                (json.dumps(record), asset_date, 1784014800 + index)
+                for index, record in enumerate(records)
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    handlers._schema_ready.clear()
+
+    assert handlers._ensure_sqlite_schema() is True
+    sources = handlers._find_sqlite_sources(
+        asset_date,
+        asset_date,
+        1784014800,
+        1784014800 + len(records),
+    )
+    triage = handlers._read_triage(sources)
+    closed_loop = handlers._build_closed_loop(triage)
+    with sqlite3.connect(db_path) as conn:
+        timeline = handlers._sqlite_timeline(
+            conn,
+            handlers._sqlite_settings(),
+            "asset_date = ? AND event_time BETWEEN ? AND ?",
+            [asset_date, 1784014800, 1784014800 + len(records)],
+            [asset_date],
+            1784014800,
+            1784014800 + len(records),
+        )
+        first_fact = conn.execute(
+            "SELECT threat_name, threat_type, severity, risk_level "
+            "FROM soc_dashboard_alert_facts ORDER BY alert_row_id LIMIT 1"
+        ).fetchone()
+
+    assert triage["totalRecords"] == 8
+    assert triage["newTriaged"] == 6
+    assert triage["attackSuccess"] == 2
+    assert triage["attack"] == 1
+    assert triage["attackFailed"] == 1
+    assert triage["attackTotal"] == 4
+    assert triage["benign"] == 1
+    assert triage["unknown"] == 1
+    assert triage["triageFailed"] == 2
+    assert first_fact == ("threat-name-0", "threat-type-0", "low", "High")
+    assert dict(triage["threatTypeCounter"]) == {
+        f"threat-type-{index}": 1 for index in range(len(records))
+    }
+    assert dict(triage["severityCounter"]) == {
+        "critical": 2,
+        "high": 2,
+        "low": 2,
+        "medium": 2,
+    }
+    assert dict(triage["riskCounter"]) == {"high": 8}
+    assert closed_loop["pending"] == 3
+    assert triage["attackTotal"] + triage["benign"] + closed_loop["pending"] == 8
+    assert sum(timeline["attack"]) == triage["attackTotal"]
+
+
+def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
+    db_path = tmp_path / "soc.db"
+    asset_date = "2026-07-14"
+    records = [
+        {
+            "threat_name": "SQL injection attempt",
+            "_threat_type": "web_attack",
+            "threat_type": "ignored_fallback",
+        },
+        {
+            "threat_name": "Suspicious crawler",
+        },
+    ]
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "CREATE TABLE alert_records "
+            "(record_json TEXT NOT NULL, asset_date TEXT NOT NULL, event_time INTEGER NOT NULL)"
+        )
+        conn.executemany(
+            "INSERT INTO alert_records VALUES (?, ?, ?)",
+            [
+                (json.dumps(record), asset_date, 1784014800 + index)
+                for index, record in enumerate(records)
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_overview_handlers()
+    handlers.DEFAULT_SQLITE_DB = db_path
+    source = handlers._RecordSource(
+        path=db_path,
+        role="denoise",
+        date=asset_date,
+        data_source="sqlite",
+    )
+    denoise = handlers._read_denoise([source])
+    field_stats = handlers._build_field_stats([source])
+
+    assert dict(denoise["threatCounter"]) == {
+        "sql injection attempt": 1,
+        "suspicious crawler": 1,
+    }
+    assert {
+        item["label"]: item["value"] for item in field_stats["threatTypes"]
+    } == {"web_attack": 1, "unknown": 1}
+
+
+def test_soc_dashboard_activity_does_not_mix_name_type_or_risk_fields():
+    handlers = _load_dashboard_handlers()
+    row = {
+        "activity_row_id": 1,
+        "activity_event_time": 1784014800,
+        "sample_count": 1,
+        "record_json": json.dumps(
+            {
+                "_threat_type": "web_attack",
+                "triage_status": "ok",
+                "threat_level": "critical",
+            }
+        ),
+    }
+
+    event = handlers._activity_event(row)
+
+    assert event["alert"]["threatName"] == "未知告警"
+    assert event["alert"]["threatType"] == "web_attack"
+    assert event["result"]["threatSeverity"] == ""
+    assert event["result"]["riskLevel"] == ""
+
+
+def test_soc_alert_verdict_does_not_fall_back_to_risk_or_threat_level():
+    operations = _load_alert_operations()
+
+    assert operations._verdict_bucket(
+        {"risk_level": "attack_success", "threat_level": "attack_failed"}
+    ) == "unknown"
+    assert operations._verdict_bucket({"attack_verdict": "attack_success"}) == "success"
 
 
 def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path: Path):

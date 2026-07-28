@@ -29,6 +29,7 @@ class WebUIWorkspaceManifest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     id: str = Field(..., description="Stable workspace identifier")
+    version: str = Field("0.0.0", description="Workspace package version")
     title: str = Field(..., description="Navigation label")
     titleEn: Optional[str] = Field(None, description="English navigation label", alias="titleEn")
     icon: str = Field("LayoutDashboard", description="Lucide icon name")
@@ -117,6 +118,7 @@ class WebUIWorkspaceListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
 
     id: str
+    version: str = "0.0.0"
     title: str
     titleEn: Optional[str] = Field(None, alias="titleEn")
     route: str

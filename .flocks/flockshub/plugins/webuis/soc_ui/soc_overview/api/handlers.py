@@ -271,8 +271,8 @@ def _simulate_triage_from_denoise(paths):
             if verdict in {"attack_success", "attack", "attack_failed"}:
                 file_attack += 1
             source_counter[_norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
-            risk_counter[_norm(obj.get("threat_level") or obj.get("threat_severity") or obj.get("risk_level"))] += 1
+            threat_counter[_norm(obj.get("threat_name"))] += 1
+            risk_counter[_norm(obj.get("risk_level"))] += 1
             _update_profile_counters(obj, profile_counters)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
         series_total.append(file_total)
@@ -627,7 +627,7 @@ def _read_denoise(paths, workflow_call_count: int = 0):
             if obj.get("is_duplicate") is True:
                 file_duplicates += 1
             source_counter[_norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
+            threat_counter[_norm(obj.get("threat_name"))] += 1
             _update_profile_counters(obj, profile_counters)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
         total_raw += file_raw
@@ -712,8 +712,8 @@ def _read_triage(paths):
 
             source = _norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))
             source_counter[source] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
-            risk_counter[_norm(obj.get("risk_level") or obj.get("threat_level") or obj.get("threat_severity"))] += 1
+            threat_counter[_norm(obj.get("threat_name"))] += 1
+            risk_counter[_norm(obj.get("risk_level"))] += 1
             _update_profile_counters(obj, profile_counters)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
             triage_source = _norm(obj.get("triage_source"))
@@ -800,7 +800,7 @@ def _update_profile_counters(obj, counters):
     counters["directionCounter"][_norm(obj.get("direction") or obj.get("traffic_direction"))] += 1
     counters["resultCounter"][_norm(obj.get("threat_result") or obj.get("attack_verdict"))] += 1
     counters["protocolCounter"][_norm(obj.get("net_type") or obj.get("net_app_proto") or obj.get("protocol"))] += 1
-    counters["severityCounter"][_norm(obj.get("threat_severity") or obj.get("threat_level") or obj.get("risk_level"))] += 1
+    counters["severityCounter"][_norm(obj.get("threat_severity"))] += 1
     counters["responseCounter"][_norm(obj.get("rsp_status_code") or obj.get("status_code"))] += 1
 
     port_value = obj.get("dport") or obj.get("dst_port") or obj.get("destination_port")
@@ -892,7 +892,7 @@ def _build_field_stats(paths):
             status_code = _field_text(obj.get("rsp_status_code"))
             direction = _norm(obj.get("direction") or "unknown")
             protocol = _norm(obj.get("net_type") or obj.get("net_app_proto") or "unknown")
-            threat_type = _norm(obj.get("threat_type") or obj.get("_threat_type") or obj.get("threat_name"))
+            threat_type = _norm(obj.get("_threat_type") or obj.get("threat_type"))
             threat_result = _norm(obj.get("threat_result") or "unknown")
             threat_phase = _norm(obj.get("threat_phase") or "unknown")
 
