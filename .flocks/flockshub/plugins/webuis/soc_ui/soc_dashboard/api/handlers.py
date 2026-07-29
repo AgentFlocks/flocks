@@ -1498,6 +1498,9 @@ def _task_center_workflow_rows(limit=12):
                 if _table_exists(conn, "workflow_executions")
                 else set()
             )
+            finished_at_expr = "finished_at" if "finished_at" in execution_columns else "NULL"
+            updated_at_expr = "updated_at" if "updated_at" in execution_columns else "NULL"
+            execution_time_expr = f"COALESCE({finished_at_expr}, {updated_at_expr}, started_at, 0)"
             latest_select = ", ".join(
                 [
                     "id",
@@ -1532,9 +1535,9 @@ def _task_center_workflow_rows(limit=12):
                     exec_summary = conn.execute(
                         "SELECT COUNT(*) AS execution_count, "
                         "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
-                        "SUM(CASE WHEN status IN ('running') THEN 1 ELSE 0 END) AS active_count, "
-                        "SUM(CASE WHEN COALESCE(finished_at, updated_at, started_at, 0) >= ? "
-                        "AND COALESCE(finished_at, updated_at, started_at, 0) < ? THEN 1 ELSE 0 END) "
+                        "SUM(CASE WHEN status IN ('running', 'queued', 'pending') THEN 1 ELSE 0 END) AS active_count, "
+                        f"SUM(CASE WHEN {execution_time_expr} >= ? "
+                        f"AND {execution_time_expr} < ? THEN 1 ELSE 0 END) "
                         "AS today_execution_count "
                         "FROM workflow_executions WHERE workflow_id = ?",
                         (today_start_ms, tomorrow_start_ms, workflow_id),
@@ -1542,7 +1545,7 @@ def _task_center_workflow_rows(limit=12):
                     latest = conn.execute(
                         f"SELECT {latest_select} "
                         "FROM workflow_executions WHERE workflow_id = ? "
-                        "ORDER BY COALESCE(finished_at, updated_at, started_at, 0) DESC LIMIT 1",
+                        f"ORDER BY {execution_time_expr} DESC LIMIT 1",
                         (workflow_id,),
                     ).fetchone()
                 execution_count = max(

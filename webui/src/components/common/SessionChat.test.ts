@@ -276,8 +276,11 @@ beforeEach(() => {
   useSessionMessagesMock.mockReturnValue({
     messages: [],
     loading: false,
+    loadingOlder: false,
+    hasMore: false,
     error: null,
     refetch: vi.fn(),
+    loadOlder: vi.fn(),
     addMessage: vi.fn(),
     updateMessage: vi.fn(),
     updateMessagePart: vi.fn(),
@@ -450,6 +453,81 @@ describe('SessionChat message loading state', () => {
     expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '重试' }));
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat focused message deep links', () => {
+  it('loads older messages before consuming a focus target that is not rendered yet', async () => {
+    const loadOlder = vi.fn().mockResolvedValue(undefined);
+    const onFocusMessageConsumed = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'visible-message',
+          parts: [{ id: 'part-1', type: 'text', text: 'visible' }],
+        }),
+      ],
+      loading: false,
+      loadingOlder: false,
+      hasMore: true,
+      error: null,
+      refetch: vi.fn(),
+      loadOlder,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      focusMessageId: 'target-message',
+      onFocusMessageConsumed,
+    }));
+
+    await waitFor(() => expect(loadOlder).toHaveBeenCalledTimes(1));
+    expect(onFocusMessageConsumed).not.toHaveBeenCalled();
+  });
+
+  it('scrolls to and consumes a rendered focus target', async () => {
+    const loadOlder = vi.fn();
+    const onFocusMessageConsumed = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'target-message',
+          parts: [{ id: 'part-1', type: 'text', text: 'target' }],
+        }),
+      ],
+      loading: false,
+      loadingOlder: false,
+      hasMore: true,
+      error: null,
+      refetch: vi.fn(),
+      loadOlder,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      focusMessageId: 'target-message',
+      onFocusMessageConsumed,
+    }));
+
+    await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
+    expect(loadOlder).not.toHaveBeenCalled();
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
   });
 });
 

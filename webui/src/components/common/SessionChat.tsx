@@ -1853,19 +1853,34 @@ export default function SessionChat({
     const targetId = String(focusMessageId || '').trim();
     if (!targetId || focusedMessageRef.current === targetId) return;
     if (loading) return;
-    focusedMessageRef.current = targetId;
     const target = messagesContentRef.current?.querySelector<HTMLElement>(
       `[data-message-id="${CSS.escape(targetId)}"]`,
     );
     if (target) {
+      focusedMessageRef.current = targetId;
       target.scrollIntoView({ block: 'center', behavior: 'smooth' });
       target.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
       window.setTimeout(() => {
         target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
       }, 1800);
+      onFocusMessageConsumed?.();
+      return;
     }
+    if (hasMoreMessages) {
+      if (!loadingOlder) void loadOlder();
+      return;
+    }
+    focusedMessageRef.current = targetId;
     onFocusMessageConsumed?.();
-  }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
+  }, [
+    focusMessageId,
+    hasMoreMessages,
+    loadOlder,
+    loading,
+    loadingOlder,
+    messages.length,
+    onFocusMessageConsumed,
+  ]);
 
   useEffect(() => { loadOlderMessagesRef.current = loadOlder; }, [loadOlder]);
   useEffect(() => { hasMoreMessagesRef.current = hasMoreMessages; }, [hasMoreMessages]);

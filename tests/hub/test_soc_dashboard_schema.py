@@ -866,6 +866,64 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     assert denoise["progressLabel"] == "已完成"
 
 
+def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    today_at_1100 = datetime.now().astimezone().replace(
+        hour=11,
+        minute=0,
+        second=0,
+        microsecond=0,
+    )
+    today_ms = int(today_at_1100.timestamp() * 1000)
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?)",
+            ("stream_alert_denoise", 1, 0, 0),
+        )
+        conn.execute(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?)",
+            ("wf-running", "stream_alert_denoise", "running", today_ms),
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+
+    denoise = next(
+        workflow for workflow in payload["workflows"] if workflow["id"] == "stream_alert_denoise"
+    )
+    assert payload["workflowExecutionCount"] == 1
+    assert payload["workflowTodayExecutionCount"] == 1
+    assert denoise["executionCount"] == 1
+    assert denoise["todayExecutionCount"] == 1
+    assert denoise["activeCount"] == 1
+    assert denoise["latestExecutionHash"] == "wf-running"
+    assert denoise["lastRunAt"] == today_ms
+
+
 def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
     now = datetime.now().astimezone().replace(microsecond=0)
     older = now - timedelta(hours=3)
