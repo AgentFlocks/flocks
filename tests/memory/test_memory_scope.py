@@ -1,5 +1,6 @@
 """Tests for Global and Project Memory scope isolation."""
 
+import os
 from pathlib import Path
 import sqlite3
 from types import SimpleNamespace
@@ -160,6 +161,86 @@ async def test_indexer_scans_global_and_all_projects(
         "prj_beta",
         "projects/prj_beta/MEMORY.md",
     ) in identities
+
+
+@pytest.mark.asyncio
+async def test_indexer_does_not_read_unchanged_files(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "metadata-scan.db"
+    await Storage.init(db_path)
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    memory_file = memory_root / "MEMORY.md"
+    memory_file.write_text("stable memory", encoding="utf-8")
+    indexer = MemoryIndexer(
+        project_id="global",
+        workspace_dir=tmp_path,
+        provider_id=None,
+        embedding_model="unused",
+        config=MemoryConfig(),
+    )
+
+    with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
+        initial = await indexer.sync()
+        with patch.object(
+            Path,
+            "read_text",
+            side_effect=AssertionError("unchanged Memory file was read"),
+        ):
+            unchanged = await indexer.sync()
+
+    assert initial["files_indexed"] == 1
+    assert unchanged["files_indexed"] == 0
+    assert unchanged["files_skipped"] == 1
+
+
+@pytest.mark.asyncio
+async def test_indexer_refreshes_metadata_without_reindexing_unchanged_content(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "metadata-refresh.db"
+    await Storage.init(db_path)
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    memory_file = memory_root / "MEMORY.md"
+    memory_file.write_text("stable memory", encoding="utf-8")
+    indexer = MemoryIndexer(
+        project_id="global",
+        workspace_dir=tmp_path,
+        provider_id=None,
+        embedding_model="unused",
+        config=MemoryConfig(),
+    )
+
+    with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
+        await indexer.sync()
+        before = memory_file.stat()
+        os.utime(
+            memory_file,
+            ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000),
+        )
+        with patch.object(
+            indexer,
+            "_index_file",
+            wraps=indexer._index_file,
+        ) as index_file:
+            touched = await indexer.sync()
+        indexed_files = await indexer._get_indexed_files()
+        with patch.object(
+            Path,
+            "read_text",
+            side_effect=AssertionError("refreshed Memory file was read again"),
+        ):
+            unchanged = await indexer.sync()
+
+    indexed = indexed_files[("global", "", "MEMORY.md")]
+    assert touched["files_indexed"] == 0
+    assert touched["files_skipped"] == 1
+    index_file.assert_not_awaited()
+    assert indexed["mtime"] == memory_file.stat().st_mtime
+    assert unchanged["files_indexed"] == 0
+    assert unchanged["files_skipped"] == 1
 
 
 @pytest.mark.asyncio

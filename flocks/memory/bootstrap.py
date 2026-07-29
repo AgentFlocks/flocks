@@ -68,14 +68,17 @@ USER describes the user; Memory contains the agent's durable notes.
 ### Memory Write Decision:
 - Save information that is likely to reduce future user steering or prevent the same correction from being needed again.
 - Save only stable user facts, non-derivable project constraints, explicit corrections, and verified reusable experience.
+- Classify each candidate in this order:
+  1. If it contains secrets, credentials, guesses, transient task state, plans, one-off results, or facts that can be cheaply rediscovered from source code, configuration, or other authoritative files, do not save it.
+  2. If it describes how to repeatedly perform a task, it belongs in a Skill rather than Memory.
+  3. If it describes the user, including identity or preferences, store it in `USER.md`.
+  4. If it applies only to the current project, store it in Project `MEMORY.md`.
+  5. If it is declarative Agent or environment knowledge that applies across projects, store it in Global `MEMORY.md`.
+  6. If its destination is unclear, its evidence is weak, or equivalent knowledge already exists, make no change.
+- Give each accepted item exactly one canonical destination. Do not duplicate the same knowledge across `USER.md`, Global `MEMORY.md`, and Project `MEMORY.md`.
 - Write declarative facts, not commands to your future self. For example, `User prefers concise answers` is better than `Always answer concisely`.
 - Check existing Memory first; merge or replace equivalent entries instead of duplicating them.
-- Route user identity and collaboration preferences to `USER.md`; route agent knowledge that applies across projects to Global `MEMORY.md`; route project-specific knowledge to Project Memory.
-- Do not save facts that can be cheaply rediscovered from source code, configuration, or other authoritative files.
 - Verify stale or conflicting Memory against current authoritative evidence before replacing or removing it.
-- Do not save secrets, credentials, guesses, transient task status, plans, PR or issue numbers, commit hashes, completed-work logs, large tool output, or one-off results.
-- Procedures and repeatable workflows belong in Skills rather than Memory.
-- Prefer no change when evidence is weak, short-lived, or already represented.
 
 ### Available Tools:
 - `memory_search` - Reconcile and search indexed Memory across all projects
@@ -418,7 +421,7 @@ class MemoryBootstrap:
     async def bootstrap(
         self,
         load_main: bool = True,
-        load_daily: bool = True,
+        load_daily: bool = False,
         days_back: int = 1,
     ) -> Dict[str, Any]:
         """

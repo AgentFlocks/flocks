@@ -19,26 +19,22 @@ from flocks.memory.paths import (
     is_registered_project_id,
 )
 from flocks.memory.types import MemoryScope
-from flocks.session.message import Message, TextPart, ToolPart
+from flocks.session.message import (
+    Message,
+    MessageWithParts,
+    TextPart,
+    ToolPart,
+)
 from flocks.storage import Storage
 from flocks.utils.log import Log
 
 
 log = Log.create(service="memory.evolution")
-Pipeline = Literal["dream", "skill"]
+Pipeline = Literal["dream"]
 SourceType = Literal["session", "daily"]
 _PIPELINE_LOCKS = {"dream": asyncio.Lock(), "skill": asyncio.Lock()}
 _TOOL_PAYLOAD_MIN_CHARS = 256
 
-_CORRECTION_RE = re.compile(
-    r"(?:"
-    r"不对|错了|不是这样|你理解错|我说的是|纠正一下|"
-    r"应该(?:是|用|改成)|请改成|不要这样|别再|"
-    r"that(?:'s| is) wrong|not what i (?:said|meant|asked)|"
-    r"you misunderstood|correction:|please use .+ instead"
-    r")",
-    re.IGNORECASE,
-)
 _SENSITIVE_KEY_RE = re.compile(
     r"(?:authorization|api[-_]?key|access[-_]?token|refresh[-_]?token|"
     r"password|passwd|secret|private[-_]?key|credential|cookie)",
@@ -75,6 +71,14 @@ CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
 );
 CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
 ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at);
+
+CREATE TABLE IF NOT EXISTS memory_skill_evolution_state (
+    session_id TEXT PRIMARY KEY,
+    last_counted_message_id TEXT,
+    last_reviewed_message_id TEXT,
+    pending_tool_iterations INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL
+);
 
 DROP INDEX IF EXISTS idx_memory_skill_proposals_status;
 DROP TABLE IF EXISTS memory_skill_proposals;
@@ -135,15 +139,36 @@ class DreamTarget:
 class TurnReview:
     """Canonical context and tool trace for one successful turn."""
 
-    source: SourceSnapshot
     user_message_id: str
     assistant_message_id: str
     trigger_reasons: tuple[str, ...]
     content: str
 
 
+@dataclass(frozen=True)
+class TurnEvidence:
+    """One validated successful Turn backed by one Session history read."""
+
+    session_id: str
+    user_message_id: str
+    assistant_message_id: str
+    messages: tuple[MessageWithParts, ...]
+    user_index: int
+    assistant_index: int
+    tool_iterations: int
+
+
+@dataclass(frozen=True)
+class SkillEvolutionState:
+    """Per-Session Hermes-style Skill review trigger state."""
+
+    last_counted_message_id: Optional[str] = None
+    last_reviewed_message_id: Optional[str] = None
+    pending_tool_iterations: int = 0
+
+
 class EvolutionCheckpointStore:
-    """SQLite cursors shared by Dream and skill review."""
+    """SQLite source cursors for incremental Dream processing."""
 
     _schema_lock = asyncio.Lock()
 
@@ -276,6 +301,141 @@ class EvolutionCheckpointStore:
                 now,
             ),
         )
+
+
+class SkillEvolutionStateStore:
+    """Persist accumulated tool-loop iterations and the review watermark."""
+
+    @classmethod
+    async def get(cls, session_id: str) -> Optional[SkillEvolutionState]:
+        await EvolutionCheckpointStore.ensure_schema()
+        async with Storage.connect() as db:
+            cursor = await db.execute(
+                """
+                SELECT last_counted_message_id, last_reviewed_message_id,
+                       pending_tool_iterations
+                FROM memory_skill_evolution_state
+                WHERE session_id = ?
+                """,
+                (session_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            return None
+        return SkillEvolutionState(
+            last_counted_message_id=row[0],
+            last_reviewed_message_id=row[1],
+            pending_tool_iterations=int(row[2] or 0),
+        )
+
+    @classmethod
+    async def record_turn(
+        cls,
+        session_id: str,
+        assistant_message_id: str,
+        tool_iterations: int,
+    ) -> SkillEvolutionState:
+        """Count one completed Turn exactly once and return updated state."""
+        await EvolutionCheckpointStore.ensure_schema()
+        now = _now_iso()
+        async with Storage.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    """
+                    SELECT last_counted_message_id, last_reviewed_message_id,
+                           pending_tool_iterations
+                    FROM memory_skill_evolution_state
+                    WHERE session_id = ?
+                    """,
+                    (session_id,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    last_counted = None
+                    last_reviewed = None
+                    pending = 0
+                else:
+                    last_counted = row[0]
+                    last_reviewed = row[1]
+                    pending = int(row[2] or 0)
+
+                if last_counted is None or last_counted < assistant_message_id:
+                    last_counted = assistant_message_id
+                    pending += max(int(tool_iterations), 0)
+
+                await db.execute(
+                    """
+                    INSERT INTO memory_skill_evolution_state (
+                        session_id, last_counted_message_id,
+                        last_reviewed_message_id, pending_tool_iterations,
+                        updated_at
+                    ) VALUES (?, ?, ?, ?, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        last_counted_message_id =
+                            excluded.last_counted_message_id,
+                        last_reviewed_message_id =
+                            excluded.last_reviewed_message_id,
+                        pending_tool_iterations =
+                            excluded.pending_tool_iterations,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        session_id,
+                        last_counted,
+                        last_reviewed,
+                        pending,
+                        now,
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
+        return SkillEvolutionState(
+            last_counted_message_id=last_counted,
+            last_reviewed_message_id=last_reviewed,
+            pending_tool_iterations=pending,
+        )
+
+    @classmethod
+    async def commit_review(
+        cls,
+        session_id: str,
+        assistant_message_id: str,
+    ) -> None:
+        """Reset the counter and advance the Skill review watermark."""
+        await EvolutionCheckpointStore.ensure_schema()
+        now = _now_iso()
+        async with Storage.connect() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                await db.execute(
+                    """
+                    INSERT INTO memory_skill_evolution_state (
+                        session_id, last_counted_message_id,
+                        last_reviewed_message_id, pending_tool_iterations,
+                        updated_at
+                    ) VALUES (?, ?, ?, 0, ?)
+                    ON CONFLICT(session_id) DO UPDATE SET
+                        last_counted_message_id =
+                            excluded.last_counted_message_id,
+                        last_reviewed_message_id =
+                            excluded.last_reviewed_message_id,
+                        pending_tool_iterations = 0,
+                        updated_at = excluded.updated_at
+                    """,
+                    (
+                        session_id,
+                        assistant_message_id,
+                        assistant_message_id,
+                        now,
+                    ),
+                )
+                await db.commit()
+            except BaseException:
+                await db.rollback()
+                raise
 
 
 def _now_iso() -> str:
@@ -497,18 +657,18 @@ async def _collect_dream_sources(
         )
     else:
         total_source_budget = max(int(max_chars), 2)
-    session_budget = total_source_budget // 2
-    daily_budget = total_source_budget - session_budget
+    remaining_budget = total_source_budget
     sources: list[SourceSnapshot] = []
     sync_targets = [(session.project_id, session.directory) for session in eligible_sessions]
     backlog = False
     changed_sessions = 0
+    included_session_ids: set[str] = set()
 
     for session in eligible_sessions:
         if evolution.catch_up_sessions > 0 and changed_sessions >= evolution.catch_up_sessions:
             backlog = True
             break
-        if session_budget <= 0:
+        if remaining_budget <= 0:
             backlog = True
             break
         checkpoint = await EvolutionCheckpointStore.get(
@@ -522,7 +682,7 @@ async def _collect_dream_sources(
             session.id,
             checkpoint,
             max_messages=evolution.max_session_messages,
-            max_chars=session_budget,
+            max_chars=remaining_budget,
             scope=target.scope,
             scope_id=target.scope_id,
         )
@@ -530,7 +690,9 @@ async def _collect_dream_sources(
             continue
         sources.append(snapshot)
         changed_sessions += 1
-        session_budget -= len(snapshot.content)
+        if snapshot.content.strip():
+            included_session_ids.add(session.id)
+        remaining_budget -= len(snapshot.content)
         backlog = backlog or source_backlog
 
     memory_root = Config.get_data_path() / "memory"
@@ -538,7 +700,7 @@ async def _collect_dream_sources(
         memory_root,
         evolution.dream.recent_daily_days,
     ):
-        if daily_budget <= 0:
+        if remaining_budget <= 0:
             backlog = True
             break
         checkpoint = await EvolutionCheckpointStore.get(
@@ -551,16 +713,16 @@ async def _collect_dream_sources(
         snapshot, source_backlog = _daily_delta(
             path,
             checkpoint,
-            max_chars=daily_budget,
+            max_chars=remaining_budget,
             scope=target.scope,
             scope_id=target.scope_id,
-            allowed_session_ids=eligible_session_ids,
+            allowed_session_ids=eligible_session_ids - included_session_ids,
             session_prefixes=session_prefixes,
         )
         if snapshot is None:
             continue
         sources.append(snapshot)
-        daily_budget -= len(snapshot.content)
+        remaining_budget -= len(snapshot.content)
         backlog = backlog or source_backlog
 
     return sources, backlog, sync_targets
@@ -609,24 +771,19 @@ def _redact_sensitive(value: Any, *, key: Optional[str] = None) -> Any:
     return redacted
 
 
-def _is_user_correction(text: str) -> bool:
-    return bool(text and _CORRECTION_RE.search(text))
-
-
 def _is_real_tool_part(part: ToolPart) -> bool:
     metadata = part.metadata or {}
     return not bool(metadata.get("ignored") or metadata.get("synthetic"))
 
 
-async def _build_turn_review(
+def _build_turn_evidence(
     *,
     session_id: str,
     user_message_id: str,
     assistant_message_id: str,
-    config: MemoryConfig,
-    force: bool = False,
-) -> Optional[TurnReview]:
-    messages = await Message.list_with_parts(session_id, include_archived=True)
+    messages: list[MessageWithParts],
+) -> Optional[TurnEvidence]:
+    """Validate and summarize one successful Turn from loaded messages."""
     positions = {message.info.id: index for index, message in enumerate(messages)}
     user_index = positions.get(user_message_id)
     assistant_index = positions.get(assistant_message_id)
@@ -641,36 +798,73 @@ async def _build_turn_review(
     ):
         return None
 
-    turn_messages = messages[user_index : assistant_index + 1]
+    iterations = 0
+    for message in messages[user_index : assistant_index + 1]:
+        if _message_role(message) != "assistant":
+            continue
+        if any(
+            isinstance(part, ToolPart) and _is_real_tool_part(part)
+            for part in message.parts
+        ):
+            iterations += 1
+    return TurnEvidence(
+        session_id=session_id,
+        user_message_id=user_message_id,
+        assistant_message_id=assistant_message_id,
+        messages=tuple(messages),
+        user_index=user_index,
+        assistant_index=assistant_index,
+        tool_iterations=iterations,
+    )
+
+
+async def _load_turn_evidence(
+    *,
+    session_id: str,
+    user_message_id: str,
+    assistant_message_id: str,
+) -> Optional[TurnEvidence]:
+    """Load Session history once and resolve one successful Turn."""
+    messages = await Message.list_with_parts(
+        session_id,
+        include_archived=True,
+    )
+    return _build_turn_evidence(
+        session_id=session_id,
+        user_message_id=user_message_id,
+        assistant_message_id=assistant_message_id,
+        messages=messages,
+    )
+
+
+def _build_turn_review(
+    *,
+    evidence: TurnEvidence,
+    config: MemoryConfig,
+    since_message_id: Optional[str] = None,
+    force: bool = False,
+) -> Optional[TurnReview]:
+    """Build bounded Learn input without loading Session history again."""
+    messages = evidence.messages
+    positions = {message.info.id: index for index, message in enumerate(messages)}
+    since_index = positions.get(since_message_id) if since_message_id else None
+    review_start = since_index + 1 if since_index is not None else 0
+    review_messages = messages[
+        review_start : evidence.assistant_index + 1
+    ]
+    review_messages = review_messages[-config.evolution.max_session_messages :]
     tool_parts: list[ToolPart] = []
-    for message in turn_messages:
-        tool_parts.extend(part for part in message.parts if isinstance(part, ToolPart) and _is_real_tool_part(part))
-
-    completed_count = sum(part.state.status == "completed" for part in tool_parts)
-    seen_error = False
-    recovered_after_error = False
-    for part in tool_parts:
-        if part.state.status == "error":
-            seen_error = True
-        elif seen_error and part.state.status == "completed":
-            recovered_after_error = True
-
-    user_text = _real_text(messages[user_index])
-    trigger_reasons: list[str] = []
-    if completed_count >= config.evolution.skill.min_completed_tools:
-        trigger_reasons.append("completed_tool_threshold")
-    if recovered_after_error:
-        trigger_reasons.append("failure_then_success")
-    if _is_user_correction(user_text):
-        trigger_reasons.append("user_correction")
-    if force and not trigger_reasons:
-        trigger_reasons.append("manual")
-    if not trigger_reasons:
+    for message in review_messages:
+        tool_parts.extend(
+            part
+            for part in message.parts
+            if isinstance(part, ToolPart) and _is_real_tool_part(part)
+        )
+    if not force and not tool_parts:
         return None
 
-    context_messages = messages[: assistant_index + 1][-config.evolution.max_session_messages :]
     context_blocks: list[str] = []
-    for message in context_messages:
+    for message in review_messages:
         role = _message_role(message)
         if role not in {"user", "assistant"}:
             continue
@@ -699,19 +893,15 @@ async def _build_turn_review(
         serialized = json.dumps(payload, ensure_ascii=False, default=str)
         trace_blocks.append(_truncate_middle(serialized, per_tool_budget))
     trace = "\n".join(trace_blocks) or "(no tool calls)"
-    content = f"## Recent Session context\n{context}\n\n## Current Turn tool trace\n{trace}"
-    source = SourceSnapshot(
-        source_type="session",
-        source_key=session_id,
-        content=content,
-        content_hash=_hash_text(content),
-        line_count=len(content.splitlines()),
-        last_message_id=assistant_message_id,
+    content = (
+        "## Session context since previous Skill review\n"
+        f"{context}\n\n"
+        "## Tool trace since previous Skill review\n"
+        f"{trace}"
     )
     return TurnReview(
-        source=source,
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        trigger_reasons=tuple(trigger_reasons),
+        user_message_id=evidence.user_message_id,
+        assistant_message_id=evidence.assistant_message_id,
+        trigger_reasons=("manual" if force else "tool_iteration_threshold",),
         content=content,
     )

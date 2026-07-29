@@ -82,7 +82,11 @@ class MemoryIndexer:
         
         try:
             content_cache: Dict[str, str] = {}
-            memory_files = await self._scan_memory_files(_content_cache=content_cache)
+            indexed_files = await self._get_indexed_files()
+            memory_files = await self._scan_memory_files(
+                _content_cache=content_cache,
+                _indexed_files=None if force else indexed_files,
+            )
             stats["files_scanned"] = len(memory_files)
             
             if progress_callback:
@@ -91,8 +95,6 @@ class MemoryIndexer:
                     total=len(memory_files),
                     label="Scanning files"
                 ))
-            
-            indexed_files = await self._get_indexed_files()
             
             for idx, file_entry in enumerate(memory_files):
                 if not force:
@@ -104,6 +106,8 @@ class MemoryIndexer:
                         )
                     )
                     if indexed and indexed["hash"] == file_entry.hash:
+                        if not self._metadata_matches(file_entry, indexed):
+                            await self._update_file_metadata(file_entry)
                         stats["files_skipped"] += 1
                         log.debug("indexer.file.skipped", {"path": file_entry.path})
                         content_cache.pop(file_entry.abs_path, None)
@@ -139,15 +143,21 @@ class MemoryIndexer:
             raise
     
     async def _scan_memory_files(
-        self, *, _content_cache: Optional[Dict[str, str]] = None,
+        self,
+        *,
+        _content_cache: Optional[Dict[str, str]] = None,
+        _indexed_files: Optional[
+            Dict[tuple[str, str, str], Dict[str, Any]]
+        ] = None,
     ) -> List[MemoryFileEntry]:
         """
         Scan workspace for memory files.
 
-        Filesystem I/O (glob, stat, read) is offloaded to a thread to avoid
-        blocking the event loop.  When *_content_cache* is passed, file
-        contents read during hash calculation are stored there for later
-        reuse in ``_index_file``.
+        Filesystem I/O is offloaded to a thread to avoid blocking the event
+        loop. When *_indexed_files* is passed, files whose mtime and size still
+        match the stored manifest reuse the stored content hash without being
+        read. New or changed files are read once, hashed, and cached for
+        ``_index_file``.
         """
         from flocks.config import Config
         
@@ -170,11 +180,18 @@ class MemoryIndexer:
                 if classified is None:
                     return
                 seen.add(resolved)
+                scope, scope_id, rel_path = classified
+                indexed_file = (
+                    _indexed_files.get((scope.value, scope_id, rel_path))
+                    if _indexed_files is not None
+                    else None
+                )
                 files.append(
                     self._create_file_entry(
                         fp,
                         memory_root,
                         _content_cache=_content_cache,
+                        _indexed_file=indexed_file,
                     )
                 )
 
@@ -202,14 +219,19 @@ class MemoryIndexer:
         return files
     
     def _create_file_entry(
-        self, file_path: Path, memory_root: Path, *, _content_cache: Optional[Dict[str, str]] = None,
+        self,
+        file_path: Path,
+        memory_root: Path,
+        *,
+        _content_cache: Optional[Dict[str, str]] = None,
+        _indexed_file: Optional[Dict[str, Any]] = None,
     ) -> MemoryFileEntry:
         """
         Create file entry from path.
 
-        When *_content_cache* is provided the raw text is stored there keyed
-        by absolute path so that ``_index_file`` can reuse it without a second
-        disk read (fixes the TOCTOU + double-I/O issue).
+        An unchanged indexed file reuses its stored hash based on mtime and
+        size. Otherwise the raw text is read and optionally cached by absolute
+        path so that ``_index_file`` can reuse it without a second disk read.
         """
         classified = classify_memory_path(memory_root, file_path)
         if classified is None:
@@ -217,12 +239,17 @@ class MemoryIndexer:
         scope, scope_id, rel_path = classified
         
         stat = file_path.stat()
-        
-        content = file_path.read_text(encoding="utf-8")
-        content_hash = compute_text_hash(content)
-        
-        if _content_cache is not None:
-            _content_cache[str(file_path)] = content
+        if (
+            _indexed_file is not None
+            and _indexed_file["mtime"] == stat.st_mtime
+            and _indexed_file["size"] == stat.st_size
+        ):
+            content_hash = str(_indexed_file["hash"])
+        else:
+            content = file_path.read_text(encoding="utf-8")
+            content_hash = compute_text_hash(content)
+            if _content_cache is not None:
+                _content_cache[str(file_path)] = content
         
         return MemoryFileEntry(
             scope=scope,
@@ -233,6 +260,38 @@ class MemoryIndexer:
             size=stat.st_size,
             hash=content_hash,
         )
+
+    @staticmethod
+    def _metadata_matches(
+        file_entry: MemoryFileEntry,
+        indexed_file: Dict[str, Any],
+    ) -> bool:
+        """Return whether current file metadata matches the stored manifest."""
+        return (
+            indexed_file["mtime"] == file_entry.mtime_ms / 1000
+            and indexed_file["size"] == file_entry.size
+        )
+
+    async def _update_file_metadata(self, file_entry: MemoryFileEntry) -> None:
+        """Refresh metadata after a content-preserving filesystem change."""
+        async with Storage.connect(Storage.get_db_path()) as db:
+            await db.execute(
+                """
+                UPDATE memory_files
+                SET mtime = ?, size = ?
+                WHERE scope = ? AND scope_id = ? AND path = ?
+                    AND source = 'memory' AND hash = ?
+                """,
+                (
+                    file_entry.mtime_ms / 1000,
+                    file_entry.size,
+                    file_entry.scope.value,
+                    file_entry.scope_id,
+                    file_entry.path,
+                    file_entry.hash,
+                ),
+            )
+            await db.commit()
     
     async def _get_indexed_files(
         self,

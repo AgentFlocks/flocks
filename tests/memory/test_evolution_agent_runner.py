@@ -43,10 +43,6 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
             new=message_create,
         ),
         patch(
-            "flocks.memory.evolution.agent_runner.Message.get_text_content",
-            new=AsyncMock(return_value="done"),
-        ),
-        patch(
             "flocks.memory.evolution.agent_runner.SessionLoop.run",
             new=loop,
         ),
@@ -66,9 +62,10 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
             directory="/workspace",
             provider_id="provider",
             model_id="model",
+            write_permission_patterns=["memory/MEMORY.md"],
         )
 
-    assert result.summary == "done"
+    assert result is None
     assert created.await_args.kwargs["category"] == "task"
     assert (
         created.await_args.kwargs["metadata"]["hideFromSessionManager"]
@@ -78,6 +75,23 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
         "providerID": "provider",
         "modelID": "model",
     }
+    permission_rules = created.await_args.kwargs["permission"]
+    assert any(
+        rule.permission == "edit"
+        and rule.action == "allow"
+        and rule.pattern == "memory/MEMORY.md"
+        for rule in permission_rules
+    )
+    assert any(
+        rule.permission == "edit"
+        and rule.action == "deny"
+        and rule.pattern == "*"
+        for rule in permission_rules
+    )
+    assert any(
+        rule.permission == "bash" and rule.action == "deny"
+        for rule in permission_rules
+    )
     loop.assert_awaited_once_with(
         session_id="ses_evolution",
         provider_id="provider",
@@ -103,9 +117,9 @@ def test_evolution_agents_are_hidden_and_have_expected_tools() -> None:
         "edit",
         "glob",
         "grep",
-        "bash",
     ]
     assert learn is not None
     assert learn.hidden is True
     assert learn.delegatable is False
     assert "skill_load" in learn.tools
+    assert "bash" not in learn.tools

@@ -5,7 +5,7 @@ Defines configuration structures for the memory system.
 """
 
 from typing import Optional, List, Literal
-from pydantic import BaseModel, Field
+from pydantic import AliasChoices, BaseModel, Field
 
 
 class MemoryEmbeddingConfig(BaseModel):
@@ -179,11 +179,19 @@ class MemoryAutoFlushConfig(BaseModel):
     )
     user_prompt: str = Field(
         (
-            "If this Session contains durable user facts, corrections, "
-            "non-derivable constraints, or reusable lessons, update the "
-            "narrowest curated USER.md or MEMORY.md with read/edit. Never "
-            "write or edit Daily Memory; the Session lifecycle owns it. "
-            "Reply with NO_REPLY if nothing qualifies, then continue the task."
+            "If this Session contains durable knowledge, classify each "
+            "candidate before using read/edit: user information or preferences "
+            "belong in USER.md; current-project-only knowledge belongs in "
+            "Project MEMORY.md; cross-project declarative Agent or environment "
+            "knowledge belongs in Global MEMORY.md; repeatable procedures "
+            "belong in Skills, not Memory. Do not save secrets, guesses, "
+            "transient state, one-off results, cheaply rediscoverable facts, "
+            "weak evidence, unclear candidates, or knowledge already "
+            "represented. Give each accepted item exactly one canonical "
+            "destination and never duplicate it across USER.md, Global "
+            "MEMORY.md, and Project MEMORY.md. Never write or edit Daily "
+            "Memory; the Session lifecycle owns it. Reply with NO_REPLY if "
+            "nothing qualifies, then continue the task."
         ),
         description="User prompt for memory flush"
     )
@@ -215,10 +223,16 @@ class MemorySkillEvolutionConfig(BaseModel):
         True,
         description="Create or update user skills from successful tool turns",
     )
-    min_completed_tools: int = Field(
+    tool_iteration_interval: int = Field(
         10,
         ge=1,
-        description="Completed tool calls in one turn that trigger a skill review",
+        validation_alias=AliasChoices(
+            "tool_iteration_interval",
+            "min_completed_tools",
+        ),
+        description=(
+            "Accumulated AgentLoop tool iterations between Skill reviews"
+        ),
     )
 
 

@@ -54,6 +54,7 @@ class MemoryEvolutionScheduler:
     @classmethod
     async def _run_loop(cls) -> None:
         while True:
+            await asyncio.sleep(_TICK_SECONDS)
             try:
                 await cls._tick_once()
             except asyncio.CancelledError:
@@ -65,7 +66,6 @@ class MemoryEvolutionScheduler:
                         "error": str(exc),
                     },
                 )
-            await asyncio.sleep(_TICK_SECONDS)
 
     @classmethod
     async def _tick_once(cls, now_ts: Optional[float] = None) -> None:

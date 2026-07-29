@@ -1044,6 +1044,7 @@ class SessionLoop:
             assistant_text = await Message.get_text_content(last_message)
             hook_ctx = await HookPipeline.run_turn_finish({
                 "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_message, "agent", None) or ctx.agent_name,
                 "model": {
@@ -1504,7 +1505,7 @@ class SessionLoop:
                     from flocks.memory.bootstrap import MemoryBootstrap
                     ctx.memory_bootstrap_data = await MemoryBootstrap(
                         project_id=ctx.session.project_id,
-                    ).bootstrap()
+                    ).bootstrap(load_daily=False)
                     log.info("loop.memory_bootstrap_done", {
                         "session_id": ctx.session.id,
                         "has_main": ctx.memory_bootstrap_data.get("main_memory") is not None,

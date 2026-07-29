@@ -8,7 +8,7 @@ import pytest
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 from flocks.memory import DailyMemory, MemoryBootstrap, MemoryFlush
 from flocks.memory.config import MemoryAutoFlushConfig
@@ -245,6 +245,18 @@ class TestMemoryBootstrap:
         assert "memory_search" in instructions
         assert "{memory_root}" not in instructions
         assert "On-disk memory root" in instructions
+        assert "exactly one canonical destination" in instructions
+        assert "If it describes the user" in instructions
+        assert "If it applies only to the current project" in instructions
+
+    def test_default_flush_prompt_routes_to_one_memory_scope(self):
+        """Default flush prompt distinguishes curated Memory destinations."""
+        prompt = MemoryAutoFlushConfig().user_prompt
+
+        assert "USER.md" in prompt
+        assert "Global MEMORY.md" in prompt
+        assert "Project MEMORY.md" in prompt
+        assert "exactly one canonical destination" in prompt
     
     @pytest.mark.asyncio
     async def test_bootstrap(self):
@@ -267,6 +279,22 @@ class TestMemoryBootstrap:
         # Check instructions
         assert result["instructions"]
         assert "Memory System" in result["instructions"]
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_does_not_load_daily_by_default(self):
+        """Normal Session bootstrap leaves Daily files on demand."""
+        bootstrap = MemoryBootstrap()
+        load_daily = AsyncMock()
+
+        with patch.object(
+            bootstrap,
+            "load_daily_memories",
+            new=load_daily,
+        ):
+            result = await bootstrap.bootstrap()
+
+        load_daily.assert_not_awaited()
+        assert result["daily_memories"] == []
 
 
 class TestMemoryFlush:
