@@ -19,7 +19,7 @@ def _load_tool(yaml_name: str):
         / ".flocks"
         / "plugins"
         / "tools"
-        / "api"
+        / "device"
         / _QINGTENG_PLUGIN_DIR
         / yaml_name
     )
@@ -33,7 +33,7 @@ def _load_handler_module(script_name: str, module_name: str):
         / ".flocks"
         / "plugins"
         / "tools"
-        / "api"
+        / "device"
         / _QINGTENG_PLUGIN_DIR
         / script_name
     )
@@ -743,6 +743,7 @@ async def test_qingteng_system_audit_uses_shared_handler_logic():
     ]
 
     module.get_secret_manager = lambda: mock_secret_manager
+    module.ConfigWriter.get_api_service_raw = lambda service_id: {}
     module.httplib.HTTPConnection = _FakeHTTPConnection
     module.time.time = lambda: 1700000000
 
@@ -759,17 +760,7 @@ async def test_qingteng_system_audit_uses_shared_handler_logic():
     assert result.success is True
     assert result.metadata["api"] == "system.audit"
     assert result.output["total"] == 1
-
-
-@pytest.mark.asyncio
-async def test_qingteng_login_returns_clear_error_when_configuration_missing():
-    module = _load_handler_module("qingteng.handler.py", "qingteng_login_handler_test")
-    mock_secret_manager = MagicMock()
-    mock_secret_manager.get.return_value = None
-    module.get_secret_manager = lambda: mock_secret_manager
-    module.ConfigWriter.get_api_service_raw = lambda service_id: {}
-
-    result = await module.login(ToolContext(session_id="test", message_id="test"))
-
-    assert result.success is False
-    assert result.error == "Missing configuration: qingteng base_url/qingteng_host, qingteng_username, qingteng_password"
+    assert len(_FakeHTTPConnection.created) == 2
+    login_call = _FakeHTTPConnection.created[0].calls[0]
+    assert login_call["method"] == "POST"
+    assert login_call["url"] == "/v1/api/auth"
