@@ -625,6 +625,10 @@ async def test_scoped_critical_entrypoint_failure_stops_tool_registry_effect(
         lambda: _EntryPoints(),
     )
     monkeypatch.setattr(
+        "flocks.plugin.loader.importlib.util.find_spec",
+        lambda _name: object(),
+    )
+    monkeypatch.setattr(
         PluginLoader,
         "_extension_points",
         {
@@ -677,12 +681,14 @@ async def test_scoped_critical_entrypoint_failure_stops_tool_registry_effect(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("load_mode", ["scoped", "all"])
-async def test_entrypoint_metadata_scan_failure_stops_tool_registry_effect(
+@pytest.mark.parametrize("pro_installed", [False, True])
+async def test_entrypoint_metadata_scan_failure_follows_pro_installation_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
     load_mode: str,
+    pro_installed: bool,
 ) -> None:
-    """An unreadable entrypoint index cannot leave lifecycle effects open."""
+    """Metadata scan failures stop effects only when Pro is installed."""
 
     def _scan_error():
         raise RuntimeError("entrypoint metadata unavailable")
@@ -690,6 +696,10 @@ async def test_entrypoint_metadata_scan_failure_stops_tool_registry_effect(
     monkeypatch.setattr(
         "flocks.plugin.loader.importlib.metadata.entry_points",
         _scan_error,
+    )
+    monkeypatch.setattr(
+        "flocks.plugin.loader.importlib.util.find_spec",
+        lambda _name: object() if pro_installed else None,
     )
     monkeypatch.setattr(
         PluginLoader,
@@ -712,7 +722,7 @@ async def test_entrypoint_metadata_scan_failure_stops_tool_registry_effect(
         )
     else:
         result = PluginLoader.load_all(project_dir=tmp_path)
-        assert result.has_critical_entrypoint_failure is True
+        assert result.has_critical_entrypoint_failure is pro_installed
 
     executed = False
 
@@ -740,10 +750,10 @@ async def test_entrypoint_metadata_scan_failure_stops_tool_registry_effect(
         value="must not execute",
     )
 
-    assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
-    assert execution.success is False
-    assert execution.error == "critical plugin entrypoint failure"
-    assert executed is False
+    assert PluginLoader.has_runtime_critical_entrypoint_failure() is pro_installed
+    assert execution.success is not pro_installed
+    assert execution.error == ("critical plugin entrypoint failure" if pro_installed else None)
+    assert executed is not pro_installed
 
 
 @pytest.mark.asyncio

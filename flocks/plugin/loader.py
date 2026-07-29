@@ -460,20 +460,49 @@ class PluginLoader:
         - ``fn()``.
 
         Plugins opt into host-visible startup failure with the generic
-        ``flocks.plugins.critical`` group.  The loader does not interpret why
-        the plugin is critical; it only reports failures in that declared
-        group through :class:`PluginLoadResult`.
+        ``flocks.plugins.critical`` group. Critical failures block effects only
+        when the optional ``flockspro`` component is installed; pure OSS
+        deployments always isolate entry-point failures.
         """
         result = result or PluginLoadResult()
         try:
+            pro_installed = importlib.util.find_spec("flockspro") is not None
+        except Exception as exc:
+            # If the installation state cannot be determined, preserve the OSS
+            # boundary and do not let plugin discovery block Core effects.
+            pro_installed = False
+            log.warning(
+                "plugin.flockspro.installation_check_failed",
+                {"error": str(exc)},
+            )
+
+        def record_critical_failure(
+            name: str,
+            event: str,
+            context: Dict[str, Any],
+        ) -> None:
+            if pro_installed:
+                result.critical_entrypoint_failures.append(name)
+                log.error(event, context)
+                return
+
+            log.warning(
+                "plugin.entrypoint.critical_failure_isolated",
+                {
+                    **context,
+                    "event": event,
+                    "reason": "flockspro_not_installed",
+                },
+            )
+
+        try:
             entry_points = importlib.metadata.entry_points()
         except Exception as e:
-            # A failed global scan leaves the loader unable to determine
-            # whether a declared-critical entrypoint is present.  Preserve a
-            # generic critical marker so hosts fail closed rather than serving
-            # after an indeterminate plugin discovery pass.
-            result.critical_entrypoint_failures.append("entrypoint_metadata_scan")
-            log.error("plugin.entrypoints.scan_failed", {"error": str(e)})
+            record_critical_failure(
+                "entrypoint_metadata_scan",
+                "plugin.entrypoints.scan_failed",
+                {"error": str(e)},
+            )
             return result
 
         for group, declared_critical in (
@@ -484,8 +513,8 @@ class PluginLoader:
                 eps = entry_points.select(group=group)
             except Exception as exc:
                 if declared_critical:
-                    result.critical_entrypoint_failures.append(group)
-                    log.error(
+                    record_critical_failure(
+                        group,
                         "plugin.entrypoint.critical_group_scan_failed",
                         {"group": group, "error": str(exc)},
                     )
@@ -501,8 +530,8 @@ class PluginLoader:
                     target = ep.load()
                 except Exception as exc:
                     if declared_critical or isinstance(exc, CriticalPluginEntrypointFailure):
-                        result.critical_entrypoint_failures.append(ep.name)
-                        log.error(
+                        record_critical_failure(
+                            ep.name,
                             "plugin.entrypoint.critical_load_failed",
                             {"name": ep.name, "group": group, "error": str(exc)},
                         )
@@ -515,8 +544,8 @@ class PluginLoader:
 
                 if not callable(target):
                     if declared_critical:
-                        result.critical_entrypoint_failures.append(ep.name)
-                        log.error(
+                        record_critical_failure(
+                            ep.name,
                             "plugin.entrypoint.critical_not_callable",
                             {"name": ep.name, "group": group},
                         )
@@ -533,8 +562,8 @@ class PluginLoader:
                     log.info("plugin.entrypoint.loaded", {"name": ep.name, "group": group})
                 except Exception as exc:
                     if declared_critical or isinstance(exc, CriticalPluginEntrypointFailure):
-                        result.critical_entrypoint_failures.append(ep.name)
-                        log.error(
+                        record_critical_failure(
+                            ep.name,
                             "plugin.entrypoint.critical_invoke_failed",
                             {"name": ep.name, "group": group, "error": str(exc)},
                         )
