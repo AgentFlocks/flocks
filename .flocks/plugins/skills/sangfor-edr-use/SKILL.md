@@ -13,7 +13,9 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 验证过的同一套 Cookie/token，不从其他状态源拼接凭据。
 
 - 管理同一次登录产生的 Cookie 与 `login_token`。
-- 默认使用 HTTP 登录；仅当用户明确选择自动化登录时使用 browser/CDP。
+- 默认使用 HTTP 登录，开始前必须向用户索取并保存 EDR 地址、用户名和密码。
+- 仅当用户明确选择“打开页面后手动登录”时，才可不索取账密并直接使用 browser/CDP。
+- HTTP 登录连续 3 次失败后，按“browser/CDP 自动化登录（仍需账密）→保留页面供用户手动登录（不需账密）”顺序降级。
 - 每次登录或数据采集前探测现有认证，认证有效则跳过登录，失效则重新登录并更新存储。
 - 通过 API 采集首页终端概况、受影响终端、漏洞、勒索防护、实时病毒、Top 5 终端和设备资源使用率。
 
@@ -24,8 +26,8 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 调用 `sangfor_edr_auth`：
 
 - `status_auth_state`：返回认证文件、凭据和认证探测状态，不返回敏感值。
-- `ensure_auth_state`、`refresh_auth_state`、`http_login`：执行“探测后按需 HTTP 登录”。
-- `browser_login`：用户明确选择自动化登录时，执行“探测后按需 browser/CDP 登录”。
+- `ensure_auth_state`、`refresh_auth_state`、`http_login`：执行“探测后按需 HTTP 登录”；HTTP 连续 3 次失败时按降级策略进入 browser/CDP，再失败则转为手动登录。
+- `browser_login`：用户明确选择自动化登录时，执行“探测后按需 browser/CDP 登录”；该路径需要账密，除非用户明确要求打开页面后自行手动登录。
 - `validate_auth_state`：仅验证浏览器 state。
 - `complete_manual_login`：保存用户在已打开浏览器中完成的登录。
 
@@ -55,16 +57,16 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 2. 使用 Cookie 与 `login_token` 调用威胁终端概览接口 `get_agent_overview`：
    - HTTP 200、无登录页重定向、响应成功且包含终端概览数据：认证有效，跳过登录。
    - Cookie 缺失或不匹配、401/403、重定向、非 200、响应无终端概览数据：认证失效。
-3. 默认重新登录流程：访问登录页，获取 RSA 公钥和验证码，提交 `dlogin`，再调用 `launch_login.php`。
+3. 默认重新登录流程：访问登录页，获取 RSA 公钥和验证码，提交 `dlogin`，调用 `launch_login.php`，再 GET `/ui`；HTTP 登录连续 3 次失败后进入 browser/CDP 自动化登录，自动化登录仍需账密，自动化登录失败后保留页面供用户手动登录。
 4. 登录成功后将 Cookie 写入 `auth-state.json`，将 `login_token` 写入 Secret Manager，并更新配对指纹。
 5. 仪表盘 API 只能使用通过上述探测的同一套 Cookie/token；禁止从不同 state 或 Secret 拼接。
 
 ## 错误处理
 
 - 缺少地址或账密：返回缺失字段，向用户索取后保存到配置或 Secret Manager。
-- 验证码或 HTTP 登录失败：返回 `http_login_failed`，不得自动切换 browser/CDP。
-- 用户明确选择自动化登录后，browser/CDP 失败：保留浏览器供用户完成登录，再调用 `complete_manual_login`。
-- 认证探测失败：禁止继续业务 API；HTTP 重登并再次探测，仍失败则返回错误。
+- 验证码或 HTTP 登录失败：最多进行 3 次独立 HTTP 登录尝试；仍失败则切换 browser/CDP 自动化登录，切换时仍需账密。
+- browser/CDP 自动化登录失败或用户明确选择打开页面后手动登录：保留浏览器供用户完成登录，不再索取账密，再调用 `complete_manual_login`。
+- 认证探测失败：禁止继续业务 API；先执行 HTTP 重登并再次探测，连续 3 次 HTTP 仍失败则按 browser/CDP 自动化登录→手动登录降级。
 - 仪表盘部分接口失败：保留成功数据，在 `errors` 中按采集项返回失败原因。
 - Cookie、密码和 `login_token` 不得回显、记录日志或混入业务输出。
 
@@ -74,6 +76,6 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 - 不得假设 Flocks 项目、插件或虚拟环境的绝对路径；代码必须通过当前运行时加载的模块、`Path.home()`、`~/.flocks` 或显式配置/环境变量解析路径。
 - 需要具体 CDP 命令、浏览器启动方式、验证码识别、selector、tab/iframe 处理或页面关键词时，必须先阅读 [references/cdp-workflow.md](references/cdp-workflow.md)，不要在本文件重复展开。
 - `bu.port` 是 Flocks browser daemon 的 IPC 端口文件，不是 Chrome remote-debugging 端口；禁止手工创建或修改。
-- 默认认证和仪表盘采集不得启动 browser daemon；只有用户明确选择 `browser_login` 或执行 `validate_auth_state`、`complete_manual_login` 时，才允许使用 browser/CDP。
-- HTTP 登录失败不得自动切换 browser/CDP；应返回错误并等待用户明确选择自动化登录或补充输入。
+- 默认认证和仪表盘采集开始时不得启动 browser daemon；只有用户明确选择 `browser_login`、执行 `validate_auth_state`/`complete_manual_login`，或 HTTP 登录连续 3 次失败进入降级流程时，才允许使用 browser/CDP。
+- HTTP 登录连续 3 次失败后必须按 browser/CDP 自动化登录→手动登录顺序降级；自动化登录阶段仍需账密，手动登录阶段不得要求账密。
 - 任何 API 采集前必须完成认证探测；认证探测失败时不得继续调用业务接口。
