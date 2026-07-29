@@ -7,9 +7,9 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import time
 from datetime import datetime, timedelta
-from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
@@ -22,6 +22,12 @@ from flocks.browser.admin import ensure_daemon
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
 
+_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
+import sangfor_edr_dashboard_api as _dashboard_api_module  # noqa: E402
+import sangfor_edr_http_login as _http_login_module  # noqa: E402
+
 SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
 USERNAME_SECRET_ID = "sangfor_edr_username"
@@ -33,7 +39,6 @@ DEFAULT_LOGIN_PATH = "/ui/login.php"
 DEFAULT_INDEX_PATH = "/ui/#/index"
 DEFAULT_TIMEOUT = 25
 MAX_LOCAL_STORAGE_VALUE_BYTES = 100 * 1024
-PUBLIC_EXPONENT = 0x10001
 CONFIG_KEYS = (
     "base_url",
     "auth_state_path",
@@ -334,42 +339,6 @@ def _safe_error(exc: Exception, *sensitive_values: str) -> str:
     return message
 
 
-def _http_failure_detail(phase: str, exc: Exception, cfg: RuntimeConfig) -> str:
-    response = getattr(exc, "response", None)
-    status = getattr(response, "status_code", None)
-    status_text = f"; http_status={status}" if status is not None else ""
-    return f"phase={phase}{status_text}; detail={_safe_error(exc, cfg.username, cfg.password)}"
-
-
-def _is_captcha_failure(login_result: dict[str, Any]) -> bool:
-    message = str(login_result.get("msg") or "")
-    data = login_result.get("data") if isinstance(login_result.get("data"), dict) else {}
-    return "验证码" in message or data.get("code") is True
-
-
-def _nonzero_random(length: int) -> bytes:
-    result = bytearray()
-    while len(result) < length:
-        result.extend(value for value in secrets.token_bytes(length - len(result)) if value)
-    return bytes(result[:length])
-
-
-def _rsa_encrypt_password(rsa_key_hex: str, password: str) -> str:
-    modulus_hex = rsa_key_hex.strip().lower()
-    if modulus_hex.startswith("0x"):
-        modulus_hex = modulus_hex[2:]
-    if not modulus_hex:
-        raise ValueError("EDR RSA key is empty.")
-    modulus = int(modulus_hex, 16)
-    key_size = (modulus.bit_length() + 7) // 8
-    message = password.encode("utf-8")
-    if key_size < len(message) + 11:
-        raise ValueError("EDR password is too long for the login RSA key.")
-    encoded = b"\x00\x02" + _nonzero_random(key_size - len(message) - 3) + b"\x00" + message
-    encrypted = pow(int.from_bytes(encoded, "big"), PUBLIC_EXPONENT, modulus)
-    return f"{encrypted:0{key_size * 2}x}"
-
-
 def _http_headers(cfg: RuntimeConfig, *, image: bool = False) -> dict[str, str]:
     headers = {
         "Pragma": "no-cache",
@@ -392,34 +361,6 @@ def _http_headers(cfg: RuntimeConfig, *, image: bool = False) -> dict[str, str]:
             }
         )
     return headers
-
-
-def _http_session(cfg: RuntimeConfig) -> requests.Session:
-    session = requests.Session()
-    session.verify = False
-    session.headers.update({"Accept-Language": "zh-CN,zh;q=0.9"})
-    session.cookies.set("hadSetUkey", "0", domain=urlparse(cfg.base_url).hostname, path="/")
-    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
-    return session
-
-
-def _cookie_state(cookies: CookieJar, cfg: RuntimeConfig) -> list[dict[str, Any]]:
-    default_domain = urlparse(cfg.base_url).hostname or ""
-    result: list[dict[str, Any]] = []
-    for cookie in cookies:
-        item: dict[str, Any] = {
-            "name": cookie.name,
-            "value": cookie.value,
-            "domain": cookie.domain or default_domain,
-            "path": cookie.path or "/",
-            "secure": bool(cookie.secure),
-            "httpOnly": bool(cookie.has_nonstandard_attr("HttpOnly")),
-            "sameSite": "Lax",
-        }
-        if cookie.expires and cookie.expires > 0:
-            item["expires"] = float(cookie.expires)
-        result.append(item)
-    return result
 
 
 def _read_auth_state(path: Path) -> dict[str, Any]:
@@ -574,155 +515,6 @@ def _probe_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
         "http_status": 200,
         "agent_overview_verified": True,
     }
-
-
-def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
-    missing = _missing_login_inputs(cfg)
-    if missing:
-        return {
-            "success": False,
-            "status": "http_login_credentials_required",
-            "reason": "missing_http_login_credentials",
-            "missing": missing,
-        }
-    session = _http_session(cfg)
-    phase = "session_init"
-    try:
-        phase = "login_page"
-        session.get(_login_url(cfg), headers=_http_headers(cfg), timeout=cfg.timeout).raise_for_status()
-        phase = "rsakey"
-        rsa_response = session.post(
-            _url(cfg, "/login"),
-            headers=_http_headers(cfg),
-            json={"opr": "rsakey"},
-            timeout=cfg.timeout,
-        )
-        rsa_response.raise_for_status()
-        rsa_result = rsa_response.json()
-        rsa_key = str(rsa_result.get("key") or "")
-        if not rsa_result.get("success") or not rsa_key:
-            raise RuntimeError("EDR RSA key request failed.")
-
-        last_error = ""
-        for attempt in range(1, cfg.max_captcha_retry + 1):
-            code = captcha_code.strip()
-            if not code:
-                if not cfg.auto_ocr_code:
-                    return {
-                        "success": False,
-                        "status": "http_login_captcha_required",
-                        "reason": "captcha_code_required",
-                    }
-                phase = "captcha"
-                captcha_response = session.get(
-                    _url(cfg, f"/ui/randcode.php?{_now_ms()}"),
-                    headers=_http_headers(cfg, image=True),
-                    timeout=cfg.timeout,
-                )
-                captcha_response.raise_for_status()
-                code = _ocr_verify_code(captcha_response.content)
-
-            phase = "dlogin"
-            login_response = session.post(
-                _url(cfg, "/login"),
-                headers=_http_headers(cfg),
-                json={
-                    "opr": "dlogin",
-                    "data": {
-                        "auth_type": "pwd",
-                        "user_name": cfg.username,
-                        "code": code,
-                        "pwd": _rsa_encrypt_password(rsa_key, cfg.password),
-                    },
-                },
-                timeout=cfg.timeout,
-            )
-            login_response.raise_for_status()
-            login_result = login_response.json()
-            if not login_result.get("success") or login_result.get("key") in (None, ""):
-                last_error = str(login_result.get("msg") or "EDR dlogin failed.")
-                if captcha_code or not _is_captcha_failure(login_result):
-                    raise RuntimeError(last_error)
-                continue
-
-            phase = "launch_login"
-            launch_response = session.post(
-                _url(cfg, "/launch_login.php"),
-                headers=_http_headers(cfg),
-                json={
-                    "opr": "dlogin",
-                    "app_args": {"name": "app.web.auth.login", "options": {}},
-                    "data": {
-                        "key": login_result["key"],
-                        "user_aggreement_status": "true",
-                    },
-                },
-                timeout=cfg.timeout,
-            )
-            launch_response.raise_for_status()
-            launch_result = launch_response.json()
-            token = str((launch_result.get("data") or {}).get("token") or "")
-            cookies = _cookie_state(session.cookies, cfg)
-            if launch_result.get("success") and token and any(
-                cookie["name"].lower() == "sessionid" for cookie in cookies
-            ):
-                phase = "save_auth_pair"
-                saved = _save_auth_pair(
-                    cfg,
-                    {"cookies": cookies, "origins": []},
-                    token,
-                )
-                return {
-                    "success": True,
-                    "valid": True,
-                    "status": "http_login_refreshed_auth_state",
-                    "attempt": attempt,
-                    "token_saved": True,
-                    "saved": saved,
-                }
-            last_error = str(launch_result.get("msg") or "incomplete EDR cookie/token response")
-            if captcha_code:
-                break
-        raise RuntimeError(last_error or "EDR HTTP login retry limit exceeded.")
-    except Exception as exc:
-        return {
-            "success": False,
-            "valid": False,
-            "status": "http_login_failed",
-            "reason": "http_login_failed",
-            "error": _http_failure_detail(phase, exc, cfg),
-            "phase": phase,
-        }
-
-
-def _ensure_http_auth_pair(
-    cfg: RuntimeConfig,
-    *,
-    captcha_code: str = "",
-) -> dict[str, Any]:
-    probe = _probe_auth_pair(cfg)
-    if probe.get("valid"):
-        return {
-            "success": True,
-            "valid": True,
-            "status": "http_auth_pair_reused",
-            "login_skipped": True,
-            "probe": probe,
-        }
-    result = _http_login(cfg, captcha_code=captcha_code)
-    result["previous_probe"] = probe
-    if result.get("success"):
-        confirmation = _probe_auth_pair(cfg)
-        result["probe"] = confirmation
-        if not confirmation.get("valid"):
-            return {
-                **result,
-                "success": False,
-                "valid": False,
-                "status": "http_login_probe_failed",
-                "reason": str(confirmation.get("reason") or "http_login_probe_failed"),
-            }
-    return result
 
 
 def _login_url(cfg: RuntimeConfig) -> str:
@@ -1517,48 +1309,8 @@ def _collect_dashboard(
     sections: list[str],
     days: int,
 ) -> dict[str, Any]:
-    auth = _ensure_http_auth_pair(cfg)
-    if not auth.get("success"):
-        raise RuntimeError(
-            "EDR authentication refresh failed: "
-            f"{auth.get('error') or auth.get('reason') or auth.get('status')}"
-        )
-    state, token = _load_verified_auth_pair(cfg)
-    session = _dashboard_session(cfg, state)
-    definitions = _dashboard_requests(cfg, token, days=days)
-    selected = sections or list(definitions)
-    unknown = sorted(set(selected) - set(definitions))
-    if unknown:
-        raise ValueError(f"Unsupported EDR dashboard sections: {', '.join(unknown)}")
-    data: dict[str, Any] = {}
-    errors: dict[str, str] = {}
-    for section in selected:
-        path, payload = definitions[section]
-        try:
-            response = session.post(
-                _url(cfg, path),
-                headers=_http_headers(cfg),
-                json=payload,
-                timeout=cfg.timeout,
-            )
-            response.raise_for_status()
-            data[section] = response.json()
-        except Exception as exc:
-            errors[section] = _safe_error(exc, token)
-    return {
-        "success": not errors,
-        "status": "dashboard_api_collected" if not errors else "dashboard_api_partially_collected",
-        "base_url": cfg.base_url,
-        "days": days,
-        "sections": selected,
-        "data": data,
-        "errors": errors,
-        "auth_pair_verified": True,
-        "authentication": {
-            "status": auth.get("status"),
-            "login_skipped": bool(auth.get("login_skipped")),
-        },
-    }
+    """Compatibility entry point; dashboard API implementation is standalone."""
+    return _dashboard_api_module.collect_dashboard(cfg, sections=sections, days=days)
 
 
 # ── Tool actions ─────────────────────────────────────────────────────────────
@@ -1576,17 +1328,12 @@ async def handle(ctx: ToolContext) -> ToolResult:
     action = str(params.get("action") or "ensure_auth_state").strip()
 
     try:
-        if action == "status_auth_state":
-            status = _saved_auto_login_status(params)
-            validation = status.get("auth_probe")
+        if action in {"status_auth_state", "ensure_auth_state", "refresh_auth_state", "http_login"}:
+            result = _http_login_module.run_auth_action(params)
             return ToolResult(
-                success=True,
-                output={
-                    "success": True,
-                    "status": "saved_auto_login_status",
-                    **status,
-                    "validation": validation,
-                },
+                success=bool(result.get("success")),
+                output=result,
+                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         cfg = _resolve_runtime_config(params)
@@ -1605,17 +1352,6 @@ async def handle(ctx: ToolContext) -> ToolResult:
                 success=bool(result.get("success")),
                 output=result,
                 error=None if result.get("success") else result.get("reason"),
-            )
-
-        if action == "http_login":
-            result = _ensure_http_auth_pair(
-                cfg,
-                captcha_code=str(params.get("captcha_code") or ""),
-            )
-            return ToolResult(
-                success=bool(result.get("success")),
-                output=result,
-                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         if action == "browser_login":
@@ -1662,10 +1398,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
                 ),
             )
 
-        result = _ensure_http_auth_pair(
-            cfg,
-            captcha_code=str(params.get("captcha_code") or ""),
-        )
+        result = _http_login_module.run_auth_action(params)
         return ToolResult(
             success=bool(result.get("success")),
             output=result,
@@ -1678,19 +1411,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
 async def handle_dashboard(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
     try:
-        cfg = _resolve_runtime_config({**params, "persist_credentials": False})
-        raw_sections = params.get("sections")
-        if isinstance(raw_sections, str):
-            sections = [item.strip() for item in raw_sections.split(",") if item.strip()]
-        elif isinstance(raw_sections, list):
-            sections = [str(item).strip() for item in raw_sections if str(item).strip()]
-        else:
-            sections = []
-        result = _collect_dashboard(
-            cfg,
-            sections=sections,
-            days=max(1, min(90, _coerce_int(params.get("days"), 7))),
-        )
+        result = _dashboard_api_module.run_dashboard(params)
         return ToolResult(
             success=bool(result.get("success")),
             output=result,

@@ -222,6 +222,7 @@ def test_auth_pair_rejects_cookie_token_mismatch(tmp_path, monkeypatch):
 
 def test_http_login_saves_matched_cookie_and_token(tmp_path, monkeypatch):
     handler = _load_handler()
+    http = handler._http_login_module
     cfg = _cfg(handler, tmp_path / "auth-state.json")
 
     class Response:
@@ -237,7 +238,7 @@ def test_http_login_saves_matched_cookie_and_token(tmp_path, monkeypatch):
 
     class Session:
         def __init__(self):
-            self.cookies = handler.requests.cookies.RequestsCookieJar()
+            self.cookies = http.requests.cookies.RequestsCookieJar()
             self.cookies.set("sessionid", "cookie-value", domain="edr.example.com", path="/")
             self.posts = []
 
@@ -254,15 +255,15 @@ def test_http_login_saves_matched_cookie_and_token(tmp_path, monkeypatch):
             return Response({"success": True, "data": {"token": "token-value"}})
 
     saved = {}
-    monkeypatch.setattr(handler, "_http_session", lambda cfg: Session())
-    monkeypatch.setattr(handler, "_ocr_verify_code", lambda content: "1234")
+    monkeypatch.setattr(http, "http_session", lambda cfg: Session())
+    monkeypatch.setattr(http, "_ocr_verify_code", lambda content: "1234")
     monkeypatch.setattr(
-        handler,
+        http,
         "_save_auth_pair",
         lambda cfg, state, token: saved.update({"state": state, "token": token}) or {"pair_verified": True},
     )
 
-    result = handler._http_login(cfg)
+    result = http._http_login(cfg)
 
     assert result["status"] == "http_login_refreshed_auth_state"
     assert saved["token"] == "token-value"
@@ -366,19 +367,20 @@ def test_auth_probe_rejects_login_redirect(tmp_path, monkeypatch):
 
 def test_http_auth_reuses_valid_pair_without_login(tmp_path, monkeypatch):
     handler = _load_handler()
+    http = handler._http_login_module
     cfg = _cfg(handler, tmp_path / "auth-state.json")
     monkeypatch.setattr(
-        handler,
-        "_probe_auth_pair",
+        http,
+        "probe_auth_pair",
         lambda cfg: {"valid": True, "reason": "auth_probe_succeeded"},
     )
     monkeypatch.setattr(
-        handler,
+        http,
         "_http_login",
         lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("login must be skipped")),
     )
 
-    result = handler._ensure_http_auth_pair(cfg)
+    result = http.ensure_http_auth_pair(cfg)
 
     assert result["status"] == "http_auth_pair_reused"
     assert result["login_skipped"] is True
@@ -386,6 +388,7 @@ def test_http_auth_reuses_valid_pair_without_login(tmp_path, monkeypatch):
 
 def test_http_auth_relogs_and_confirms_when_probe_fails(tmp_path, monkeypatch):
     handler = _load_handler()
+    http = handler._http_login_module
     cfg = _cfg(handler, tmp_path / "auth-state.json")
     probes = iter(
         [
@@ -393,14 +396,14 @@ def test_http_auth_relogs_and_confirms_when_probe_fails(tmp_path, monkeypatch):
             {"valid": True, "reason": "auth_probe_succeeded"},
         ]
     )
-    monkeypatch.setattr(handler, "_probe_auth_pair", lambda cfg: next(probes))
+    monkeypatch.setattr(http, "probe_auth_pair", lambda cfg: next(probes))
     monkeypatch.setattr(
-        handler,
+        http,
         "_http_login",
         lambda cfg, captcha_code="": {"success": True, "status": "http_login_refreshed_auth_state"},
     )
 
-    result = handler._ensure_http_auth_pair(cfg)
+    result = http.ensure_http_auth_pair(cfg)
 
     assert result["success"] is True
     assert result["previous_probe"]["reason"] == "auth_probe_unauthorized"
@@ -421,15 +424,16 @@ def test_dashboard_error_redacts_login_token():
 
 def test_http_login_reports_failure_phase(tmp_path, monkeypatch):
     handler = _load_handler()
+    http = handler._http_login_module
     cfg = _cfg(handler, tmp_path / "auth-state.json")
 
     class Session:
         def get(self, *args, **kwargs):
-            raise handler.requests.ConnectionError("connection refused")
+            raise http.requests.ConnectionError("connection refused")
 
-    monkeypatch.setattr(handler, "_http_session", lambda cfg: Session())
+    monkeypatch.setattr(http, "http_session", lambda cfg: Session())
 
-    result = handler._http_login(cfg)
+    result = http._http_login(cfg)
 
     assert result["status"] == "http_login_failed"
     assert result["phase"] == "login_page"
@@ -439,6 +443,7 @@ def test_http_login_reports_failure_phase(tmp_path, monkeypatch):
 
 def test_http_login_retries_captcha_dlogin_failure(tmp_path, monkeypatch):
     handler = _load_handler()
+    http = handler._http_login_module
     cfg = _cfg(handler, tmp_path / "auth-state.json")
     cfg.max_captcha_retry = 2
 
@@ -455,7 +460,7 @@ def test_http_login_retries_captcha_dlogin_failure(tmp_path, monkeypatch):
 
     class Session:
         def __init__(self):
-            self.cookies = handler.requests.cookies.RequestsCookieJar()
+            self.cookies = http.requests.cookies.RequestsCookieJar()
             self.cookies.set("sessionid", "cookie-value", domain="edr.example.com", path="/")
             self.dlogin_count = 0
 
@@ -474,11 +479,11 @@ def test_http_login_retries_captcha_dlogin_failure(tmp_path, monkeypatch):
             return Response({"success": True, "data": {"token": "token-value"}})
 
     session = Session()
-    monkeypatch.setattr(handler, "_http_session", lambda cfg: session)
-    monkeypatch.setattr(handler, "_ocr_verify_code", lambda content: "1234")
-    monkeypatch.setattr(handler, "_save_auth_pair", lambda cfg, state, token: {"pair_verified": True})
+    monkeypatch.setattr(http, "http_session", lambda cfg: session)
+    monkeypatch.setattr(http, "_ocr_verify_code", lambda content: "1234")
+    monkeypatch.setattr(http, "_save_auth_pair", lambda cfg, state, token: {"pair_verified": True})
 
-    result = handler._http_login(cfg)
+    result = http._http_login(cfg)
 
     assert result["success"] is True
     assert result["attempt"] == 2
