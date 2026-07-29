@@ -58,7 +58,7 @@ def _chunk(
 
 
 @pytest.mark.asyncio
-async def test_search_reconciles_filesystem_even_when_manager_is_clean(
+async def test_search_reconciles_filesystem_before_every_search(
     tmp_path: Path,
 ) -> None:
     manager = MemoryManager(
@@ -67,7 +67,6 @@ async def test_search_reconciles_filesystem_even_when_manager_is_clean(
         config=MemoryConfig(),
     )
     manager._initialized = True
-    manager._dirty = False
     manager.sync = AsyncMock(return_value={})
     manager.search_engine = SimpleNamespace(
         search=AsyncMock(return_value=[]),

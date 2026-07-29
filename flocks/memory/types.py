@@ -52,7 +52,6 @@ class MemoryProviderStatus(BaseModel):
     # Statistics
     files: int = Field(0, description="Number of indexed files")
     chunks: int = Field(0, description="Number of indexed chunks")
-    dirty: bool = Field(False, description="Whether sync is needed")
     
     # Configuration
     workspace_dir: Optional[str] = Field(None, description="Workspace directory")

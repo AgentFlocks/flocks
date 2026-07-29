@@ -173,7 +173,6 @@ Use async/await for I/O-bound operations to improve performance.
             path = await manager.write_memory(new_entry, append=True)
             print(f"   Written to: {path}")
             print(f"   Content length: {len(new_entry)} chars")
-            print(f"   Dirty flag: {manager._dirty}")
             print("✅ write_memory working correctly")
             
             # Sync/Index files
@@ -270,7 +269,6 @@ Use async/await for I/O-bound operations to improve performance.
             print(f"   Provider: {status.provider}")
             print(f"   Model: {status.model}")
             print(f"   Sources: {[s.value for s in status.sources]}")
-            print(f"   Dirty: {status.dirty}")
             print("✅ Status reporting working correctly")
         
         # Final summary

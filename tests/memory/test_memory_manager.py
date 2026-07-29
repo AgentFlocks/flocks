@@ -17,7 +17,7 @@ async def test_memory_manager():
     print("=" * 60)
     
     # Test 1: Import modules
-    print("\n[1/7] Testing imports...")
+    print("\n[1/6] Testing imports...")
     try:
         from flocks.memory import MemoryManager, MemoryConfig
         from flocks.storage import Storage
@@ -30,7 +30,7 @@ async def test_memory_manager():
         return False
     
     # Test 2: Test singleton pattern
-    print("\n[2/7] Testing singleton pattern...")
+    print("\n[2/6] Testing singleton pattern...")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(enabled=True)
@@ -69,7 +69,7 @@ async def test_memory_manager():
         return False
     
     # Test 3: Test initialization
-    print("\n[3/7] Testing initialization...")
+    print("\n[3/6] Testing initialization...")
     try:
         await Storage.init()
         await Provider.init()
@@ -114,7 +114,7 @@ async def test_memory_manager():
         return False
     
     # Test 4: Test status method
-    print("\n[4/7] Testing status method...")
+    print("\n[4/6] Testing status method...")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             config = MemoryConfig(
@@ -134,9 +134,7 @@ async def test_memory_manager():
             print(f"   Provider: {status.provider}")
             print(f"   Model: {status.model}")
             print(f"   Sources: {[s.value for s in status.sources]}")
-            print(f"   Dirty: {status.dirty}")
-            
-            assert status.enabled == True, "Should be enabled"
+            assert status.enabled, "Should be enabled"
             assert len(status.sources) == 2, "Should have 2 sources"
             
             print("✅ Status method working correctly")
@@ -147,7 +145,7 @@ async def test_memory_manager():
         return False
     
     # Test 5: Test write_memory method
-    print("\n[5/7] Testing write_memory method...")
+    print("\n[5/6] Testing write_memory method...")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -180,9 +178,6 @@ async def test_memory_manager():
             appended = file_path.read_text()
             assert append_content in appended, "Appended content should be present"
             
-            # Check dirty flag
-            assert manager._dirty == True, "Should be marked as dirty"
-            
             print("✅ Write memory working correctly")
     except Exception as e:
         print(f"❌ Write memory test failed: {e}")
@@ -191,7 +186,7 @@ async def test_memory_manager():
         return False
     
     # Test 6: Test read_file method
-    print("\n[6/7] Testing read_file method...")
+    print("\n[6/6] Testing read_file method...")
     try:
         with tempfile.TemporaryDirectory() as tmpdir:
             workspace = Path(tmpdir)
@@ -228,32 +223,6 @@ async def test_memory_manager():
         traceback.print_exc()
         return False
     
-    # Test 7: Test mark_dirty method
-    print("\n[7/7] Testing mark_dirty method...")
-    try:
-        with tempfile.TemporaryDirectory() as tmpdir:
-            config = MemoryConfig(enabled=True)
-            
-            manager = MemoryManager(
-                project_id="test_proj",
-                workspace_dir=tmpdir,
-                config=config,
-            )
-            
-            print(f"   Initial dirty: {manager._dirty}")
-            assert manager._dirty == False, "Should start clean"
-            
-            manager.mark_dirty()
-            print(f"   After mark: {manager._dirty}")
-            assert manager._dirty == True, "Should be dirty after mark"
-            
-            print("✅ Mark dirty working correctly")
-    except Exception as e:
-        print(f"❌ Mark dirty test failed: {e}")
-        import traceback
-        traceback.print_exc()
-        return False
-    
     print("\n" + "=" * 60)
     print("✅ All memory manager tests passed!")
     print("=" * 60)
@@ -264,8 +233,6 @@ async def test_memory_manager():
     print("   - File indexing orchestration")
     print("   - Memory file read/write")
     print("   - Status reporting")
-    print("   - Dirty tracking for sync")
-    
     print("\n⚠️  Note: Full search/sync tests require:")
     print("   - Indexed memory files")
     print("   - API keys for embeddings")

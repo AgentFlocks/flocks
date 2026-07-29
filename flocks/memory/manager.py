@@ -42,7 +42,6 @@ class _MemoryIndexCoordinator:
         self.indexer: Optional[MemoryIndexer] = None
         self.signature: Optional[tuple[Any, ...]] = None
         self.initialized = False
-        self.dirty = True
         self.sync_lock = asyncio.Lock()
         self.write_lock = asyncio.Lock()
 
@@ -75,32 +74,49 @@ class _MemoryIndexCoordinator:
         )
         self.signature = signature
         self.initialized = False
-        self.dirty = True
         return self.indexer
+
+    async def _sync_locked(
+        self,
+        *,
+        force: bool,
+        progress_callback: Optional[Callable[[MemorySyncProgress], None]],
+    ) -> Dict[str, Any]:
+        """Reconcile while the coordinator sync lock is held."""
+        if self.indexer is None:
+            raise RuntimeError("Memory file indexer is not configured")
+        async with self.write_lock:
+            stats = await self.indexer.sync(
+                force=force,
+                progress_callback=progress_callback,
+            )
+        self.initialized = True
+        return stats
+
+    async def sync_on_start(self) -> Optional[Dict[str, Any]]:
+        """Run the initial reconciliation once for a shared indexer."""
+        async with self.sync_lock:
+            if self.initialized:
+                return None
+            return await self._sync_locked(
+                force=False,
+                progress_callback=None,
+            )
 
     async def sync(
         self,
         *,
         force: bool = False,
-        only_if_needed: bool = False,
         progress_callback: Optional[
             Callable[[MemorySyncProgress], None]
         ] = None,
-    ) -> Optional[Dict[str, Any]]:
-        """Serialize global scans and optionally skip an already-clean index."""
+    ) -> Dict[str, Any]:
+        """Serialize global Memory index reconciliation."""
         async with self.sync_lock:
-            if only_if_needed and self.initialized and not self.dirty:
-                return None
-            if self.indexer is None:
-                raise RuntimeError("Memory file indexer is not configured")
-            async with self.write_lock:
-                stats = await self.indexer.sync(
-                    force=force,
-                    progress_callback=progress_callback,
-                )
-                self.initialized = True
-                self.dirty = False
-                return stats
+            return await self._sync_locked(
+                force=force,
+                progress_callback=progress_callback,
+            )
 
 
 class MemoryManager:
@@ -149,7 +165,6 @@ class MemoryManager:
         
         # State
         self._initialized = False
-        self._dirty = False
         self._init_lock = asyncio.Lock()
         self._index_coordinator: Optional[_MemoryIndexCoordinator] = None
 
@@ -163,26 +178,6 @@ class MemoryManager:
             cls._index_coordinators[key] = coordinator
         return coordinator
 
-    def _mark_index_dirty(self) -> None:
-        """Mark the shared file index dirty for every project manager."""
-        coordinator = self._index_coordinator or self._coordinator_for_active_db()
-        coordinator.dirty = True
-        for manager in self._instances.values():
-            manager._dirty = True
-        self._dirty = True
-
-    def _mark_index_clean(self, coordinator: _MemoryIndexCoordinator) -> None:
-        """Clear dirty flags for managers sharing this index owner."""
-        if coordinator.dirty:
-            return
-        for manager in self._instances.values():
-            if (
-                manager._index_coordinator is None
-                or manager._index_coordinator is coordinator
-            ):
-                manager._dirty = False
-        self._dirty = False
-    
     @classmethod
     def get_instance(
         cls,
@@ -298,12 +293,10 @@ class MemoryManager:
                     for manager in self._instances.values():
                         if manager._index_coordinator is coordinator:
                             manager.indexer = self.indexer
-                            manager._dirty = True
                 
                 self._initialized = True
                 if self.config.sync.on_session_start:
-                    await coordinator.sync(only_if_needed=True)
-                    self._mark_index_clean(coordinator)
+                    await coordinator.sync_on_start()
                 if (
                     "session" in self.config.sources
                     and self.config.sync.sessions.enabled
@@ -373,9 +366,8 @@ class MemoryManager:
             await self._persist_session_source()
 
         # Filesystem tools and external editors can update Memory without going
-        # through MemoryManager, so dirty flags cannot be a correctness gate.
-        # Reconcile the index on every search and let the indexer skip files
-        # whose content hash is unchanged.
+        # through MemoryManager. Reconcile on every search and let the indexer
+        # skip files whose content hash is unchanged.
         if self.config.sync.on_search:
             await self.sync(reason="search")
 
@@ -557,9 +549,6 @@ class MemoryManager:
             else:
                 with open(file_path, "w", encoding="utf-8") as f:
                     f.write(content)
-            # Mark as dirty before releasing the shared write/sync barrier.
-            self._mark_index_dirty()
-        
         log.info("manager.write", {"path": path, "append": append, "length": len(content)})
         
         return path
@@ -596,11 +585,9 @@ class MemoryManager:
                 force=force,
                 progress_callback=progress_callback,
             )
-            self._mark_index_clean(coordinator)
 
-            result = stats or {}
-            log.info("manager.sync.complete", result)
-            return result
+            log.info("manager.sync.complete", stats)
+            return stats
 
         except Exception as e:
             log.error("manager.sync.failed", {"error": str(e)})
@@ -614,7 +601,6 @@ class MemoryManager:
             Status information
         """
         # TODO: Implement comprehensive status collection
-        coordinator = self._index_coordinator or self._coordinator_for_active_db()
         return MemoryProviderStatus(
             enabled=self.config.enabled,
             provider=self.provider_id or "fts",
@@ -622,7 +608,6 @@ class MemoryManager:
             requested_provider=self.config.embedding.provider,
             workspace_dir=str(self.workspace_dir),
             sources=[MemorySource(s) for s in self.config.sources],
-            dirty=self._dirty or coordinator.dirty,
             cache={"enabled": self.config.cache.enabled},
             fts={"enabled": True},  # Always available
             vector={"enabled": self.provider_id is not None},
@@ -644,7 +629,3 @@ class MemoryManager:
                 if candidate is coordinator:
                     self._index_coordinators.pop(key, None)
         log.info("manager.closed", {"project_id": self.project_id})
-    
-    def mark_dirty(self) -> None:
-        """Mark as needing sync"""
-        self._mark_index_dirty()
