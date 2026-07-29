@@ -7,6 +7,11 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 
 ## 核心功能
 
+实现边界：`sangfor_edr_http_login.py` 负责 HTTP 登录、认证探测、
+`auth-state.json` Cookie 及 Secret Manager token bundle；
+`sangfor_edr_dashboard_api.py` 负责仪表盘 API 请求，只读取 HTTP 登录模块
+验证过的同一套 Cookie/token，不从其他状态源拼接凭据。
+
 - 管理同一次登录产生的 Cookie 与 `login_token`。
 - 默认使用 HTTP 登录；仅当用户明确选择自动化登录时使用 browser/CDP。
 - 每次登录或数据采集前探测现有认证，认证有效则跳过登录，失效则重新登录并更新存储。

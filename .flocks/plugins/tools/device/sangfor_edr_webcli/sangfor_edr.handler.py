@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import secrets
+import sys
 import time
 from datetime import datetime, timedelta
 from http.cookiejar import CookieJar
@@ -21,6 +22,12 @@ from flocks.browser import helpers
 from flocks.browser.admin import ensure_daemon
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
+
+_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
+import sangfor_edr_dashboard_api as _dashboard_api_module  # noqa: E402
+import sangfor_edr_http_login as _http_login_module  # noqa: E402
 
 SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
@@ -1576,17 +1583,12 @@ async def handle(ctx: ToolContext) -> ToolResult:
     action = str(params.get("action") or "ensure_auth_state").strip()
 
     try:
-        if action == "status_auth_state":
-            status = _saved_auto_login_status(params)
-            validation = status.get("auth_probe")
+        if action in {"status_auth_state", "ensure_auth_state", "refresh_auth_state", "http_login"}:
+            result = _http_login_module.run_auth_action(params)
             return ToolResult(
-                success=True,
-                output={
-                    "success": True,
-                    "status": "saved_auto_login_status",
-                    **status,
-                    "validation": validation,
-                },
+                success=bool(result.get("success")),
+                output=result,
+                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         cfg = _resolve_runtime_config(params)
@@ -1605,17 +1607,6 @@ async def handle(ctx: ToolContext) -> ToolResult:
                 success=bool(result.get("success")),
                 output=result,
                 error=None if result.get("success") else result.get("reason"),
-            )
-
-        if action == "http_login":
-            result = _ensure_http_auth_pair(
-                cfg,
-                captcha_code=str(params.get("captcha_code") or ""),
-            )
-            return ToolResult(
-                success=bool(result.get("success")),
-                output=result,
-                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         if action == "browser_login":
@@ -1662,10 +1653,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
                 ),
             )
 
-        result = _ensure_http_auth_pair(
-            cfg,
-            captcha_code=str(params.get("captcha_code") or ""),
-        )
+        result = _http_login_module.run_auth_action(params)
         return ToolResult(
             success=bool(result.get("success")),
             output=result,
@@ -1678,19 +1666,7 @@ async def handle(ctx: ToolContext) -> ToolResult:
 async def handle_dashboard(ctx: ToolContext) -> ToolResult:
     params = dict(ctx.params)
     try:
-        cfg = _resolve_runtime_config({**params, "persist_credentials": False})
-        raw_sections = params.get("sections")
-        if isinstance(raw_sections, str):
-            sections = [item.strip() for item in raw_sections.split(",") if item.strip()]
-        elif isinstance(raw_sections, list):
-            sections = [str(item).strip() for item in raw_sections if str(item).strip()]
-        else:
-            sections = []
-        result = _collect_dashboard(
-            cfg,
-            sections=sections,
-            days=max(1, min(90, _coerce_int(params.get("days"), 7))),
-        )
+        result = _dashboard_api_module.run_dashboard(params)
         return ToolResult(
             success=bool(result.get("success")),
             output=result,
