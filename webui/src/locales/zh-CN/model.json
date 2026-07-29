@@ -18,6 +18,12 @@
     "noCost": "暂无费用",
     "toggleCurrency": "点击切换人民币 / 美元"
   },
+  "modelSelection": {
+    "info": "模型信息",
+    "free": "免费",
+    "unavailable": "暂无",
+    "closeDefault": "关闭默认模型选择"
+  },
   "providerList": {
     "empty": "尚未添加模型供应商",
     "emptyHint": "点击右上角「添加模型供应商」开始配置",

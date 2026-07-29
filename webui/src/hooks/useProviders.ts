@@ -31,7 +31,9 @@ function normalizeProvidersPayload(data: unknown): ProvidersResourceData {
   const connectedSet = new Set(connectedIds);
   const providers: EnrichedProvider[] = rawProviders.map((provider) => {
     const modelCount = provider.models ? Object.keys(provider.models).length : 0;
-    const configured = connectedSet.has(provider.id);
+    const configured = typeof provider.configured === 'boolean'
+      ? provider.configured
+      : connectedSet.has(provider.id);
     const category: ProviderCategory = configured ? 'connected' : getProviderCategory(provider.id);
     return {
       ...provider,

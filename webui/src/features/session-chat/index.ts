@@ -1,6 +1,7 @@
 export {
   buildInstructionDisplayText,
   parseInstructionDisplayText,
+  stripTaskMetadata,
   type PromptDisplayOptions,
   type SessionChatDisplay,
 } from './display';

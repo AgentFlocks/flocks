@@ -73,5 +73,10 @@ async def clear_session_callable_tools(session_id: str) -> None:
     await Storage.delete(f"{_CALLABLE_PREFIX}{session_id}")
 
 
+def invalidate_session_callable_tools_cache(session_id: str) -> None:
+    """Drop process-local callable-tool state after an external transaction."""
+    _cache.pop(session_id, None)
+
+
 async def session_can_call_tool(session_id: str, tool_name: str) -> bool:
     return tool_name in await get_session_callable_tools(session_id)

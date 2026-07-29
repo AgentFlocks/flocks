@@ -43,7 +43,7 @@
   },
   "quickActions": {
     "sessions": {
-      "title": "Sessions",
+      "title": "Workbench",
       "description": "Chat with AI to complete complex security tasks"
     },
     "workflows": {

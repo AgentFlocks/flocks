@@ -120,10 +120,17 @@ export default function ChatTab({
     groupedOptions: groupedChatModelOptions,
     loading: loadingChatModels,
     options: chatModelOptions,
+    canSelectAuto,
+    effectiveModelOption,
+    modelPickerAutoOption,
+    selectAuto,
+    selectModelKey,
+    selectedModelAuto,
     selectedModelOption,
     selectedPromptModel,
+    setSelectedModelAuto,
     setSelectedModelKey,
-  } = useChatModelOptions();
+  } = useChatModelOptions({ enableAuto: true });
   const sessionPinnedModelKey = sessionPinnedModel
     ? `${sessionPinnedModel.providerID}::${sessionPinnedModel.modelID}`
     : null;
@@ -131,16 +138,25 @@ export default function ChatTab({
     sessionPinnedModelKey && chatModelOptions.some((option) => option.key === sessionPinnedModelKey),
   );
   const effectiveSessionPinnedModel = hasSessionPinnedModelOption ? sessionPinnedModel : null;
-  const effectiveSupportsVision = selectedModelOption?.supportsVision ?? defaultSupportsVision;
+  const effectiveSupportsVision = effectiveModelOption?.supportsVision ?? defaultSupportsVision;
 
   const applySessionModel = useCallback((session: unknown) => {
     const data = session as {
       provider?: unknown;
       model?: unknown;
+      model_auto?: unknown;
       model_pinned?: unknown;
     } | null;
     const providerID = typeof data?.provider === 'string' ? data.provider : '';
     const modelID = typeof data?.model === 'string' ? data.model : '';
+
+    if (data?.model_auto) {
+      setSessionPinnedModel(null);
+      setSelectedModelAuto(true);
+      return;
+    }
+
+    setSelectedModelAuto(false);
 
     if (data?.model_pinned && providerID && modelID) {
       setSessionPinnedModel({ providerID, modelID });
@@ -150,7 +166,7 @@ export default function ChatTab({
 
     setSessionPinnedModel(null);
     setSelectedModelKey(null);
-  }, [setSelectedModelKey]);
+  }, [setSelectedModelAuto, setSelectedModelKey]);
 
   useEffect(() => {
     workflowRevisionRef.current = workflowRevisionKey(workflow);
@@ -190,6 +206,7 @@ export default function ChatTab({
   } = useSessionChat({
     title: t('detail.chat.sessionTitle', { name: workflowDisplayName }),
     category: 'workflow',
+    modelAuto: selectedModelAuto,
     contextMessage: [
       t('detail.chat.contextMessage', workflowChatPromptParams),
       workflowChatPromptParams.backendConfigAccessGuide,
@@ -214,6 +231,7 @@ export default function ChatTab({
 
     if (!sessionId) {
       setSessionPinnedModel(null);
+      setSelectedModelAuto(false);
       setSelectedModelKey(null);
       return;
     }
@@ -227,13 +245,14 @@ export default function ChatTab({
       .catch(() => {
         if (cancelled || hydrationId !== sessionModelHydrationRef.current) return;
         setSessionPinnedModel(null);
+        setSelectedModelAuto(false);
         setSelectedModelKey(null);
       });
 
     return () => {
       cancelled = true;
     };
-  }, [applySessionModel, sessionId]);
+  }, [applySessionModel, sessionId, setSelectedModelAuto, setSelectedModelKey]);
 
   // Load stored sessions and validate only the active one (lightweight check)
   useEffect(() => {
@@ -339,6 +358,7 @@ export default function ChatTab({
             imageParts,
             agent: effectiveAgent,
             model: effectiveModel,
+            modelAuto: selectedModelAuto,
             displayText: effectiveDisplayText,
           });
         } else {
@@ -350,7 +370,7 @@ export default function ChatTab({
         setInitialMessage(null);
       }
     },
-    [onFirstMessageSent, selectedPromptModel, createSession, createAndSendSession],
+    [onFirstMessageSent, selectedModelAuto, selectedPromptModel, createSession, createAndSendSession],
   );
 
   const handleWelcomeGuidePrompt = useCallback(
@@ -385,7 +405,7 @@ export default function ChatTab({
     sessionModelHydrationRef.current += 1;
     const nextModel = { providerID: option.providerID, modelID: option.modelID };
     setSessionPinnedModel(nextModel);
-    setSelectedModelKey(option.key);
+    selectModelKey(option.key);
 
     if (!sessionId) return;
 
@@ -393,10 +413,26 @@ export default function ChatTab({
       provider: option.providerID,
       model: option.modelID,
       model_pinned: true,
+      model_auto: false,
     }).catch((err) => {
       console.warn('[WorkflowDetail] failed to pin workflow chat model', err);
     });
-  }, [sessionId, setSelectedModelKey]);
+  }, [selectModelKey, sessionId]);
+
+  const handleSelectAuto = useCallback(() => {
+    if (!canSelectAuto) return;
+    sessionModelHydrationRef.current += 1;
+    setSessionPinnedModel(null);
+    selectAuto();
+
+    if (!sessionId) return;
+    client.patch(`/api/session/${sessionId}`, {
+      model_auto: true,
+      model_pinned: false,
+    }).catch((err) => {
+      console.warn('[WorkflowDetail] failed to enable Auto for workflow chat', err);
+    });
+  }, [canSelectAuto, selectAuto, sessionId]);
 
   // Helper: fetch fresh workflow and notify parent if updated
   const checkWorkflowUpdate = useCallback(async () => {
@@ -561,8 +597,9 @@ export default function ChatTab({
           initialMessage={initialMessage}
           onSSEEvent={handleSSEEvent}
           supportsVision={effectiveSupportsVision}
-          contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
+          contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={effectiveSessionPinnedModel ?? selectedPromptModel}
+          modelAuto={selectedModelAuto}
           onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
           composerTextareaMinHeight={48}
           composerTextareaMaxHeight={120}
@@ -578,6 +615,9 @@ export default function ChatTab({
               loading={loadingChatModels}
               selectedModelOption={selectedModelOption}
               onSelectModel={handleSelectModel}
+              autoOption={modelPickerAutoOption
+                ? { ...modelPickerAutoOption, onSelect: handleSelectAuto }
+                : undefined}
             />
           }
           conversationBottomSlot={({ sendPrompt, sending, streaming }) => (

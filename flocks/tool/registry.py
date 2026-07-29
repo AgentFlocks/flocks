@@ -267,6 +267,20 @@ class ToolContext:
             always: Always-allow patterns
             metadata: Additional metadata
         """
+        execution_mode = self.extra.get("execution_mode")
+        if execution_mode:
+            from flocks.session.execution_mode import is_permission_allowed
+
+            if not is_permission_allowed(
+                execution_mode,
+                permission,
+                patterns,
+                self,
+            ):
+                raise PermissionError(
+                    "Plan mode may only edit the current session plan file."
+                )
+
         request = PermissionRequest(
             permission=permission,
             patterns=patterns,
@@ -869,6 +883,40 @@ class ToolRegistry:
                 session_id="default",
                 message_id="default"
             )
+
+        execution_mode = ctx.extra.get("execution_mode")
+        if execution_mode:
+            from flocks.session.execution_mode import (
+                is_tool_allowed,
+                tool_call_denial_reason,
+            )
+
+            if not is_tool_allowed(execution_mode, tool_name):
+                log.warn("tool.execute.execution_mode_denied", {
+                    "name": tool_name,
+                    "execution_mode": str(execution_mode),
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Tool {tool_name!r} is not available in "
+                        f"{str(execution_mode)!r} execution mode."
+                    ),
+                )
+            denial_reason = tool_call_denial_reason(
+                execution_mode,
+                tool_name,
+                kwargs,
+                ctx,
+            )
+            if denial_reason:
+                log.warn("tool.execute.execution_mode_call_denied", {
+                    "name": tool_name,
+                    "execution_mode": str(execution_mode),
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(success=False, error=denial_reason)
 
         log.info("tool.execute", {
             "name": tool_name,
@@ -1616,7 +1664,7 @@ class ToolRegistry:
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
             # system/ — questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context and status probes
@@ -1650,16 +1698,43 @@ class ToolRegistry:
         if "get_time" not in cls._tools:
             @cls.register_function(
                 name="get_time",
-                description="Get current date and time",
+                description="Get current date and time in ISO 8601 or Unix timestamp format",
                 category=ToolCategory.SYSTEM,
                 native=True,
-                parameters=[]
+                parameters=[
+                    ToolParameter(
+                        name="format",
+                        type=ParameterType.STRING,
+                        description=(
+                            "Output format: 'iso' for ISO 8601, 'unix' for Unix seconds, "
+                            "or 'unix_ms' for Unix milliseconds. Defaults to 'iso'."
+                        ),
+                        required=False,
+                        default="iso",
+                        enum=["iso", "unix", "unix_ms"],
+                    )
+                ]
             )
-            async def get_time(ctx: ToolContext) -> ToolResult:
+            async def get_time(ctx: ToolContext, format: str = "iso") -> ToolResult:
                 from datetime import datetime
+
+                if format not in {"iso", "unix", "unix_ms"}:
+                    return ToolResult(
+                        success=False,
+                        error="format must be one of: iso, unix, unix_ms",
+                    )
+
+                now = datetime.now()
+                if format == "unix":
+                    output = str(int(now.timestamp()))
+                elif format == "unix_ms":
+                    output = str(int(now.timestamp() * 1000))
+                else:
+                    output = now.isoformat()
+
                 return ToolResult(
                     success=True,
-                    output=datetime.now().isoformat()
+                    output=output,
                 )
 
     @classmethod

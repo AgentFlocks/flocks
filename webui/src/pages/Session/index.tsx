@@ -1,18 +1,20 @@
 import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
-  Plus, Trash2,
-  ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
+  Plus, Trash2, Archive,
+  ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info,
-  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
+  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X, Check,
+  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive, BookOpen,
+  Hammer, ClipboardList, Target,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
-import i18n from '@/i18n';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
+import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
+import { useSSE } from '@/hooks/useSSE';
 import SuiteInstallProgressPanel, {
   applySuiteInstallProgressEvent,
   createSuiteInstallProgressState,
@@ -21,18 +23,33 @@ import SuiteInstallProgressPanel, {
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
+import { skillAPI, type Skill } from '@/api/skill';
+import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
-import { useEnabledChatModelDefinitions, useResolvedDefaultModel } from '@/hooks/useChatModelResources';
-import client from '@/api/client';
+import {
+  useEnabledChatModelDefinitions,
+  useResolvedDefaultModel,
+} from '@/hooks/useChatModelResources';
+import client, { getApiBase } from '@/api/client';
 import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
-import { formatSessionDate } from '@/utils/time';
+import { formatRelativeTime, formatSessionDate } from '@/utils/time';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
 import type { ModelDefinitionV2, Session } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
+import {
+  DEFAULT_SESSION_EXECUTION_MODE,
+  promoteDraftExecutionMode,
+  readSessionExecutionMode,
+  resetDraftExecutionMode,
+  writeSessionExecutionMode,
+  type PersistentSessionExecutionMode,
+  type SessionExecutionMode,
+} from '@/utils/sessionExecutionMode';
 
 function sanitizeSessionExportName(value: string) {
   const trimmed = value.trim();
@@ -48,8 +65,22 @@ const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
+const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
+const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
+
+function ExecutionModeIcon({
+  mode,
+  className = 'h-3 w-3',
+}: {
+  mode: SessionExecutionMode;
+  className?: string;
+}) {
+  if (mode === 'plan') return <ClipboardList className={className} />;
+  if (mode === 'goal') return <Target className={className} />;
+  return <Hammer className={className} />;
+}
 type ProjectSummary = {
   id: string;
   worktree: string;
@@ -84,8 +115,146 @@ type FolderBrowserResponse = {
   roots: FolderEntry[];
   entries: FolderEntry[];
 };
+
+type ComposerResourceItem = {
+  id: string;
+  name: string;
+  description?: string;
+  badge?: string;
+  source: 'builtin' | 'custom';
+};
+
+function ComposerResourcePicker({
+  label,
+  title,
+  emptyText,
+  icon: Icon,
+  items,
+  loading,
+  open,
+  onToggle,
+  onSelect,
+}: {
+  label: string;
+  title: string;
+  emptyText: string;
+  icon: React.ComponentType<{ className?: string }>;
+  items: ComposerResourceItem[];
+  loading: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onSelect: (item: ComposerResourceItem) => void;
+}) {
+  const { t } = useTranslation('session');
+  const [sourceFilter, setSourceFilter] = useState<AgentSourceFilter>('all');
+  const filteredItems = items.filter((item) => (
+    sourceFilter === 'all' || item.source === sourceFilter
+  ));
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+            <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
+              {title}
+            </span>
+            <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+              {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
+                <button
+                  key={filter}
+                  type="button"
+                  onClick={() => setSourceFilter(filter)}
+                  className={`rounded-md px-2 py-1 transition-colors ${
+                    sourceFilter === filter
+                      ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
+                      : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                  }`}
+                >
+                  {t(`agentPicker.filter.${filter}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+            {loading ? (
+              <div className="flex h-full items-center justify-center text-zinc-400">
+                <Loader2 className="h-4 w-4 animate-spin" />
+              </div>
+            ) : filteredItems.length > 0 ? (
+              filteredItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelect(item)}
+                  title={item.description}
+                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                >
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
+                    <Icon className="h-3 w-3" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                    item.source === 'builtin'
+                      ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                      : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                  }`}>
+                    {t(`agentPicker.badge.${item.source}`)}
+                  </span>
+                  {item.badge && (
+                    <span className="max-w-20 shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500 dark:bg-white/[0.07] dark:text-zinc-400">
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              ))
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-zinc-400">
+                {emptyText}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
 const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
+
+function readSessionStatusType(status: unknown): string | undefined {
+  if (typeof status === 'string') return status;
+  if (!status || typeof status !== 'object' || !('type' in status)) return undefined;
+  return typeof status.type === 'string' ? status.type : undefined;
+}
+
+function isRunningSessionStatus(status: unknown): boolean {
+  const statusType = readSessionStatusType(status);
+  return statusType === 'busy' || statusType === 'compacting' || statusType === 'retry';
+}
+
+function readRunningSessionIds(statuses: unknown): Set<string> {
+  if (!statuses || typeof statuses !== 'object' || Array.isArray(statuses)) return new Set();
+  return new Set(
+    Object.entries(statuses)
+      .filter(([, status]) => isRunningSessionStatus(status))
+      .map(([sessionId]) => sessionId),
+  );
+}
 type ChatModelOption = {
   key: string;
   providerID: string;
@@ -108,10 +277,6 @@ type SelectorTooltip = {
   x: number;
   y: number;
 };
-
-function formatAgentName(name: string): string {
-  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
-}
 
 function readLastSelectedSessionId(): string | null {
   try {
@@ -182,9 +347,12 @@ interface SessionSidebarItemProps {
   selectMode: boolean;
   checked: boolean;
   menuOpen: boolean;
+  running: boolean;
   renaming: boolean;
   renameValue: string;
   renameSubmitting: boolean;
+  language: string;
+  relativeTimeClock: number;
   t: (key: string, options?: Record<string, unknown>) => string;
   renameInputRef: RefObject<HTMLInputElement | null>;
   onSelect: (sessionId: string) => void;
@@ -202,9 +370,11 @@ function SessionSidebarItemInner({
   selectMode,
   checked,
   menuOpen,
+  running,
   renaming,
   renameValue,
   renameSubmitting,
+  language,
   t,
   renameInputRef,
   onSelect,
@@ -217,19 +387,17 @@ function SessionSidebarItemInner({
   return (
     <div
       onClick={() => onSelect(session.id)}
-      className={`group relative mb-1 cursor-pointer border px-3 transition-all duration-150 ${
-        nested ? 'ml-7 mr-2 rounded-lg py-2' : 'mx-2 rounded-xl py-2.5'
+      className={`group relative mb-0.5 min-h-[34px] cursor-pointer rounded-lg border px-3 py-1 transition-colors duration-100 ${
+        nested ? 'ml-5' : ''
       } ${
         !selectMode && selected
-          ? 'border-gray-300 bg-gray-100 shadow-sm dark:border-zinc-700 dark:bg-zinc-900 dark:shadow-none'
+          ? 'border-transparent bg-zinc-200/70 text-[#202328] dark:bg-[#3a434e] dark:text-white'
           : selectMode && checked
-          ? 'bg-blue-50 border-blue-200 dark:border-blue-500/40 dark:bg-blue-950/30'
-          : nested
-            ? 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 dark:border-zinc-800 dark:hover:bg-zinc-900'
-            : 'border-gray-100 hover:border-gray-200 hover:bg-gray-50 hover:shadow-sm dark:border-transparent dark:hover:border-zinc-800 dark:hover:bg-zinc-900 dark:hover:shadow-none'
+          ? 'border-blue-200 bg-blue-50 text-[#202328] dark:border-blue-400/40 dark:bg-blue-500/10 dark:text-white'
+          : 'border-transparent text-[#5b6067] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white'
       }`}
     >
-      <div className="flex items-center gap-1.5 min-w-0 pr-7">
+      <div className="flex min-w-0 items-center gap-1.5 pr-6">
         {selectMode && (
           <input
             type="checkbox"
@@ -241,12 +409,12 @@ function SessionSidebarItemInner({
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
-            <WorkflowIcon className="w-3 h-3 text-orange-400" />
+            <WorkflowIcon className="h-3.5 w-3.5 text-orange-400" />
           </span>
         )}
         {session.category === 'entity-config' && (
           <span title={t('configSession')} className="flex-shrink-0">
-            <Settings2 className="w-3 h-3 text-purple-400" />
+            <Settings2 className="h-3.5 w-3.5 text-purple-400" />
           </span>
         )}
         {renaming ? (
@@ -262,28 +430,47 @@ function SessionSidebarItemInner({
             }}
             placeholder={t('renamePlaceholder')}
             disabled={renameSubmitting}
-            className="w-full min-w-0 rounded border border-blue-300 bg-white px-1.5 py-0.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-zinc-950 dark:text-zinc-100"
+            className="h-6 w-full min-w-0 rounded-md border border-blue-300 bg-white px-1.5 text-sm text-gray-900 outline-none focus:border-blue-400 dark:border-blue-500/50 dark:bg-[#252c35] dark:text-white"
             aria-label={t('rename')}
             data-session-rename-input
           />
         ) : (
-          <h3 className="font-semibold text-gray-900 truncate text-sm flex items-center gap-1.5 dark:text-zinc-100">
+          <h3 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium">
             <span className="truncate">{session.title}</span>
             {session.isShared && (
-              <span className="inline-flex items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700">
+              <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
                 {t('sharedTag')}
               </span>
             )}
           </h3>
         )}
+        {session.time?.updated && !renaming && (
+          <time
+            dateTime={new Date(session.time.updated).toISOString()}
+            title={formatSessionDate(session.time.updated)}
+            className="ml-1 shrink-0 whitespace-nowrap text-[11px] font-normal tabular-nums text-zinc-500 dark:text-[#8f9ba8]"
+          >
+            {formatRelativeTime(session.time.updated, language)}
+          </time>
+        )}
       </div>
-      {session.time?.updated && !renaming && (
-        <p className="mt-1 text-xs text-gray-400 truncate pl-0.5 dark:text-zinc-500">
-          {formatSessionDate(session.time.updated)}
-        </p>
-      )}
       {!selectMode && (
-        <div className="absolute right-1.5 top-2" data-session-actions>
+        <div className="absolute right-1 top-1/2 h-6 w-6 -translate-y-1/2" data-session-actions>
+          {running && (
+            <span
+              role="status"
+              aria-label={t('chat.tool.running')}
+              title={t('chat.tool.running')}
+              data-session-running={session.id}
+              className={`pointer-events-none absolute inset-0 grid place-items-center text-[#5f8fcb] transition-opacity dark:text-[#8ab4e8] ${
+                menuOpen
+                  ? 'opacity-0'
+                  : 'opacity-100 group-hover:opacity-0 group-focus-within:opacity-0'
+              }`}
+            >
+              <Loader2 className="h-[14px] w-[14px] animate-spin" />
+            </span>
+          )}
           <button
             onClick={(e) => {
               e.stopPropagation();
@@ -292,11 +479,13 @@ function SessionSidebarItemInner({
             title={t('moreActions')}
             aria-label={t('moreActions')}
             aria-expanded={menuOpen}
-            className={`p-1 rounded text-gray-400 hover:text-gray-600 hover:bg-gray-200 transition-all dark:text-zinc-500 dark:hover:bg-zinc-800 dark:hover:text-zinc-200 ${
-              menuOpen ? 'opacity-100 text-gray-600 bg-gray-200 dark:bg-zinc-800 dark:text-zinc-200' : 'opacity-0 group-hover:opacity-100'
+            className={`absolute inset-0 grid h-6 w-6 place-items-center rounded-lg text-[#989ca1] transition-[color,opacity,background-color] hover:bg-white hover:text-[#202328] dark:text-[#8f9ba8] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+              menuOpen || (selected && !running)
+                ? 'text-[#202328] opacity-100 dark:text-white'
+                : 'opacity-0 group-hover:opacity-100'
             }`}
           >
-            <MoreHorizontal className="w-3.5 h-3.5" />
+            <MoreHorizontal className="h-[15px] w-[15px]" />
           </button>
         </div>
       )}
@@ -315,11 +504,88 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.selectMode === next.selectMode &&
   prev.checked === next.checked &&
   prev.menuOpen === next.menuOpen &&
+  prev.running === next.running &&
   prev.renaming === next.renaming &&
   prev.renameValue === next.renameValue &&
   prev.renameSubmitting === next.renameSubmitting &&
+  prev.language === next.language &&
+  prev.relativeTimeClock === next.relativeTimeClock &&
   prev.t === next.t
 ));
+
+function WorkbenchRefreshStatus({ label }: { label: string }) {
+  return (
+    <div
+      role="status"
+      aria-live="polite"
+      data-testid="workbench-refresh-status"
+      className="ml-auto flex min-w-0 items-center gap-2 rounded-full border border-black/[0.06] bg-white/55 px-2.5 py-1 text-[11px] font-medium text-[#737980] shadow-[0_1px_2px_rgba(22,27,34,0.03)] dark:border-white/[0.08] dark:bg-white/[0.04] dark:text-[#aeb8c3]"
+    >
+      <span className="h-1.5 w-1.5 shrink-0 animate-pulse rounded-full bg-[#4f92e8]" />
+      <span className="truncate">{label}</span>
+      <span className="h-px w-8 shrink-0 overflow-hidden rounded-full bg-[#d9e5f4] dark:bg-[#46515e]">
+        <span className="block h-full w-1/2 animate-pulse rounded-full bg-[#4f92e8]" />
+      </span>
+    </div>
+  );
+}
+
+function SessionListSkeleton() {
+  return (
+    <div
+      data-testid="session-list-skeleton"
+      aria-hidden="true"
+      className="animate-pulse px-2 pt-1"
+    >
+      <div className="mb-2 h-3 w-16 rounded-full bg-black/[0.07] dark:bg-white/[0.08]" />
+      <div className="space-y-1.5">
+        {[72, 88, 64].map((width, index) => (
+          <div
+            key={`${width}-${index}`}
+            className="flex h-[34px] items-center gap-2 rounded-lg px-2"
+          >
+            <div className="h-3.5 w-3.5 shrink-0 rounded bg-black/[0.06] dark:bg-white/[0.07]" />
+            <div
+              className="h-3 rounded-full bg-black/[0.06] dark:bg-white/[0.07]"
+              style={{ width: `${width}%` }}
+            />
+          </div>
+        ))}
+      </div>
+      <div className="mb-2 mt-5 h-3 w-12 rounded-full bg-black/[0.07] dark:bg-white/[0.08]" />
+      <div className="space-y-1.5">
+        {[82, 68, 76, 58].map((width, index) => (
+          <div
+            key={`${width}-${index}`}
+            className="flex h-[34px] items-center gap-2 rounded-lg px-2"
+          >
+            <div className="h-3.5 w-3.5 shrink-0 rounded-full bg-black/[0.06] dark:bg-white/[0.07]" />
+            <div
+              className="h-3 rounded-full bg-black/[0.06] dark:bg-white/[0.07]"
+              style={{ width: `${width}%` }}
+            />
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SessionChatSkeleton() {
+  return (
+    <div
+      data-testid="session-chat-skeleton"
+      aria-hidden="true"
+      className="flex min-h-0 flex-1 justify-center overflow-hidden px-7 pt-16"
+    >
+      <LoadingSpinner
+        size="sm"
+        delayMs={180}
+        className="opacity-60 [&_svg]:text-zinc-400 dark:[&_svg]:text-zinc-500"
+      />
+    </div>
+  );
+}
 
 export default function SessionPage() {
   const { t, i18n } = useTranslation('session');
@@ -334,9 +600,27 @@ export default function SessionPage() {
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
+  const [showWorkflowOptions, setShowWorkflowOptions] = useState(false);
+  const [showSkillOptions, setShowSkillOptions] = useState(false);
+  const [composerWorkflows, setComposerWorkflows] = useState<WorkflowSummary[]>([]);
+  const [composerSkills, setComposerSkills] = useState<Skill[]>([]);
+  const [loadingComposerResources, setLoadingComposerResources] = useState(false);
+  const [selectedExecutionMode, setSelectedExecutionMode] = useState<SessionExecutionMode>(
+    () => readSessionExecutionMode(null),
+  );
+  const [showExecutionModeOptions, setShowExecutionModeOptions] = useState(false);
+  const executionModeHandoffRef = useRef<{
+    sessionId: string;
+    mode: SessionExecutionMode;
+  } | null>(null);
+  const [showProjectOptions, setShowProjectOptions] = useState(false);
   const [selectedModelKey, setSelectedModelKey] = useState<string | null>(null);
   const [showModelOptions, setShowModelOptions] = useState(false);
+  const modelSelectorRef = useRef<HTMLDivElement>(null);
+  const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
+  const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
+  const [relativeTimeClock, setRelativeTimeClock] = useState(0);
   const [creating, setCreating] = useState(false);
   const [installingSocWorkspace, setInstallingSocWorkspace] = useState(false);
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
@@ -345,6 +629,7 @@ export default function SessionPage() {
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
+  const [refreshingProjects, setRefreshingProjects] = useState(true);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
   const [collapsedProjectIds, setCollapsedProjectIds] = useState<Set<string>>(() => {
     try {
@@ -354,6 +639,7 @@ export default function SessionPage() {
       return new Set();
     }
   });
+  const [collapsedLoadedSessionGroupIds, setCollapsedLoadedSessionGroupIds] = useState<Set<string>>(new Set());
   const [projectsSectionCollapsed, setProjectsSectionCollapsed] = useState(() => {
     try {
       return window.localStorage.getItem(projectsSectionCollapsedStorageKey) === 'true';
@@ -372,9 +658,12 @@ export default function SessionPage() {
   const [folderBrowser, setFolderBrowser] = useState<FolderBrowserResponse | null>(null);
   const [folderBrowserLoading, setFolderBrowserLoading] = useState(false);
   const [projectSubmitting, setProjectSubmitting] = useState(false);
-  const [batchDeleting, setBatchDeleting] = useState(false);
+  const [batchArchiving, setBatchArchiving] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [movePickerSessionId, setMovePickerSessionId] = useState<string | null>(null);
+  const [movingSessionId, setMovingSessionId] = useState<string | null>(null);
+  const [movingTargetProjectId, setMovingTargetProjectId] = useState<string | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
@@ -384,22 +673,36 @@ export default function SessionPage() {
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
   const [selectorTooltip, setSelectorTooltip] = useState<SelectorTooltip | null>(null);
+  const updateModelMenuLeftOffset = useCallback(() => {
+    const selector = modelSelectorRef.current;
+    if (!selector) return;
+    setModelMenuLeftOffset(getAnchoredMenuLeftOffset(
+      selector.getBoundingClientRect().left,
+      window.innerWidth,
+    ));
+  }, []);
   const renameInputRef = useRef<HTMLInputElement | null>(null);
   const renameSubmitInFlightRef = useRef(false);
   const projectSubmitInFlightRef = useRef(false);
   const folderBrowserRequestIdRef = useRef(0);
   const folderBrowserInputPathRef = useRef<string | null>(null);
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
+  const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
+  const composerResourcesLoadedRef = useRef(false);
   const toast = useToast();
 
   const sessionProjectIds = useMemo(
     () => [TASK_SESSION_GROUP_ID, ...projects.map((project) => project.id)],
     [projects],
   );
+  const sessionListPageSize = projects.length >= 1
+    ? MULTI_PROJECT_SESSION_PAGE_SIZE
+    : SINGLE_PROJECT_SESSION_PAGE_SIZE;
   const {
     sessions,
     loading: loadingSessions,
+    refreshing: refreshingSessions = loadingSessions,
     refetch: refetchSessions,
     updateSessionTitle,
     removeSession,
@@ -410,9 +713,7 @@ export default function SessionPage() {
     loadMore: loadMoreSessions,
   } = useSessions(searchQuery, {
     projectIds: sessionProjectIds,
-    pageSize: projects.length >= 1
-      ? MULTI_PROJECT_SESSION_PAGE_SIZE
-      : SINGLE_PROJECT_SESSION_PAGE_SIZE,
+    pageSize: sessionListPageSize,
   });
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
@@ -428,16 +729,46 @@ export default function SessionPage() {
   const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
   const filteredChatAgents = useMemo(
     () => chatAgents.filter((agent) => {
+      if (agent.name.toLowerCase() === 'rex') return false;
       if (agentSourceFilter === 'builtin') return agent.native;
       if (agentSourceFilter === 'custom') return !agent.native;
       return true;
     }),
     [chatAgents, agentSourceFilter],
   );
-  const selectedAgentInfo = useMemo(
-    () => chatAgents.find((agent) => agent.name === selectedAgent),
-    [chatAgents, selectedAgent],
-  );
+  const loadComposerResources = useCallback(async () => {
+    if (composerResourcesLoadedRef.current || loadingComposerResources) return;
+    setLoadingComposerResources(true);
+    try {
+      const [workflowResult, skillResult] = await Promise.allSettled([
+        workflowAPI.listSummaries({ status: 'active' }),
+        skillAPI.status(),
+      ]);
+      if (workflowResult.status === 'fulfilled') {
+        setComposerWorkflows(
+          workflowResult.value.data
+            .filter((workflow) => workflow.status === 'active')
+            .sort((a, b) => getWorkflowDisplayName(a, i18n.language)
+              .localeCompare(getWorkflowDisplayName(b, i18n.language))),
+        );
+      }
+      if (skillResult.status === 'fulfilled') {
+        setComposerSkills(
+          skillResult.value.data
+            .filter((skill) => (
+              !skill.ui_hidden
+              && !skill.disabled
+              && skill.eligible !== false
+              && skill.category !== 'system'
+            ))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      }
+      composerResourcesLoadedRef.current = true;
+    } finally {
+      setLoadingComposerResources(false);
+    }
+  }, [i18n.language, loadingComposerResources]);
   const chatModelOptions = useMemo<ChatModelOption[]>(() => {
     const providerById = new Map(
       providers
@@ -461,6 +792,7 @@ export default function SessionPage() {
     };
 
     return enabledModelDefinitions.flatMap((model) => {
+      if (model.model_type !== 'llm') return [];
       const provider = providerById.get(model.provider_id);
       if (!provider) return [];
       return [{
@@ -515,23 +847,60 @@ export default function SessionPage() {
     ? makeModelKey(selectedSession.provider, selectedSession.model)
     : null;
   const hasPinnedModelOption = !!pinnedModelKey && chatModelOptions.some((option) => option.key === pinnedModelKey);
+  const selectedModelAuto = selectedModelKey === AUTO_MODEL_KEY;
   const selectedModelOption = useMemo(
     () => chatModelOptions.find((option) => option.key === selectedModelKey) ?? (selectedModelKey ? null : chatModelOptions[0] ?? null),
     [chatModelOptions, selectedModelKey],
   );
-  const selectedPromptModel = selectedModelOption
-    ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
-    : null;
   const {
     data: resolvedDefaultModel,
     initialized: resolvedDefaultModelInitialized,
-  } = useResolvedDefaultModel(chatModelOptions.length > 0 && !hasPinnedModelOption);
-  const effectiveSupportsVision = selectedModelOption?.supportsVision ?? supportsVision;
+  } = useResolvedDefaultModel(chatModelOptions.length > 0);
+  const primaryModelOption = useMemo(() => {
+    if (!resolvedDefaultModel) return null;
+    const key = makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID);
+    return chatModelOptions.find((option) => option.key === key) ?? null;
+  }, [chatModelOptions, resolvedDefaultModel]);
+  const autoSelectionAllowed = !selectedSessionId || Boolean(
+    selectedSession && ['user', 'entity-config', 'workflow'].includes(selectedSession.category ?? 'user'),
+  );
+  const canSelectAuto = Boolean(
+    autoSelectionAllowed && primaryModelOption,
+  );
+  const effectiveModelOption = selectedModelAuto ? primaryModelOption : selectedModelOption;
+  const selectedPromptModel = selectedModelAuto
+    ? null
+    : selectedModelOption
+      ? { providerID: selectedModelOption.providerID, modelID: selectedModelOption.modelID }
+      : null;
+  const effectiveSupportsVision = effectiveModelOption?.supportsVision ?? supportsVision;
+  const autoStatusLabel = !autoSelectionAllowed
+    ? t('modelPicker.autoUserSessionsOnly')
+    : primaryModelOption
+      ? t('modelPicker.autoHint')
+      : t('modelPicker.autoUnavailable');
+  const firstChatModelKey = chatModelOptions[0]?.key ?? null;
+  const resolvedDefaultKey = resolvedDefaultModel
+    ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
+    : null;
+  const defaultSelectionKey = resolvedDefaultKey
+    && chatModelOptions.some(option => option.key === resolvedDefaultKey)
+    ? resolvedDefaultKey
+    : firstChatModelKey;
 
   const toggleProjectCollapsed = useCallback((projectId: string) => {
     setCollapsedProjectIds(prev => {
       const next = new Set(prev);
       next.has(projectId) ? next.delete(projectId) : next.add(projectId);
+      return next;
+    });
+  }, []);
+
+  const setLoadedSessionGroupCollapsed = useCallback((groupId: string, collapsed: boolean) => {
+    setCollapsedLoadedSessionGroupIds((current) => {
+      const next = new Set(current);
+      if (collapsed) next.add(groupId);
+      else next.delete(groupId);
       return next;
     });
   }, []);
@@ -611,18 +980,27 @@ export default function SessionPage() {
         worktree: '',
         sessions: taskSessions,
         sessionCount: taskSessions.length,
-        pathStatus: 'available' as const,
       };
     },
     [projects, sessions, t],
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
-  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
-  const hasMoreTaskSessions = hasMoreByProject[TASK_SESSION_GROUP_ID] ?? false;
+  const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
+  const visibleTaskSessions = taskSessionsCollapsedToFirstPage
+    ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
+    : taskSessionGroup.sessions;
+  const hasMoreRemoteTaskSessions = hasMoreByProject[TASK_SESSION_GROUP_ID] ?? false;
+  const canShowMoreTaskSessions = taskSessionsCollapsedToFirstPage || hasMoreRemoteTaskSessions;
+  const canCollapseTaskSessions = !taskSessionsCollapsedToFirstPage
+    && taskSessionGroup.sessions.length > sessionListPageSize;
 
   const selectedProjectIDForCreate = selectedProjectId && selectedProjectId !== TASK_SESSION_GROUP_ID
     ? selectedProjectId
     : null;
+  const selectedProjectContextLabel = selectedProjectId === TASK_SESSION_GROUP_ID
+    ? t('projectPicker.none')
+    : projectSessionGroups.find((group) => group.id === selectedProjectId)?.label
+      ?? t('projectPicker.none');
 
   useEffect(() => {
     const selectableProjectIds = new Set([
@@ -665,22 +1043,29 @@ export default function SessionPage() {
 
   const fetchProjects = useCallback(async (ensureProject?: ProjectSummary, query = '') => {
     const requestSeq = ++projectListRequestSeqRef.current;
-    const listResult = await client.get('/api/project', {
-      params: { search: query.trim() || undefined },
-    });
-    if (requestSeq !== projectListRequestSeqRef.current) return;
-    const nextProjects = Array.isArray(listResult.data)
-      ? listResult.data.filter((project: ProjectSummary) => (
-        project.id !== TASK_SESSION_GROUP_ID && !project.isDefault
-      ))
-      : [];
-    setProjects((currentProjects) => {
-      if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
-        return nextProjects;
+    setRefreshingProjects(true);
+    try {
+      const listResult = await client.get('/api/project', {
+        params: { search: query.trim() || undefined },
+      });
+      if (requestSeq !== projectListRequestSeqRef.current) return;
+      const nextProjects = Array.isArray(listResult.data)
+        ? listResult.data.filter((project: ProjectSummary) => (
+          project.id !== TASK_SESSION_GROUP_ID && !project.isDefault
+        ))
+        : [];
+      setProjects((currentProjects) => {
+        if (!ensureProject?.id || nextProjects.some((project) => project.id === ensureProject.id)) {
+          return nextProjects;
+        }
+        const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
+        return [{ ...currentProject, ...ensureProject }, ...nextProjects];
+      });
+    } finally {
+      if (requestSeq === projectListRequestSeqRef.current) {
+        setRefreshingProjects(false);
       }
-      const currentProject = currentProjects.find((project) => project.id === ensureProject.id);
-      return [{ ...currentProject, ...ensureProject }, ...nextProjects];
-    });
+    }
   }, []);
 
   const scheduleSessionListRefetch = useCallback(() => {
@@ -702,6 +1087,19 @@ export default function SessionPage() {
   }, []);
 
   const handleSSEEvent = useCallback((event: SSEChatEvent) => {
+    if (
+      event.type === 'session.execution_mode.changed'
+      && event.properties?.sessionID === selectedSessionId
+      && event.properties?.executionMode === 'build'
+    ) {
+      setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+      writeSessionExecutionMode(
+        selectedSessionId,
+        DEFAULT_SESSION_EXECUTION_MODE,
+      );
+      setShowExecutionModeOptions(false);
+      return;
+    }
     if (event.type === 'session.notice' && event.properties?.kind === 'directory-fallback') {
       toast.warning(
         t('projectDirectoryFallbackTitle'),
@@ -721,11 +1119,66 @@ export default function SessionPage() {
       // those bursts don't turn into a request/re-render storm.
       scheduleSessionListRefetch();
     }
-  }, [scheduleSessionListRefetch, t, toast, updateSessionTitle]);
+  }, [
+    scheduleSessionListRefetch,
+    selectedSessionId,
+    t,
+    toast,
+    updateSessionTitle,
+  ]);
 
   useEffect(() => {
     void fetchProjects(undefined, searchQuery);
   }, [fetchProjects, searchQuery]);
+
+  const setSessionRunning = useCallback((sessionId: string, running: boolean) => {
+    setRunningSessionIds((current) => {
+      if (current.has(sessionId) === running) return current;
+      const next = new Set(current);
+      if (running) next.add(sessionId);
+      else next.delete(sessionId);
+      return next;
+    });
+  }, []);
+
+  const handleSessionStatusEvent = useCallback((event: SSEChatEvent) => {
+    if (event.type !== 'session.status') return;
+    const sessionId = event.properties?.sessionID;
+    if (typeof sessionId !== 'string') return;
+    sessionStatusEventVersionRef.current += 1;
+    setSessionRunning(sessionId, isRunningSessionStatus(event.properties?.status));
+  }, [setSessionRunning]);
+
+  const refreshRunningSessionIds = useCallback(async () => {
+    const eventVersion = sessionStatusEventVersionRef.current;
+    try {
+      const response = await client.get('/api/session/status');
+      if (sessionStatusEventVersionRef.current !== eventVersion) return;
+      setRunningSessionIds(readRunningSessionIds(response.data));
+    } catch {
+      // The sidebar status is progressive enhancement; chat remains usable
+      // when status recovery is temporarily unavailable.
+    }
+  }, []);
+
+  useSSE({
+    url: `${getApiBase()}/api/event`,
+    onEvent: handleSessionStatusEvent,
+    onReconnect: refreshRunningSessionIds,
+    enabled: true,
+    reconnect: { enabled: true, maxRetries: 5, initialDelay: 1000, maxDelay: 10000 },
+  });
+
+  useEffect(() => {
+    void refreshRunningSessionIds();
+  }, [refreshRunningSessionIds]);
+
+  useEffect(() => {
+    const intervalId = window.setInterval(() => {
+      setRelativeTimeClock((tick) => tick + 1);
+    }, 60_000);
+    return () => window.clearInterval(intervalId);
+  }, []);
 
   useEffect(() => {
     if (!openProjectMenuId) return;
@@ -781,6 +1234,16 @@ export default function SessionPage() {
   }, [selectedSession?.id, selectedSessionId]);
 
   useEffect(() => {
+    const handoff = executionModeHandoffRef.current;
+    if (selectedSessionId && handoff?.sessionId === selectedSessionId) {
+      executionModeHandoffRef.current = null;
+      setSelectedExecutionMode(handoff.mode);
+      return;
+    }
+    setSelectedExecutionMode(readSessionExecutionMode(selectedSessionId));
+  }, [selectedSessionId]);
+
+  useEffect(() => {
     if (!selectedSessionId) {
       setSelectedSessionFallback(null);
       return;
@@ -826,6 +1289,42 @@ export default function SessionPage() {
   }, [showAgentOptions]);
 
   useEffect(() => {
+    if (!showExecutionModeOptions) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('[data-execution-mode-selector]')) {
+        setShowExecutionModeOptions(false);
+      }
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setShowExecutionModeOptions(false);
+    };
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showExecutionModeOptions]);
+
+  useEffect(() => {
+    if (!showProjectOptions) return;
+    const handle = (e: MouseEvent) => {
+      const target = e.target as HTMLElement;
+      if (!target.closest('[data-project-selector]')) setShowProjectOptions(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showProjectOptions]);
+
+  useEffect(() => {
+    if (!showModelOptions) return;
+    updateModelMenuLeftOffset();
+    window.addEventListener('resize', updateModelMenuLeftOffset);
+    return () => window.removeEventListener('resize', updateModelMenuLeftOffset);
+  }, [showModelOptions, updateModelMenuLeftOffset]);
+
+  useEffect(() => {
     if (!showModelOptions) return;
     const handle = (e: MouseEvent) => {
       const target = e.target as HTMLElement;
@@ -836,7 +1335,12 @@ export default function SessionPage() {
   }, [showModelOptions]);
 
   useEffect(() => {
-    if (chatModelOptions.length === 0) {
+    if (selectedSession?.model_auto) {
+      setSelectedModelKey(AUTO_MODEL_KEY);
+      return;
+    }
+
+    if (!firstChatModelKey) {
       setSelectedModelKey(null);
       return;
     }
@@ -848,30 +1352,37 @@ export default function SessionPage() {
 
     setSelectedModelKey(null);
     if (!resolvedDefaultModelInitialized) return;
-    const defaultKey = resolvedDefaultModel
-      ? makeModelKey(resolvedDefaultModel.providerID, resolvedDefaultModel.modelID)
-      : null;
-    const fallbackKey = chatModelOptions[0]?.key ?? null;
-    setSelectedModelKey(defaultKey && chatModelOptions.some((option) => option.key === defaultKey) ? defaultKey : fallbackKey);
+    setSelectedModelKey(defaultSelectionKey);
   }, [
-    chatModelOptions,
+    defaultSelectionKey,
+    firstChatModelKey,
     hasPinnedModelOption,
     pinnedModelKey,
-    resolvedDefaultModel,
     resolvedDefaultModelInitialized,
+    selectedSession?.model_auto,
     selectedSessionId,
   ]);
 
   useEffect(() => {
-    if (loadingEnabledModels || chatModelOptions.length === 0 || !selectedModelKey) return;
+    if (loadingEnabledModels || chatModelOptions.length === 0 || !selectedModelKey || selectedModelAuto) return;
     if (chatModelOptions.some((option) => option.key === selectedModelKey)) return;
     setSelectedModelKey(chatModelOptions[0].key);
-  }, [chatModelOptions, loadingEnabledModels, selectedModelKey]);
+  }, [chatModelOptions, loadingEnabledModels, selectedModelAuto, selectedModelKey]);
 
   useEffect(() => {
-    if (showAgentOptions || showModelOptions) return;
+    if (
+      showAgentOptions
+      || showExecutionModeOptions
+      || showModelOptions
+      || showProjectOptions
+    ) return;
     setSelectorTooltip(null);
-  }, [showAgentOptions, showModelOptions]);
+  }, [
+    showAgentOptions,
+    showExecutionModeOptions,
+    showModelOptions,
+    showProjectOptions,
+  ]);
 
   useEffect(() => {
     if (!openMenuSessionId) return;
@@ -880,6 +1391,7 @@ export default function SessionPage() {
       if (!target.closest('[data-session-actions]') && !target.closest('[data-session-menu-portal]')) {
         setOpenMenuSessionId(null);
         setMenuAnchor(null);
+        setMovePickerSessionId(null);
       }
     };
     document.addEventListener('mousedown', handle);
@@ -895,19 +1407,56 @@ export default function SessionPage() {
   useEffect(() => {
     if (!selectMode) return;
     setOpenMenuSessionId(null);
+    setMovePickerSessionId(null);
     setRenamingSessionId(null);
     setRenameValue('');
   }, [selectMode]);
+
+  const handleSelectExecutionMode = useCallback((mode: SessionExecutionMode) => {
+    setSelectedExecutionMode(mode);
+    setShowExecutionModeOptions(false);
+    if (mode !== 'goal') {
+      writeSessionExecutionMode(
+        selectedSessionId,
+        mode as PersistentSessionExecutionMode,
+      );
+    }
+  }, [selectedSessionId]);
+
+  const handleExecutionModeAccepted = useCallback((mode: SessionExecutionMode) => {
+    if (mode !== 'goal') return;
+    setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+    writeSessionExecutionMode(
+      selectedSessionId,
+      DEFAULT_SESSION_EXECUTION_MODE,
+    );
+  }, [selectedSessionId]);
+
+  const handleStartNewSession = useCallback(() => {
+    writeLastSelectedSessionId(null);
+    setSelectedSessionId(null);
+    setSelectedSessionFallback(null);
+    setPendingInitialMessage(null);
+    setPendingInitialDisplayText(null);
+    setSelectedAgent('rex');
+    setSelectedModelKey(null);
+    setSseStatus('disconnected');
+    setShowAgentOptions(false);
+    setShowModelOptions(false);
+    setShowProjectOptions(false);
+  }, []);
 
   const handleCreateSession = useCallback(async (projectIdOverride?: string) => {
     if (creating) return;
     const targetGroupId = projectIdOverride ?? selectedProjectId ?? TASK_SESSION_GROUP_ID;
     const projectID = targetGroupId === TASK_SESSION_GROUP_ID ? null : targetGroupId;
+    const carryAutoSelection = !selectedSessionId && selectedModelAuto;
     setCreating(true);
     try {
       const response = await client.post('/api/session', {
         title: 'New Session',
         ...(projectID ? { projectID } : {}),
+        ...(carryAutoSelection ? { model_auto: true } : {}),
       });
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
@@ -919,20 +1468,28 @@ export default function SessionPage() {
         return next;
       });
       setSelectedAgent('rex');
-      setSelectedModelKey(null);
+      executionModeHandoffRef.current = {
+        sessionId: response.data.id,
+        mode: DEFAULT_SESSION_EXECUTION_MODE,
+      };
+      resetDraftExecutionMode();
+      writeSessionExecutionMode(
+        response.data.id,
+        DEFAULT_SESSION_EXECUTION_MODE,
+      );
+      setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+      setShowExecutionModeOptions(false);
+      setSelectedModelKey(carryAutoSelection ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(response.data.id);
     } catch (err: any) {
       toast.error(t('createFailed'), err.message);
     } finally {
       setCreating(false);
     }
-  }, [creating, selectedProjectId, addSession, fetchProjects, searchQuery, toast, t]);
-
-  const handleCreateSessionInProject = useCallback((projectId: string) => {
-    void handleCreateSession(projectId);
-  }, [handleCreateSession]);
+  }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
+    const previousModelKey = selectedModelKey;
     setSelectedModelKey(option.key);
     setShowModelOptions(false);
     if (!selectedSessionId) return;
@@ -942,12 +1499,33 @@ export default function SessionPage() {
         provider: option.providerID,
         model: option.modelID,
         model_pinned: true,
+        model_auto: false,
       });
       refetchSessions();
     } catch (err: any) {
+      setSelectedModelKey(previousModelKey);
       toast.error(t('chat.error', 'Error'), err.message);
     }
-  }, [refetchSessions, selectedSessionId, toast, t]);
+  }, [refetchSessions, selectedModelKey, selectedSessionId, toast, t]);
+
+  const handleSelectAutoModel = useCallback(async () => {
+    if (!canSelectAuto) return;
+    const previousModelKey = selectedModelKey;
+    setSelectedModelKey(AUTO_MODEL_KEY);
+    setShowModelOptions(false);
+    if (!selectedSessionId) return;
+
+    try {
+      await sessionApi.update(selectedSessionId, {
+        model_auto: true,
+        model_pinned: false,
+      });
+      refetchSessions();
+    } catch (err: any) {
+      setSelectedModelKey(previousModelKey);
+      toast.error(t('chat.error', 'Error'), err.message);
+    }
+  }, [canSelectAuto, refetchSessions, selectedModelKey, selectedSessionId, toast, t]);
 
   const handleCreateAndSend = useCallback(async (
     text: string,
@@ -955,18 +1533,37 @@ export default function SessionPage() {
     agentOverride?: string,
     modelOverride?: { providerID: string; modelID: string } | null,
     options?: PromptDisplayOptions,
+    executionModeOverride?: SessionExecutionMode,
   ) => {
     try {
+      const effectiveExecutionMode = executionModeOverride || selectedExecutionMode;
       const response = await client.post('/api/session', {
         title: 'New Session',
         ...(selectedProjectIDForCreate ? { projectID: selectedProjectIDForCreate } : {}),
+        ...(selectedModelAuto ? { model_auto: true } : {}),
       });
       const newSessionId = response.data.id;
 
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
-      setSelectedModelKey(null);
+      executionModeHandoffRef.current = {
+        sessionId: newSessionId,
+        mode: effectiveExecutionMode,
+      };
+      if (effectiveExecutionMode === 'goal') {
+        writeSessionExecutionMode(
+          newSessionId,
+          DEFAULT_SESSION_EXECUTION_MODE,
+        );
+        resetDraftExecutionMode();
+      } else {
+        promoteDraftExecutionMode(
+          newSessionId,
+          effectiveExecutionMode as PersistentSessionExecutionMode,
+        );
+      }
+      setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
       setSelectedSessionId(newSessionId);
 
       const payload: Record<string, unknown> = {
@@ -974,15 +1571,32 @@ export default function SessionPage() {
       };
       const effectiveAgent = agentOverride || selectedAgent || 'rex';
       if (effectiveAgent) payload.agent = effectiveAgent;
-      if (modelOverride) payload.model = modelOverride;
+      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
       if (options?.displayText) payload.displayText = options.displayText;
-      client.post(`/api/session/${newSessionId}/prompt_async`, payload).catch((err: any) => {
-        toast.error(t('chat.sendFailed', 'Send failed'), err.message);
-      });
+      payload.executionMode = effectiveExecutionMode;
+      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
+      if (effectiveExecutionMode === 'goal') {
+        setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
+        writeSessionExecutionMode(
+          newSessionId,
+          DEFAULT_SESSION_EXECUTION_MODE,
+        );
+      }
     } catch (err: any) {
-      toast.error(t('createFailed'), err.message);
+      toast.error(t('chat.sendFailed', 'Send failed'), err.message);
+      throw err;
     }
-  }, [addSession, fetchProjects, searchQuery, selectedAgent, selectedProjectIDForCreate, toast, t]);
+  }, [
+    addSession,
+    fetchProjects,
+    searchQuery,
+    selectedAgent,
+    selectedExecutionMode,
+    selectedModelAuto,
+    selectedProjectIDForCreate,
+    toast,
+    t,
+  ]);
 
   const handleSuiteInstallProgress = useCallback((progress: HubInstallProgressEvent) => {
     setSuiteInstallProgress(current => applySuiteInstallProgressEvent(current, progress));
@@ -1045,22 +1659,28 @@ export default function SessionPage() {
     });
   }, []);
 
-  const handleDeleteSession = useCallback(async (sessionId: string) => {
+  const handleArchiveSession = useCallback(async (sessionId: string) => {
     const target = sessions.find((s) => s.id === sessionId);
     if (target?.canDelete === false) {
-      toast.error(t('deleteFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
+      toast.error(t('archiveFailed'), i18n.t('auth:error.noPermissionToDeleteSession') as string);
       return;
     }
-    if (!confirm(t('confirmDelete'))) return;
+    if (!confirm(t('confirmArchive'))) return;
     try {
-      await sessionApi.delete(sessionId);
-      // Remove from local state first so auto-select won't pick the deleted session.
-      // No need to refetchSessions — removeSession already keeps the list accurate.
-      if (selectedSessionId === sessionId) setSelectedSessionId(null);
-      removeSession(sessionId);
-      await fetchProjects(undefined, searchQuery);
+      await sessionApi.archive(sessionId);
     } catch (err: any) {
-      toast.error(t('deleteFailed'), err.message);
+      toast.error(t('archiveFailed'), err.message);
+      return;
+    }
+    // The mutation is complete. A secondary project-count refresh must not
+    // turn a successful archive into an error or re-enable the removed row.
+    if (selectedSessionId === sessionId) setSelectedSessionId(null);
+    removeSession(sessionId);
+    toast.success(t('archiveSuccess'));
+    try {
+      await fetchProjects(undefined, searchQuery);
+    } catch {
+      // SSE/reconnect refreshes will reconcile project counts later.
     }
   }, [fetchProjects, removeSession, searchQuery, selectedSessionId, toast, t]);
 
@@ -1353,6 +1973,41 @@ export default function SessionPage() {
     }
   }, [refetchSessions, t, toast]);
 
+  const handleMoveSessionToProject = useCallback(async (
+    sessionId: string,
+    project: ProjectSummary,
+  ) => {
+    if (movingSessionId) return;
+    setMovingSessionId(sessionId);
+    setMovingTargetProjectId(project.id);
+    try {
+      await sessionApi.moveToProject(sessionId, project.id);
+      setOpenMenuSessionId(null);
+      setMenuAnchor(null);
+      setMovePickerSessionId(null);
+      setProjectsSectionCollapsed(false);
+      setCollapsedProjectIds((current) => {
+        const next = new Set(current);
+        next.delete(project.id);
+        return next;
+      });
+      toast.success(t('moveToProjectSuccess', { project: getProjectLabel(project) }));
+      await Promise.allSettled([
+        refetchSessions(),
+        fetchProjects(undefined, searchQuery),
+      ]);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(
+        t('moveToProjectFailed'),
+        typeof detail === 'string' ? detail : err?.message,
+      );
+    } finally {
+      setMovingSessionId(null);
+      setMovingTargetProjectId(null);
+    }
+  }, [fetchProjects, movingSessionId, refetchSessions, searchQuery, t, toast]);
+
   const handleEnterSelectMode = useCallback(() => {
     setSelectMode(true);
     setCheckedIds(new Set());
@@ -1379,6 +2034,7 @@ export default function SessionPage() {
     }
   }, [handleToggleCheck, selectMode]);
   const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
+    setMovePickerSessionId(null);
     setOpenMenuSessionId((current) => {
       if (current === sessionId) {
         setMenuAnchor(null);
@@ -1398,37 +2054,44 @@ export default function SessionPage() {
     }
   }, [checkedIds.size, sessions]);
 
-  const handleBatchDelete = useCallback(async () => {
-    if (checkedIds.size === 0 || batchDeleting) return;
-    if (!confirm(t('confirmBatchDelete', { count: checkedIds.size }))) return;
-    setBatchDeleting(true);
-    const ids = Array.from(checkedIds);
-    const succeeded: string[] = [];
-    const failed: string[] = [];
-    await Promise.all(ids.map(async (id) => {
-      try {
-        await client.delete(`/api/session/${id}`);
-        succeeded.push(id);
-      } catch {
-        failed.push(id);
+  const handleBatchArchive = useCallback(async () => {
+    if (checkedIds.size === 0 || batchArchiving) return;
+    if (!confirm(t('confirmBatchArchive', { count: checkedIds.size }))) return;
+    setBatchArchiving(true);
+    try {
+      const ids = Array.from(checkedIds);
+      const succeeded: string[] = [];
+      const failed: string[] = [];
+      await Promise.all(ids.map(async (id) => {
+        try {
+          await sessionApi.archive(id);
+          succeeded.push(id);
+        } catch {
+          failed.push(id);
+        }
+      }));
+      if (succeeded.length > 0) {
+        removeSessions(succeeded);
+        if (selectedSessionId && succeeded.includes(selectedSessionId)) {
+          setSelectedSessionId(null);
+        }
+        try {
+          await fetchProjects(undefined, searchQuery);
+        } catch {
+          // The archive results remain authoritative; counts reconcile later.
+        }
       }
-    }));
-    if (succeeded.length > 0) {
-      removeSessions(succeeded);
-      await fetchProjects(undefined, searchQuery);
-      if (selectedSessionId && succeeded.includes(selectedSessionId)) {
-        setSelectedSessionId(null);
+      if (failed.length > 0) {
+        setCheckedIds(new Set(failed));
+        toast.error(t('batchArchiveFailed', { count: failed.length }));
+      } else {
+        setCheckedIds(new Set());
+        setSelectMode(false);
       }
+    } finally {
+      setBatchArchiving(false);
     }
-    if (failed.length > 0) {
-      setCheckedIds(new Set(failed));
-      toast.error(t('batchDeleteFailed', { count: failed.length }));
-    } else {
-      setCheckedIds(new Set());
-      setSelectMode(false);
-    }
-    setBatchDeleting(false);
-  }, [batchDeleting, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
+  }, [batchArchiving, checkedIds, fetchProjects, removeSessions, searchQuery, selectedSessionId, toast, t]);
 
   const renderSessionListItem = (session: Session) => (
     <div
@@ -1524,59 +2187,94 @@ export default function SessionPage() {
     </div>
   );
 
-  if (loadingSessions) {
-    return (
-      <div className="flex items-center justify-center h-full">
-        <LoadingSpinner delayMs={180} />
-      </div>
-    );
-  }
+  const workbenchRefreshing = refreshingSessions || refreshingProjects || resolvingSelectedSession;
+  const workbenchRefreshLabel = resolvingSelectedSession
+    ? t('restoringTask')
+    : t('refreshingWorkbench');
+  const showSessionListSkeleton = loadingSessions && sessions.length === 0;
 
   return (
-    <div className="h-full w-full flex overflow-hidden bg-gray-50 dark:bg-zinc-950">
+    <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`bg-white border-r border-gray-100 flex flex-col transition-all duration-300 flex-shrink-0 h-full overflow-hidden dark:border-zinc-800 dark:bg-zinc-950 ${
-          sidebarCollapsed ? 'w-0' : 'w-64'
+        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
+          sidebarCollapsed
+            ? 'w-0 border-transparent opacity-0'
+            : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
         }`}
+        aria-label={t('managementTitle')}
       >
-        {/* Header：始终显示新建 + 搜索 */}
-        <div className="px-3 pt-3 pb-2 flex-shrink-0 space-y-2">
-          <div className="relative">
-            {creating
-              ? <Loader2 className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 animate-spin text-gray-400 pointer-events-none" />
-              : <Plus className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-500 pointer-events-none" />}
-            <button
-              onClick={() => void handleCreateSession()}
-              disabled={creating}
-              className="w-full pl-8 pr-3 py-2 text-left bg-white border border-gray-200 text-gray-700 rounded-lg hover:bg-gray-50 hover:border-gray-300 shadow-sm hover:shadow transition-all disabled:opacity-60 disabled:cursor-not-allowed text-sm font-medium dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-200 dark:hover:border-zinc-700 dark:hover:bg-zinc-800"
-            >
-              {t('newSession')}
-            </button>
+        {/* Header：始终显示标题、新建与搜索 */}
+        <div className="flex-shrink-0 px-3 pb-2 pt-3.5">
+          <div className="mb-2 flex h-8 items-center justify-between px-1">
+            <div className="min-w-0">
+              <strong className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
+                {t('managementTitle')}
+              </strong>
+              <span className="ml-2 text-[11px] text-[#7b8087] dark:text-[#9aa7b4]">
+                {t('sessionCount', { count: sessions.length })}
+              </span>
+            </div>
           </div>
-          <div className="relative">
-            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-gray-400 pointer-events-none" />
-            <input
-              value={searchQuery}
-              onChange={(e) => setSearchQuery(e.target.value)}
-              placeholder={t('filterConversations', 'Filter conversations...')}
-              className="w-full pl-8 pr-3 py-1.5 text-sm bg-gray-100 rounded-lg border-0 outline-none focus:bg-gray-200 transition-colors placeholder:text-gray-400 text-gray-700 dark:bg-zinc-900 dark:text-zinc-200 dark:placeholder:text-zinc-600 dark:focus:bg-zinc-800"
-            />
+
+          <div className="space-y-0.5">
+            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
+              {creating
+                ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
+                : <PencilLine className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />}
+              <button
+                onClick={handleStartNewSession}
+                disabled={creating}
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-3 text-left text-sm font-medium text-[#474b51] transition-colors hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:text-white"
+              >
+                {t('newSession')}
+              </button>
+            </div>
+
+            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
+              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
+              <input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder={t('filterConversations', 'Search tasks')}
+                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
+              />
+              {searchQuery && (
+                <button
+                  type="button"
+                  onClick={() => setSearchQuery('')}
+                  className="absolute right-1.5 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-md text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                  title={t('clearSearch')}
+                  aria-label={t('clearSearch')}
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
 
         {/* Session list */}
-        <div className="flex-1 overflow-y-auto overflow-x-hidden scrollbar-hide pb-2">
+        <div
+          data-testid="session-list-scroll"
+          className="session-sidebar-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-2 pb-[18px] pt-1.5"
+        >
+          {showSessionListSkeleton ? (
+            <SessionListSkeleton />
+          ) : (
           <div>
             <section className="group/projects-section">
-                <div className="flex items-center justify-between px-4 pt-4 pb-1 text-xs font-semibold text-gray-400 uppercase tracking-wide select-none dark:text-zinc-600">
+                <div className="flex h-7 select-none items-center gap-1.5 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-zinc-500 dark:text-[#8f9ba8]">
                   <button
                     type="button"
                     onClick={() => setProjectsSectionCollapsed((collapsed) => !collapsed)}
-                    className="flex items-center gap-1 rounded text-left transition-colors hover:text-gray-700 dark:hover:text-zinc-300"
+                    className="flex h-6 items-center gap-1 rounded-lg px-1 text-left transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:hover:bg-white/[0.06] dark:hover:text-white"
                     aria-label={t('toggleProjects')}
                   >
                     <span>{t('projectsSection')}</span>
+                    <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                      ({managedProjectSessionGroups.length})
+                    </span>
                     {projectsSectionCollapsed
                       ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                       : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
@@ -1584,7 +2282,7 @@ export default function SessionPage() {
                   <button
                     type="button"
                     onClick={handleOpenCreateProject}
-                    className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                    className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                     title={t('projectDialog.createTitle')}
                     aria-label={t('projectDialog.createTitle')}
                   >
@@ -1592,22 +2290,30 @@ export default function SessionPage() {
                   </button>
                 </div>
                 {!projectsSectionCollapsed && (
-                  <div className="space-y-2">
+                  <div>
                 {managedProjectSessionGroups.map((group) => {
                   const collapsed = collapsedProjectIds.has(group.id);
                   const isSelectedProject = selectedProjectId === group.id;
-                  const hasMoreProjectSessions = (
+                  const sessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(group.id);
+                  const visibleProjectSessions = sessionsCollapsedToFirstPage
+                    ? group.sessions.slice(0, sessionListPageSize)
+                    : group.sessions;
+                  const hasMoreRemoteProjectSessions = (
                     group.sessions.length < group.sessionCount
                     || hasMoreByProject[group.id]
                   );
+                  const canShowMoreProjectSessions = sessionsCollapsedToFirstPage
+                    || hasMoreRemoteProjectSessions;
+                  const canCollapseProjectSessions = !sessionsCollapsedToFirstPage
+                    && group.sessions.length > sessionListPageSize;
                   const persistedProject = projects.find((project) => project.id === group.id);
                   return (
                     <div key={group.id} className="group/project relative">
                       <div
-                        className={`mx-2 flex items-center gap-1 rounded-lg px-1.5 py-1 text-sm transition-colors ${
+                        className={`flex h-[34px] items-center gap-1 rounded-lg px-3 text-sm transition-colors ${
                           isSelectedProject
-                            ? 'bg-gray-100 text-gray-900 dark:bg-zinc-900 dark:text-zinc-100'
-                            : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100'
+                            ? 'font-semibold text-[#202328] dark:text-white'
+                            : 'font-medium text-[#474b51] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
                         }`}
                         title={group.worktree}
                       >
@@ -1617,12 +2323,12 @@ export default function SessionPage() {
                             setSelectedProjectId(group.id);
                             toggleProjectCollapsed(group.id);
                           }}
-                          className="flex min-w-0 flex-1 items-center gap-2 rounded px-1 py-0.5 text-left"
+                          className="flex h-full min-w-0 flex-1 items-center gap-2 rounded-lg text-left"
                           aria-label={t('selectProject', { project: group.label })}
                           aria-expanded={!collapsed}
                         >
-                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-gray-500 dark:text-zinc-500" />
-                          <span className="min-w-0 flex-1 truncate font-medium">{group.label}</span>
+                          <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#6f757c] dark:text-[#9aa7b4]" />
+                          <span className="min-w-0 flex-1 truncate">{group.label}</span>
                           {group.isShared && (
                             <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-500/30 dark:bg-blue-950/30 dark:text-blue-300">
                               {t('sharedTag')}
@@ -1635,19 +2341,6 @@ export default function SessionPage() {
                             />
                           )}
                         </button>
-                        <button
-                          type="button"
-                          onClick={(event) => {
-                            event.stopPropagation();
-                            handleCreateSessionInProject(group.id);
-                          }}
-                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
-                          className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
-                          title={t('createSessionInProject', { project: group.label })}
-                          aria-label={t('createSessionInProject', { project: group.label })}
-                        >
-                          {creating && isSelectedProject ? <Loader2 className="h-3 w-3 animate-spin" /> : <Plus className="h-3 w-3" />}
-                        </button>
                         {persistedProject && (
                           <button
                             type="button"
@@ -1655,7 +2348,11 @@ export default function SessionPage() {
                               event.stopPropagation();
                               setOpenProjectMenuId((current) => current === group.id ? null : group.id);
                             }}
-                            className="rounded p-1 text-gray-400 transition-colors hover:bg-gray-200 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-800 dark:hover:text-zinc-200"
+                            className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                              openProjectMenuId === group.id || isSelectedProject
+                                ? 'opacity-100'
+                                : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
+                            }`}
                             title={t('projectActions')}
                             aria-label={t('projectActions')}
                             aria-expanded={openProjectMenuId === group.id}
@@ -1663,13 +2360,10 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
-                        <span className="inline-flex min-w-5 shrink-0 items-center justify-center rounded-full bg-white/80 px-1.5 py-0.5 text-[10px] tabular-nums text-gray-400 dark:bg-zinc-800 dark:text-zinc-500">
-                          {group.sessionCount}
-                        </span>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
-                          className="absolute right-8 top-8 z-30 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
+                          className="absolute right-7 top-8 z-30 grid w-[140px] gap-0.5 rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
                           role="menu"
                           onClick={(event) => event.stopPropagation()}
                         >
@@ -1677,7 +2371,7 @@ export default function SessionPage() {
                             type="button"
                             role="menuitem"
                             onClick={() => void handleCopyProjectPath(group)}
-                            className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                            className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                           >
                             <Copy className="h-3.5 w-3.5" />
                             {t('projectDialog.copyPathAction')}
@@ -1687,7 +2381,7 @@ export default function SessionPage() {
                               type="button"
                               role="menuitem"
                               onClick={() => void handleShareProject(group, !group.isShared)}
-                              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                             >
                               <Share2 className="h-3.5 w-3.5" />
                               {t(group.isShared ? 'unshareAction' : 'shareAction')}
@@ -1698,21 +2392,21 @@ export default function SessionPage() {
                               type="button"
                               role="menuitem"
                               onClick={() => handleOpenRenameProject(group)}
-                              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
                             >
                               <PencilLine className="h-3.5 w-3.5" />
                               {t('projectDialog.renameAction')}
                             </button>
                           )}
                           {group.canDelete && (
-                            <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
+                            <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
                           )}
                           {group.canDelete && (
                             <button
                               type="button"
                               role="menuitem"
                               onClick={() => handleOpenDeleteProject(group)}
-                              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-950/40"
+                              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-40 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
                             >
                               <Trash2 className="h-3.5 w-3.5" />
                               {t('projectDialog.deleteAction')}
@@ -1721,9 +2415,9 @@ export default function SessionPage() {
                         </div>
                       )}
                       {!collapsed && (
-                        <div className="mt-1.5">
+                        <div className="mb-1 mt-0.5">
                           {group.sessions.length > 0 ? (
-                            group.sessions.map((session) => (
+                            visibleProjectSessions.map((session) => (
                               <SessionSidebarItem
                                 key={session.id}
                                 session={session}
@@ -1732,9 +2426,12 @@ export default function SessionPage() {
                                 selectMode={selectMode}
                                 checked={checkedIds.has(session.id)}
                                 menuOpen={openMenuSessionId === session.id}
+                                running={runningSessionIds.has(session.id)}
                                 renaming={renamingSessionId === session.id}
                                 renameValue={renameValue}
                                 renameSubmitting={renameSubmitting}
+                                language={i18n.language}
+                                relativeTimeClock={relativeTimeClock}
                                 t={t}
                                 renameInputRef={renameInputRef}
                                 onSelect={handleSelectSessionRow}
@@ -1746,23 +2443,40 @@ export default function SessionPage() {
                               />
                             ))
                           ) : (
-                            <div className="ml-7 mr-2 rounded-lg px-3 py-2 text-xs text-gray-400 dark:text-zinc-600">
+                            <div className="ml-[19px] px-2.5 py-2 text-[11px] text-[#a0a4aa] dark:text-[#8f9ba8]">
                               {t('noProjectSessions')}
                             </div>
                           )}
-                          {hasMoreProjectSessions && (
-                            <div className="ml-7 mr-2 py-1">
+                          {(canShowMoreProjectSessions || canCollapseProjectSessions) && (
+                            <div className="ml-[19px] flex h-7 items-center justify-center gap-2 py-0.5">
+                              {canShowMoreProjectSessions && (
                               <button
                                 type="button"
-                                onClick={() => void loadMoreSessions(group.id)}
+                                onClick={() => {
+                                  if (sessionsCollapsedToFirstPage) {
+                                    setLoadedSessionGroupCollapsed(group.id, false);
+                                    return;
+                                  }
+                                  void loadMoreSessions(group.id);
+                                }}
                                 disabled={loadingMoreProjectIds.has(group.id)}
-                                className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                                className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                               >
-                                {loadingMoreProjectIds.has(group.id)
-                                  ? <Loader2 className="h-3 w-3 animate-spin" />
-                                  : <ChevronDown className="h-3 w-3" />}
-                                {t('loadMore', 'Load more')}
+                                {loadingMoreProjectIds.has(group.id) && (
+                                  <Loader2 className="h-3 w-3 animate-spin" />
+                                )}
+                                {t('loadMore')}
                               </button>
+                              )}
+                              {canCollapseProjectSessions && (
+                                <button
+                                  type="button"
+                                  onClick={() => setLoadedSessionGroupCollapsed(group.id, true)}
+                                  className="flex h-7 items-center justify-center rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                                >
+                                  {t('collapseLoaded')}
+                                </button>
+                              )}
                             </div>
                           )}
                         </div>
@@ -1775,53 +2489,28 @@ export default function SessionPage() {
               </section>
               {taskSessionGroup && (
                 <section className="group/tasks-section mt-3">
-                  <div className="flex items-center gap-1 px-4 pb-1 pt-2 text-xs font-semibold uppercase tracking-wide text-gray-400 select-none dark:text-zinc-600">
+                  <div className="flex h-7 select-none items-center gap-1 px-2 text-xs font-semibold uppercase tracking-[0.02em] text-zinc-500 dark:text-[#8f9ba8]">
                     <button
                       type="button"
                       onClick={() => {
                         setSelectedProjectId(taskSessionGroup.id);
                         toggleProjectCollapsed(taskSessionGroup.id);
                       }}
-                      className="min-w-0 truncate rounded text-left transition-colors hover:text-gray-700 dark:hover:text-zinc-300"
-                      aria-label={t('selectTasks')}
-                    >
-                      {t('tasksSection')}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleProjectCollapsed(taskSessionGroup.id);
-                      }}
-                      className="mr-auto rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                      className="flex h-6 items-center gap-1 rounded-lg px-1 text-left transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:hover:bg-white/[0.06] dark:hover:text-white"
                       aria-label={t('toggleTasks')}
                     >
+                      <span>{t('tasksSection')}</span>
+                      <span className="font-normal tabular-nums text-[#858a91] dark:text-[#8f9ba8]">
+                        ({taskSessionGroup.sessionCount})
+                      </span>
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
                     </button>
-                    <button
-                      type="button"
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        void handleCreateSession(TASK_SESSION_GROUP_ID);
-                      }}
-                      disabled={creating || taskSessionGroup.pathStatus !== 'available'}
-                      className="rounded p-0.5 text-gray-400 transition-colors hover:bg-gray-100 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-600 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
-                      title={t('createTaskSession')}
-                      aria-label={t('createTaskSession')}
-                    >
-                      {creating && taskGroupSelected
-                        ? <Loader2 className="h-3 w-3 animate-spin" />
-                        : <Plus className="h-3 w-3" />}
-                    </button>
-                    <span className="w-5 shrink-0 text-right tabular-nums">
-                      {taskSessionGroup.sessionCount}
-                    </span>
                   </div>
                   {!taskGroupCollapsed && (
-                    <div className="mt-1 space-y-1">
-                      {taskSessionGroup.sessions.map((session) => (
+                    <div className="mt-0.5">
+                      {visibleTaskSessions.map((session) => (
                         <SessionSidebarItem
                           key={session.id}
                           session={session}
@@ -1829,9 +2518,12 @@ export default function SessionPage() {
                           selectMode={selectMode}
                           checked={checkedIds.has(session.id)}
                           menuOpen={openMenuSessionId === session.id}
+                          running={runningSessionIds.has(session.id)}
                           renaming={renamingSessionId === session.id}
                           renameValue={renameValue}
                           renameSubmitting={renameSubmitting}
+                          language={i18n.language}
+                          relativeTimeClock={relativeTimeClock}
                           t={t}
                           renameInputRef={renameInputRef}
                           onSelect={handleSelectSessionRow}
@@ -1842,19 +2534,36 @@ export default function SessionPage() {
                           onToggleMenu={handleToggleSessionMenu}
                         />
                       ))}
-                      {hasMoreTaskSessions && (
-                        <div className="mx-4 py-1">
+                      {(canShowMoreTaskSessions || canCollapseTaskSessions) && (
+                        <div className="flex h-7 items-center justify-center gap-2 py-0.5">
+                          {canShowMoreTaskSessions && (
                           <button
                             type="button"
-                            onClick={() => void loadMoreSessions(taskSessionGroup.id)}
+                            onClick={() => {
+                              if (taskSessionsCollapsedToFirstPage) {
+                                setLoadedSessionGroupCollapsed(taskSessionGroup.id, false);
+                                return;
+                              }
+                              void loadMoreSessions(taskSessionGroup.id);
+                            }}
                             disabled={loadingMoreProjectIds.has(taskSessionGroup.id)}
-                            className="flex w-full items-center justify-center gap-1 rounded px-2 py-1 text-xs text-gray-400 hover:bg-gray-50 hover:text-gray-700 disabled:cursor-not-allowed disabled:opacity-50 dark:hover:bg-zinc-900 dark:hover:text-zinc-300"
+                            className="flex h-7 items-center justify-center gap-1 rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
                           >
-                            {loadingMoreProjectIds.has(taskSessionGroup.id)
-                              ? <Loader2 className="h-3 w-3 animate-spin" />
-                              : <ChevronDown className="h-3 w-3" />}
-                            {t('loadMore', 'Load more')}
+                            {loadingMoreProjectIds.has(taskSessionGroup.id) && (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            )}
+                            {t('loadMore')}
                           </button>
+                          )}
+                          {canCollapseTaskSessions && (
+                            <button
+                              type="button"
+                              onClick={() => setLoadedSessionGroupCollapsed(taskSessionGroup.id, true)}
+                              className="flex h-7 items-center justify-center rounded-lg px-2 text-[11px] text-[#969aa0] transition-colors hover:bg-black/[0.04] hover:text-[#474b51] dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                            >
+                              {t('collapseLoaded')}
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>
@@ -1862,41 +2571,48 @@ export default function SessionPage() {
                 </section>
               )}
           </div>
+          )}
         </div>
 
         {/* Bottom：批量操作栏 / 批量选择入口 */}
         {sessions.length > 0 && (
-          <div className="border-t border-gray-100 px-3 pt-3 pb-4 flex-shrink-0 dark:border-zinc-800">
+          <div className="flex min-h-11 flex-shrink-0 items-center justify-center border-t border-black/[0.07] px-3 dark:border-white/[0.08]">
             {selectMode ? (
               <div className="grid grid-cols-3 gap-1.5">
                 <button
                   onClick={handleSelectAll}
-                  className="flex items-center justify-center py-2 text-sm text-blue-600 bg-blue-50 hover:bg-blue-100 rounded-lg transition-colors"
+                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-blue-600 transition-colors hover:bg-blue-50 dark:text-blue-300 dark:hover:bg-blue-500/10"
+                  title={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
+                  aria-label={checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
                 >
-                  {checkedIds.size === sessions.length && sessions.length > 0 ? t('deselectAll') : t('selectAll')}
+                  <CheckSquare className="h-[15px] w-[15px]" />
                 </button>
                 <button
                   onClick={handleExitSelectMode}
-                  className="flex items-center justify-center py-2 text-sm text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg transition-colors"
+                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-[#60656b] transition-colors hover:bg-black/[0.04] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06]"
+                  title={t('cancelSelect')}
+                  aria-label={t('cancelSelect')}
                 >
-                  {t('cancelSelect')}
+                  <X className="h-[15px] w-[15px]" />
                 </button>
                 <button
-                  onClick={handleBatchDelete}
-                  disabled={checkedIds.size === 0 || batchDeleting}
-                  className="flex items-center justify-center py-2 text-sm text-red-600 bg-red-50 hover:bg-red-100 rounded-lg disabled:opacity-40 disabled:cursor-not-allowed transition-colors"
-                  title={t('deleteSelected', { count: checkedIds.size })}
+                  onClick={handleBatchArchive}
+                  disabled={checkedIds.size === 0 || batchArchiving}
+                  className="grid h-[30px] w-[30px] place-items-center rounded-lg text-red-600 transition-colors hover:bg-red-50 disabled:cursor-default disabled:opacity-35 dark:text-red-300 dark:hover:bg-red-500/10"
+                  title={t('archiveSelected', { count: checkedIds.size })}
+                  aria-label={t('archiveSelected', { count: checkedIds.size })}
                 >
-                  {batchDeleting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Trash2 className="w-4 h-4" />}
+                  {batchArchiving ? <Loader2 className="h-[15px] w-[15px] animate-spin" /> : <Archive className="h-[15px] w-[15px]" />}
                 </button>
               </div>
             ) : (
               <button
                 onClick={handleEnterSelectMode}
-                className="w-full flex items-center justify-center gap-1.5 py-1.5 text-xs text-gray-400 hover:text-gray-600 hover:bg-gray-50 rounded-lg transition-colors"
+                className="grid h-[30px] w-[30px] place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                title={t('selectMode')}
+                aria-label={t('selectMode')}
               >
-                <CheckSquare className="w-3.5 h-3.5" />
-                <span>{t('selectMode')}</span>
+                <CheckSquare className="h-[15px] w-[15px]" />
               </button>
             )}
           </div>
@@ -1904,32 +2620,34 @@ export default function SessionPage() {
       </div>
 
       {/* ── Main area ── */}
-      <div className="flex-1 flex flex-col overflow-hidden h-full min-w-0">
+      <div className="flex h-full min-w-0 flex-1 flex-col overflow-hidden bg-[#fcfcfd] dark:bg-[#303842]">
         {/* Header */}
-        <div className="px-6 h-12 border-b border-gray-200 bg-white flex items-center justify-between flex-shrink-0 relative dark:border-zinc-800 dark:bg-zinc-950/95">
-          <div className="absolute left-4 top-1/2 -translate-y-1/2">
+        <header className="relative flex h-[52px] flex-shrink-0 items-center gap-2 px-4 text-[13px]">
+          <div className="shrink-0">
             <button
               onClick={() => setSidebarCollapsed(!sidebarCollapsed)}
-              className="p-2 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 shadow-sm hover:shadow-md transition-all duration-200 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:shadow-none"
+              className="grid h-[30px] w-[30px] place-items-center rounded-lg border-0 bg-transparent text-[#7b8087] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.06] dark:hover:text-white"
               title={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
+              aria-label={sidebarCollapsed ? t('showHistory') : t('hideHistory')}
             >
-              {sidebarCollapsed ? <PanelLeft className="w-5 h-5" /> : <PanelLeftClose className="w-5 h-5" />}
+              {sidebarCollapsed ? <PanelLeft className="h-4 w-4" /> : <PanelLeftClose className="h-4 w-4" />}
             </button>
           </div>
 
-          <div className="flex items-center gap-3 ml-14">
-            <h2 className="text-base font-semibold text-gray-900 dark:text-zinc-100">
+          <div className="flex min-w-0 items-center">
+            <h2 className="truncate text-sm font-semibold text-[#555a61] dark:text-[#c3ccd6]">
               {selectedSession?.title || t('newSession')}
             </h2>
           </div>
 
-        </div>
+          {workbenchRefreshing && (
+            <WorkbenchRefreshStatus label={workbenchRefreshLabel} />
+          )}
+        </header>
 
         {/* Chat — powered by unified SessionChat */}
         {resolvingSelectedSession ? (
-          <div className="flex min-h-0 flex-1 items-center justify-center">
-            <LoadingSpinner delayMs={180} />
-          </div>
+          <SessionChatSkeleton />
         ) : (
           <SessionChat
             key={activeChatSessionId ?? 'empty-session'}
@@ -1938,6 +2656,7 @@ export default function SessionPage() {
           hideInput={selectedSession?.canWrite === false}
           display={{
             compact: false,
+            pageCanvas: true,
             showActions: true,
             showTimestamp: true,
             collapseIntermediateSteps: true,
@@ -1945,8 +2664,11 @@ export default function SessionPage() {
             processGroupsOpenWhileActive: true,
           }}
           agentName={selectedAgent}
+          executionMode={selectedExecutionMode}
+          onExecutionModeAccepted={handleExecutionModeAccepted}
           mentionAgents={chatAgents}
           className="flex-1 min-h-0"
+          composerTextareaMinHeight={56}
           initialMessage={pendingInitialMessage}
           initialDisplayText={pendingInitialDisplayText}
           onInitialMessageConsumed={() => {
@@ -1957,13 +2679,13 @@ export default function SessionPage() {
           onSSEEvent={handleSSEEvent}
           onError={handleChatError}
           onCreateAndSend={handleCreateAndSend}
-          onCreateNewSession={handleCreateSession}
+          onCreateNewSession={handleStartNewSession}
           onStreamingDone={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
           }}
           supportsVision={effectiveSupportsVision}
-          contextWindowTokens={selectedModelOption?.contextWindowTokens ?? null}
+          contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
           model={selectedPromptModel}
           welcomeContent={(setInput) => (
             <WelcomeScreen
@@ -1972,25 +2694,44 @@ export default function SessionPage() {
               alertOperationsBusy={installingSocWorkspace}
             />
           )}
-          toolbarSlot={
+          onComposerAddMenuOpenChange={(open) => {
+            setShowAgentOptions(false);
+            setShowWorkflowOptions(false);
+            setShowSkillOptions(false);
+            if (!open) return;
+            setShowProjectOptions(false);
+            setShowModelOptions(false);
+            void loadComposerResources();
+          }}
+          composerAddMenuSlot={({ closeMenu, insertMention, insertReference }) => (
+            <>
             <div className="relative" data-agent-selector>
               <button
                 type="button"
-                onClick={() => setShowAgentOptions(!showAgentOptions)}
-                className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                onClick={() => {
+                  setShowAgentOptions((open) => !open);
+                  setShowWorkflowOptions(false);
+                  setShowSkillOptions(false);
+                  setShowProjectOptions(false);
+                  setShowModelOptions(false);
+                }}
+                className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                 title={t('agentPicker.title')}
+                aria-label={t('chat.addMenu.agent')}
+                aria-haspopup="menu"
+                aria-expanded={showAgentOptions}
               >
-                <Bot className="h-3 w-3 shrink-0" />
-                <span className="truncate font-medium">
-                  {selectedAgentInfo ? getAgentDisplayName(selectedAgentInfo, i18n.language) : formatAgentName(selectedAgent)}
+                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                  <Bot className="h-3.5 w-3.5" />
                 </span>
-                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
+                <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
+                <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
               </button>
               {showAgentOptions && (
-                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                  <div className="flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
                     <div className="min-w-0">
-                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('agentPicker.title')}</div>
+                      <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
                       <div
                         className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
                         onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
@@ -2002,16 +2743,16 @@ export default function SessionPage() {
                         {t('agentPicker.hint')}
                       </div>
                     </div>
-                    <div className="inline-flex shrink-0 items-center rounded-md border border-zinc-200 bg-white p-0.5 text-[10px] dark:border-zinc-800 dark:bg-zinc-950">
+                    <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
                       {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
                         <button
                           key={filter}
                           type="button"
                           onClick={() => setAgentSourceFilter(filter)}
-                          className={`rounded px-1.5 py-0.5 transition-colors ${
+                          className={`rounded-md px-2 py-1 transition-colors ${
                             agentSourceFilter === filter
-                              ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
-                              : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
+                              ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
+                              : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
                           }`}
                         >
                           {t(`agentPicker.filter.${filter}`)}
@@ -2027,37 +2768,47 @@ export default function SessionPage() {
                         const displayName = getAgentDisplayName(agent, i18n.language);
                         const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
                         return (
-                        <button
-                          key={agent.name}
-                          onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                          className={`w-full min-w-0 rounded-md px-2 py-1.5 text-left transition-colors ${
-                            selectedAgent === agent.name
-                              ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                              : 'hover:bg-zinc-50 text-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                          }`}
-                        >
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Bot className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                            <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                              {displayName}
-                            </span>
-                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
-                              agent.mode === 'primary'
-                                ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
-                                : agent.native
-                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
-                                  : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
-                            }`}>
-                              {agent.mode === 'primary'
-                                ? t('agentPicker.badge.primary')
-                                : agent.native
-                                  ? t('agentPicker.badge.builtin')
-                                  : t('agentPicker.badge.custom')}
-                            </span>
-                            <div className="ml-auto flex shrink-0 items-center gap-1">
+                          <button
+                            key={agent.name}
+                            type="button"
+                            onClick={() => {
+                              setShowAgentOptions(false);
+                              insertMention(agent.name);
+                              closeMenu();
+                            }}
+                            className={`w-full min-w-0 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              selectedAgent === agent.name
+                                ? 'bg-zinc-100/90 text-zinc-900 dark:bg-white/[0.09] dark:text-zinc-50'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
+                                selectedAgent === agent.name
+                                  ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
+                                  : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
+                              }`}>
+                                <Bot className="h-3 w-3" />
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                                {displayName}
+                              </span>
+                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                agent.mode === 'primary'
+                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                  : agent.native
+                                    ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                    : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                              }`}>
+                                {agent.mode === 'primary'
+                                  ? t('agentPicker.badge.primary')
+                                  : agent.native
+                                    ? t('agentPicker.badge.builtin')
+                                    : t('agentPicker.badge.custom')}
+                              </span>
                               {primaryDesc && (
                                 <span
-                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-white/[0.08]"
                                   onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                   onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
                                   onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
@@ -2070,8 +2821,7 @@ export default function SessionPage() {
                                 </span>
                               )}
                             </div>
-                          </div>
-                        </button>
+                          </button>
                         );
                       })
                     ) : (
@@ -2081,33 +2831,282 @@ export default function SessionPage() {
                 </div>
               )}
             </div>
+            <ComposerResourcePicker
+              label={t('chat.addMenu.skills')}
+              title={t('chat.addMenu.selectSkill')}
+              emptyText={t('chat.addMenu.noSkills')}
+              icon={BookOpen}
+              items={composerSkills.map((skill) => ({
+                id: skill.name,
+                name: skill.name,
+                description: skill.description,
+                badge: skill.category,
+                source: skill.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showSkillOptions}
+              onToggle={() => {
+                setShowSkillOptions((open) => !open);
+                setShowAgentOptions(false);
+                setShowWorkflowOptions(false);
+              }}
+              onSelect={(skill) => {
+                insertReference(skill.id, 'skill');
+              }}
+            />
+            <ComposerResourcePicker
+              label={t('chat.addMenu.workflows')}
+              title={t('chat.addMenu.selectWorkflow')}
+              emptyText={t('chat.addMenu.noWorkflows')}
+              icon={WorkflowIcon}
+              items={composerWorkflows.map((workflow) => ({
+                id: workflow.id,
+                name: getWorkflowDisplayName(workflow, i18n.language),
+                description: workflow.description,
+                source: workflow.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showWorkflowOptions}
+              onToggle={() => {
+                setShowWorkflowOptions((open) => !open);
+                setShowAgentOptions(false);
+                setShowSkillOptions(false);
+              }}
+              onSelect={(workflow) => {
+                insertReference(workflow.id, 'workflow');
+                setShowWorkflowOptions(false);
+                closeMenu();
+              }}
+            />
+            </>
+          )}
+          toolbarSlot={
+            <div className="flex min-w-0 items-center gap-0.5">
+              <div className="relative" data-execution-mode-selector>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowExecutionModeOptions(!showExecutionModeOptions);
+                    setShowAgentOptions(false);
+                    setShowModelOptions(false);
+                    setShowProjectOptions(false);
+                  }}
+                  className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                  title={t(`executionMode.options.${selectedExecutionMode}.description`)}
+                  aria-label={t('executionMode.title')}
+                  aria-haspopup="menu"
+                  aria-expanded={showExecutionModeOptions}
+                >
+                  <ExecutionModeIcon mode={selectedExecutionMode} />
+                  <span className="font-medium">
+                    {t(`executionMode.options.${selectedExecutionMode}.label`)}
+                  </span>
+                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showExecutionModeOptions ? 'rotate-180' : ''}`} />
+                </button>
+                {showExecutionModeOptions && (
+                  <div
+                    role="menu"
+                    aria-label={t('executionMode.title')}
+                    className="absolute bottom-full left-0 z-50 mb-2 w-64 overflow-hidden rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                  >
+                    <div className="border-b border-zinc-100 px-3 py-2 dark:border-zinc-800">
+                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
+                        {t('executionMode.title')}
+                      </div>
+                      <div className="mt-0.5 text-[10px] text-zinc-400 dark:text-zinc-500">
+                        {t('executionMode.hint')}
+                      </div>
+                    </div>
+                    <div className="space-y-0.5 p-1.5">
+                      {SESSION_EXECUTION_MODES.map((mode) => {
+                        const selected = selectedExecutionMode === mode;
+                        return (
+                          <button
+                            key={mode}
+                            type="button"
+                            role="menuitemradio"
+                            aria-checked={selected}
+                            onClick={() => handleSelectExecutionMode(mode)}
+                            className={`flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors ${
+                              selected
+                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <ExecutionModeIcon
+                              mode={mode}
+                              className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
+                                selected
+                                  ? 'text-zinc-700 dark:text-zinc-100'
+                                  : 'text-zinc-400 dark:text-zinc-500'
+                              }`}
+                            />
+                            <span className="min-w-0 flex-1">
+                              <span className="block text-xs font-medium">
+                                {t(`executionMode.options.${mode}.label`)}
+                              </span>
+                              <span className="mt-0.5 block text-[10px] leading-4 text-zinc-400 dark:text-zinc-500">
+                                {t(`executionMode.options.${mode}.description`)}
+                              </span>
+                            </span>
+                            {selected && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+              </div>
+              {!activeChatSessionId && (
+              <div className="relative" data-project-selector>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setShowProjectOptions((open) => !open);
+                    setShowAgentOptions(false);
+                    setShowExecutionModeOptions(false);
+                    setShowModelOptions(false);
+                  }}
+                  className="flex h-7 max-w-[160px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-[#5e646b] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#b8c2cc] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                  title={t('projectPicker.title')}
+                  aria-label={t('projectPicker.title')}
+                  aria-expanded={showProjectOptions}
+                >
+                  <FolderGit2 className="h-3 w-3 shrink-0" />
+                  <span className="truncate font-medium">{selectedProjectContextLabel}</span>
+                  <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showProjectOptions ? 'rotate-180' : ''}`} />
+                </button>
+                {showProjectOptions && (
+                  <div
+                    className="absolute bottom-full left-0 z-50 mb-2 grid w-64 gap-0.5 rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
+                    role="menu"
+                    aria-label={t('projectPicker.title')}
+                  >
+                    {projectSessionGroups.map((group) => (
+                      <button
+                        key={group.id}
+                        type="button"
+                        role="menuitemradio"
+                        aria-checked={selectedProjectId === group.id}
+                        onClick={() => {
+                          setSelectedProjectId(group.id);
+                          setShowProjectOptions(false);
+                        }}
+                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      >
+                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <span className="min-w-0 flex-1 truncate">{group.label}</span>
+                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-[#4f92e8]" />}
+                      </button>
+                    ))}
+                    <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
+                    <button
+                      type="button"
+                      role="menuitemradio"
+                      aria-checked={selectedProjectId === TASK_SESSION_GROUP_ID}
+                      onClick={() => {
+                        setSelectedProjectId(TASK_SESSION_GROUP_ID);
+                        setShowProjectOptions(false);
+                      }}
+                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                    >
+                      <X className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                      <span className="min-w-0 flex-1 truncate">{t('projectPicker.none')}</span>
+                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-[#4f92e8]" />}
+                    </button>
+                    <button
+                      type="button"
+                      role="menuitem"
+                      onClick={() => {
+                        setShowProjectOptions(false);
+                        handleOpenCreateProject();
+                      }}
+                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                    >
+                      <FolderPlus className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                      <span>{t('projectPicker.create')}</span>
+                    </button>
+                  </div>
+                )}
+              </div>
+            )}
+            </div>
           }
           centerToolbarSlot={
-            <div className="relative" data-model-selector>
+            <div ref={modelSelectorRef} className="relative" data-model-selector>
               <button
                 type="button"
-                onClick={() => setShowModelOptions(!showModelOptions)}
+                onClick={() => {
+                  if (!showModelOptions) updateModelMenuLeftOffset();
+                  setShowModelOptions(!showModelOptions);
+                  setShowExecutionModeOptions(false);
+                  setShowProjectOptions(false);
+                  setShowAgentOptions(false);
+                }}
                 disabled={loadingProviders || loadingEnabledModels || chatModelOptions.length === 0}
                 className="flex h-7 w-[132px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                title={selectedModelOption ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}` : t('modelPicker.empty')}
+                title={selectedModelAuto
+                  ? `${t('modelPicker.auto')}: ${autoStatusLabel}`
+                  : selectedModelOption
+                    ? `${selectedModelOption.providerName} / ${selectedModelOption.modelID}`
+                    : t('modelPicker.empty')}
               >
-                <Cpu className="h-3 w-3 shrink-0" />
+                {selectedModelAuto
+                  ? <Sparkles className="h-3 w-3 shrink-0" />
+                  : <Cpu className="h-3 w-3 shrink-0" />}
                 <span className="truncate font-medium">
-                  {selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
+                  {selectedModelAuto
+                    ? t('modelPicker.auto')
+                    : selectedModelOption?.label ?? (loadingProviders || loadingEnabledModels ? t('loading') : t('modelPicker.empty'))}
                 </span>
                 <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showModelOptions ? 'rotate-180' : ''}`} />
               </button>
               {showModelOptions && (
-                <div className="absolute right-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                <div
+                  className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30"
+                  style={{ transform: `translateX(${modelMenuLeftOffset}px)` }}
+                >
                   <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
                     <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('modelPicker.title')}</div>
                     <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">{t('modelPicker.hint')}</div>
                   </div>
-                  <div className="h-[13.5rem] overflow-y-auto p-1.5">
+                  <div className="h-[15.5rem] overflow-y-auto p-1.5">
                     {loadingProviders || loadingEnabledModels ? (
                       <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
-                    ) : groupedChatModelOptions.length > 0 ? (
-                      groupedChatModelOptions.map((group) => (
+                    ) : (
+                      <>
+                        <div className="mb-1 border-b border-zinc-100 pb-1.5 dark:border-zinc-800">
+                          <button
+                            type="button"
+                            onClick={() => void handleSelectAutoModel()}
+                            disabled={!canSelectAuto}
+                            className={`w-full rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                              selectedModelAuto
+                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <Sparkles className={`h-3 w-3 shrink-0 ${selectedModelAuto ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                                {t('modelPicker.auto')}
+                              </span>
+                              <span
+                                className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
+                                onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
+                                onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
+                                onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('modelPicker.auto'), [autoStatusLabel])}
+                                onMouseLeave={() => setSelectorTooltip(null)}
+                                onPointerLeave={() => setSelectorTooltip(null)}
+                              >
+                                <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                              </span>
+                            </div>
+                          </button>
+                        </div>
+                        {groupedChatModelOptions.length > 0 ? groupedChatModelOptions.map((group) => (
                         <div key={group.providerID} className="py-1 first:pt-0 last:pb-0">
                           <div className="sticky top-0 z-10 flex items-center justify-between gap-2 bg-white/95 px-1.5 py-1 text-[10px] font-semibold text-zinc-500 backdrop-blur dark:bg-zinc-900/95 dark:text-zinc-400">
                             <span className="truncate">{group.providerName}</span>
@@ -2154,9 +3153,10 @@ export default function SessionPage() {
                             ))}
                           </div>
                         </div>
-                      ))
-                    ) : (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                        )) : (
+                          <div className="p-3 text-center text-xs text-zinc-500">{t('modelPicker.empty')}</div>
+                        )}
+                      </>
                     )}
                   </div>
                   <div className="border-t border-zinc-100 p-1.5 dark:border-zinc-800">
@@ -2182,15 +3182,15 @@ export default function SessionPage() {
       </div>
 
       {projectDialogMode && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-lg rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
-            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#1e23283d] px-6 backdrop-blur-[2px]">
+          <div className="w-full max-w-[420px] overflow-hidden rounded-2xl border border-black/[0.11] bg-[#fdfdfc] shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]">
+            <div className="border-b border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
+              <h3 className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
                 {projectDialogMode === 'create' ? t('projectDialog.createTitle') : t('projectDialog.renameTitle')}
               </h3>
             </div>
-            <div className="space-y-3 px-4 py-4">
-              <label className="block text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-name">
+            <div className="space-y-3 px-4 py-4 text-[13px] text-[#676c73] dark:text-[#b8c2cc]">
+              <label className="block text-[11px] font-semibold text-[#777c82] dark:text-[#9aa7b4]" htmlFor="session-project-name">
                 {t('projectDialog.nameLabel')}
               </label>
               <input
@@ -2220,12 +3220,12 @@ export default function SessionPage() {
                 }}
                 disabled={projectSubmitting}
                 placeholder={t('projectDialog.namePlaceholder')}
-                className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                className="h-9 w-full rounded-[10px] border border-black/[0.11] bg-white px-2.5 text-[13px] text-[#202328] outline-none transition-colors placeholder:text-[#969aa0] focus:border-[#4f92e8] dark:border-white/[0.10] dark:bg-[#252c35] dark:text-white dark:placeholder:text-[#8f9ba8]"
                 autoFocus
               />
               {projectDialogMode === 'create' && (
                 <>
-                  <label className="block pt-1 text-xs font-medium text-zinc-500 dark:text-zinc-400" htmlFor="session-project-worktree">
+                  <label className="block pt-1 text-[11px] font-semibold text-[#777c82] dark:text-[#9aa7b4]" htmlFor="session-project-worktree">
                     {t('projectDialog.folderLabel')}
                   </label>
                   <div className="flex gap-2">
@@ -2243,13 +3243,13 @@ export default function SessionPage() {
                       }}
                       disabled={projectSubmitting}
                       placeholder={t('projectDialog.folderPlaceholder')}
-                      className="min-w-0 flex-1 rounded-lg border border-zinc-200 bg-white px-3 py-2 font-mono text-xs text-zinc-900 outline-none transition-colors placeholder:text-zinc-400 focus:border-blue-400 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-100 dark:placeholder:text-zinc-600 dark:focus:border-blue-500"
+                      className="h-9 min-w-0 flex-1 rounded-[10px] border border-black/[0.11] bg-white px-2.5 font-mono text-xs text-[#202328] outline-none transition-colors placeholder:text-[#969aa0] focus:border-[#4f92e8] dark:border-white/[0.10] dark:bg-[#252c35] dark:text-white dark:placeholder:text-[#8f9ba8]"
                     />
                     <button
                       type="button"
                       onClick={() => void loadFolderBrowser(projectWorktreeValue)}
                       disabled={projectSubmitting || folderBrowserLoading}
-                      className="inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-zinc-200 px-3 text-xs font-medium text-zinc-600 hover:bg-zinc-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-900"
+                      className="inline-flex h-9 shrink-0 items-center gap-1.5 rounded-[10px] border border-black/[0.11] px-3 text-xs font-medium text-[#60656b] transition-colors hover:bg-black/[0.04] disabled:cursor-not-allowed disabled:opacity-50 dark:border-white/[0.10] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06]"
                     >
                       {folderBrowserLoading ? <Loader2 className="h-3.5 w-3.5 animate-spin" /> : <FolderOpen className="h-3.5 w-3.5" />}
                       {t('projectDialog.chooseFolder')}
@@ -2315,12 +3315,12 @@ export default function SessionPage() {
                 </>
               )}
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+            <div className="flex items-center justify-end gap-2 border-t border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
               <button
                 type="button"
                 onClick={handleCloseProjectDialog}
                 disabled={projectSubmitting}
-                className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+                className="h-8 min-w-[66px] rounded-[10px] bg-[#f1f1ef] px-3 text-xs text-[#5d6269] transition-colors hover:bg-[#e8e8e5] disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/[0.07] dark:text-[#c3ccd6] dark:hover:bg-white/[0.10]"
               >
                 {t('cancel')}
               </button>
@@ -2328,7 +3328,7 @@ export default function SessionPage() {
                 type="button"
                 onClick={() => void handleSubmitProject()}
                 disabled={projectSubmitting}
-                className="inline-flex min-w-16 items-center justify-center rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-zinc-700 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-300"
+                className="inline-flex h-8 min-w-[66px] items-center justify-center rounded-[10px] bg-[#24272b] px-3 text-xs font-medium text-white transition-colors hover:bg-[#35393e] disabled:cursor-not-allowed disabled:opacity-60 dark:bg-[#eef2f6] dark:text-[#252c35] dark:hover:bg-white"
               >
                 {projectSubmitting ? <Loader2 className="h-4 w-4 animate-spin" /> : t('save')}
               </button>
@@ -2338,22 +3338,22 @@ export default function SessionPage() {
       )}
 
       {projectPendingDelete && (
-        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-black/30 px-4 backdrop-blur-sm">
-          <div className="w-full max-w-sm rounded-lg border border-zinc-200 bg-white shadow-xl dark:border-zinc-800 dark:bg-zinc-950">
-            <div className="border-b border-zinc-100 px-4 py-3 dark:border-zinc-800">
-              <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+        <div className="fixed inset-0 z-[70] flex items-center justify-center bg-[#1e23283d] px-6 backdrop-blur-[2px]">
+          <div className="w-full max-w-[420px] overflow-hidden rounded-2xl border border-black/[0.11] bg-[#fdfdfc] shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]">
+            <div className="border-b border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
+              <h3 className="text-sm font-semibold text-[#202328] dark:text-[#f0f3f7]">
                 {t('projectDialog.deleteTitle')}
               </h3>
             </div>
-            <div className="px-4 py-4 text-sm leading-6 text-zinc-600 dark:text-zinc-300">
+            <div className="px-4 py-4 text-[13px] leading-6 text-[#676c73] dark:text-[#b8c2cc]">
               {t('projectDialog.deleteDescription', { project: projectPendingDelete.label })}
             </div>
-            <div className="flex items-center justify-end gap-2 border-t border-zinc-100 px-4 py-3 dark:border-zinc-800">
+            <div className="flex items-center justify-end gap-2 border-t border-black/[0.07] px-4 py-[13px] dark:border-white/[0.08]">
               <button
                 type="button"
                 onClick={() => setProjectPendingDelete(null)}
                 disabled={projectDeleting}
-                className="rounded-lg px-3 py-1.5 text-sm text-zinc-500 transition-colors hover:bg-zinc-100 hover:text-zinc-800 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-400 dark:hover:bg-zinc-900 dark:hover:text-zinc-100"
+                className="h-8 min-w-[66px] rounded-[10px] bg-[#f1f1ef] px-3 text-xs text-[#5d6269] transition-colors hover:bg-[#e8e8e5] disabled:cursor-not-allowed disabled:opacity-50 dark:bg-white/[0.07] dark:text-[#c3ccd6] dark:hover:bg-white/[0.10]"
               >
                 {t('cancel')}
               </button>
@@ -2361,7 +3361,7 @@ export default function SessionPage() {
                 type="button"
                 onClick={() => void handleDeleteProject()}
                 disabled={projectDeleting}
-                className="inline-flex min-w-16 items-center justify-center gap-1.5 rounded-lg bg-red-600 px-3 py-1.5 text-sm font-medium text-white transition-colors hover:bg-red-500 disabled:cursor-not-allowed disabled:opacity-60"
+                className="inline-flex h-8 min-w-[66px] items-center justify-center gap-1.5 rounded-[10px] bg-[#dc3f39] px-3 text-xs font-medium text-white transition-colors hover:bg-[#c9342f] disabled:cursor-not-allowed disabled:opacity-60"
               >
                 {projectDeleting ? <Loader2 className="h-4 w-4 animate-spin" /> : <Trash2 className="h-4 w-4" />}
                 {t('projectDialog.confirmDelete')}
@@ -2399,16 +3399,84 @@ export default function SessionPage() {
         const sid = openMenuSessionId;
         const session = sessions.find(s => s.id === sid);
         if (!session) return null;
+        const currentProjectId = session.effectiveProjectID || session.projectID;
+        const showMovePicker = movePickerSessionId === session.id;
+        const moveTargetProjects = projects.filter((project) => (
+          project.id.startsWith('prj_')
+          && project.canWrite !== false
+          && project.pathStatus !== 'missing'
+          && project.pathStatus !== 'unreadable'
+        ));
+        const movePickerHeight = Math.min(
+          272,
+          48 + Math.max(44, moveTargetProjects.length * 34),
+        );
+        const menuTop = showMovePicker
+          ? Math.max(8, Math.min(menuAnchor.top, window.innerHeight - movePickerHeight - 8))
+          : menuAnchor.top;
         return (
           <div
-            className="fixed z-50 min-w-28 rounded-md border border-zinc-200 bg-white p-1 shadow-lg dark:border-zinc-700 dark:bg-zinc-900"
-            style={{ top: menuAnchor.top, right: menuAnchor.right }}
+            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] ${
+              showMovePicker ? 'w-[220px]' : 'w-[132px]'
+            }`}
+            style={{
+              top: menuTop,
+              right: menuAnchor.right,
+              maxHeight: showMovePicker ? 'calc(100vh - 16px)' : undefined,
+            }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
+            {showMovePicker ? (
+              <>
+                <div className="flex h-8 items-center gap-1 border-b border-black/[0.07] px-1 pb-1 dark:border-white/[0.08]">
+                  <button
+                    type="button"
+                    onClick={() => setMovePickerSessionId(null)}
+                    className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-[#6f757c] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#aeb8c3] dark:hover:bg-white/[0.07] dark:hover:text-white"
+                    aria-label={t('moveToProjectBack')}
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="min-w-0 truncate text-xs font-semibold text-[#34383d] dark:text-[#e3e8ee]">
+                    {t('moveToProjectTitle')}
+                  </span>
+                </div>
+                <div className="session-sidebar-scrollbar min-h-0 max-h-56 overflow-y-auto py-0.5" role="menu" aria-label={t('moveToProjectTitle')}>
+                  {moveTargetProjects.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-xs leading-5 text-[#858a91] dark:text-[#8f9ba8]">
+                      {t('moveToProjectEmpty')}
+                    </div>
+                  ) : moveTargetProjects.map((project) => {
+                    const isCurrent = project.id === currentProjectId;
+                    const isMovingHere = (
+                      movingSessionId === session.id
+                      && movingTargetProjectId === project.id
+                    );
+                    return (
+                      <button
+                        key={project.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void handleMoveSessionToProject(session.id, project)}
+                        disabled={isCurrent || Boolean(movingSessionId)}
+                        title={project.worktree}
+                        className="flex min-h-[34px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-default disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      >
+                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <span className="min-w-0 flex-1 truncate">{getProjectLabel(project)}</span>
+                        {isCurrent && <Check className="h-3.5 w-3.5 shrink-0 text-blue-500" />}
+                        {!isCurrent && isMovingHere && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-500" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
               <PencilLine className="w-3.5 h-3.5" />
               <span>{t('rename')}</span>
@@ -2416,7 +3484,7 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); void handleDownloadSession(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               disabled={downloadingSessionId === session.id}
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
               <Download className="w-3.5 h-3.5" />
               <span>{t('downloadJson')}</span>
@@ -2424,20 +3492,31 @@ export default function SessionPage() {
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleShareSession(session.id, !session.isShared); }}
               disabled={session.canWrite === false}
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
-            <div className="mx-2 my-1 border-t border-zinc-100 dark:border-zinc-800" />
             <button
-              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleDeleteSession(session.id); }}
-              disabled={session.canDelete === false}
-              className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-xs text-red-600 transition-colors hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-950/40"
+              onClick={(e) => { e.stopPropagation(); setMovePickerSessionId(session.id); }}
+              disabled={session.canWrite === false || runningSessionIds.has(session.id)}
+              title={runningSessionIds.has(session.id) ? t('moveToProjectRunning') : undefined}
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
             >
-              <Trash2 className="w-3.5 h-3.5" />
-              <span>{t('deleteAction')}</span>
+              <FolderOpen className="h-3.5 w-3.5" />
+              <span className="truncate">{t('moveToProjectAction')}</span>
             </button>
+            <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
+            <button
+              onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleArchiveSession(session.id); }}
+              disabled={session.canDelete === false}
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#c33c36] transition-colors hover:bg-[#fff0ef] hover:text-[#a92520] disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300 dark:hover:bg-red-500/10 dark:hover:text-red-200"
+            >
+              <Archive className="w-3.5 h-3.5" />
+              <span>{t('archiveAction')}</span>
+            </button>
+              </>
+            )}
           </div>
         );
       })()}
@@ -2458,39 +3537,39 @@ function WelcomeScreen({
 }) {
   const { t } = useTranslation('session');
   return (
-    <div className="text-center max-w-2xl px-8">
-      <div className="w-20 h-20 mx-auto mb-6 rounded-full bg-gradient-to-br from-slate-700 to-slate-900 flex items-center justify-center shadow-lg">
-        <Sparkles className="w-10 h-10 text-white" />
+    <div className="w-full max-w-[660px] px-9 text-center">
+      <div className="mx-auto mb-5 flex h-16 w-16 items-center justify-center rounded-full bg-slate-800 text-white shadow-[0_3px_10px_rgba(30,41,59,0.10)] dark:bg-[#46515e]">
+        <Sparkles className="h-[30px] w-[30px]" strokeWidth={1.7} />
       </div>
-      <h3 className="text-xl font-bold text-gray-900 mb-3 dark:text-zinc-50">{t('welcome.title')}</h3>
-      <p className="text-sm text-gray-600 mb-8 dark:text-zinc-400">{t('welcome.description')}</p>
+      <h3 className="text-[22px] font-semibold tracking-[-0.01em] text-[#1f2937] dark:text-[#f0f3f7]">{t('welcome.title')}</h3>
+      <p className="mt-3 text-sm leading-6 text-[#647084] dark:text-[#aeb9c5]">{t('welcome.description')}</p>
 
-      <div className="flex flex-wrap gap-3 justify-center">
+      <div className="mt-6 flex flex-wrap justify-center gap-2.5">
         <button
           onClick={onAlertOperationsSetup}
           disabled={alertOperationsBusy}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-slate-400 hover:bg-slate-50 transition-all duration-200 shadow-sm hover:shadow-md disabled:cursor-not-allowed disabled:opacity-70 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-slate-500/70 dark:hover:bg-zinc-800 dark:hover:shadow-none"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] disabled:cursor-not-allowed disabled:opacity-70 dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
           {alertOperationsBusy ? (
-            <Loader2 className="w-5 h-5 animate-spin text-slate-600" />
+            <Loader2 className="h-[18px] w-[18px] animate-spin text-[#657489] dark:text-[#aeb9c5]" />
           ) : (
-            <Shield className="w-5 h-5 text-slate-600" />
+            <Shield className="h-[18px] w-[18px] text-[#657489] dark:text-[#aeb9c5]" />
           )}
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.alertOperations')}</span>
+          <span>{t('welcome.alertOperations')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.threatHuntingSuggestion'))}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-orange-400 hover:bg-orange-50 transition-all duration-200 shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-orange-500/70 dark:hover:bg-orange-950/30 dark:hover:shadow-none"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <Search className="w-5 h-5 text-orange-600" />
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.threatHunting')}</span>
+          <Search className="h-[18px] w-[18px] text-[#f4511e]" />
+          <span>{t('welcome.threatHunting')}</span>
         </button>
         <button
           onClick={() => onSuggestion(t('welcome.incidentResponseSuggestion'))}
-          className="flex items-center gap-2 px-5 py-3 bg-white border-2 border-gray-200 rounded-xl hover:border-amber-400 hover:bg-amber-50 transition-all duration-200 shadow-sm hover:shadow-md dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-amber-500/70 dark:hover:bg-amber-950/30 dark:hover:shadow-none"
+          className="inline-flex h-11 items-center gap-2.5 rounded-[10px] border border-black/[0.11] bg-zinc-50 px-4 text-sm font-semibold text-[#374151] transition-colors hover:border-[#c2c9d2] hover:bg-white hover:text-[#111827] dark:border-white/[0.10] dark:bg-[#303842] dark:text-[#d7dee8] dark:hover:border-white/[0.18] dark:hover:bg-[#3a434e] dark:hover:text-white"
         >
-          <AlertTriangle className="w-5 h-5 text-amber-600" />
-          <span className="font-medium text-gray-700 dark:text-zinc-200">{t('welcome.incidentResponse')}</span>
+          <AlertTriangle className="h-[18px] w-[18px] text-amber-500" />
+          <span>{t('welcome.incidentResponse')}</span>
         </button>
       </div>
     </div>

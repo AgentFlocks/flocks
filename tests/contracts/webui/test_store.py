@@ -50,6 +50,7 @@ def _write_workspace(
     workspace_id: str,
     title: str,
     order: int = 100,
+    version: str | None = None,
     default_page_id: str | None = None,
     sections: list[dict] | None = None,
 ) -> None:
@@ -63,6 +64,8 @@ def _write_workspace(
         "enabled": True,
         "placement": "sceneWorkspace",
     }
+    if version is not None:
+        payload["version"] = version
     if default_page_id is not None:
         payload["defaultPageId"] = default_page_id
     if sections is not None:
@@ -109,6 +112,40 @@ def test_list_pages_scans_user_and_project_roots_with_user_priority(tmp_path):
     assert store.page_dir("project-page").is_relative_to(project_root)
 
 
+def test_list_pages_skips_installer_scratch_dirs(tmp_path):
+    """Pages that exist only under the Hub installer's ``.<name>.<rand>`` /
+    ``.<name>.bak`` scratch dirs must never surface as real pages.
+
+    Reproduces the Windows WinError 5 aftermath where a failed atomic swap
+    left the SOC pages' manifests stuck inside scratch dirs while the real
+    install was incomplete.
+    """
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_page(user_root, "real-page", "Real Page")
+    # Manifests stranded in leftover scratch/backup dirs (no real install).
+    _write_page_at(user_root, ".soc_ui.abc123/soc_overview", "soc-overview", "Stranded Overview")
+    _write_page_at(user_root, ".soc_ui.bak/soc_dashboard", "soc-dashboard", "Stranded Dashboard")
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+
+    pages = store.list_pages()
+    assert [page.id for page in pages] == ["real-page"]
+    assert pages[0].title == "Real Page"
+
+
+def test_list_workspaces_skips_installer_scratch_dirs(tmp_path):
+    user_root = tmp_path / "user" / "contracts" / "webui"
+    _write_workspace(user_root, "real_ws", "Real Workspace")
+    # A workspace manifest stranded under a scratch dir must be ignored.
+    _write_workspace(user_root / ".soc_ui.abc123", "soc_ui", "Stranded Workspace")
+
+    store = WebUIPagesStore(root=user_root, project_root=None, legacy_root=None)
+
+    workspaces = store.list_workspaces()
+    assert [workspace.id for workspace in workspaces] == ["real_ws"]
+    assert workspaces[0].title == "Real Workspace"
+
+
 def test_grouped_page_directory_uses_manifest_id_for_lookup(tmp_path):
     user_root = tmp_path / "user" / "contracts" / "webui"
     _write_workspace(user_root, "scene_workspace", "场景工作区")
@@ -140,6 +177,7 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
         "scene_workspace",
         "场景工作区",
         order=5,
+        version="2.3.4",
         default_page_id="ops-overview",
         sections=[
             {
@@ -159,6 +197,7 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
     workspaces = store.list_workspaces()
 
     assert [workspace.id for workspace in workspaces] == ["scene_workspace"]
+    assert workspaces[0].version == "2.3.4"
     assert workspaces[0].title == "场景工作区"
     assert workspaces[0].route == "/contracts/webui/workspaces/scene_workspace"
     assert workspaces[0].placement == "sceneWorkspace"

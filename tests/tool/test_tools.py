@@ -17,6 +17,7 @@ import json
 import os
 import tempfile
 import shutil
+import time
 import uuid
 from pathlib import Path
 from typing import Dict, Any, List
@@ -919,6 +920,46 @@ class TestSampleTools:
         assert result.success
         # Should return ISO format datetime
         assert "T" in result.output  # ISO format contains 'T'
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("output_format", "scale"),
+        [("unix", 1), ("unix_ms", 1000)],
+    )
+    async def test_get_time_tool_timestamp_formats(
+        self,
+        tool_context,
+        output_format,
+        scale,
+    ):
+        """Test Unix timestamp output in seconds and milliseconds."""
+        ToolRegistry.init()
+        before = int(time.time() * scale)
+
+        result = await ToolRegistry.execute(
+            "get_time",
+            ctx=tool_context,
+            format=output_format,
+        )
+
+        after = int(time.time() * scale)
+        assert result.success
+        assert result.output.isdigit()
+        assert before <= int(result.output) <= after
+
+    @pytest.mark.asyncio
+    async def test_get_time_tool_rejects_invalid_format(self, tool_context):
+        """Test invalid output formats return a clear error."""
+        ToolRegistry.init()
+
+        result = await ToolRegistry.execute(
+            "get_time",
+            ctx=tool_context,
+            format="invalid",
+        )
+
+        assert not result.success
+        assert result.error == "format must be one of: iso, unix, unix_ms"
 
 
 # =============================================================================

@@ -578,8 +578,9 @@ function DeviceAddRexPanel({
       text: prompt,
       agent: rexComposerControls.rexAgentName,
       model: rexComposerControls.rexModel,
+      modelAuto: rexComposerControls.rexModelAuto,
     }).catch(() => {});
-  }, [createAndSend, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+  }, [createAndSend, rexComposerControls.rexAgentName, rexComposerControls.rexModel, rexComposerControls.rexModelAuto]);
 
   const vendorGroups = useMemo(() => {
     const groups = new Map<string, { vendor: DeviceVendor; templates: DeviceTemplate[] }>();
@@ -719,6 +720,7 @@ function DeviceAddRexPanel({
           agentName={rexComposerControls.rexAgentName}
           mentionAgents={rexComposerControls.rexMentionAgents}
           model={rexComposerControls.rexModel}
+          modelAuto={rexComposerControls.rexModelAuto}
           supportsVision={rexComposerControls.rexSupportsVision}
           contextWindowTokens={rexComposerControls.rexContextWindowTokens}
           composerTextareaMinHeight={rexComposerControls.rexComposerTextareaMinHeight}
@@ -879,6 +881,7 @@ function DeviceAddRexPanel({
           imageParts,
           agent: agentOverride || rexComposerControls.rexAgentName,
           model: modelOverride === undefined ? rexComposerControls.rexModel : modelOverride,
+          modelAuto: rexComposerControls.rexModelAuto,
         }) : undefined}
       />
       </Suspense>
@@ -1985,6 +1988,7 @@ export default function DeviceIntegrationPage() {
   } = useSessionChat({
     title: t('wizard.rex.title'),
     category: 'entity-config',
+    modelAuto: rexComposerControls.rexModelAuto,
     contextMessage: rexContextMessage,
     welcomeMessage: t('wizard.rex.welcome'),
   });
@@ -2221,6 +2225,7 @@ export default function DeviceIntegrationPage() {
         ...buildDeviceTestGuidePrompt(createdDevice, panel.template),
         agent: rexComposerControls.rexAgentName,
         model: rexComposerControls.rexModel,
+        modelAuto: rexComposerControls.rexModelAuto,
       }).catch(() => {});
       pollRexTestStatus(createdDevice);
       await fetchData(true);
@@ -2258,12 +2263,13 @@ export default function DeviceIntegrationPage() {
       ...prompt,
       agent: rexComposerControls.rexAgentName,
       model: rexComposerControls.rexModel,
+      modelAuto: rexComposerControls.rexModelAuto,
     });
     if (input.action === 'test' && input.device) {
       pollRexTestStatus(input.device);
     }
     setPanel({ kind: 'wizard' });
-  }, [createAndSendRex, pollRexTestStatus, rexComposerControls.rexAgentName, rexComposerControls.rexModel]);
+  }, [createAndSendRex, pollRexTestStatus, rexComposerControls.rexAgentName, rexComposerControls.rexModel, rexComposerControls.rexModelAuto]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // Group to use when adding a new device (follows sidebar selection).

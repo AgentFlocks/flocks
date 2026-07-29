@@ -43,7 +43,7 @@
   },
   "quickActions": {
     "sessions": {
-      "title": "会话管理",
+      "title": "工作台",
       "description": "与 AI 对话，完成复杂的安全任务"
     },
     "workflows": {

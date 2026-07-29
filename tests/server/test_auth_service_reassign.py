@@ -60,7 +60,8 @@ async def test_reassign_orphan_sessions_skips_owned_and_rewrites_orphans(monkeyp
     async def _list_all():
         return listed
 
-    async def _update(*, project_id, session_id, owner_user_id, owner_username):
+    async def _update(*, project_id, session_id, owner_user_id, owner_username, allow_inactive=False):
+        assert allow_inactive is True
         update_calls.append({
             "project_id": project_id,
             "session_id": session_id,
@@ -119,7 +120,8 @@ async def test_reassign_orphan_sessions_continues_on_partial_failure(monkeypatch
     async def _list_all():
         return listed
 
-    async def _update(*, project_id, session_id, owner_user_id, owner_username):
+    async def _update(*, project_id, session_id, owner_user_id, owner_username, allow_inactive=False):
+        assert allow_inactive is True
         update_calls.append(session_id)
         if session_id == "ses_b":
             raise RuntimeError("storage write failed")
