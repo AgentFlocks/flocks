@@ -133,6 +133,15 @@ class ConfigWriter:
             Config.clear_cache()
         except Exception:
             pass
+        try:
+            from flocks.channel.inbound.dispatcher import invalidate_channel_config_cache
+
+            channels = data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channels:
+                    invalidate_channel_config_cache(str(channel_id))
+        except Exception:
+            pass
 
         log.debug("config_writer.written", {"path": str(path)})
 

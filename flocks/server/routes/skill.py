@@ -16,6 +16,7 @@ from flocks.skill.skill import Skill, SkillInfo
 from flocks.skill.installer import SkillInstaller, SkillInstallResult, DepInstallResult
 from flocks.command.command import API_SURFACES, Command, CommandInfo
 from flocks.server.auth import require_user
+from flocks.server.routes.action_lifecycle import ActionLifecycleRouter
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 
@@ -38,7 +39,7 @@ def _is_user_managed_skill(skill: SkillInfo) -> bool:
         return False
 
 
-router = APIRouter()
+router = ActionLifecycleRouter(lifecycle_domain="skill")
 log = Log.create(service="skill-routes")
 
 

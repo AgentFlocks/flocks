@@ -449,6 +449,23 @@ class Session:
             else:
                 kwargs.setdefault("owner_user_id", API_TOKEN_SERVICE_USER_ID)
                 kwargs.setdefault("owner_username", API_TOKEN_SERVICE_USER_ID)
+
+        # Ensure every session carries a canonical execution profile envelope.
+        from flocks.session.execution_profile import (
+            PROFILE_METADATA_KEY,
+        )
+        metadata = dict(kwargs.get("metadata") or {})
+        if PROFILE_METADATA_KEY not in metadata:
+            metadata[PROFILE_METADATA_KEY] = {
+                "version": "v1",
+                "entry": "interactive",
+                "visible_agents": [],
+                "default_agent": str(kwargs.get("agent") or "").strip(),
+                "revision": 1,
+                "source": "session.create",
+                "updated_at": datetime.now().astimezone().isoformat(),
+            }
+        kwargs["metadata"] = metadata
         
         async def persist(parent: Optional[SessionInfo] = None) -> SessionInfo:
             if parent_id is not None:

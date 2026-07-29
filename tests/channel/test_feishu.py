@@ -382,6 +382,30 @@ async def test_handle_webhook_invalid_timestamp_returns_status_code() -> None:
 
 
 @pytest.mark.asyncio
+async def test_webhook_authentication_evidence_reflects_platform_verification() -> None:
+    """The neutral route hook receives evidence, not a policy decision."""
+    channel = FeishuChannel()
+    channel._config = {
+        "connectionMode": "webhook",
+        "verificationToken": "main-token",
+        "appId": "main-id",
+        "appSecret": "main-secret",
+    }
+    valid_body = json.dumps({"token": "main-token", "event": {}}).encode("utf-8")
+    invalid_body = json.dumps({"token": "wrong-token", "event": {}}).encode("utf-8")
+
+    assert await channel.webhook_authentication_evidence(valid_body, {}) == {
+        "plugin_authenticated": True,
+        "provider": "feishu",
+        "replay_protection": "plugin_dedup",
+    }
+    assert await channel.webhook_authentication_evidence(invalid_body, {}) == {
+        "plugin_authenticated": False,
+        "provider": "feishu",
+    }
+
+
+@pytest.mark.asyncio
 async def test_channel_route_uses_plugin_status_code(monkeypatch) -> None:
     from flocks.server.routes.channel import channel_webhook
 

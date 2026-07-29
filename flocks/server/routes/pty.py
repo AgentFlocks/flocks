@@ -4,11 +4,12 @@ PTY routes - API endpoints for PTY session management
 Matches Flocks' ported src/server/routes/pty.ts
 """
 
-from typing import Optional
 from fastapi import APIRouter, HTTPException, WebSocket, WebSocketDisconnect, status
 from pydantic import BaseModel, Field
 
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
+from flocks.hooks.execution import execution_context_scope, execution_lifecycle_scope
+from flocks.identity import reset_current_subject, set_current_subject
 from flocks.utils.log import Log
 from flocks.pty.pty import Pty, PtyInfo, CreateInput, UpdateInput, PtyStatus
 
@@ -137,41 +138,55 @@ async def connect_session(websocket: WebSocket, pty_id: str):
     """
     token = None
     try:
-        _blocked, token, _user = await apply_auth_for_request(websocket)
-    except HTTPException as exc:
-        close_code = 4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401
-        await websocket.close(code=close_code, reason=str(exc.detail))
-        return
-
-    try:
-        # Check only after authentication so unauthenticated callers cannot
-        # probe for active PTY identifiers.
-        if not Pty.get(pty_id):
-            await websocket.close(code=4004, reason="Session not found")
-            return
-
-        await websocket.accept()
-
-        # Connect to PTY
-        handlers = await Pty.connect(pty_id, websocket)
-        if not handlers:
-            await websocket.close(code=4004, reason="Session not found")
-            return
-        
-        # Handle messages
-        while True:
+        # WebSocket lifetimes outlive the ingress hook that authenticated the
+        # handshake. Keep only neutral, opaque execution context alive for the
+        # connection so extensions can restore their own verified bindings.
+        with execution_lifecycle_scope():
             try:
-                data = await websocket.receive_text()
-                handlers["onMessage"](data)
-            except WebSocketDisconnect:
-                break
-            except Exception as e:
-                log.error("pty.ws.error", {"id": pty_id, "error": str(e)})
-                break
-        
-        # Cleanup
-        handlers["onClose"]()
-        
+                _blocked, token, _user = await apply_auth_for_request(websocket)
+            except HTTPException as exc:
+                close_code = (
+                    4403 if exc.status_code == status.HTTP_403_FORBIDDEN else 4401
+                )
+                await websocket.close(code=close_code, reason=str(exc.detail))
+                return
+
+            subject = getattr(websocket.state, "subject", None)
+            subject_token = set_current_subject(subject) if subject is not None else None
+            handlers = None
+            try:
+                extension_context = getattr(websocket.state, "extension_context", None)
+                with execution_context_scope(extension_context):
+                    # Check only after authentication so unauthenticated callers cannot
+                    # probe for active PTY identifiers.
+                    if not Pty.get(pty_id):
+                        await websocket.close(code=4004, reason="Session not found")
+                        return
+
+                    await websocket.accept()
+
+                    # Connect to PTY
+                    handlers = await Pty.connect(pty_id, websocket)
+                    if not handlers:
+                        await websocket.close(code=4004, reason="Session not found")
+                        return
+
+                    # Each received frame is routed through Pty.write(), whose
+                    # public primitive owns the neutral action lifecycle.
+                    while True:
+                        try:
+                            data = await websocket.receive_text()
+                            await handlers["onMessage"](data)
+                        except WebSocketDisconnect:
+                            break
+                        except Exception as exc:
+                            log.error("pty.ws.error", {"id": pty_id, "error": str(exc)})
+                            break
+            finally:
+                if handlers is not None:
+                    handlers["onClose"]()
+                if subject_token is not None:
+                    reset_current_subject(subject_token)
     except Exception as e:
         log.error("pty.ws.connect.error", {"id": pty_id, "error": str(e)})
     finally:

@@ -19,6 +19,7 @@ from typing import Any, Optional
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
 from flocks.channel.inbound.session_binding import SessionBindingService
 from flocks.config.config import ChannelConfig
+from flocks.identity import ChannelIngressProvenance
 from flocks.utils.log import Log
 
 log = Log.create(service="channel.dispatcher")
@@ -271,6 +272,18 @@ class _CachedConfig:
 
 _channel_config_cache: dict[str, _CachedConfig] = {}
 
+
+def invalidate_channel_config_cache(channel_id: str | None = None) -> None:
+    """Invalidate cached channel config entries.
+
+    Args:
+        channel_id: When provided, drop only this channel. Otherwise clear all.
+    """
+    if channel_id is None:
+        _channel_config_cache.clear()
+        return
+    _channel_config_cache.pop(str(channel_id), None)
+
 _SESSION_LOCK_MAX = 5000
 
 
@@ -290,7 +303,45 @@ class InboundDispatcher:
         self._session_locks: OrderedDict[str, asyncio.Lock] = OrderedDict()
         self._group_context: OrderedDict[str, deque[_GroupContextEntry]] = OrderedDict()
 
-    async def dispatch(self, msg: InboundMessage) -> None:
+    async def dispatch(
+        self,
+        msg: InboundMessage,
+        *,
+        provenance: ChannelIngressProvenance | None = None,
+    ) -> None:
+        from flocks.hooks.execution import execute_with_hooks
+        from flocks.hooks.pipeline import HookPipeline
+        # Resolve config before ingress hooks so channel_policy uses persisted
+        # role/agent settings even on cold start (empty in-memory cache).
+        channel_config = await self._get_channel_config(
+            msg.channel_id,
+            force_refresh=True,
+        )
+        channel_policy = _build_channel_policy_context(channel_config)
+
+        return await execute_with_hooks(
+            {
+                "operation": "channel.dispatch",
+                "transport": "channel",
+                "channel_id": msg.channel_id,
+                "account_id": msg.account_id,
+                "message_id": msg.message_id,
+                "sender_id": msg.sender_id,
+                "chat_id": msg.chat_id,
+                "chat_type": msg.chat_type.value,
+                "message": msg,
+                "text": msg.text,
+                "evidence": msg.raw,
+                "provenance": provenance,
+                "channel_policy": channel_policy,
+            },
+            lambda: self._dispatch(msg),
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    async def _dispatch(self, msg: InboundMessage) -> None:
+
         # 1. dedup
         if self.dedup.is_duplicate(msg.message_id):
             log.debug("dispatcher.dedup", {"message_id": msg.message_id})
@@ -339,6 +390,7 @@ class InboundDispatcher:
         # ``rex`` only via ``Agent.get(name) or Agent.get("rex")``, hiding the
         # real default and making behaviour diverge between WebUI and channel.
         default_agent = channel_config.default_agent
+        visible_agents = _resolve_visible_agents(channel_config)
         scope_override = None
         if msg.channel_id == "feishu" and msg.chat_type == ChatType.GROUP:
             scope_override, feishu_agent = _resolve_feishu_group_overrides(
@@ -355,10 +407,13 @@ class InboundDispatcher:
                     "error": str(exc),
                 })
                 default_agent = "rex"
+        if visible_agents and default_agent not in visible_agents:
+            default_agent = visible_agents[0]
 
         binding = await self.binding_service.resolve_or_create(
             msg,
             default_agent=default_agent,
+            visible_agents=visible_agents,
             scope_override=scope_override,
             directory=channel_config.workspace_dir,
         )
@@ -889,6 +944,34 @@ class InboundDispatcher:
             **Session.inherited_model_kwargs(session),
             **owner_kwargs,
         )
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            from flocks.session.execution_profile import (
+                get_session_execution_profile,
+                upsert_session_execution_profile,
+            )
+
+            await upsert_session_execution_profile(
+                new_session.id,
+                patch={
+                    "entry": "channel",
+                    "channel_id": msg.channel_id,
+                    "account_id": msg.account_id,
+                    "default_agent": str(new_session.agent or "").strip(),
+                },
+                source="channel.command.new_session",
+            )
+            profile = await get_session_execution_profile(new_session.id)
+            await HookPipeline.run_action_before(
+                {
+                    "operation": "session.mode.initialize",
+                    "session_id": new_session.id,
+                    "entry": "channel",
+                    "session_execution_profile": profile or {},
+                }
+            )
+        except Exception:
+            pass
         new_binding = await self.binding_service.rebind(
             msg,
             new_session.id,
@@ -1040,9 +1123,13 @@ class InboundDispatcher:
             })
 
     @staticmethod
-    async def _get_channel_config(channel_id: str) -> ChannelConfig:
+    async def _get_channel_config(
+        channel_id: str,
+        *,
+        force_refresh: bool = False,
+    ) -> ChannelConfig:
         cached = _channel_config_cache.get(channel_id)
-        if cached and not cached.is_stale():
+        if cached and not cached.is_stale() and not force_refresh:
             return cached.config
         try:
             from flocks.config.config import Config
@@ -1051,6 +1138,8 @@ class InboundDispatcher:
             _channel_config_cache[channel_id] = _CachedConfig(ch_cfg)
             return ch_cfg
         except Exception:
+            if cached is not None:
+                return cached.config
             return ChannelConfig()
 
     @staticmethod
@@ -1463,6 +1552,22 @@ def _resolve_feishu_group_overrides(
     )
     agent = merged.get("defaultAgent") or None
     return scope, agent
+
+
+def _resolve_visible_agents(channel_config: ChannelConfig) -> list[str]:
+    raw = channel_config.visible_agents
+    if not isinstance(raw, list):
+        return []
+    return [str(item).strip() for item in raw if str(item).strip()]
+
+
+def _build_channel_policy_context(
+    channel_config: ChannelConfig,
+) -> dict[str, Any]:
+    return {
+        "default_agent": str(channel_config.default_agent or "").strip(),
+        "visible_agents": _resolve_visible_agents(channel_config),
+    }
 
 
 async def _expand_merge_forward(
