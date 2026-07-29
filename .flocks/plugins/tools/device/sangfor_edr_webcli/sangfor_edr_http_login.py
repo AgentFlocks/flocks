@@ -445,6 +445,13 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
             launch_response.raise_for_status()
             launch_result = launch_response.json()
             token = str((launch_result.get("data") or {}).get("token") or "")
+            if launch_result.get("success") and token:
+                phase = "ui"
+                session.get(
+                    _url(cfg, "/ui"),
+                    headers=_http_headers(cfg),
+                    timeout=cfg.timeout,
+                ).raise_for_status()
             cookies = _cookie_state(session.cookies, cfg)
             if launch_result.get("success") and token and any(cookie["name"].lower() == "sessionid" for cookie in cookies):
                 saved = _save_auth_pair(cfg, {"cookies": cookies, "origins": []}, token)
