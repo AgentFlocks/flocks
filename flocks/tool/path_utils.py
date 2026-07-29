@@ -70,12 +70,29 @@ def resolve_host_path(path: str, *, base_dir: Optional[str] = None) -> str:
     return str(candidate.resolve(strict=False))
 
 
+def _resolve_host_memory_path(path: str) -> Optional[tuple[str, str]]:
+    """Resolve an absolute path when it belongs to Flocks' host Memory root."""
+    expanded = Path(str(path).strip()).expanduser()
+    if not expanded.is_absolute():
+        return None
+
+    from flocks.config import Config
+    from flocks.memory.paths import path_is_within
+
+    memory_root = (Config.get_data_path() / "memory").resolve(strict=False)
+    candidate = expanded.resolve(strict=False)
+    if not path_is_within(memory_root, candidate):
+        return None
+    return str(candidate), str(memory_root)
+
+
 async def resolve_tool_path(
     ctx: ToolContext,
     path: str,
     *,
     base_dir: Optional[str] = None,
     worktree: Optional[str] = None,
+    allow_host_memory: bool = False,
 ) -> ToolPathResolution:
     """
     Resolve a tool path consistently across host and sandbox contexts.
@@ -88,6 +105,7 @@ async def resolve_tool_path(
     Sandbox mode:
     - resolve against sandbox workspace root
     - reject path traversal and symlink escapes
+    - optionally allow the host Memory root for standard Memory file tools
     """
     raw_path = path
     context_workspace = (
@@ -108,27 +126,42 @@ async def resolve_tool_path(
     normalized_input = str(raw_path).strip()
 
     if sandbox_root:
-        from flocks.sandbox.paths import assert_sandbox_path
-
         normalized_root = normalize_user_path(sandbox_root)
-        sandbox_input = str(Path(normalized_input).expanduser())
-        if os.path.isabs(sandbox_input):
-            sandbox_input = os.path.normpath(os.path.abspath(sandbox_input))
-        try:
-            result = await assert_sandbox_path(
-                file_path=sandbox_input,
-                cwd=normalized_root,
-                root=normalized_root,
-            )
-        except Exception as exc:
-            raise ValueError(
-                f"Path escapes sandbox workspace: {raw_path}. "
-                f"Use paths inside sandbox workspace only. ({exc})"
-            ) from exc
+        memory_path = (
+            _resolve_host_memory_path(normalized_input)
+            if allow_host_memory
+            else None
+        )
+        if memory_path is not None:
+            resolved_path, memory_root = memory_path
+            resolved_base = memory_root
+            resolved_worktree = str(Path(memory_root).parent)
+        else:
+            from flocks.sandbox.paths import assert_sandbox_path
 
-        resolved_path = str(Path(result.resolved).resolve(strict=False))
-        resolved_base = normalized_root
-        resolved_worktree = normalized_root
+            sandbox_input = str(Path(normalized_input).expanduser())
+            if os.path.isabs(sandbox_input):
+                sandbox_input = os.path.normpath(os.path.abspath(sandbox_input))
+            try:
+                result = await assert_sandbox_path(
+                    file_path=sandbox_input,
+                    cwd=normalized_root,
+                    root=normalized_root,
+                )
+            except Exception as exc:
+                allowed_locations = (
+                    "the sandbox workspace or the Flocks Memory root"
+                    if allow_host_memory
+                    else "the sandbox workspace"
+                )
+                raise ValueError(
+                    f"Path escapes sandbox workspace: {raw_path}. "
+                    f"Use paths inside {allowed_locations} only. ({exc})"
+                ) from exc
+
+            resolved_path = str(Path(result.resolved).resolve(strict=False))
+            resolved_base = normalized_root
+            resolved_worktree = normalized_root
     else:
         resolved_path = resolve_host_path(normalized_input, base_dir=resolved_base)
 

@@ -3,13 +3,13 @@ Flocks Memory System
 
 Provides persistent memory and semantic search capabilities for agents.
 
-Based on OpenClaw's memory system, adapted for Flocks architecture.
+Uses filesystem-managed curated Memory plus lifecycle-owned Daily evidence.
 """
 
 # Core manager
 from flocks.memory.manager import MemoryManager
 
-# OpenClaw-style components
+# Filesystem-managed components
 from flocks.memory.bootstrap import MemoryBootstrap
 from flocks.memory.daily import DailyMemory
 from flocks.memory.flush import MemoryFlush, extract_and_save
@@ -51,7 +51,7 @@ __all__ = [
     # Core
     "MemoryManager",
     
-    # OpenClaw-style components
+    # Filesystem-managed components
     "MemoryBootstrap",
     "DailyMemory",
     "MemoryFlush",

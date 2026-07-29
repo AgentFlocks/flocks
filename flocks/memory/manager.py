@@ -372,9 +372,11 @@ class MemoryManager:
         if sources is not None and MemorySource.SESSION in selected_sources:
             await self._persist_session_source()
 
-        # Trigger Memory file sync if configured and dirty.
-        coordinator = self._index_coordinator or self._coordinator_for_active_db()
-        if self.config.sync.on_search and (self._dirty or coordinator.dirty):
+        # Filesystem tools and external editors can update Memory without going
+        # through MemoryManager, so dirty flags cannot be a correctness gate.
+        # Reconcile the index on every search and let the indexer skip files
+        # whose content hash is unchanged.
+        if self.config.sync.on_search:
             await self.sync(reason="search")
 
         results: List[MemorySearchResult] = []

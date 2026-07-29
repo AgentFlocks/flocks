@@ -915,8 +915,17 @@ class SessionPrompt:
         memory_bootstrap_data: Optional[Dict[str, Any]],
     ) -> Optional[str]:
         """Build filesystem Memory guidance beside the frozen snapshot."""
-        del prompt_tool_names
         if not memory_bootstrap_data:
+            return None
+        required_tools = {
+            "read",
+            "write",
+            "edit",
+            "glob",
+            "grep",
+            "memory_search",
+        }
+        if not required_tools.issubset(set(prompt_tool_names)):
             return None
         instructions = memory_bootstrap_data.get("instructions", "")
         return cls._normalize_prompt_text(instructions)

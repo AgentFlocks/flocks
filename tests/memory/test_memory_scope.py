@@ -2,12 +2,14 @@
 
 from pathlib import Path
 import sqlite3
-from unittest.mock import patch
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from flocks.memory.config import MemoryConfig
 from flocks.memory.evolution import EvolutionCheckpointStore
+from flocks.memory.manager import MemoryManager
 from flocks.memory.sync.indexer import MemoryIndexer
 from flocks.memory.types import MemoryScope
 from flocks.storage import (
@@ -53,6 +55,27 @@ def _chunk(
         "embedding_model": None,
         "embedding_dims": None,
     }
+
+
+@pytest.mark.asyncio
+async def test_search_reconciles_filesystem_even_when_manager_is_clean(
+    tmp_path: Path,
+) -> None:
+    manager = MemoryManager(
+        project_id="prj_alpha",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(),
+    )
+    manager._initialized = True
+    manager._dirty = False
+    manager.sync = AsyncMock(return_value={})
+    manager.search_engine = SimpleNamespace(
+        search=AsyncMock(return_value=[]),
+    )
+
+    await manager.search("new filesystem memory")
+
+    manager.sync.assert_awaited_once_with(reason="search")
 
 
 @pytest.mark.asyncio

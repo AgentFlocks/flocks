@@ -1,7 +1,7 @@
 """
 Memory Bootstrap - Load memory files at session start
 
-Implements OpenClaw-style memory loading with filesystem-managed user profiling:
+Implements filesystem-managed loading with the Hermes Agent USER/Memory split:
 1. USER.md - Stable user identity and preferences (auto-injected)
 2. MEMORY.md - Global cross-project memory (auto-injected)
 3. projects/<project_id>/MEMORY.md - Registered Project memory (auto-injected)
@@ -27,48 +27,58 @@ log = Log.create(service="memory.bootstrap")
 MEMORY_FILENAME = GLOBAL_MEMORY_FILENAME
 MEMORY_ALT_FILENAME = "memory.md"
 
-INITIAL_USER_PROFILE = "# User Profile\n"
+INITIAL_USER_PROFILE = """# User Profile
 
-# Default instructions for agent (similar to OpenClaw's AGENTS.md)
+## Identity and Context
+
+## Communication Preferences
+
+## Working Style
+
+## Technical Level
+"""
+
+# Default instructions informed by Hermes Agent and MiMo-Code memory prompts.
 # Uses global storage paths for Flocks
 MEMORY_INSTRUCTIONS = """
 ## Memory System Guidance
 
 You have access to a persistent memory system for continuity across sessions.
 On-disk memory root (absolute path): `{memory_root}`.
+`USER.md` and Global `MEMORY.md` follow the open-source Hermes Agent split:
+USER describes the user; Memory contains the agent's durable notes.
 
-### Files Available:
-1. `USER.md` - Stable user profile: identity, preferences, communication style, working habits, and technical level (already injected above)
-2. `MEMORY.md` - Global cross-project preferences, habits, and reusable rules (already injected above)
+### Memory Layers:
+1. `{memory_root}/USER.md` - Who the user is: stable identity, communication preferences, expectations, working style, and technical level (already injected above)
+2. `{memory_root}/MEMORY.md` - The agent's global notes: cross-project environment facts, stable conventions, tool quirks, corrections, and reusable lessons (already injected above)
 {project_file_instruction}
-4. `daily/YYYY-MM-DD.md` - Daily notes maintained by the session lifecycle and searchable through `memory_search`.
-5. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
+4. `{memory_root}/daily/YYYY-MM-DD.md` - Lifecycle journal used as evidence for later consolidation. It is searchable but not curated or injected.
+5. Current examples: `{memory_root}/daily/{today}.md` and `{memory_root}/daily/{yesterday}.md`.
 
 ### Managing Memory Files:
-- Use `read`, `glob`, and `grep` to inspect Memory explicitly.
-- Use `write` only to create a missing Memory file.
-- Read existing Memory first, then use `edit` for precise changes.
-- **User profile**: Maintain `{memory_root}/USER.md`.
-- **Daily notes**: Session lifecycle maintains `daily/`; do not edit Daily files manually.
-- **Global long-term**: Maintain `{memory_root}/MEMORY.md` only for clearly cross-project preferences and reusable rules.
+- The injected USER, Global, and Project files are a snapshot for this run. Read the file again before changing it.
+- Use `read`, `glob`, and `grep` to inspect Memory explicitly, and `memory_search` for indexed recall across all projects.
+- Use `write` only to create a missing curated Memory file. Use `edit` for precise entry-level changes to an existing curated file.
+- Never write or edit `daily/`; only the Session lifecycle may append Daily entries.
+- **User profile**: Maintain `{memory_root}/USER.md` only for facts about the user.
+- **Global agent notes**: Maintain `{memory_root}/MEMORY.md` only for knowledge that remains useful across projects.
 {project_write_instruction}
-- Write memories BEFORE the session ends, especially if important work was done
-- If someone says "remember this", update the narrowest appropriate Memory file immediately.
+- If the user explicitly asks you to remember something, update the narrowest appropriate curated file without interrupting the current task.
 
 ### Memory Write Decision:
-- Check existing Memory first and do not add duplicate or equivalent entries.
-- Save only stable preferences, non-derivable project constraints, explicit corrections, and verified reusable experience.
+- Save information that is likely to reduce future user steering or prevent the same correction from being needed again.
+- Save only stable user facts, non-derivable project constraints, explicit corrections, and verified reusable experience.
+- Write declarative facts, not commands to your future self. For example, `User prefers concise answers` is better than `Always answer concisely`.
+- Check existing Memory first; merge or replace equivalent entries instead of duplicating them.
+- Route user identity and collaboration preferences to `USER.md`; route agent knowledge that applies across projects to Global `MEMORY.md`; route project-specific knowledge to Project Memory.
 - Do not save facts that can be cheaply rediscovered from source code, configuration, or other authoritative files.
 - Verify stale or conflicting Memory against current authoritative evidence before replacing or removing it.
-- Do not save secrets, credentials, guesses, transient task status, plans, large tool output, or one-off results.
-- Keep `USER.md` about the user, not about individual projects or one-off tasks
-- Store project architecture, conventions, decisions, and lessons in Project Memory by default
-- Promote only clearly cross-project information to Global `MEMORY.md`
-- Use `memory_search` tool to find information from all past memories
-- Review old daily files and distill key points into MEMORY.md
+- Do not save secrets, credentials, guesses, transient task status, plans, PR or issue numbers, commit hashes, completed-work logs, large tool output, or one-off results.
+- Procedures and repeatable workflows belong in Skills rather than Memory.
+- Prefer no change when evidence is weak, short-lived, or already represented.
 
 ### Available Tools:
-- `memory_search` - Search all memories semantically
+- `memory_search` - Reconcile and search indexed Memory across all projects
 - `read`, `glob`, `grep` - Inspect Memory files
 - `write` - Create a missing Memory file
 - `edit` - Precisely update an existing Memory file
@@ -294,21 +304,13 @@ class MemoryBootstrap:
             # Create MEMORY.md if it doesn't exist
             memory_file = self.memory_dir / MEMORY_FILENAME
             if not memory_file.exists():
-                initial_content = """# Long-Term Memory
+                initial_content = """# Global Memory
 
-This is your curated long-term memory file. Store important information here:
+## Environment and Tools
 
-## Key Facts
-- 
+## Stable Conventions
 
-## Decisions & Preferences
-- 
-
-## Lessons Learned
-- 
-
-## Important Context
-- 
+## Lessons and Corrections
 """
                 memory_file.write_text(initial_content, encoding='utf-8')
                 log.info("bootstrap.created_memory_file", {
@@ -380,14 +382,16 @@ This is your curated long-term memory file. Store important information here:
         instructions = MEMORY_INSTRUCTIONS.replace("{memory_root}", str(memory_root))
         if self.has_project_memory:
             project_file_instruction = (
-                "3. `projects/"
-                f"{self.project_id}/MEMORY.md` - Current project facts, "
-                "conventions, decisions, and lessons (already injected above)"
+                "3. `"
+                f"{memory_root}/projects/{self.project_id}/MEMORY.md"
+                "` - Current project context, hard rules, architecture decisions, "
+                "and discovered durable knowledge (already injected above)"
             )
             project_write_instruction = (
-                "- **Project long-term**: Maintain `projects/"
-                f"{self.project_id}/MEMORY.md` for current project facts, "
-                "conventions, decisions, and lessons"
+                "- **Project Memory**: Maintain `"
+                f"{memory_root}/projects/{self.project_id}/MEMORY.md"
+                "` for current project context, hard rules, architecture "
+                "decisions, and discovered durable knowledge"
             )
         else:
             project_file_instruction = (

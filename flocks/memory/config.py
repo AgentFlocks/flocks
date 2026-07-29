@@ -64,7 +64,7 @@ class MemorySyncConfig(BaseModel):
     )
     on_search: bool = Field(
         True,
-        description="Sync before search if dirty"
+        description="Reconcile filesystem Memory before every search"
     )
     watch: bool = Field(
         True,
@@ -171,11 +171,20 @@ class MemoryAutoFlushConfig(BaseModel):
         description="Reserved tokens"
     )
     system_prompt: str = Field(
-        "Session nearing context limit. Store important memories now.",
+        (
+            "Session nearing context limit. Preserve only durable Memory "
+            "without ending the current task."
+        ),
         description="System prompt for memory flush"
     )
     user_prompt: str = Field(
-        "Write any lasting notes to memory/ directory; reply with NO_REPLY if nothing to store.",
+        (
+            "If this Session contains durable user facts, corrections, "
+            "non-derivable constraints, or reusable lessons, update the "
+            "narrowest curated USER.md or MEMORY.md with read/edit. Never "
+            "write or edit Daily Memory; the Session lifecycle owns it. "
+            "Reply with NO_REPLY if nothing qualifies, then continue the task."
+        ),
         description="User prompt for memory flush"
     )
 

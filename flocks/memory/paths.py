@@ -11,7 +11,20 @@ from flocks.memory.types import MemoryScope
 GLOBAL_SCOPE_ID = ""
 GLOBAL_MEMORY_FILENAME = "MEMORY.md"
 USER_FILENAME = "USER.md"
-PROJECT_MEMORY_INITIAL_CONTENT = "# Project Memory\n"
+PROJECT_MEMORY_INITIAL_CONTENT = """# Project Memory
+
+## Project Context
+
+## Rules
+
+## Architecture Decisions
+
+## Discovered Durable Knowledge
+"""
+DAILY_AGENT_WRITE_ERROR = (
+    "Daily Memory is maintained by the Session lifecycle. "
+    "Agents may read or search Daily files, but cannot write or edit them."
+)
 
 _REGISTERED_PROJECT_RE = re.compile(r"^prj_[A-Za-z0-9_-]+$")
 _CURATED_PATHS = {
@@ -23,6 +36,18 @@ _CURATED_PATHS = {
 def is_registered_project_id(project_id: str) -> bool:
     """Return whether *project_id* is safe and belongs to a registered project."""
     return bool(_REGISTERED_PROJECT_RE.fullmatch(project_id))
+
+
+def path_is_within(root: Path, path: Path) -> bool:
+    """Return whether *path* resolves to *root* or one of its descendants."""
+    resolved_root = root.expanduser().resolve(strict=False)
+    resolved_path = path.expanduser().resolve(strict=False)
+    return resolved_path == resolved_root or resolved_root in resolved_path.parents
+
+
+def is_daily_memory_path(memory_root: Path, file_path: Path) -> bool:
+    """Return whether *file_path* belongs to the lifecycle-owned Daily tree."""
+    return path_is_within(memory_root / "daily", file_path)
 
 
 def normalize_curated_path(path: str) -> str:

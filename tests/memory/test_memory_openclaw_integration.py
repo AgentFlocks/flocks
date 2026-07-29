@@ -8,9 +8,11 @@ import pytest
 import asyncio
 from pathlib import Path
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 from flocks.memory import DailyMemory, MemoryBootstrap, MemoryFlush
 from flocks.memory.config import MemoryAutoFlushConfig
+from flocks.memory.paths import PROJECT_MEMORY_INITIAL_CONTENT
 
 
 class TestDailyMemory:
@@ -150,11 +152,15 @@ class TestMemoryBootstrap:
         assert "User Profile" in result["content"]
 
     @pytest.mark.asyncio
-    async def test_registered_project_creates_and_loads_project_memory(self):
+    async def test_registered_project_creates_and_loads_project_memory(
+        self,
+        tmp_path: Path,
+    ):
         """Registered Sessions use a shared user-data Project Memory file."""
-        bootstrap = MemoryBootstrap(project_id="prj_scope_test")
+        with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
+            bootstrap = MemoryBootstrap(project_id="prj_scope_test")
 
-        result = await bootstrap.bootstrap(load_daily=False)
+            result = await bootstrap.bootstrap(load_daily=False)
 
         project_path = (
             bootstrap.memory_dir
@@ -162,7 +168,10 @@ class TestMemoryBootstrap:
             / "prj_scope_test"
             / "MEMORY.md"
         )
-        assert project_path.read_text(encoding="utf-8") == "# Project Memory\n"
+        assert (
+            project_path.read_text(encoding="utf-8")
+            == PROJECT_MEMORY_INITIAL_CONTENT
+        )
         assert result["project_memory"]["path"] == (
             "projects/prj_scope_test/MEMORY.md"
         )

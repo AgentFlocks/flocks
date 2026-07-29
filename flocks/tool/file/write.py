@@ -195,14 +195,21 @@ async def _maybe_redirect_to_default_outputs(
 
 
 def _existing_memory_write_error(filepath: str) -> Optional[str]:
-    """Prevent whole-file replacement of existing stable Memory files."""
+    """Prevent invalid whole-file replacement of Memory files."""
     from flocks.config import Config
-    from flocks.memory.paths import is_registered_project_id
+    from flocks.memory.paths import (
+        DAILY_AGENT_WRITE_ERROR,
+        is_daily_memory_path,
+        is_registered_project_id,
+    )
 
     path = Path(filepath).expanduser().resolve(strict=False)
     memory_root = (
         Config.get_data_path() / "memory"
     ).expanduser().resolve(strict=False)
+    if is_daily_memory_path(memory_root, path):
+        return DAILY_AGENT_WRITE_ERROR
+
     protected_files = {
         memory_root / "MEMORY.md",
         memory_root / "USER.md",
@@ -212,10 +219,7 @@ def _existing_memory_write_error(filepath: str) -> Optional[str]:
         and path.parent.parent == memory_root / "projects"
         and is_registered_project_id(path.parent.name)
     )
-    is_daily = memory_root / "daily" in path.parents
-    if path.exists() and (
-        path in protected_files or is_project_memory or is_daily
-    ):
+    if path.exists() and (path in protected_files or is_project_memory):
         return (
             "Existing Memory files cannot be overwritten with write. "
             "Read the current content and use edit for a precise change."
@@ -278,7 +282,11 @@ async def write_tool(
             content = str(content)
 
     try:
-        resolution = await resolve_tool_path(ctx, filePath)
+        resolution = await resolve_tool_path(
+            ctx,
+            filePath,
+            allow_host_memory=True,
+        )
         if resolution.sandbox_root is None:
             redirected_path = await _maybe_redirect_to_default_outputs(
                 ctx,
@@ -292,6 +300,7 @@ async def write_tool(
                     redirected_path,
                     base_dir=resolution.base_dir,
                     worktree=resolution.worktree,
+                    allow_host_memory=True,
                 )
     except ValueError as exc:
         return ToolResult(
