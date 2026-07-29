@@ -6,15 +6,13 @@ import base64
 import hashlib
 import json
 import os
-import re
 import secrets
-import sys
 import time
 from datetime import datetime, timedelta
 from http.cookiejar import CookieJar
 from pathlib import Path
 from typing import Any, Optional
-from urllib.parse import parse_qsl, urlencode, urljoin, urlparse, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlparse
 
 import requests
 import urllib3
@@ -343,114 +341,6 @@ def _http_failure_detail(phase: str, exc: Exception, cfg: RuntimeConfig) -> str:
     return f"phase={phase}{status_text}; detail={_safe_error(exc, cfg.username, cfg.password)}"
 
 
-def _http_debug_enabled() -> bool:
-    return str(os.getenv("SANGFOR_EDR_DEBUG_HTTP") or "").strip().lower() in {"1", "true", "yes", "on"}
-
-
-def _http_debug_sensitive() -> bool:
-    return str(os.getenv("SANGFOR_EDR_DEBUG_HTTP_SENSITIVE") or "").strip().lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
-def _redact_debug_value(value: Any, key: str = "") -> Any:
-    if _http_debug_sensitive():
-        return value
-    normalized_key = key.lower().replace("-", "_")
-    if normalized_key in {
-        "password",
-        "pwd",
-        "token",
-        "login_token",
-        "sessionid",
-        "cookie",
-        "set_cookie",
-        "authorization",
-        "s",
-    } or any(marker in normalized_key for marker in ("token", "cookie", "password")):
-        return "<redacted>"
-    if isinstance(value, dict):
-        return {str(item_key): _redact_debug_value(item_value, str(item_key)) for item_key, item_value in value.items()}
-    if isinstance(value, (list, tuple)):
-        return [_redact_debug_value(item, key) for item in value]
-    if isinstance(value, bytes):
-        return {"type": "bytes", "length": len(value)}
-    return value
-
-
-def _redact_debug_url(url: str) -> str:
-    if _http_debug_sensitive():
-        return url
-    try:
-        parsed = urlsplit(url)
-        query = []
-        for key, value in parse_qsl(parsed.query, keep_blank_values=True):
-            if key.lower() in {"s", "token", "login_token"}:
-                value = "<redacted>"
-            query.append((key, value))
-        return urlunsplit((parsed.scheme, parsed.netloc, parsed.path, urlencode(query), parsed.fragment))
-    except Exception:
-        return re.sub(r"([?&](?:s|token|login_token)=)[^&]*", r"\1<redacted>", url, flags=re.IGNORECASE)
-
-
-def _debug_http_exchange(
-    stage: str,
-    method: str,
-    url: str,
-    payload: Any,
-    response: Any,
-    cookies: Any = None,
-) -> None:
-    if not _http_debug_enabled():
-        return
-    try:
-        headers = _redact_debug_value(dict(getattr(response, "headers", {}) or {}), "headers")
-        content_type = str(getattr(response, "headers", {}).get("Content-Type") or "")
-        body: Any
-        response_text = str(getattr(response, "text", "") or "")
-        if "json" in content_type.lower() or (not content_type and response_text):
-            try:
-                body = _redact_debug_value(response.json())
-            except Exception:
-                body = response_text[:10000]
-        else:
-            raw = getattr(response, "content", b"") or b""
-            if isinstance(raw, bytes):
-                body = {
-                    "type": "bytes",
-                    "length": len(raw),
-                    "sha256": hashlib.sha256(raw).hexdigest(),
-                }
-            else:
-                body = str(getattr(response, "text", raw) or "")[:10000]
-        cookie_dump = None
-        if cookies is not None:
-            cookie_dump = _redact_debug_value(
-                {str(cookie.name): str(cookie.value) for cookie in cookies},
-                "cookie",
-            )
-        record = {
-            "stage": stage,
-            "request": {
-                "method": method,
-                "url": _redact_debug_url(url),
-                "payload": _redact_debug_value(payload),
-            },
-            "response": {
-                "status_code": getattr(response, "status_code", None),
-                "headers": headers,
-                "body": body,
-            },
-            "session_cookies": cookie_dump,
-        }
-        print("[SANGFOR_EDR_HTTP_DEBUG] " + json.dumps(record, ensure_ascii=False, default=str), file=sys.stderr, flush=True)
-    except Exception as exc:
-        print(f"[SANGFOR_EDR_HTTP_DEBUG] failed to serialize {stage}: {exc}", file=sys.stderr, flush=True)
-
-
 def _is_captcha_failure(login_result: dict[str, Any]) -> bool:
     message = str(login_result.get("msg") or "")
     data = login_result.get("data") if isinstance(login_result.get("data"), dict) else {}
@@ -633,29 +523,19 @@ def _probe_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
         return {"valid": False, "reason": "auth_pair_missing_or_mismatched", "error": str(exc)}
 
     session = _dashboard_session(cfg, state)
-    probe_url = _url(cfg, f"/launch.php?s={token}&opr=get_agent_overview")
-    probe_payload = {
-        "app_args": {"name": "app.web.event_center.head", "options": {}},
-        "auto": 1,
-        "opr": "get_agent_overview",
-        "date_range": _unix_date_range(),
-        "query_id": _query_id(),
-    }
     try:
         response = session.post(
-            probe_url,
+            _url(cfg, f"/launch.php?s={token}&opr=get_agent_overview"),
             headers=_http_headers(cfg),
-            json=probe_payload,
+            json={
+                "app_args": {"name": "app.web.event_center.head", "options": {}},
+                "auto": 1,
+                "opr": "get_agent_overview",
+                "date_range": _unix_date_range(),
+                "query_id": _query_id(),
+            },
             timeout=cfg.timeout,
             allow_redirects=False,
-        )
-        _debug_http_exchange(
-            "auth_probe",
-            "POST",
-            probe_url,
-            probe_payload,
-            response,
-            getattr(session, "cookies", None),
         )
     except Exception as exc:
         return {"valid": False, "reason": "auth_probe_request_failed", "error": _safe_error(exc, token)}
@@ -709,20 +589,14 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
     phase = "session_init"
     try:
         phase = "login_page"
-        login_page_url = _login_url(cfg)
-        login_page_response = session.get(login_page_url, headers=_http_headers(cfg), timeout=cfg.timeout)
-        _debug_http_exchange("login_page", "GET", login_page_url, None, login_page_response, session.cookies)
-        login_page_response.raise_for_status()
+        session.get(_login_url(cfg), headers=_http_headers(cfg), timeout=cfg.timeout).raise_for_status()
         phase = "rsakey"
-        rsa_url = _url(cfg, "/login")
-        rsa_payload = {"opr": "rsakey"}
         rsa_response = session.post(
-            rsa_url,
+            _url(cfg, "/login"),
             headers=_http_headers(cfg),
-            json=rsa_payload,
+            json={"opr": "rsakey"},
             timeout=cfg.timeout,
         )
-        _debug_http_exchange("rsakey", "POST", rsa_url, rsa_payload, rsa_response, session.cookies)
         rsa_response.raise_for_status()
         rsa_result = rsa_response.json()
         rsa_key = str(rsa_result.get("key") or "")
@@ -740,34 +614,29 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
                         "reason": "captcha_code_required",
                     }
                 phase = "captcha"
-                captcha_url = _url(cfg, f"/ui/randcode.php?{_now_ms()}")
                 captcha_response = session.get(
-                    captcha_url,
+                    _url(cfg, f"/ui/randcode.php?{_now_ms()}"),
                     headers=_http_headers(cfg, image=True),
                     timeout=cfg.timeout,
                 )
-                _debug_http_exchange("captcha", "GET", captcha_url, None, captcha_response, session.cookies)
                 captcha_response.raise_for_status()
                 code = _ocr_verify_code(captcha_response.content)
 
             phase = "dlogin"
-            dlogin_url = _url(cfg, "/login")
-            dlogin_payload = {
-                "opr": "dlogin",
-                "data": {
-                    "auth_type": "pwd",
-                    "user_name": cfg.username,
-                    "code": code,
-                    "pwd": _rsa_encrypt_password(rsa_key, cfg.password),
-                },
-            }
             login_response = session.post(
-                dlogin_url,
+                _url(cfg, "/login"),
                 headers=_http_headers(cfg),
-                json=dlogin_payload,
+                json={
+                    "opr": "dlogin",
+                    "data": {
+                        "auth_type": "pwd",
+                        "user_name": cfg.username,
+                        "code": code,
+                        "pwd": _rsa_encrypt_password(rsa_key, cfg.password),
+                    },
+                },
                 timeout=cfg.timeout,
             )
-            _debug_http_exchange("dlogin", "POST", dlogin_url, dlogin_payload, login_response, session.cookies)
             login_response.raise_for_status()
             login_result = login_response.json()
             if not login_result.get("success") or login_result.get("key") in (None, ""):
@@ -777,22 +646,19 @@ def _http_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
                 continue
 
             phase = "launch_login"
-            launch_url = _url(cfg, "/launch_login.php")
-            launch_payload = {
-                "opr": "dlogin",
-                "app_args": {"name": "app.web.auth.login", "options": {}},
-                "data": {
-                    "key": login_result["key"],
-                    "user_aggreement_status": "true",
-                },
-            }
             launch_response = session.post(
-                launch_url,
+                _url(cfg, "/launch_login.php"),
                 headers=_http_headers(cfg),
-                json=launch_payload,
+                json={
+                    "opr": "dlogin",
+                    "app_args": {"name": "app.web.auth.login", "options": {}},
+                    "data": {
+                        "key": login_result["key"],
+                        "user_aggreement_status": "true",
+                    },
+                },
                 timeout=cfg.timeout,
             )
-            _debug_http_exchange("launch_login", "POST", launch_url, launch_payload, launch_response, session.cookies)
             launch_response.raise_for_status()
             launch_result = launch_response.json()
             token = str((launch_result.get("data") or {}).get("token") or "")
