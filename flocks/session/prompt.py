@@ -29,8 +29,6 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
-MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory", "memory_search"})
-
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
 StringPromptFactory = Callable[[], Optional[str]]
@@ -916,10 +914,9 @@ class SessionPrompt:
         prompt_tool_names: Iterable[str],
         memory_bootstrap_data: Optional[Dict[str, Any]],
     ) -> Optional[str]:
-        """Build memory tool guidance separately from the frozen memory snapshot."""
+        """Build filesystem Memory guidance beside the frozen snapshot."""
+        del prompt_tool_names
         if not memory_bootstrap_data:
-            return None
-        if not (set(prompt_tool_names) & MEMORY_GUIDANCE_TOOL_NAMES):
             return None
         instructions = memory_bootstrap_data.get("instructions", "")
         return cls._normalize_prompt_text(instructions)

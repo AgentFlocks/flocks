@@ -1,7 +1,7 @@
 """
 Memory Bootstrap - Load memory files at session start
 
-Implements OpenClaw-style memory loading with Hermes-style user profiling:
+Implements OpenClaw-style memory loading with filesystem-managed user profiling:
 1. USER.md - Stable user identity and preferences (auto-injected)
 2. MEMORY.md - Global cross-project memory (auto-injected)
 3. projects/<project_id>/MEMORY.md - Registered Project memory (auto-injected)
@@ -44,27 +44,34 @@ On-disk memory root (absolute path): `{memory_root}`.
 4. `daily/YYYY-MM-DD.md` - Daily notes maintained by the session lifecycle and searchable through `memory_search`.
 5. Examples for the current session: today `daily/{today}.md`, yesterday `daily/{yesterday}.md` — any other day uses the same pattern with that day's `YYYY-MM-DD`.
 
-### When to Write Memory:
-- **User profile**: Use `memory(scope="global", target="USER.md", action=...)`
-- **Daily notes**: Raw session logs are maintained automatically under `daily/`
-- **Global long-term**: Use `memory(scope="global", target="MEMORY.md", action=...)` only for clearly cross-project preferences and reusable rules
+### Managing Memory Files:
+- Use `read`, `glob`, and `grep` to inspect Memory explicitly.
+- Use `write` only to create a missing Memory file.
+- Read existing Memory first, then use `edit` for precise changes.
+- **User profile**: Maintain `{memory_root}/USER.md`.
+- **Daily notes**: Session lifecycle maintains `daily/`; do not edit Daily files manually.
+- **Global long-term**: Maintain `{memory_root}/MEMORY.md` only for clearly cross-project preferences and reusable rules.
 {project_write_instruction}
 - Write memories BEFORE the session ends, especially if important work was done
-- If someone says "remember this", write it down immediately with the `memory` tool
+- If someone says "remember this", update the narrowest appropriate Memory file immediately.
 
-### Memory Best Practices:
+### Memory Write Decision:
+- Check existing Memory first and do not add duplicate or equivalent entries.
+- Save only stable preferences, non-derivable project constraints, explicit corrections, and verified reusable experience.
+- Do not save facts that can be cheaply rediscovered from source code, configuration, or other authoritative files.
+- Verify stale or conflicting Memory against current authoritative evidence before replacing or removing it.
+- Do not save secrets, credentials, guesses, transient task status, plans, large tool output, or one-off results.
 - Keep `USER.md` about the user, not about individual projects or one-off tasks
-- Use `daily/YYYY-MM-DD.md` for daily logs (system auto-creates if needed)
 - Store project architecture, conventions, decisions, and lessons in Project Memory by default
 - Promote only clearly cross-project information to Global `MEMORY.md`
-- Use `add` for a new entry. For `replace` or `remove`, pass a short unique `old_text` from the existing entry
 - Use `memory_search` tool to find information from all past memories
 - Review old daily files and distill key points into MEMORY.md
-- Don't keep secrets unless explicitly asked
 
 ### Available Tools:
 - `memory_search` - Search all memories semantically
-- `memory` - Add, replace, or remove entries in `USER.md` and `MEMORY.md`
+- `read`, `glob`, `grep` - Inspect Memory files
+- `write` - Create a missing Memory file
+- `edit` - Precisely update an existing Memory file
 """.strip()
 
 
@@ -378,9 +385,9 @@ This is your curated long-term memory file. Store important information here:
                 "conventions, decisions, and lessons (already injected above)"
             )
             project_write_instruction = (
-                "- **Project long-term**: Use "
-                '`memory(scope="project", target="MEMORY.md", action=...)` '
-                "for current project facts, conventions, decisions, and lessons"
+                "- **Project long-term**: Maintain `projects/"
+                f"{self.project_id}/MEMORY.md` for current project facts, "
+                "conventions, decisions, and lessons"
             )
         else:
             project_file_instruction = (

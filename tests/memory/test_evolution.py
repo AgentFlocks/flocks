@@ -176,7 +176,8 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
         assert heading in DREAM_SYSTEM_PROMPT
     assert "Return strict JSON" not in DREAM_SYSTEM_PROMPT
     assert "Do not output JSON" in DREAM_SYSTEM_PROMPT
-    assert "Use `memory`" in DREAM_SYSTEM_PROMPT
+    assert "Use `write` only to create a missing" in DREAM_SYSTEM_PROMPT
+    assert "using `edit` for a precise change" in DREAM_SYSTEM_PROMPT
     assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
 

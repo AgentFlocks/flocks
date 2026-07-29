@@ -52,7 +52,6 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "skill_load": ["knowledge", "skill"],
     "tool_search": ["tool-discovery", "capability-search"],
     "session_manage": ["session", "history", "management"],
-    "memory": ["memory", "context"],
     "memory_search": ["memory", "search"],
     "list_providers": ["model", "configuration"],
     "add_provider": ["provider", "configuration"],

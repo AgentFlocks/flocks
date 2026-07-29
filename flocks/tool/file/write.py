@@ -9,6 +9,7 @@ Writes files to the local filesystem with:
 
 import os
 from difflib import unified_diff
+from pathlib import Path
 from typing import Optional
 
 from flocks.tool.registry import (
@@ -193,6 +194,35 @@ async def _maybe_redirect_to_default_outputs(
         return resolved_path
 
 
+def _existing_memory_write_error(filepath: str) -> Optional[str]:
+    """Prevent whole-file replacement of existing stable Memory files."""
+    from flocks.config import Config
+    from flocks.memory.paths import is_registered_project_id
+
+    path = Path(filepath).expanduser().resolve(strict=False)
+    memory_root = (
+        Config.get_data_path() / "memory"
+    ).expanduser().resolve(strict=False)
+    protected_files = {
+        memory_root / "MEMORY.md",
+        memory_root / "USER.md",
+    }
+    is_project_memory = (
+        path.name == "MEMORY.md"
+        and path.parent.parent == memory_root / "projects"
+        and is_registered_project_id(path.parent.name)
+    )
+    is_daily = memory_root / "daily" in path.parents
+    if path.exists() and (
+        path in protected_files or is_project_memory or is_daily
+    ):
+        return (
+            "Existing Memory files cannot be overwritten with write. "
+            "Read the current content and use edit for a precise change."
+        )
+    return None
+
+
 @ToolRegistry.register_function(
     name="write",
     description=DESCRIPTION,
@@ -270,6 +300,13 @@ async def write_tool(
             title=filePath,
         )
     filepath = resolution.resolved_path
+    memory_error = _existing_memory_write_error(filepath)
+    if memory_error:
+        return ToolResult(
+            success=False,
+            error=memory_error,
+            title=filePath,
+        )
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":

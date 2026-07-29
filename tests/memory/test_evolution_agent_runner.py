@@ -103,7 +103,6 @@ def test_evolution_agents_are_hidden_and_have_expected_tools() -> None:
         "edit",
         "glob",
         "grep",
-        "memory",
         "bash",
     ]
     assert learn is not None

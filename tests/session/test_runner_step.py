@@ -978,7 +978,7 @@ class TestBuildSystemPrompts:
         custom_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_includes_memory_guidance_when_memory_tools_loaded(self):
+    async def test_build_system_prompts_includes_filesystem_memory_guidance(self):
         session = _make_session("ses_prompts_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -1040,7 +1040,7 @@ class TestBuildSystemPrompts:
         assert "PowerShell syntax" not in combined
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_skips_memory_guidance_without_memory_tools(self):
+    async def test_build_system_prompts_includes_memory_guidance_with_file_tools(self):
         session = _make_session("ses_prompts_no_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -1071,11 +1071,11 @@ class TestBuildSystemPrompts:
                 memory_bootstrap_data=runner._memory_bootstrap_data,
             )
 
-        assert "memory guidance" not in "\n\n".join(prompts)
+        assert "memory guidance" in "\n\n".join(prompts)
         assert "## MEMORY.md\n\nremembered context" in prompts
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_rebuilds_when_prompt_tool_names_change(self):
+    async def test_filesystem_memory_guidance_does_not_depend_on_tool_names(self):
         shared_cache = {}
         session = _make_session("ses_prompts_tool_names")
         runner = SessionRunner(
@@ -1122,9 +1122,9 @@ class TestBuildSystemPrompts:
                 static_cache=shared_cache,
             )
 
-        assert prompts_with_memory != prompts_without_memory
+        assert prompts_with_memory == prompts_without_memory
         assert "memory guidance" in "\n\n".join(prompts_with_memory)
-        assert "memory guidance" not in "\n\n".join(prompts_without_memory)
+        assert "memory guidance" in "\n\n".join(prompts_without_memory)
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()
