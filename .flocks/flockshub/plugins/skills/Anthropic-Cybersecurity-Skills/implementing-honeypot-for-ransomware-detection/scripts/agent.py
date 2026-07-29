@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent for deploying and monitoring ransomware honeypot decoy files."""
+"""Agent for deploying and monitoring ransomware honeypot canary files."""
 
 import os
 import json
@@ -11,22 +11,22 @@ from pathlib import Path
 from collections import Counter
 
 
-DECOY_EXTENSIONS = [".docx", ".xlsx", ".pdf", ".pptx", ".csv", ".txt",
+CANARY_EXTENSIONS = [".docx", ".xlsx", ".pdf", ".pptx", ".csv", ".txt",
                      ".jpg", ".png", ".sql", ".bak"]
-DECOY_PREFIX_NAMES = [
+CANARY_PREFIX_NAMES = [
     "!Accounting_Report_2024", "!Budget_Final", "!Confidential_HR",
     "!Employee_SSN_List", "!Financial_Audit", "!Payroll_Records",
     "~$Customer_Database", "~$Executive_Compensation",
 ]
 
 
-def create_decoy_files(target_dir, count=10):
-    """Create decoy files in strategic locations for ransomware detection."""
+def create_canary_files(target_dir, count=10):
+    """Create canary files in strategic locations for ransomware detection."""
     canaries = []
     target = Path(target_dir)
-    for i in range(min(count, len(DECOY_PREFIX_NAMES))):
-        for ext in DECOY_EXTENSIONS[:3]:
-            name = f"{DECOY_PREFIX_NAMES[i]}{ext}"
+    for i in range(min(count, len(CANARY_PREFIX_NAMES))):
+        for ext in CANARY_EXTENSIONS[:3]:
+            name = f"{CANARY_PREFIX_NAMES[i]}{ext}"
             path = target / name
             content = os.urandom(1024 * (i + 1))
             path.write_bytes(content)
@@ -40,11 +40,11 @@ def create_decoy_files(target_dir, count=10):
     return canaries
 
 
-def generate_decoy_manifest(canaries, manifest_path):
-    """Save decoy file manifest for integrity monitoring."""
+def generate_canary_manifest(canaries, manifest_path):
+    """Save canary file manifest for integrity monitoring."""
     manifest = {
         "created_at": datetime.utcnow().isoformat(),
-        "decoy_count": len(canaries),
+        "canary_count": len(canaries),
         "canaries": canaries,
     }
     with open(manifest_path, "w") as f:
@@ -52,38 +52,38 @@ def generate_decoy_manifest(canaries, manifest_path):
     return manifest_path
 
 
-def check_decoy_integrity(manifest_path):
-    """Check decoy files against manifest to detect tampering/encryption."""
+def check_canary_integrity(manifest_path):
+    """Check canary files against manifest to detect tampering/encryption."""
     with open(manifest_path) as f:
         manifest = json.load(f)
     alerts = []
-    for decoy in manifest.get("canaries", []):
-        path = Path(decoy["path"])
+    for canary in manifest.get("canaries", []):
+        path = Path(canary["path"])
         if not path.exists():
             alerts.append({
                 "type": "DELETED",
-                "path": decoy["path"],
+                "path": canary["path"],
                 "severity": "CRITICAL",
-                "detail": "Decoy file deleted - possible ransomware wiper",
+                "detail": "Canary file deleted - possible ransomware wiper",
             })
             continue
         current_hash = hashlib.sha256(path.read_bytes()).hexdigest()
-        if current_hash != decoy["hash"]:
+        if current_hash != canary["hash"]:
             alerts.append({
                 "type": "MODIFIED",
-                "path": decoy["path"],
+                "path": canary["path"],
                 "severity": "CRITICAL",
-                "original_hash": decoy["hash"],
+                "original_hash": canary["hash"],
                 "current_hash": current_hash,
-                "detail": "Decoy file modified - possible ransomware encryption",
+                "detail": "Canary file modified - possible ransomware encryption",
             })
         current_size = path.stat().st_size
-        if abs(current_size - decoy["size"]) > decoy["size"] * 0.1:
+        if abs(current_size - canary["size"]) > canary["size"] * 0.1:
             alerts.append({
                 "type": "SIZE_CHANGE",
-                "path": decoy["path"],
+                "path": canary["path"],
                 "severity": "HIGH",
-                "original_size": decoy["size"],
+                "original_size": canary["size"],
                 "current_size": current_size,
             })
     checked = len(manifest.get("canaries", []))
@@ -186,8 +186,8 @@ def analyze_honeypot_logs(log_path):
 
 def main():
     parser = argparse.ArgumentParser(description="Ransomware Honeypot Agent")
-    parser.add_argument("--deploy", help="Directory to deploy decoy files")
-    parser.add_argument("--manifest", help="Decoy manifest JSON for integrity check")
+    parser.add_argument("--deploy", help="Directory to deploy canary files")
+    parser.add_argument("--manifest", help="Canary manifest JSON for integrity check")
     parser.add_argument("--watch", help="Directory to watch for ransomware indicators")
     parser.add_argument("--honeypot-log", help="Honeypot access log JSON")
     parser.add_argument("--action", choices=["deploy", "check", "detect", "analyze",
@@ -198,13 +198,13 @@ def main():
     report = {"generated_at": datetime.utcnow().isoformat(), "results": {}}
 
     if args.action in ("deploy", "full") and args.deploy:
-        canaries = create_decoy_files(args.deploy)
-        manifest = generate_decoy_manifest(canaries, args.deploy + "/decoy_manifest.json")
+        canaries = create_canary_files(args.deploy)
+        manifest = generate_canary_manifest(canaries, args.deploy + "/canary_manifest.json")
         report["results"]["deployed"] = {"count": len(canaries), "manifest": manifest}
-        print(f"[+] Deployed {len(canaries)} decoy files")
+        print(f"[+] Deployed {len(canaries)} canary files")
 
     if args.action in ("check", "full") and args.manifest:
-        result = check_decoy_integrity(args.manifest)
+        result = check_canary_integrity(args.manifest)
         report["results"]["integrity"] = result
         print(f"[+] Integrity: {result['status']} ({result['alert_count']} alerts)")
 

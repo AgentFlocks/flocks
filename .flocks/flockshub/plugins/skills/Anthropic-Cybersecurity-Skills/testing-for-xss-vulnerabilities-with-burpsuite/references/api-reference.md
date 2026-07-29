@@ -20,16 +20,16 @@
 
 ### DOM Invader
 - Built-in browser extension for DOM XSS testing
-- Decoy injection and sink monitoring
+- Canary injection and sink monitoring
 - Source-to-sink data flow tracing
 
 ## requests Library (Companion Script)
 
 ### Reflection Detection
 ```python
-decoy = "xssdecoy12345"
-resp = requests.get(f"{url}?q={decoy}")
-if decoy in resp.text:
+canary = "xsscanary12345"
+resp = requests.get(f"{url}?q={canary}")
+if canary in resp.text:
     # Determine context and fuzz with payloads
 ```
 

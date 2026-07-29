@@ -57,7 +57,7 @@ def check_binary_protections(app_name: str) -> dict:
     """Check for binary protections."""
     checks = {
         "pie": False,
-        "stack_decoy": False,
+        "stack_canary": False,
         "arc": False,
         "encrypted": False,
     }

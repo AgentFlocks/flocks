@@ -17,7 +17,7 @@ license: Apache-2.0
 d3fend_techniques:
 - Platform Monitoring
 - Process Code Segment Verification
-- Stack Frame Decoy Validation
+- Stack Frame Canary Validation
 - Segment Address Offset Randomization
 - Process Analysis
 nist_csf:

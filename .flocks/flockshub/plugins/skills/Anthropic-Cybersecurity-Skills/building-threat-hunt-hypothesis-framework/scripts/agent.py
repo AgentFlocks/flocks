@@ -37,7 +37,7 @@ DATA_SOURCE_MAP = {
     "T1071.001": {"name": "Web Protocols C2", "sources": ["Proxy logs", "DNS query logs", "Zeek http.log"],
                    "log_channel": "Proxy/DNS"},
     "T1486": {"name": "Data Encrypted for Impact", "sources": ["File creation burst (Sysmon 11)",
-               "Decoy file triggers", "VSS deletion (Sysmon 1)"], "log_channel": "Sysmon"},
+               "Canary file triggers", "VSS deletion (Sysmon 1)"], "log_channel": "Sysmon"},
     "T1021.001": {"name": "Remote Desktop Protocol", "sources": ["Logon Type 10 (4624)",
                    "RDP connection (1149)"], "log_channel": "Security / TerminalServices-RemoteConnectionManager"},
 }

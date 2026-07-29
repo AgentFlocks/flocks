@@ -57,8 +57,8 @@ def check_linux_nx_support():
 
 
 def check_elf_pie_relro(binary_path):
-    """Check ELF binary for PIE, RELRO, stack decoy, and NX using readelf/checksec."""
-    findings = {"binary": binary_path, "pie": False, "relro": "none", "nx": False, "decoy": False}
+    """Check ELF binary for PIE, RELRO, stack canary, and NX using readelf/checksec."""
+    findings = {"binary": binary_path, "pie": False, "relro": "none", "nx": False, "canary": False}
     readelf_cmd = subprocess.run(["readelf", "-h", binary_path], capture_output=True, text=True, timeout=120)
     if "DYN" in readelf_cmd.stdout:
         findings["pie"] = True
@@ -69,12 +69,12 @@ def check_elf_pie_relro(binary_path):
         findings["relro"] = "partial"
     readelf_s = subprocess.run(["readelf", "-s", binary_path], capture_output=True, text=True, timeout=120)
     if "__stack_chk_fail" in readelf_s.stdout:
-        findings["decoy"] = True
+        findings["canary"] = True
     readelf_l = subprocess.run(["readelf", "-l", binary_path], capture_output=True, text=True, timeout=120)
     for line in readelf_l.stdout.split("\n"):
         if "GNU_STACK" in line and "RWE" not in line:
             findings["nx"] = True
-    score = sum([findings["pie"], findings["relro"] == "full", findings["nx"], findings["decoy"]])
+    score = sum([findings["pie"], findings["relro"] == "full", findings["nx"], findings["canary"]])
     findings["protection_score"] = f"{score}/4"
     return findings
 
@@ -109,7 +109,7 @@ def generate_report(system_checks, binary_checks):
             "pie_enabled": sum(1 for b in binary_checks if b.get("pie")),
             "full_relro": sum(1 for b in binary_checks if b.get("relro") == "full"),
             "nx_enabled": sum(1 for b in binary_checks if b.get("nx")),
-            "decoy_present": sum(1 for b in binary_checks if b.get("decoy")),
+            "canary_present": sum(1 for b in binary_checks if b.get("canary")),
         },
         "weak_binary_details": weak_binaries[:20],
     }
@@ -142,7 +142,7 @@ def main():
                 "pid": proc.get("PID", 0),
                 "pie": bool(proc.get("ASLR")),
                 "nx": bool(proc.get("DEP")),
-                "decoy": False,
+                "canary": False,
                 "relro": "n/a",
             })
 

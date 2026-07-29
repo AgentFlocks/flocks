@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Agent for deploying and monitoring decoy tokens via the Thinkst API."""
+"""Agent for deploying and monitoring Canary Tokens via the Thinkst Canary API."""
 
 import json
 import argparse
@@ -27,11 +27,11 @@ TOKEN_KINDS = {
 }
 
 
-class DecoyClient:
-    """Client for the Thinkst Decoy Console REST API."""
+class CanaryClient:
+    """Client for the Thinkst Canary Console REST API."""
 
     def __init__(self, console_domain, auth_token):
-        self.base_url = f"https://{console_domain}.decoy.tools/api/v1"
+        self.base_url = f"https://{console_domain}.canary.tools/api/v1"
         self.auth_token = auth_token
 
     def _get(self, endpoint, params=None):
@@ -53,7 +53,7 @@ class DecoyClient:
         return self._get("/ping")
 
     def create_token(self, kind, memo, **kwargs):
-        """Create a new Decoytoken.
+        """Create a new Canarytoken.
 
         Args:
             kind: Token type (http, dns, doc-msword, aws-id, etc.)
@@ -68,19 +68,19 @@ class DecoyClient:
             data.pop("doc", None)
             files = {"doc": (doc_path, open(doc_path, "rb"),
                             "application/vnd.openxmlformats-officedocument.wordprocessingml.document")}
-        return self._post("/decoytoken/create", data=data, files=files)
+        return self._post("/canarytoken/create", data=data, files=files)
 
     def list_tokens(self):
-        """List all Decoytokens on the console."""
-        return self._get("/decoytokens/fetch")
+        """List all Canarytokens on the console."""
+        return self._get("/canarytokens/fetch")
 
-    def get_token(self, decoytoken):
+    def get_token(self, canarytoken):
         """Get details for a specific token."""
-        return self._get("/decoytoken/fetch", params={"decoytoken": decoytoken})
+        return self._get("/canarytoken/fetch", params={"canarytoken": canarytoken})
 
-    def delete_token(self, decoytoken):
-        """Delete a Decoytoken."""
-        return self._post("/decoytoken/delete", data={"decoytoken": decoytoken})
+    def delete_token(self, canarytoken):
+        """Delete a Canarytoken."""
+        return self._post("/canarytoken/delete", data={"canarytoken": canarytoken})
 
     def get_alerts(self, newer_than=None):
         """Fetch recent alerts from triggered tokens."""
@@ -89,9 +89,9 @@ class DecoyClient:
             params["newer_than"] = newer_than
         return self._get("/incidents/all", params=params)
 
-    def get_token_alerts(self, decoytoken):
+    def get_token_alerts(self, canarytoken):
         """Fetch alerts for a specific token."""
-        return self._get("/decoytoken/incidents", params={"decoytoken": decoytoken})
+        return self._get("/canarytoken/incidents", params={"canarytoken": canarytoken})
 
     def ack_alert(self, incident_id):
         """Acknowledge an alert."""
@@ -103,7 +103,7 @@ def create_deployment(client, deployment_plan):
     results = []
     for token_spec in deployment_plan:
         kind = token_spec.get("kind", "http")
-        memo = token_spec.get("memo", f"Decoytoken - {kind}")
+        memo = token_spec.get("memo", f"Canarytoken - {kind}")
         extra = {k: v for k, v in token_spec.items() if k not in ("kind", "memo")}
         try:
             resp = client.create_token(kind, memo, **extra)
@@ -111,8 +111,8 @@ def create_deployment(client, deployment_plan):
                 "kind": kind,
                 "memo": memo,
                 "status": "CREATED",
-                "decoytoken": resp.get("decoytoken", {}).get("decoytoken", ""),
-                "url": resp.get("decoytoken", {}).get("url", ""),
+                "canarytoken": resp.get("canarytoken", {}).get("canarytoken", ""),
+                "url": resp.get("canarytoken", {}).get("url", ""),
             })
         except Exception as e:
             results.append({"kind": kind, "memo": memo, "status": "FAILED", "error": str(e)})
@@ -133,9 +133,9 @@ def audit_token_coverage(client):
         kind_counts[kind] = kind_counts.get(kind, 0) + 1
 
     for alert in alerts:
-        triggered_tokens.add(alert.get("decoytoken", ""))
+        triggered_tokens.add(alert.get("canarytoken", ""))
 
-    untriggered = [t for t in tokens if t.get("decoytoken", "") not in triggered_tokens]
+    untriggered = [t for t in tokens if t.get("canarytoken", "") not in triggered_tokens]
     recommended_types = []
     for kind_name in TOKEN_KINDS:
         if kind_name not in kind_counts:
@@ -153,7 +153,7 @@ def audit_token_coverage(client):
 
 
 def full_audit(client):
-    """Run comprehensive Decoytoken deployment audit."""
+    """Run comprehensive Canarytoken deployment audit."""
     coverage = audit_token_coverage(client)
     tokens_resp = client.list_tokens()
     tokens = tokens_resp.get("tokens", [])
@@ -163,7 +163,7 @@ def full_audit(client):
     token_details = []
     for t in tokens[:30]:
         token_details.append({
-            "decoytoken": t.get("decoytoken"),
+            "canarytoken": t.get("canarytoken"),
             "kind": t.get("kind"),
             "memo": t.get("memo"),
             "created": t.get("created_printable"),
@@ -178,12 +178,12 @@ def full_audit(client):
             "description": a.get("description"),
             "source_ip": a.get("src_host"),
             "timestamp": a.get("created_printable"),
-            "decoytoken": a.get("decoytoken"),
+            "canarytoken": a.get("canarytoken"),
             "acknowledged": a.get("acknowledged"),
         })
 
     return {
-        "audit_type": "Decoytoken Deception Coverage Audit",
+        "audit_type": "Canarytoken Deception Coverage Audit",
         "timestamp": datetime.utcnow().isoformat(),
         "coverage": coverage,
         "deployed_tokens": token_details,
@@ -194,8 +194,8 @@ def full_audit(client):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Decoytoken Deception Detection Agent")
-    parser.add_argument("--console", required=True, help="Decoy Console domain (e.g., abc123)")
+    parser = argparse.ArgumentParser(description="Canarytoken Deception Detection Agent")
+    parser.add_argument("--console", required=True, help="Canary Console domain (e.g., abc123)")
     parser.add_argument("--auth-token", required=True, help="API auth token")
     sub = parser.add_subparsers(dest="command")
     sub.add_parser("ping", help="Test API connectivity")
@@ -208,7 +208,7 @@ def main():
     sub.add_parser("full", help="Full deception audit")
     args = parser.parse_args()
 
-    client = DecoyClient(args.console, args.auth_token)
+    client = CanaryClient(args.console, args.auth_token)
 
     if args.command == "ping":
         result = client.ping()

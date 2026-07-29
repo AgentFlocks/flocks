@@ -17,7 +17,7 @@ PLAYBOOK_TYPES = {
         "phases": {
             "detection": [
                 "EDR alerts on mass file encryption (CrowdStrike, SentinelOne)",
-                "Decoy file modification alerts from deception tools",
+                "Canary file modification alerts from deception tools",
                 "User reports of inaccessible files or ransom note",
             ],
             "containment": [

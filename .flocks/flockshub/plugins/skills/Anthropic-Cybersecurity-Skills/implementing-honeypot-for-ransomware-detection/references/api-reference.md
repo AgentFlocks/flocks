@@ -1,6 +1,6 @@
 # API Reference: Implementing Honeypot for Ransomware Detection
 
-## Decoy File Strategy
+## Canary File Strategy
 
 | Name Pattern | Extension | Purpose |
 |-------------|-----------|---------|
@@ -13,7 +13,7 @@
 ```python
 import hashlib
 from pathlib import Path
-content = Path("decoy.docx").read_bytes()
+content = Path("canary.docx").read_bytes()
 sha256 = hashlib.sha256(content).hexdigest()
 ```
 
@@ -39,15 +39,15 @@ sha256 = hashlib.sha256(content).hexdigest()
     full_audit:priority = NOTICE
 ```
 
-## Thinkst Decoy API
+## Thinkst Canary API
 
 ```bash
 # List incidents
-curl "https://DOMAIN.decoy.tools/api/v1/incidents/all" \
+curl "https://DOMAIN.canary.tools/api/v1/incidents/all" \
   -d auth_token=TOKEN
 
 # Acknowledge incident
-curl "https://DOMAIN.decoy.tools/api/v1/incident/acknowledge" \
+curl "https://DOMAIN.canary.tools/api/v1/incident/acknowledge" \
   -d auth_token=TOKEN -d incident=INC_ID
 ```
 
@@ -56,12 +56,12 @@ curl "https://DOMAIN.decoy.tools/api/v1/incident/acknowledge" \
 | Metric | Threshold | Severity |
 |--------|----------|----------|
 | Files modified in 60s | > 50 | CRITICAL |
-| Decoy file deleted | Any | CRITICAL |
-| Decoy hash changed | Any | CRITICAL |
+| Canary file deleted | Any | CRITICAL |
+| Canary hash changed | Any | CRITICAL |
 | Known ransom extensions | Any | CRITICAL |
 
 ### References
 
-- Thinkst Decoy: https://decoy.tools/
+- Thinkst Canary: https://canary.tools/
 - CISA Ransomware Guide: https://www.cisa.gov/stopransomware
-- Decoytokens: https://decoytokens.org/
+- Canarytokens: https://canarytokens.org/
