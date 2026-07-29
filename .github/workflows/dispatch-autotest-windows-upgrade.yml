@@ -290,7 +290,11 @@ jobs:
               rf"(?<![0-9A-Za-z._+-]){re.escape(release_tag)}"
               rf"(?![0-9A-Za-z._+-])"
           )
-          version_artifact_prefix = f"flocks-windows-upgrade-{release_tag}-"
+          version_artifact_pattern = re.compile(
+              rf"(?<![0-9A-Za-z.]){re.escape(release_tag)}"
+              rf"(?![0-9.]|\+|[-_.](?:rc|alpha|beta|pre|preview|dev|post)(?:[0-9._-]|$))",
+              re.IGNORECASE,
+          )
           dispatch_started = parse_github_time(dispatch_started_at) - timedelta(seconds=30)
           deadline = time.time() + wait_timeout
           source_discovery_deadline = time.time() + 120
@@ -313,7 +317,13 @@ jobs:
               candidates.sort(key=lambda run: run.get("created_at") or "", reverse=True)
               return candidates[0] if candidates else None
 
-          def find_artifact(run_id, *, exact_name="", name_prefix="", retry_seconds=120):
+          def find_artifact(
+              run_id,
+              *,
+              exact_name="",
+              match_release_version=False,
+              retry_seconds=120,
+          ):
               artifacts_url = (
                   f"{api_root}/repos/{autotest_repo}/actions/runs/{run_id}/artifacts?per_page=100"
               )
@@ -333,13 +343,16 @@ jobs:
                       if not artifact.get("expired")
                       and (
                           (exact_name and (artifact.get("name") or "") == exact_name)
-                          or (name_prefix and (artifact.get("name") or "").startswith(name_prefix))
+                          or (
+                              match_release_version
+                              and version_artifact_pattern.search(artifact.get("name") or "")
+                          )
                       )
                   ]
                   if matching_artifacts or time.time() >= lookup_deadline:
                       break
                   available_text = ", ".join(available_artifact_names) if available_artifact_names else "(none)"
-                  expected_text = exact_name or f"{name_prefix}*"
+                  expected_text = exact_name or f"artifact containing exact version {release_tag}"
                   print(
                       f"Waiting for artifact {expected_text}. Available artifacts: {available_text}",
                       flush=True,
@@ -432,7 +445,7 @@ jobs:
                   fallback_run_id = fallback_run["id"]
                   artifact, available_names = find_artifact(
                       fallback_run_id,
-                      name_prefix=version_artifact_prefix,
+                      match_release_version=True,
                       retry_seconds=120,
                   )
                   if artifact:
@@ -493,7 +506,7 @@ jobs:
               f"- Conclusion: {conclusion}",
               f"- Source run: {source_run_url or 'not found'}",
               f"- Source status: {source_failure or 'ok'}",
-              f"- Version fallback prefix: {version_artifact_prefix}",
+              f"- Version fallback match: exact version {release_tag} anywhere in artifact name",
               f"- Expected artifact: {expected_artifact_name}",
           ]
           if artifact_name:
