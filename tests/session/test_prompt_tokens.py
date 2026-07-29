@@ -307,6 +307,39 @@ class TestBuildSystemPrompts:
         assert len(prompts) > 2
         assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
 
+    @pytest.mark.asyncio
+    async def test_evolution_subagent_child_uses_full_prompt(self):
+        agent = AgentInfo(
+            name="dream",
+            mode="subagent",
+            tags=["system", "evolution"],
+            prompt="You are the Dream Agent.",
+        )
+        with (
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "flocks.session.session.Session.get_by_id",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        parent_id="ses-parent",
+                        metadata={"evolution": "dream"},
+                    )
+                ),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-dream",
+                session_directory="/tmp/project",
+                agent_name="dream",
+                agent_prompt=agent.prompt,
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        assert len(prompts) > 2
+        assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+        assert agent.prompt in prompts
+
 
 # ---------------------------------------------------------------------------
 # SystemPrompt.provider() — returns List[str]

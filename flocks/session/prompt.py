@@ -1046,7 +1046,7 @@ class SessionPrompt:
         session_id: str,
         agent_name: str,
     ) -> bool:
-        """Return true for built-in system subagents running as child sessions."""
+        """Return true when a built-in child uses the minimal prompt profile."""
         try:
             from flocks.agent.registry import Agent
             from flocks.session.session import Session
@@ -1068,6 +1068,9 @@ class SessionPrompt:
                 return False
 
             session = await Session.get_by_id(session_id)
+            metadata = getattr(session, "metadata", {}) if session else {}
+            if metadata.get("evolution"):
+                return False
             return bool(session and session.parent_id)
         except Exception as exc:
             log.debug("prompt.subagent_minimal_check_failed", {

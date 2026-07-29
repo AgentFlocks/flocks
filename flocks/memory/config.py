@@ -172,27 +172,28 @@ class MemoryAutoFlushConfig(BaseModel):
     )
     system_prompt: str = Field(
         (
-            "Session nearing context limit. Preserve only durable Memory "
-            "without ending the current task."
+            "Session nearing context limit. Perform only durable Memory "
+            "maintenance; the lifecycle will resume the current task."
         ),
         description="System prompt for memory flush"
     )
     user_prompt: str = Field(
-        (
-            "If this Session contains durable knowledge, classify each "
-            "candidate before using read/edit: user information or preferences "
-            "belong in USER.md; current-project-only knowledge belongs in "
-            "Project MEMORY.md; cross-project declarative Agent or environment "
-            "knowledge belongs in Global MEMORY.md; repeatable procedures "
-            "belong in Skills, not Memory. Do not save secrets, guesses, "
-            "transient state, one-off results, cheaply rediscoverable facts, "
-            "weak evidence, unclear candidates, or knowledge already "
-            "represented. Give each accepted item exactly one canonical "
-            "destination and never duplicate it across USER.md, Global "
-            "MEMORY.md, and Project MEMORY.md. Never write or edit Daily "
-            "Memory; the Session lifecycle owns it. Reply with NO_REPLY if "
-            "nothing qualifies, then continue the task."
-        ),
+        """
+Preserve durable knowledge from this Session, then reply `NO_REPLY`.
+
+Classify each candidate in order:
+1. Secret, guess, transient state, one-off result, or cheaply rediscoverable
+   fact: skip it.
+2. Repeatable procedure: skip it; Skill evolution happens outside this flush.
+3. User information or preference: `USER.md`.
+4. Current-project-only knowledge: Project `MEMORY.md`.
+5. Cross-project declarative Agent or environment knowledge: Global `MEMORY.md`.
+6. Weak, unclear, or already represented knowledge: make no change.
+
+Store each accepted item in exactly one destination. Read the current file
+first; use `edit` for an existing file and `write` only when it is missing.
+Never write or edit Daily Memory. Do not continue task work in this flush turn.
+""".strip(),
         description="User prompt for memory flush"
     )
 

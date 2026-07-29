@@ -78,7 +78,7 @@ async def run_evolution_agent(
         parent_id=parent_session_id,
         agent=agent_name,
         category="task",
-        memory_enabled=True,
+        memory_enabled=False,
         permission=permissions,
         metadata={
             "ephemeral": True,

@@ -236,6 +236,8 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
     assert "exactly one canonical destination" in DREAM_SYSTEM_PROMPT
     assert "If it describes the user" in DREAM_SYSTEM_PROMPT
     assert "If it applies only to the current project" in DREAM_SYSTEM_PROMPT
+    assert "Project evidence belongs here by default" not in DREAM_SYSTEM_PROMPT
+    assert "sole rule for choosing among them" in DREAM_SYSTEM_PROMPT
     assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
 
@@ -251,6 +253,8 @@ def test_evolution_prompts_use_agent_workflows_without_proposals() -> None:
     assert "Read the complete existing managed" in SKILL_SYSTEM_PROMPT
     assert "# Change decision" in SKILL_SYSTEM_PROMPT
     assert "do not create a competing" in SKILL_SYSTEM_PROMPT
+    assert "load the built-in\n  `skill-builder`" in SKILL_SYSTEM_PROMPT
+    assert "unresolved failure" in SKILL_SYSTEM_PROMPT
 
 
 def test_skill_catalog_budget_preserves_valid_complete_json_entries() -> None:

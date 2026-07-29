@@ -67,6 +67,7 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
 
     assert result is None
     assert created.await_args.kwargs["category"] == "task"
+    assert created.await_args.kwargs["memory_enabled"] is False
     assert (
         created.await_args.kwargs["metadata"]["hideFromSessionManager"]
         is True
