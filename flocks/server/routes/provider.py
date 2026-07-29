@@ -2548,14 +2548,14 @@ async def test_provider_credentials(
             # Rank tools by required-parameter count (fewer = simpler);
             # prefer lightweight query/scan tools and avoid file/upload handlers.
             #
-            # NOTE: For services that expose a dedicated login/auth probe
-            # (e.g. qingteng_login, skyeye_login), we want it tried *first* —
+            # NOTE: For services that expose a dedicated login/auth probe, we
+            # want it tried *first* —
             # it is parameter-free and exercises the credential pipeline end
             # to end without invoking business APIs that may need extra
             # required fields beyond the JSON schema (e.g. assets.refresh
             # which the handler validates needs `resource`/`os_type`).
             # Match either the bare keyword (e.g. "login") or the conventional
-            # `<provider>_<keyword>` suffix (e.g. "qingteng_login"). A loose
+            # `<provider>_<keyword>` suffix (e.g. "service_login"). A loose
             # substring match would over-trigger on business tools whose names
             # merely contain the word — for example tdp_login_api_list and
             # tdp_login_weakpwd_list are query endpoints, not probes.
