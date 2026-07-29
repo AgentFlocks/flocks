@@ -22,6 +22,8 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
+import { flocksproPolicyApi, type PermissionMode } from '@/api/flocksproPolicy';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
@@ -618,6 +620,9 @@ export default function SessionPage() {
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
   const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
+  const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
+  const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
+  const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [relativeTimeClock, setRelativeTimeClock] = useState(0);
@@ -1333,6 +1338,42 @@ export default function SessionPage() {
     document.addEventListener('mousedown', handle);
     return () => document.removeEventListener('mousedown', handle);
   }, [showModelOptions]);
+
+  useEffect(() => {
+    if (!showPermissionModeOptions) return;
+    const handle = (event: MouseEvent) => {
+      if (!(event.target as HTMLElement).closest('[data-permission-mode-selector]')) {
+        setShowPermissionModeOptions(false);
+      }
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showPermissionModeOptions]);
+
+  useEffect(() => {
+    void flocksproUsersApi.hasCapability().then(setProPolicyEnabled);
+  }, []);
+
+  useEffect(() => {
+    if (!proPolicyEnabled || !selectedSessionId) {
+      setSessionPermissionMode(null);
+      return;
+    }
+    void flocksproPolicyApi.getSession(selectedSessionId)
+      .then((result) => setSessionPermissionMode(result.permissionMode))
+      .catch(() => setSessionPermissionMode(null));
+  }, [proPolicyEnabled, selectedSessionId]);
+
+  const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
+    if (!selectedSessionId || !proPolicyEnabled) return;
+    try {
+      await flocksproPolicyApi.setSession(selectedSessionId, permissionMode);
+      setSessionPermissionMode(permissionMode);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('chat.error', 'Error'), message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, t, toast]);
 
   useEffect(() => {
     if (selectedSession?.model_auto) {
@@ -3033,7 +3074,8 @@ export default function SessionPage() {
             </div>
           }
           centerToolbarSlot={
-            <div ref={modelSelectorRef} className="relative" data-model-selector>
+            <div className="flex items-center gap-1">
+              <div ref={modelSelectorRef} className="relative" data-model-selector>
               <button
                 type="button"
                 onClick={() => {
@@ -3173,6 +3215,48 @@ export default function SessionPage() {
                       {t('modelPicker.addModel')}
                     </button>
                   </div>
+                </div>
+              )}
+              </div>
+              {proPolicyEnabled && selectedSessionId && (
+                <div className="relative" data-permission-mode-selector>
+                  <button
+                    type="button"
+                    onClick={() => setShowPermissionModeOptions((open) => !open)}
+                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                    title="Permission Mode"
+                  >
+                    <Shield className="h-3 w-3 shrink-0" />
+                    <span className="max-w-[116px] truncate font-medium">
+                      {sessionPermissionMode ?? 'require-confirm'}
+                    </span>
+                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showPermissionModeOptions && (
+                    <div className="absolute right-0 bottom-full z-50 mb-2 w-52 rounded-lg border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                      {([
+                        ['readonly', '禁止命令执行'],
+                        ['require-confirm', '每次确认'],
+                        ['auto-allow-all', '自动允许'],
+                      ] as const).map(([mode, label]) => (
+                        <button
+                          key={mode}
+                          type="button"
+                          onClick={() => {
+                            void handlePermissionModeChange(mode);
+                            setShowPermissionModeOptions(false);
+                          }}
+                          className={`w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
+                            (sessionPermissionMode ?? 'require-confirm') === mode
+                              ? 'bg-zinc-50 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
+                              : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                          }`}
+                        >
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

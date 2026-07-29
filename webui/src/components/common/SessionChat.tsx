@@ -22,6 +22,7 @@ import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
+import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
@@ -29,6 +30,7 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
+import { permissionApi, type PendingPermission } from '@/api/permission';
 import client, { getApiBase } from '@/api/client';
 import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
@@ -1601,6 +1603,11 @@ export default function SessionChat({
     remove: removeQueuedPrompt,
     runNow: runQueuedPromptNow,
   } = useSessionPromptQueue(sessionId);
+  const [pendingPermissions, setPendingPermissions] = useState<PendingPermission[]>([]);
+  const [permissionSubmitting, setPermissionSubmitting] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const activePermissionSessionRef = useRef<string | null>(sessionId ?? null);
+  activePermissionSessionRef.current = sessionId ?? null;
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
@@ -1853,6 +1860,45 @@ export default function SessionChat({
 
   const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
 
+  const addPendingPermission = useCallback((request: PendingPermission) => {
+    setPendingPermissions((previous) => (
+      previous.some((item) => item.id === request.id)
+        ? previous
+        : [...previous, request]
+    ));
+  }, []);
+
+  const fetchPendingPermissions = useCallback(async () => {
+    if (!sessionId) {
+      setPendingPermissions([]);
+      return;
+    }
+    const targetSessionId = sessionId;
+    const requests = await permissionApi.list();
+    if (activePermissionSessionRef.current !== targetSessionId) return;
+    setPendingPermissions(requests.filter((item) => item.sessionID === targetSessionId));
+  }, [sessionId]);
+
+  const handlePermissionReply = useCallback(async (decision: PermissionDecision) => {
+    const request = pendingPermissions[0];
+    if (!request || permissionSubmitting) return;
+
+    setPermissionSubmitting(true);
+    setPermissionError(null);
+    try {
+      await permissionApi.reply(request.id, {
+        allow: decision !== 'deny',
+        always: decision === 'always',
+      });
+      setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPermissionError(message || '提交确认失败，请重试。');
+    } finally {
+      setPermissionSubmitting(false);
+    }
+  }, [pendingPermissions, permissionSubmitting]);
+
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
   useEffect(() => {
@@ -1885,6 +1931,39 @@ export default function SessionChat({
       // Forward only global events or events relevant to this chat. The global
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
+
+      const properties = event.properties;
+      if (
+        event.type === 'permission.request'
+        && properties
+        && properties.sessionID === sessionId
+      ) {
+        const requestID = typeof properties.requestID === 'string' ? properties.requestID : '';
+        if (requestID) {
+          addPendingPermission({
+            id: requestID,
+            sessionID: sessionId ?? '',
+            messageID: typeof properties.messageID === 'string' ? properties.messageID : '',
+            toolID: typeof properties.tool?.name === 'string'
+              ? properties.tool.name
+              : typeof properties.permission === 'string'
+                ? properties.permission
+                : '',
+            permission: typeof properties.permission === 'string' ? properties.permission : '',
+            patterns: Array.isArray(properties.patterns)
+              ? properties.patterns.filter((pattern): pattern is string => typeof pattern === 'string')
+              : [],
+            always: Array.isArray(properties.always)
+              ? properties.always.filter((pattern): pattern is string => typeof pattern === 'string')
+              : [],
+            metadata: properties.metadata && typeof properties.metadata === 'object'
+              ? properties.metadata as Record<string, unknown>
+              : {},
+            time: { created: Date.now() },
+          });
+          setPermissionError(null);
+        }
+      }
 
       const action = resolveSessionChatSSEAction(event, sessionId);
 
@@ -2078,6 +2157,7 @@ export default function SessionChat({
       handleQuestionAsked,
       removeByRequestId,
       applyPromptQueueItems,
+      addPendingPermission,
       onSSEEvent,
       onError,
       scrollToBottom,
@@ -2166,6 +2246,9 @@ export default function SessionChat({
       refetch();
       refreshContextUsage();
       fetchPromptQueue();
+      fetchPendingPermissions().catch((err) => {
+        console.warn('[SessionChat] Failed to recover pending permissions after reconnect:', err);
+      });
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
       });
@@ -2236,6 +2319,8 @@ export default function SessionChat({
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
     clearPendingQuestions();
+    setPendingPermissions([]);
+    setPermissionError(null);
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
@@ -2256,6 +2341,12 @@ export default function SessionChat({
   useEffect(() => {
     fetchPromptQueue();
   }, [fetchPromptQueue]);
+
+  useEffect(() => {
+    fetchPendingPermissions().catch((err) => {
+      console.warn('[SessionChat] Failed to fetch pending permissions:', err);
+    });
+  }, [fetchPendingPermissions]);
 
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
@@ -3601,6 +3692,19 @@ export default function SessionChat({
       )}
 
       {/* Follow-up input */}
+      {hideInput && (pendingPermissions[0] || permissionError) && (
+        <div className="flex-shrink-0 border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950">
+          <div className={!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}>
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
+            />
+          </div>
+        </div>
+      )}
+
       {!hideInput && (
         <div
           className={`flex-shrink-0 ${
@@ -3661,6 +3765,12 @@ export default function SessionChat({
               onEditSave={handleQueuedEditSave}
               onRemove={handleQueuedRemove}
               onRunNow={handleQueuedRunNow}
+            />
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
             />
             <input
               ref={fileInputRef}
