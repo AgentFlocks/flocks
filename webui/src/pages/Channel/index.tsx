@@ -141,7 +141,7 @@ interface TelegramChannelConfig extends ChannelScopedSecurityConfig {
   streamingCoalesceMs?: number;
 }
 
-interface SlackChannelConfig {
+interface SlackChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   botToken?: string;
   appToken?: string;
@@ -155,7 +155,7 @@ interface SlackChannelConfig {
   allowBots?: 'none' | 'mentions' | 'all';
 }
 
-interface EmailChannelConfig {
+interface EmailChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   address?: string;
   username?: string;
@@ -873,6 +873,9 @@ function ChannelSecurityFields({
 
   useEffect(() => {
     if (!defaultAgent) return;
+    // Agent options load asynchronously. An empty list is not evidence that
+    // a persisted default is invalid, so preserve it until discovery completes.
+    if (agentOptions.length === 0) return;
     if (defaultAgentOptions.some((item) => item.value === defaultAgent)) return;
     if (defaultAgentOptions.length > 0) {
       onDefaultAgentChange(defaultAgentOptions[0].value);
@@ -1980,9 +1983,11 @@ function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPa
 
 function SlackPanel({
   config,
+  agentOptions,
   onChange,
 }: {
   config: SlackChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: SlackChannelConfig) => void;
 }) {
   const { t } = useTranslation('channel');
@@ -2113,13 +2118,13 @@ function SlackPanel({
       </Section>
 
       <Section title={t('slack.behavior')} description={t('slack.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('slack.defaultAgent')} hint={t('slack.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('slack.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(value) => set('defaultAgent', value)}
+          onVisibleAgentsChange={(value) => set('visibleAgents', value)}
+        />
         <FieldRow label={t('slack.groupTrigger')} hint={t('slack.groupTriggerHint')}>
           <Select
             value={config.groupTrigger ?? 'mention'}
@@ -2185,10 +2190,11 @@ function SlackPanel({
 
 interface EmailPanelProps {
   config: EmailChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: EmailChannelConfig) => void;
 }
 
-function EmailPanel({ config, onChange }: EmailPanelProps) {
+function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
   const { t } = useTranslation('channel');
   const set = useCallback(
     <K extends keyof EmailChannelConfig>(key: K, value: EmailChannelConfig[K]) =>
@@ -2411,13 +2417,13 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
       </Section>
 
       <Section title={t('email.behavior')} description={t('email.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('email.defaultAgent')} hint={t('email.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('email.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(value) => set('defaultAgent', value)}
+          onVisibleAgentsChange={(value) => set('visibleAgents', value)}
+        />
         <FieldRow label={t('email.defaultSubject')} hint={t('email.defaultSubjectHint')}>
           <TextInput
             value={config.defaultSubject ?? ''}
@@ -3772,12 +3778,14 @@ export default function ChannelPage() {
                   {selectedId === 'slack' && (
                     <SlackPanel
                       config={selectedConfig as SlackChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('slack', cfg)}
                     />
                   )}
                   {selectedId === 'email' && (
                     <EmailPanel
                       config={selectedConfig as EmailChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('email', cfg)}
                     />
                   )}
