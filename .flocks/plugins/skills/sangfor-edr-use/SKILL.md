@@ -62,6 +62,7 @@ description: 深信服 EDR 登录态管理与首页仪表盘 API 采集。用户
 - 认证探测失败：禁止继续业务 API；HTTP 重登并再次探测，仍失败则返回错误。
 - 仪表盘部分接口失败：保留成功数据，在 `errors` 中按采集项返回失败原因。
 - Cookie、密码和 `login_token` 不得回显、记录日志或混入业务输出。
+- 需要诊断 HTTP 登录时，可在当前 Flocks 运行环境设置 `SANGFOR_EDR_DEBUG_HTTP=1`；模块会按阶段输出请求 payload、响应状态/头/体和 Cookie 名称，默认脱敏。仅在隔离环境临时设置 `SANGFOR_EDR_DEBUG_HTTP_SENSITIVE=1` 查看完整敏感值，诊断完成后必须关闭并清理日志。
 
 ## 执行约束
 
