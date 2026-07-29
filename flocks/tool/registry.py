@@ -479,6 +479,8 @@ class Tool:
     async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
         """Execute the tool with given parameters and context"""
         try:
+            raw_kwargs = dict(kwargs)
+
             # Log tool execution start
             log.info("tool.execute.start", {
                 "tool": self.info.name,
@@ -566,8 +568,34 @@ class Tool:
 
             coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
 
-            # Execute handler
-            result = await self.handler(ctx, **coerced_kwargs)
+            # Preserve extension-owned ingress context for work created by an
+            # enclosing lifecycle.  Flocks treats this as an opaque carrier;
+            # installed extensions remain responsible for validating its data.
+            from flocks.hooks.execution import current_execution_context, execute_with_hooks
+            from flocks.session.tool_execution import (
+                build_session_tool_execution_payload,
+            )
+
+            tool_context_extra = dict(ctx.extra)
+            inherited_context = current_execution_context()
+            if inherited_context and not isinstance(
+                tool_context_extra.get("execution_context"), dict
+            ):
+                tool_context_extra["execution_context"] = inherited_context
+            payload = await build_session_tool_execution_payload(
+                session_id=ctx.session_id,
+                message_id=ctx.message_id,
+                agent=ctx.agent,
+                tool_name=self.info.name,
+                tool_input=raw_kwargs,
+                tool_context_extra=tool_context_extra,
+                execution_domain="execution_runtime",
+            )
+
+            result = await execute_with_hooks(
+                payload,
+                lambda: self.handler(ctx, **coerced_kwargs),
+            )
 
             # Auto-truncate output unless the tool already handled it
             if result.success and not result.truncated:

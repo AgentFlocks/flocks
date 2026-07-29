@@ -27,6 +27,11 @@ from flocks.storage.storage import Storage
 from flocks.utils.langfuse import initialize as init_observability, shutdown as shutdown_observability
 from flocks.auth.service import AuthService
 from flocks.extensions import ExtensionOptions, handler_name, normalize_fail_policy, normalize_timeout
+from flocks.hooks.execution import (
+    ExecutionStopped,
+    execution_context_scope,
+    execution_lifecycle_scope,
+)
 from flocks.server.auth import apply_auth_for_request, clear_auth_context
 from flocks.server.static_webui import maybe_serve_static_webui
 
@@ -604,6 +609,8 @@ app = FastAPI(
     redoc_url="/redoc",
     openapi_url="/openapi.json",
 )
+app.state.critical_plugin_entrypoint_failure = False
+app.state.critical_plugin_entrypoint_failures = ()
 
 # Logger
 log = Log.create(service="server")
@@ -878,7 +885,6 @@ class _InstanceContextMiddleware:
             fn=handle_request,
         )
 
-
 app.add_middleware(_InstanceContextMiddleware)
 
 
@@ -1031,10 +1037,7 @@ class _AuthGuardMiddleware:
         except Exception as exc:
             log.error(
                 "auth.middleware.unexpected",
-                {
-                    "path": request.url.path,
-                    "error": repr(exc),
-                },
+                {"path": request.url.path, "error": repr(exc)},
             )
             response = JSONResponse(
                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
@@ -1332,11 +1335,23 @@ app.include_router(admin_users_router, prefix="/admin", tags=["Admin"])
 
 def _load_installed_package_plugins() -> None:
     """Load package entry-point plugins before the app starts serving requests."""
+    app.state.critical_plugin_entrypoint_failure = False
+    app.state.critical_plugin_entrypoint_failures = ()
     try:
         from flocks.plugin import PluginLoader
 
-        PluginLoader.load_all(project_dir=Path.cwd())
-        log.info("plugins.installed.loaded")
+        result = PluginLoader.load_all(project_dir=Path.cwd())
+        if result.has_critical_entrypoint_failure:
+            app.state.critical_plugin_entrypoint_failure = True
+            app.state.critical_plugin_entrypoint_failures = tuple(
+                result.critical_entrypoint_failures
+            )
+            log.error(
+                "plugins.installed.critical_failure",
+                {"entrypoints": result.critical_entrypoint_failures},
+            )
+        else:
+            log.info("plugins.installed.loaded")
     except Exception as e:
         log.warning("plugins.installed.load_failed", {"error": str(e)})
 

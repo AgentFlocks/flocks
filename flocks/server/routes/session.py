@@ -1057,6 +1057,8 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             for p in request.permission
         ]
 
+    from flocks.session.execution_profile import PROFILE_METADATA_KEY
+
     if request.projectID and request.projectID not in {
         DEFAULT_PROJECT_ID,
         TASK_SESSION_GROUP_ID,
@@ -1078,6 +1080,13 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             owner_username=(parent_session.owner_username if parent_session else current_user.username),
             model_auto=request.model_auto,
             model_pinned=False,
+            metadata={
+                PROFILE_METADATA_KEY: {
+                    "entry": "interactive",
+                    "source": "webui.session.create",
+                    "permission_mode": "require-confirm",
+                }
+            },
             **({"category": request.category} if request.category else {}),
         )
     except ProjectDeletionError as exc:
@@ -1086,6 +1095,21 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             detail=str(exc),
         ) from exc
     Project.invalidate_session_stats()
+    try:
+        from flocks.hooks.pipeline import HookPipeline
+        from flocks.session.execution_profile import get_session_execution_profile
+
+        profile = await get_session_execution_profile(session.id)
+        await HookPipeline.run_action_before(
+            {
+                "operation": "session.mode.initialize",
+                "session_id": session.id,
+                "entry": "interactive",
+                "session_execution_profile": profile or {},
+            }
+        )
+    except Exception:
+        pass
 
     log.info("session.created", {"session_id": session.id})
     try:
@@ -2652,38 +2676,42 @@ def _schedule_background_coro(
     session_id: Optional[str] = None,
     action: str = "session.background",
 ) -> None:
-    """Schedule a background coroutine with unified error reporting."""
+    """Schedule a background coroutine with its opaque execution context."""
     import asyncio
+    from flocks.hooks.execution import current_execution_context, execution_context_scope
+
+    execution_context = current_execution_context()
 
     async def _guarded_coro() -> None:
-        try:
-            await coro
-        except Exception as exc:
-            log.error("session.background.error", {
-                "sessionID": session_id,
-                "action": action,
-                "error": str(exc),
-                "error_type": type(exc).__name__,
-            })
-            if session_id:
-                from flocks.server.routes.event import publish_event
+        with execution_context_scope(execution_context):
+            try:
+                await coro
+            except Exception as exc:
+                log.error("session.background.error", {
+                    "sessionID": session_id,
+                    "action": action,
+                    "error": str(exc),
+                    "error_type": type(exc).__name__,
+                })
+                if session_id:
+                    from flocks.server.routes.event import publish_event
 
-                try:
-                    await publish_event("session.error", {
-                        "sessionID": session_id,
-                        "error": {
-                            "name": type(exc).__name__,
-                            "message": str(exc),
-                            "data": {"message": str(exc), "action": action},
-                        },
-                    })
-                except Exception as publish_exc:
-                    log.error("session.background.error.publish_failed", {
-                        "sessionID": session_id,
-                        "action": action,
-                        "error": str(publish_exc),
-                        "error_type": type(publish_exc).__name__,
-                    })
+                    try:
+                        await publish_event("session.error", {
+                            "sessionID": session_id,
+                            "error": {
+                                "name": type(exc).__name__,
+                                "message": str(exc),
+                                "data": {"message": str(exc), "action": action},
+                            },
+                        })
+                    except Exception as publish_exc:
+                        log.error("session.background.error.publish_failed", {
+                            "sessionID": session_id,
+                            "action": action,
+                            "error": str(publish_exc),
+                            "error_type": type(publish_exc).__name__,
+                        })
 
     task = asyncio.get_running_loop().create_task(_guarded_coro())
     _track_background_task(task, session_id=session_id)
@@ -4191,6 +4219,7 @@ def _event_from_queued_prompt(item, working_directory: str):
 
 
 async def _drain_prompt_queue_locked(session_id: str, working_directory: str) -> bool:
+    from flocks.hooks.execution import execution_context_scope
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
     from flocks.session.interaction_queue import InteractionQueue
@@ -4216,11 +4245,17 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
             "sessionID": session_id,
             "queueID": item.id,
         })
-        await Instance.provide(
-            directory=working_directory,
-            init=instance_bootstrap,
-            fn=lambda: _dispatch_sse_input(session_id, session, event, working_directory),
-        )
+        # A queue item may be dispatched by a different worker task than the
+        # request that submitted it. Restore the item's captured context (e.g.
+        # trusted identity transfer) and never inherit unrelated worker state.
+        with execution_context_scope(item.execution_context or {}, inherit=False):
+            await Instance.provide(
+                directory=working_directory,
+                init=instance_bootstrap,
+                fn=lambda: _dispatch_sse_input(
+                    session_id, session, event, working_directory
+                ),
+            )
 
 
 async def _run_prompt_event_chain(session_id: str, session, event, working_directory: str) -> None:
@@ -4529,6 +4564,7 @@ async def _enqueue_prompt_request(
     expected_generation: Optional[int] = None,
 ):
     from flocks.session.interaction_queue import InteractionQueue
+    from flocks.hooks.execution import current_execution_context
 
     _validate_execution_mode_request(request)
     if expected_generation is None:
@@ -4536,6 +4572,7 @@ async def _enqueue_prompt_request(
     await _require_agent_usable_for_chat(request.agent)
     model = request.model.model_dump(by_alias=True) if request.model else None
     parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
+    execution_context = current_execution_context()
     return await _persist_active_session_write(
         session_id,
         lambda: InteractionQueue.enqueue(
@@ -4551,6 +4588,7 @@ async def _enqueue_prompt_request(
             tools=request.tools,
             system=request.system,
             execution_mode=request.execution_mode,
+            execution_context=execution_context,
         ),
         expected_generation=expected_generation,
     )
@@ -4903,6 +4941,7 @@ class ShellRequest(BaseModel):
 )
 async def run_shell_command(sessionID: str, request: ShellRequest, http_request: Request):
     """Run shell command"""
+    from flocks.hooks.execution import ExecutionStopped
     from flocks.session.runner import SessionRunner
 
     current_user = require_user(http_request)
@@ -4935,6 +4974,13 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
+        ) from exc
+    except ExecutionStopped as exc:
+        # A generic extension lifecycle may stop this operation.  Keep the
+        # response stable without interpreting extension-specific policy data.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="execution stopped by extension",
         ) from exc
     
     log.info("session.shell.executed", {

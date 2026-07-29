@@ -1296,7 +1296,6 @@ class StreamProcessor:
             from flocks.sandbox.context import resolve_sandbox_context
             from flocks.sandbox.config import resolve_sandbox_config_for_agent
             from flocks.sandbox.runtime_status import resolve_sandbox_runtime_status
-            from flocks.sandbox.tool_policy import is_tool_allowed
             from flocks.sandbox.types import BashSandboxConfig
 
             if self._sandbox_runtime_cache is None:
@@ -1312,20 +1311,16 @@ class StreamProcessor:
             if not runtime.sandboxed:
                 return result
 
+            # Sandbox tool constraints are Pro-owned policy input.  OSS does
+            # not normalize, merge, or decide against this raw metadata.
+            result["extra"]["sandbox_tool_policy"] = runtime.tool_policy_metadata
+
             if self._sandbox_config_cache is None:
                 config_data = await self._load_config_data()
                 self._sandbox_config_cache = resolve_sandbox_config_for_agent(
                     config_data=config_data,
                     agent_id=self.agent.name,
                 )
-
-            if not is_tool_allowed(runtime.tool_policy, tool_name):
-                result["blocked"] = True
-                result["error"] = (
-                    f"Tool '{tool_name}' is blocked by sandbox tool policy. "
-                    "Update sandbox.tools.allow/deny in ~/.flocks/config/flocks.json if needed."
-                )
-                return result
 
             # Sandbox metadata is needed for sandbox-aware tools, including workflow
             # entrypoint so workflow runtime can execute python nodes in sandbox.
@@ -1352,12 +1347,10 @@ class StreamProcessor:
                 container_workdir=sandbox_ctx.container_workdir,
                 env=sandbox_ctx.docker.env,
             )
-            result["extra"] = {
-                "sandbox": {
-                    **sandbox.model_dump(exclude_none=True),
-                    "workspace_access": sandbox_ctx.workspace_access,
-                    "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
-                }
+            result["extra"]["sandbox"] = {
+                **sandbox.model_dump(exclude_none=True),
+                "workspace_access": sandbox_ctx.workspace_access,
+                "agent_workspace_dir": sandbox_ctx.agent_workspace_dir,
             }
             elevated_cfg = getattr(self._sandbox_config_cache, "elevated", None)
             if elevated_cfg and elevated_cfg.enabled:

@@ -94,8 +94,10 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     Channel dispatch runs outside the HTTP auth middleware, so
     ``Session.create`` cannot infer the owner from ``current_auth_user``.
     When an existing channel session is being replaced, preserve its owner.
-    Otherwise, attach new channel sessions to the local admin if one exists.
-    Installs without local accounts use the explicit system identity.
+    A channel message must never be implicitly attributed to an unrelated
+    local administrator.  Any identity-to-owner mapping belongs to a Pro
+    ingress extension; neutral Flocks sessions remain ownerless when no
+    explicit owner carrier was supplied.
     """
     owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
     owner_username = getattr(source_session, "owner_username", None) if source_session else None
@@ -117,18 +119,11 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
                 "owner_user_id": API_TOKEN_SERVICE_USER_ID,
                 "owner_username": API_TOKEN_SERVICE_USER_ID,
             }
-        users = await AuthService.list_users()
     except Exception as exc:
         log.warn("channel.owner.resolve_failed", {"error": str(exc)})
         return {}
 
-    admin = next((user for user in users if getattr(user, "role", None) == "admin"), None)
-    if admin is None:
-        return {}
-    return {
-        "owner_user_id": str(admin.id),
-        "owner_username": str(admin.username),
-    }
+    return {}
 
 
 # Register channel_bindings DDL with Storage so the tables are created
@@ -276,6 +271,7 @@ class SessionBindingService:
         self,
         msg: InboundMessage,
         default_agent: Optional[str] = None,
+        visible_agents: Optional[list[str]] = None,
         scope_override: Optional[GroupSessionScope] = None,
         directory: Optional[str] = None,
     ) -> SessionBinding:
@@ -302,10 +298,55 @@ class SessionBindingService:
             msg.channel_id, msg.account_id, chat_id, thread_id,
         )
         replaced_session = None
+        allowed_agents = [
+            str(agent).strip()
+            for agent in (visible_agents or [])
+            if str(agent).strip()
+        ]
+        allowed_agent_set = set(allowed_agents)
         if existing:
             # Archived sessions are immutable history, not live conversation
             # targets. Replace stale or inactive bindings before the dispatcher
             # persists the inbound message.
+            if (
+                allowed_agent_set
+                and str(existing.agent_id or "").strip() not in allowed_agent_set
+            ):
+                # Keep the session id stable but enforce the current agent-visibility
+                # constraint for every inbound turn.
+                fallback_agent = allowed_agents[0]
+                now = time.time()
+                existing = SessionBinding(
+                    channel_id=existing.channel_id,
+                    account_id=existing.account_id,
+                    chat_id=existing.chat_id,
+                    chat_type=existing.chat_type,
+                    thread_id=existing.thread_id,
+                    session_id=existing.session_id,
+                    agent_id=fallback_agent,
+                    created_at=existing.created_at,
+                    last_message_at=now,
+                )
+                await self._insert(existing)
+                try:
+                    from flocks.session.execution_profile import (
+                        upsert_session_execution_profile,
+                    )
+
+                    await upsert_session_execution_profile(
+                        existing.session_id,
+                        patch={
+                            "entry": "channel",
+                            "channel_id": existing.channel_id,
+                            "account_id": existing.account_id,
+                            "visible_agents": allowed_agents,
+                            "default_agent": fallback_agent,
+                        },
+                        source="channel.binding.rebind",
+                    )
+                except Exception:
+                    pass
+            # Verify the bound session still exists (user may have deleted it via WebUI)
             from flocks.session.session import Session as _Session
             bound_session = await _Session.get_by_id_unfiltered(existing.session_id)
             if bound_session and bound_session.status == "active":
@@ -323,6 +364,7 @@ class SessionBindingService:
         session_id = await self._create_session(
             msg,
             default_agent=default_agent,
+            visible_agents=allowed_agents,
             directory=directory,
             source_session=replaced_session,
         )
@@ -590,6 +632,7 @@ class SessionBindingService:
     async def _create_session(
         msg: InboundMessage,
         default_agent: Optional[str] = None,
+        visible_agents: Optional[list[str]] = None,
         directory: Optional[str] = None,
         source_session=None,
     ) -> str:
@@ -612,6 +655,35 @@ class SessionBindingService:
             agent=default_agent,
             **owner_kwargs,
         )
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            from flocks.session.execution_profile import (
+                get_session_execution_profile,
+                upsert_session_execution_profile,
+            )
+
+            await upsert_session_execution_profile(
+                session.id,
+                patch={
+                    "entry": "channel",
+                    "channel_id": msg.channel_id,
+                    "account_id": msg.account_id,
+                    "visible_agents": [a for a in (visible_agents or []) if str(a).strip()],
+                    "default_agent": str(default_agent or session.agent or "").strip(),
+                },
+                source="channel.binding.create",
+            )
+            profile = await get_session_execution_profile(session.id)
+            await HookPipeline.run_action_before(
+                {
+                    "operation": "session.mode.initialize",
+                    "session_id": session.id,
+                    "entry": "channel",
+                    "session_execution_profile": profile or {},
+                }
+            )
+        except Exception:
+            pass
         return session.id
 
 

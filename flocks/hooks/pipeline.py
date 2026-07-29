@@ -39,8 +39,17 @@ class HookStage:
     TURN_FINISH = "turn.finish"
     SUBAGENT_START = "subagent.start"
     SUBAGENT_STOP = "subagent.stop"
+    INGRESS_BEFORE = "ingress.before"
+    INGRESS_AFTER = "ingress.after"
+    ACTION_BEFORE = "action.before"
+    ACTION_AFTER = "action.after"
+    CAPABILITY_FILTER = "capability.filter"
+    SESSION_CHILD_BEFORE = "session.child.before"
+    SESSION_CHILD_AFTER = "session.child.after"
     EVENT = "event"
     CHANNEL_INBOUND = "channel.inbound"
+    CHANNEL_WEBHOOK_BEFORE = "channel.webhook.before"
+    CHANNEL_WEBHOOK_AFTER = "channel.webhook.after"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
     CHANNEL_OUTBOUND_AFTER = "channel.outbound.after"
 
@@ -55,7 +64,16 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.TURN_FINISH: 5.0,
     HookStage.SUBAGENT_START: 5.0,
     HookStage.SUBAGENT_STOP: 5.0,
+    HookStage.INGRESS_BEFORE: 5.0,
+    HookStage.INGRESS_AFTER: 5.0,
+    HookStage.ACTION_BEFORE: 5.0,
+    HookStage.ACTION_AFTER: 5.0,
+    HookStage.CAPABILITY_FILTER: 5.0,
+    HookStage.SESSION_CHILD_BEFORE: 5.0,
+    HookStage.SESSION_CHILD_AFTER: 5.0,
     HookStage.CHANNEL_INBOUND: 5.0,
+    HookStage.CHANNEL_WEBHOOK_BEFORE: 5.0,
+    HookStage.CHANNEL_WEBHOOK_AFTER: 5.0,
     HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
     HookStage.EVENT: 10.0,
@@ -67,6 +85,12 @@ class HookContext:
     stage: str
     input: Dict[str, Any]
     output: Dict[str, Any] = field(default_factory=dict)
+    # ``output`` is deliberately shared by every hook, so it remains suitable
+    # for cooperative metadata.  The generic execution stop, however, is a
+    # monotonic lifecycle control: once a hook has requested it, a later hook
+    # must not be able to resume the effect by replacing ``output.execution``.
+    execution_stop_requested: bool = False
+    execution_stop_detail: str | None = None
 
 
 class HookBase:
@@ -97,10 +121,37 @@ class HookBase:
     async def subagent_stop(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
+    async def ingress_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def ingress_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def action_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def action_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def capability_filter(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def session_child_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def session_child_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
     async def event(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def channel_inbound(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def channel_webhook_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def channel_webhook_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def channel_outbound_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -314,6 +365,62 @@ class HookPipeline:
         return await cls._run_stage(HookStage.SUBAGENT_STOP, input_data, output_data)
 
     @classmethod
+    async def run_ingress_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.INGRESS_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_ingress_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.INGRESS_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_action_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.ACTION_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_action_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.ACTION_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_capability_filter(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.CAPABILITY_FILTER, input_data, output_data)
+
+    @classmethod
+    async def run_session_child_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SESSION_CHILD_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_session_child_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SESSION_CHILD_AFTER, input_data, output_data)
+
+    @classmethod
     async def run_event(
         cls,
         input_data: Dict[str, Any],
@@ -328,6 +435,26 @@ class HookPipeline:
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
         return await cls._run_stage(HookStage.CHANNEL_INBOUND, input_data, output_data)
+
+    @classmethod
+    async def run_channel_webhook_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(
+            HookStage.CHANNEL_WEBHOOK_BEFORE, input_data, output_data
+        )
+
+    @classmethod
+    async def run_channel_webhook_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(
+            HookStage.CHANNEL_WEBHOOK_AFTER, input_data, output_data
+        )
 
     @classmethod
     async def run_channel_outbound_before(
@@ -377,7 +504,9 @@ class HookPipeline:
         project_dir = await cls._resolve_project_dir(input_data)
         await cls.ensure_initialized(project_dir)
         ctx = HookContext(stage=stage, input=input_data, output=output_data or {})
+        cls._latch_execution_stop(ctx)
         handler_count = 0
+        deferred_critical_error: Exception | None = None
         for entry in cls._hooks:
             handler = cls._resolve_handler(entry.hook, stage)
             if not handler:
@@ -395,7 +524,8 @@ class HookPipeline:
                     )
                 else:
                     await cls._invoke_handler(handler, ctx)
-            except asyncio.TimeoutError:
+                cls._latch_execution_stop(ctx)
+            except asyncio.TimeoutError as exc:
                 duration_ms = int((time.perf_counter() - handler_started_at) * 1000)
                 log.warning("hook.timeout", {
                     "stage": stage,
@@ -406,6 +536,9 @@ class HookPipeline:
                     "fail_policy": entry.fail_policy.value,
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
+                    if stage == HookStage.INGRESS_AFTER:
+                        deferred_critical_error = deferred_critical_error or exc
+                        continue
                     raise
             except Exception as exc:
                 log.error("hook.error", {
@@ -416,13 +549,39 @@ class HookPipeline:
                     "fail_policy": entry.fail_policy.value,
                 })
                 if entry.fail_policy != FailPolicy.ISOLATE:
+                    if stage == HookStage.INGRESS_AFTER:
+                        deferred_critical_error = deferred_critical_error or exc
+                        continue
                     raise
         log.debug("hook.stage_complete", {
             "stage": stage,
             "handler_count": handler_count,
             "duration_ms": int((time.perf_counter() - stage_started_at) * 1000),
         })
+        if deferred_critical_error is not None:
+            raise deferred_critical_error
         return ctx
+
+    @staticmethod
+    def _latch_execution_stop(ctx: HookContext) -> None:
+        """Remember a generic stop request even if later hooks mutate output.
+
+        This is intentionally limited to the pre-existing generic
+        ``execution.stop`` contract.  Flocks assigns no policy meaning to the
+        request; extensions remain responsible for deciding whether to emit
+        it and for supplying an opaque detail string.
+        """
+        execution = ctx.output.get("execution")
+        if not isinstance(execution, dict) or execution.get("stop") is not True:
+            return
+        ctx.execution_stop_requested = True
+        if ctx.execution_stop_detail is None:
+            detail = execution.get("detail")
+            ctx.execution_stop_detail = (
+                str(detail)
+                if detail is not None
+                else "operation stopped by extension"
+            )
 
     @classmethod
     def _register_plugin_extension_point(cls) -> None:
@@ -463,7 +622,9 @@ class HookPipeline:
     async def _invoke_handler(handler: Callable[[HookContext], Awaitable[None]], ctx: HookContext) -> None:
         result = handler(ctx)
         if inspect.isawaitable(result):
-            await result
+            result = await result
+        if isinstance(result, dict):
+            ctx.output.update(result)
 
     @staticmethod
     def _resolve_handler(hook: HookBase, stage: str) -> Optional[Callable[[HookContext], Awaitable[None]]]:
@@ -477,8 +638,17 @@ class HookPipeline:
             HookStage.TURN_FINISH: "turn_finish",
             HookStage.SUBAGENT_START: "subagent_start",
             HookStage.SUBAGENT_STOP: "subagent_stop",
+            HookStage.INGRESS_BEFORE: "ingress_before",
+            HookStage.INGRESS_AFTER: "ingress_after",
+            HookStage.ACTION_BEFORE: "action_before",
+            HookStage.ACTION_AFTER: "action_after",
+            HookStage.CAPABILITY_FILTER: "capability_filter",
+            HookStage.SESSION_CHILD_BEFORE: "session_child_before",
+            HookStage.SESSION_CHILD_AFTER: "session_child_after",
             HookStage.EVENT: "event",
             HookStage.CHANNEL_INBOUND: "channel_inbound",
+            HookStage.CHANNEL_WEBHOOK_BEFORE: "channel_webhook_before",
+            HookStage.CHANNEL_WEBHOOK_AFTER: "channel_webhook_after",
             HookStage.CHANNEL_OUTBOUND_BEFORE: "channel_outbound_before",
             HookStage.CHANNEL_OUTBOUND_AFTER: "channel_outbound_after",
         }.get(stage)

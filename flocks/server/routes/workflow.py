@@ -9,12 +9,14 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import os
 import shutil
 import threading
 import time
 from dataclasses import dataclass
+from functools import wraps
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal
 from fastapi import APIRouter, Body, HTTPException, Request, status, Query
@@ -89,14 +91,58 @@ from flocks.workflow.triggers.compat import (
     syslog_trigger_to_legacy_config,
 )
 from flocks.config.config import Config
+from flocks.hooks.execution import current_execution_context, execute_with_hooks
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
 
 
-router = APIRouter()
-webhook_router = APIRouter()
+
+def _workflow_operation_payload(endpoint, args: tuple[Any, ...], kwargs: Dict[str, Any]) -> Dict[str, Any]:
+    try:
+        arguments = inspect.signature(endpoint).bind_partial(*args, **kwargs).arguments
+    except TypeError:
+        arguments = dict(kwargs)
+    return {
+        "operation": f"workflow.{endpoint.__name__}",
+        "arguments": dict(arguments),
+    }
+
+
+def _wrap_workflow_operation(endpoint):
+    @wraps(endpoint)
+    async def _wrapped(*args, **kwargs):
+        return await execute_with_hooks(
+            _workflow_operation_payload(endpoint, args, kwargs),
+            lambda: endpoint(*args, **kwargs),
+        )
+
+    return _wrapped
+
+
+class _WorkflowLifecycleRouter(APIRouter):
+    """Attach the generic action lifecycle to workflow mutations."""
+
+    def api_route(self, path: str, *args, **kwargs):
+        methods = kwargs.get("methods") or []
+        method_set = {str(method).upper() for method in methods}
+        base_decorator = super().api_route(path, *args, **kwargs)
+
+        def _decorate(endpoint):
+            wrapped = (
+                _wrap_workflow_operation(endpoint)
+                if method_set & {"POST", "PUT", "PATCH", "DELETE"}
+                else endpoint
+            )
+            base_decorator(wrapped)
+            return wrapped
+
+        return _decorate
+
+
+router = _WorkflowLifecycleRouter()
+webhook_router = _WorkflowLifecycleRouter()
 log = Log.create(service="workflow-routes")
 
 _PROGRESS_FLUSH_EVERY_STEPS = 5
@@ -402,6 +448,10 @@ async def _build_workflow_tool_context(
     agent: Optional[str] = None,
 ) -> ToolContext:
     """Build a real ToolContext for workflow execution."""
+    context_kwargs: Dict[str, Any] = {}
+    execution_context = current_execution_context()
+    if execution_context:
+        context_kwargs["execution_context"] = execution_context
     return await build_workflow_tool_context(
         workflow_id=workflow_id,
         action_name=action_name,
@@ -409,6 +459,7 @@ async def _build_workflow_tool_context(
         message_id=message_id,
         agent=agent,
         event_publish_callback=publish_event,
+        **context_kwargs,
     )
 
 

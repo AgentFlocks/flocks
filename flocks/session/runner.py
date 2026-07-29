@@ -592,6 +592,7 @@ class SessionRunner:
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=getattr(agent, "tools", None),
+            agent=agent.name,
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
@@ -1130,76 +1131,96 @@ class SessionRunner:
             raise ValueError(f"Session {session_id} not found")
         
         cwd = session.directory or os.getcwd()
-        
-        user_msg = await Message.create(
-            session_id=session_id,
-            role=MessageRole.USER,
-            content="The following tool was executed by the user",
-            agent=agent,
-        )
-        
-        assistant_msg = await Message.create(
-            session_id=session_id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            agent=agent,
-            parent_id=user_msg.id,
-        )
-        
-        start_time = asyncio.get_event_loop().time()
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
+
+        async def _effect() -> Dict[str, Any]:
+            user_msg = await Message.create(
+                session_id=session_id,
+                role=MessageRole.USER,
+                content="The following tool was executed by the user",
+                agent=agent,
             )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=300,
+
+            assistant_msg = await Message.create(
+                session_id=session_id,
+                role=MessageRole.ASSISTANT,
+                content="",
+                agent=agent,
+                parent_id=user_msg.id,
             )
-            output = (stdout_bytes or b"").decode("utf-8", errors="replace") + \
-                     (stderr_bytes or b"").decode("utf-8", errors="replace")
-            exit_code = proc.returncode or 0
-        except asyncio.TimeoutError:
-            output = "Command timed out after 300 seconds"
-            exit_code = -1
+
+            start_time = asyncio.get_event_loop().time()
             try:
-                proc.kill()
-            except Exception as _kill_err:
-                log.debug("runner.shell.kill_failed", {"error": str(_kill_err)})
-        except Exception as e:
-            output = f"Error executing command: {str(e)}"
-            exit_code = -1
-        
-        end_time = asyncio.get_event_loop().time()
-        
-        log.info("runner.shell", {
-            "session_id": session_id,
-            "command": command[:50],
-            "exit_code": exit_code,
-            "duration_ms": int((end_time - start_time) * 1000),
-        })
-        
-        return {
-            "info": {
-                "id": assistant_msg.id,
-                "sessionID": session_id,
-                "role": "assistant",
-                "agent": agent,
-            },
-            "parts": [{
-                "id": Identifier.create("part"),
-                "messageID": assistant_msg.id,
-                "sessionID": session_id,
-                "type": "tool",
-                "tool": "bash",
-                "state": {
-                    "status": "completed",
-                    "input": {"command": command},
-                    "output": output,
+                proc = await asyncio.create_subprocess_shell(
+                    command,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    cwd=cwd,
+                )
+                stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                    proc.communicate(), timeout=300,
+                )
+                output = (stdout_bytes or b"").decode("utf-8", errors="replace") + \
+                         (stderr_bytes or b"").decode("utf-8", errors="replace")
+                exit_code = proc.returncode or 0
+            except asyncio.TimeoutError:
+                output = "Command timed out after 300 seconds"
+                exit_code = -1
+                try:
+                    proc.kill()
+                except Exception as _kill_err:
+                    log.debug("runner.shell.kill_failed", {"error": str(_kill_err)})
+            except Exception as e:
+                output = f"Error executing command: {str(e)}"
+                exit_code = -1
+
+            end_time = asyncio.get_event_loop().time()
+
+            log.info("runner.shell", {
+                "session_id": session_id,
+                "command": command[:50],
+                "exit_code": exit_code,
+                "duration_ms": int((end_time - start_time) * 1000),
+            })
+
+            return {
+                "info": {
+                    "id": assistant_msg.id,
+                    "sessionID": session_id,
+                    "role": "assistant",
+                    "agent": agent,
                 },
-            }],
-        }
+                "parts": [{
+                    "id": Identifier.create("part"),
+                    "messageID": assistant_msg.id,
+                    "sessionID": session_id,
+                    "type": "tool",
+                    "tool": "bash",
+                    "state": {
+                        "status": "completed",
+                        "input": {"command": command},
+                        "output": output,
+                    },
+                }],
+            }
+
+        # Flocks does not interpret the command or decide whether it is safe;
+        # this payload is a neutral lifecycle carrier for installed extensions.
+        from flocks.hooks.execution import execute_with_hooks
+
+        return await execute_with_hooks(
+            {
+                "operation": "session.shell",
+                "session_id": session_id,
+                "agent": agent,
+                "execution_domain": "execution_runtime",
+                "resource": {"type": "command", "id": "session.shell"},
+                "tool": {
+                    "name": "shell",
+                    "input": {"command": command, "workdir": cwd},
+                },
+            },
+            _effect,
+        )
     
     def abort(self) -> None:
         """Signal abort to stop the loop."""
@@ -3811,35 +3832,28 @@ class SessionRunner:
                 "patterns": list(getattr(request, "patterns", None) or []),
             })
 
-        from flocks.permission.next import PermissionNext
-        from flocks.permission.rule import PermissionRule, PermissionLevel
+        from flocks.permission.interactive import legacy_tool_permission_prompt_required
 
-        session_rules: List[PermissionRule] = []
-        for rule in getattr(self.session, "permission", None) or []:
-            raw_level = getattr(rule, "action", None) or getattr(rule, "level", None) or "ask"
-            try:
-                level = PermissionLevel(str(raw_level))
-            except Exception:
-                level = PermissionLevel.ASK
-            session_rules.append(PermissionRule(
-                permission=getattr(rule, "permission", "*"),
-                level=level,
-                pattern=getattr(rule, "pattern", "*"),
-            ))
+        if not legacy_tool_permission_prompt_required():
+            return
+
+        from flocks.permission.next import PermissionNext
 
         metadata = dict(getattr(request, "metadata", None) or {})
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
         metadata.setdefault("sessionID", self.session.id)
 
-        await PermissionNext.ask(
+        reply = await PermissionNext.ask(
             session_id=self.session.id,
             permission=request.permission,
             patterns=list(getattr(request, "patterns", None) or []),
-            ruleset=session_rules,
+            ruleset=[],
             metadata=metadata,
             always=list(getattr(request, "always", None) or []),
             tool={"name": request.permission},
         )
+        if reply in {"deny", "reject", "never"}:
+            raise PermissionError(f"Permission denied: {request.permission}")
 
 
 async def run_session(
