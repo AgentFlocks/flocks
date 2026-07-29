@@ -195,6 +195,37 @@ describe('QuestionTool', () => {
     expect(screen.queryByRole('button', { name: /自定义 \/ 补充说明/ })).not.toBeInTheDocument();
   });
 
+  it('accepts feedback through the continue-planning option', async () => {
+    const user = userEvent.setup();
+    const onAnswer = vi.fn().mockResolvedValue(undefined);
+
+    render(
+      <QuestionTool
+        questions={[{
+          question: 'Would you like to start implementing?',
+          type: 'choice',
+          custom: false,
+          options: [
+            '开始实施',
+            {
+              label: '调整计划',
+              allowText: true,
+            },
+          ],
+        }]}
+        onAnswer={onAnswer}
+      />,
+    );
+
+    await user.click(screen.getByRole('button', { name: /调整计划/ }));
+    await user.type(screen.getByRole('textbox'), 'Keep the public API unchanged.');
+    await user.click(screen.getByRole('button', { name: /确认/ }));
+
+    expect(onAnswer).toHaveBeenCalledWith([
+      ['调整计划', 'Keep the public API unchanged.'],
+    ]);
+  });
+
   it('falls back to text input when a choice question has no visible options', async () => {
     const user = userEvent.setup();
     const onAnswer = vi.fn().mockResolvedValue(undefined);

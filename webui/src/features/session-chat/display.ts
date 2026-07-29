@@ -3,6 +3,8 @@ export interface PromptDisplayOptions {
 }
 
 const INSTRUCTION_DISPLAY_PREFIX = '@@flocks-instruction:';
+const TASK_METADATA_BLOCK_PATTERN = /<task_metadata\b[^>]*>[\s\S]*?<\/task_metadata\s*>/gi;
+const TRAILING_TASK_METADATA_PATTERN = /<task_metadata\b[^>]*>[\s\S]*$/i;
 
 export function buildInstructionDisplayText(label: string): string {
   return `${INSTRUCTION_DISPLAY_PREFIX}${label}`;
@@ -14,12 +16,20 @@ export function parseInstructionDisplayText(text: string): string | null {
     : null;
 }
 
+export function stripTaskMetadata(text: string): string {
+  return text
+    .replace(TASK_METADATA_BLOCK_PATTERN, '')
+    .replace(TRAILING_TASK_METADATA_PATTERN, '');
+}
+
 /** Display-related options grouped to reduce prop surface. */
 export interface SessionChatDisplay {
   /** Compact mode for panels/dialogs (default: true). Set false for full-page. */
   compact?: boolean;
   /** Let embedded chats use the full available message width. */
   fullWidth?: boolean;
+  /** Use the quieter, centered canvas treatment for the session-management page. */
+  pageCanvas?: boolean;
   /** Show copy action on assistant messages */
   showActions?: boolean;
   /** Show timestamp below each message */

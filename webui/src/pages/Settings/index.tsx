@@ -5,6 +5,7 @@ import { useTranslation } from 'react-i18next';
 import {
   ArrowLeft,
   ArrowUpCircle,
+  Archive,
   Check,
   ImageIcon,
   Languages,
@@ -45,8 +46,9 @@ const ConfigPage = lazySettingsPage(() => import('@/pages/Config'));
 const SystemLogPage = lazySettingsPage(() => import('@/pages/SystemLog'));
 const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpgrade'), ['flockspro']);
 const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
+const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
 
-type SettingsSectionId = 'preferences' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
+type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -74,6 +76,7 @@ interface SettingsGroup {
 function isSettingsSectionId(value: string | undefined): value is SettingsSectionId {
   return (
     value === 'preferences' ||
+    value === 'archived-data' ||
     value === 'account' ||
     value === 'system-logs' ||
     value === 'audit-logs' ||
@@ -477,6 +480,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
   return (
     <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
       {sectionId === 'account' && <ConfigPage />}
+      {sectionId === 'archived-data' && <ArchivedDataPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}
       {sectionId === 'flockspro' && <FlocksproUpgradePage />}
@@ -542,6 +546,12 @@ export default function SettingsPage() {
         name: t('settingsGroupPreferences'),
         items: [
           { id: 'preferences', name: t('settingsPreferences'), icon: SettingsIcon },
+        ],
+      },
+      {
+        name: t('settingsGroupData'),
+        items: [
+          { id: 'archived-data', name: t('archivedData'), icon: Archive },
         ],
       },
       {

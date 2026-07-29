@@ -273,6 +273,20 @@ async def write_tool(
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
+        from flocks.session.execution_mode import is_plan_file_edit
+
+        plan_file_edit = is_plan_file_edit(
+            ctx.extra.get("execution_mode"),
+            ctx,
+            filepath,
+        )
+    else:
+        plan_file_edit = False
+    if (
+        isinstance(sandbox, dict)
+        and sandbox.get("workspace_access") == "ro"
+        and not plan_file_edit
+    ):
         return ToolResult(
             success=False,
             error=(

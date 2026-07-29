@@ -5,22 +5,26 @@
  */
 export interface Session {
   id: string;
-  slug: string;
+  slug?: string;
   projectID: string;
+  projectName?: string;
   effectiveProjectID?: string;
   directory: string;
   parentID?: string;
   summary?: SessionSummary;
   title: string;
-  version: string;
+  version?: string;
   time: SessionTime;
   permission?: PermissionRule[];
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  status?: 'active' | 'archived';
   provider?: string;
   model?: string;
   model_pinned?: boolean;
+  /** Runtime provider failover is enabled only after an explicit WebUI selection. */
+  model_auto?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
@@ -432,10 +436,11 @@ export interface ProviderInfoV2 {
   source: string;
   env: string[];
   key: string | null;
+  /** True only when the runtime has the credentials required by this provider. */
+  configured?: boolean;
   options: Record<string, any>;
   models: Record<string, ProviderModelInfo>;
   // Derived on frontend
-  configured?: boolean;
   modelCount?: number;
   category?: ProviderCategory;
 }

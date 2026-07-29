@@ -21,7 +21,7 @@ DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
 FACTS_TABLE = "soc_dashboard_alert_facts"
 ACTIVITY_TABLE = "soc_dashboard_activity"
 META_TABLE = "soc_dashboard_meta"
-SCHEMA_VERSION = "2"
+SCHEMA_VERSION = "3"
 ACTIVITY_DEFAULT_LIMIT = 20
 ACTIVITY_MAX_LIMIT = 50
 ACTIVITY_WINDOW_MS = 3000
@@ -88,6 +88,7 @@ _FACT_COLUMNS = (
     "event_time",
     "source_type",
     "threat_name",
+    "threat_type",
     "is_duplicate",
     "phase",
     "direction",
@@ -119,6 +120,7 @@ def _fact_expressions(prefix):
     source_type_fallback = _json_value(prefix, "source_type")
     threat_name = _json_value(prefix, "threat_name")
     threat_type = _json_value(prefix, "_threat_type")
+    threat_type_fallback = _json_value(prefix, "threat_type")
     phase = _json_value(prefix, "threat_phase")
     attack_phase = _json_value(prefix, "attack_phase")
     kill_chain = _json_value(prefix, "kill_chain_phase")
@@ -130,7 +132,6 @@ def _fact_expressions(prefix):
     app_protocol = _json_value(prefix, "net_app_proto")
     protocol_fallback = _json_value(prefix, "protocol")
     severity = _json_value(prefix, "threat_severity")
-    threat_level = _json_value(prefix, "threat_level")
     risk_level = _json_value(prefix, "risk_level")
     response = _json_value(prefix, "rsp_status_code")
     status_code = _json_value(prefix, "status_code")
@@ -156,15 +157,15 @@ def _fact_expressions(prefix):
         f"{prefix}.event_time",
         f"COALESCE(NULLIF({prefix}.source_type, ''), NULLIF({source_type}, ''), "
         f"NULLIF({source_type_fallback}, ''), 'unknown')",
-        f"COALESCE(NULLIF({prefix}.threat_name, ''), NULLIF({threat_name}, ''), "
-        f"NULLIF({threat_type}, ''), 'unknown')",
+        f"COALESCE(NULLIF({prefix}.threat_name, ''), NULLIF({threat_name}, ''), 'unknown')",
+        f"COALESCE(NULLIF({threat_type}, ''), NULLIF({threat_type_fallback}, ''), 'unknown')",
         f"COALESCE({prefix}.is_duplicate, 0)",
         f"COALESCE(NULLIF({phase}, ''), NULLIF({attack_phase}, ''), NULLIF({kill_chain}, ''), 'unknown')",
         f"COALESCE(NULLIF({direction}, ''), NULLIF({traffic_direction}, ''), 'unknown')",
         f"COALESCE(NULLIF({result}, ''), NULLIF({verdict}, ''), 'unknown')",
         f"COALESCE(NULLIF({protocol}, ''), NULLIF({app_protocol}, ''), "
         f"NULLIF({protocol_fallback}, ''), 'unknown')",
-        f"COALESCE(NULLIF({severity}, ''), NULLIF({threat_level}, ''), NULLIF({risk_level}, ''), 'unknown')",
+        f"COALESCE(NULLIF({severity}, ''), 'unknown')",
         f"COALESCE(NULLIF({response}, ''), NULLIF({status_code}, ''), 'unknown')",
         f"COALESCE(NULLIF({destination_port}, ''), NULLIF({destination_port_fallback}, ''), "
         f"NULLIF({destination_port_legacy}, ''), 'unknown')",
@@ -173,7 +174,7 @@ def _fact_expressions(prefix):
         f"COALESCE({triage_status}, '')",
         f"COALESCE({triage_source}, '')",
         f"COALESCE({verdict}, 'unknown')",
-        f"COALESCE({risk_level}, {threat_level}, {severity}, 'unknown')",
+        f"COALESCE(NULLIF({risk_level}, ''), 'unknown')",
         f"COALESCE(CAST({triage_ms} AS INTEGER), 0)",
         f"CASE WHEN {attack_success} IN (1, '1', 'true') THEN 1 ELSE 0 END",
     )
@@ -382,6 +383,7 @@ def _ensure_sqlite_schema():
                     event_time INTEGER,
                     source_type TEXT,
                     threat_name TEXT,
+                    threat_type TEXT,
                     is_duplicate INTEGER NOT NULL DEFAULT 0,
                     phase TEXT,
                     direction TEXT,
@@ -2041,12 +2043,12 @@ def _activity_event(row):
         "alert": {
             "id": _first_activity_text(record, "id", "record_id", "uuid", "event_id", "dedup_key"),
             "sourceType": _first_activity_text(record, "_source_type", "source_type", "device_type"),
-            "threatName": _first_activity_text(record, "threat_name", "_threat_type", "threat_type") or "未知告警",
+            "threatName": _first_activity_text(record, "threat_name") or "未知告警",
             "srcIp": _first_activity_text(record, "sip", "src_ip", "source_ip"),
             "dstIp": _first_activity_text(record, "dip", "dst_ip", "destination_ip"),
             "requestUri": _first_activity_text(record, "req_http_url", "uri", "url"),
             "threatPhase": _first_activity_text(record, "threat_phase"),
-            "threatType": _first_activity_text(record, "threat_type", "_threat_type"),
+            "threatType": _first_activity_text(record, "_threat_type", "threat_type"),
         },
     }
     if stage == "denoise":
@@ -2063,7 +2065,8 @@ def _activity_event(row):
             "durationMs": _safe_int(record.get("triage_ms")),
             "verdict": verdict,
             "verdictLabel": RESULT_LABELS.get(verdict, "待确认"),
-            "riskLevel": _first_activity_text(record, "risk_level", "threat_level"),
+            "threatSeverity": _first_activity_text(record, "threat_severity"),
+            "riskLevel": _first_activity_text(record, "risk_level"),
             "reportTitle": _first_activity_text(record, "report_title"),
             "hasReport": bool(record.get("triage_report")),
         }
@@ -2292,7 +2295,14 @@ def _get_stats(params):
             {"key": "benign", "label": "良性", "value": triage["benign"], "color": "#58a6ff"},
             {"key": "unknown", "label": "未知", "value": triage["unknown"], "color": "#9b8cff"},
         ],
-        "topThreats": _counter_items(triage["threatCounter"] or denoise["threatCounter"], 14),
+        "topThreatTypes": _counter_items(
+            triage["threatTypeCounter"] or denoise["threatTypeCounter"],
+            14,
+        ),
+        "severityLevels": _counter_items(
+            _profile_counter(denoise, triage, "severityCounter"),
+            8,
+        ),
         "riskLevels": _counter_items(triage["riskCounter"], 5),
         "tokenUsage": _read_token_usage(),
         "timeline": {
@@ -2514,7 +2524,7 @@ def _read_denoise(paths, workflow_call_count: int = 0):
     parse_errors = 0
     headers = []
     source_counter = Counter()
-    threat_counter = Counter()
+    threat_type_counter = Counter()
     profile_counters = _new_profile_counters()
     event_start = None
     event_end = None
@@ -2535,7 +2545,7 @@ def _read_denoise(paths, workflow_call_count: int = 0):
             if obj.get("is_duplicate") is True:
                 file_duplicates += 1
             source_counter[_norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
+            threat_type_counter[_norm(obj.get("_threat_type") or obj.get("threat_type"))] += 1
             _update_profile_counters(obj, profile_counters)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
         total_raw += file_raw
@@ -2559,7 +2569,7 @@ def _read_denoise(paths, workflow_call_count: int = 0):
         "eventStart": _format_event_time(event_start),
         "eventEnd": _format_event_time(event_end),
         "sourceCounter": source_counter,
-        "threatCounter": threat_counter,
+        "threatTypeCounter": threat_type_counter,
         **profile_counters,
         "seriesRaw": series_raw,
         "seriesUnique": series_unique,
@@ -2598,7 +2608,7 @@ def _read_sqlite_denoise(paths, workflow_call_count):
                 f"WHERE {where_clause} GROUP BY \"source_type\"",
                 query_params,
             ).fetchall()
-            profile_counters, threat_counter = _sqlite_detail_counters(
+            profile_counters, threat_type_counter = _sqlite_detail_counters(
                 conn,
                 settings,
                 where_clause,
@@ -2639,7 +2649,7 @@ def _read_sqlite_denoise(paths, workflow_call_count):
         "eventStart": _format_event_time(min(event_values) if event_values else None),
         "eventEnd": _format_event_time(max(event_values) if event_values else None),
         "sourceCounter": Counter({_norm(key): _safe_int(value) for key, value in source_rows}),
-        "threatCounter": threat_counter,
+        "threatTypeCounter": threat_type_counter,
         **profile_counters,
         "seriesRaw": timeline["raw"],
         "seriesUnique": timeline["unique"],
@@ -2695,8 +2705,12 @@ def _sqlite_timeline(conn, settings, where_clause, query_params, dates, start_ti
         f"COUNT(*) AS raw_count, "
         f"COALESCE(SUM(CASE WHEN is_duplicate = 0 THEN 1 ELSE 0 END), 0) AS unique_count, "
         f"COALESCE(SUM(has_triage), 0) AS triage_count, "
-        f"COALESCE(SUM(CASE WHEN has_triage = 1 AND LOWER(verdict) IN "
-        f"('attack_success', 'attack', 'attack_failed') THEN 1 ELSE 0 END), 0) AS attack_count "
+        f"COALESCE(SUM(CASE WHEN has_triage = 1 "
+        f"AND LOWER(triage_status) NOT IN ('failed', 'error') "
+        f"AND (LOWER(verdict) IN ('attack_success', 'attack', 'attack_failed') "
+        f"OR (attack_success = 1 AND LOWER(verdict) NOT IN "
+        f"('attack_success', 'attack', 'attack_failed', 'benign'))) "
+        f"THEN 1 ELSE 0 END), 0) AS attack_count "
         f"FROM {settings['facts_table']} WHERE {where_clause} AND event_time IS NOT NULL "
         f"GROUP BY bucket_index ORDER BY bucket_index",
         (bucket_start, bucket_seconds, *query_params),
@@ -2749,12 +2763,12 @@ def _sqlite_detail_counters(conn, settings, where_clause, query_params):
     ):
         return (
             {key: Counter(value) for key, value in cached["profileCounters"].items()},
-            Counter(cached["threatCounter"]),
+            Counter(cached["threatTypeCounter"]),
         )
 
     rows = conn.execute(
         f"SELECT phase, direction, result, protocol, severity, response_code, "
-        f"port, threat_name, COUNT(*) AS profile_count FROM {table} "
+        f"port, threat_type, COUNT(*) AS profile_count FROM {table} "
         f"WHERE {where_clause} "
         f"GROUP BY 1, 2, 3, 4, 5, 6, 7, 8",
         query_params,
@@ -2768,7 +2782,7 @@ def _sqlite_detail_counters(conn, settings, where_clause, query_params):
         "severityCounter",
         "responseCounter",
     )
-    threat_counter = Counter()
+    threat_type_counter = Counter()
     for row in rows:
         count = _safe_int(row[8])
         for index, key in enumerate(profile_keys):
@@ -2776,19 +2790,19 @@ def _sqlite_detail_counters(conn, settings, where_clause, query_params):
         port_value = row[6]
         port = str(_safe_int(port_value)) if _safe_int(port_value) > 0 else _norm(port_value)
         profile_counters["portCounter"][port] += count
-        threat_counter[_norm(row[7])] += count
+        threat_type_counter[_norm(row[7])] += count
     with _cache_lock:
         _denoise_detail_cache[cache_key] = {
             "lastRowId": latest_row_id,
             "lastTriagePersistedAt": latest_triage_at,
             "updatedAt": time.monotonic(),
             "profileCounters": {key: Counter(value) for key, value in profile_counters.items()},
-            "threatCounter": Counter(threat_counter),
+            "threatTypeCounter": Counter(threat_type_counter),
         }
         _denoise_detail_cache.move_to_end(cache_key)
         while len(_denoise_detail_cache) > _DENOISE_DETAIL_CACHE_MAX:
             _denoise_detail_cache.popitem(last=False)
-    return profile_counters, threat_counter
+    return profile_counters, threat_type_counter
 
 
 def _read_sqlite_triage(paths):
@@ -2805,24 +2819,37 @@ def _read_sqlite_triage(paths):
         where_clause += " AND event_time BETWEEN ? AND ?"
         query_params.extend((start_time, end_time))
     triage_where = f"{where_clause} AND has_triage = 1"
+    cache_condition = "(LOWER(triage_source) = 'cache' OR LOWER(triage_status) = 'cached')"
+    follower_condition = (
+        "(LOWER(triage_source) IN ('follower', 'followers', 'follower_reused') "
+        "OR LOWER(triage_status) = 'follower_reused')"
+    )
+    failed_condition = "LOWER(triage_status) IN ('failed', 'error')"
+    resolved_condition = f"NOT ({failed_condition})"
+    new_triage_condition = (
+        f"NOT {cache_condition} AND NOT {follower_condition} AND NOT ({failed_condition})"
+    )
     try:
         with sqlite3.connect(settings["db_path"]) as conn:
             row = conn.execute(
                 f"SELECT COUNT(*), "
-                f"COALESCE(SUM(CASE WHEN LOWER(triage_source) = 'cache' "
-                f"OR LOWER(triage_status) = 'cached' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(triage_source) IN "
-                f"('follower', 'followers', 'follower_reused') "
-                f"OR LOWER(triage_status) = 'follower_reused' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(triage_status) IN ('failed', 'error') "
+                f"COALESCE(SUM(CASE WHEN {cache_condition} THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {follower_condition} THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {failed_condition} "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'attack_success' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'attack' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'attack_failed' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) = 'benign' THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN LOWER(verdict) NOT IN "
-                f"('attack_success', 'attack', 'attack_failed', 'benign') THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN attack_success = 1 AND LOWER(verdict) <> 'attack_success' "
+                f"COALESCE(SUM(CASE WHEN {new_triage_condition} "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND "
+                f"(LOWER(verdict) = 'attack_success' OR (attack_success = 1 AND LOWER(verdict) NOT IN "
+                f"('attack_success', 'attack', 'attack_failed', 'benign'))) THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack' "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack_failed' "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'benign' "
+                f"THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) NOT IN "
+                f"('attack_success', 'attack', 'attack_failed', 'benign') AND attack_success <> 1 "
                 f"THEN 1 ELSE 0 END), 0), MIN(event_time), MAX(event_time), "
                 f"COALESCE(ROUND(AVG(CASE WHEN triage_ms > 0 THEN triage_ms END)), 0) "
                 f"FROM {settings['facts_table']} WHERE {triage_where}",
@@ -2833,9 +2860,9 @@ def _read_sqlite_triage(paths):
                 f"WHERE {triage_where} GROUP BY source_type",
                 query_params,
             ).fetchall()
-            threat_rows = conn.execute(
-                f"SELECT threat_name, COUNT(*) FROM {settings['facts_table']} "
-                f"WHERE {triage_where} GROUP BY threat_name",
+            threat_type_rows = conn.execute(
+                f"SELECT threat_type, COUNT(*) FROM {settings['facts_table']} "
+                f"WHERE {triage_where} GROUP BY threat_type",
                 query_params,
             ).fetchall()
             risk_rows = conn.execute(
@@ -2861,11 +2888,12 @@ def _read_sqlite_triage(paths):
     cache_hit = _safe_int(row[1])
     followers_reused = _safe_int(row[2])
     triage_failed = _safe_int(row[3])
-    attack_success = _safe_int(row[4]) + _safe_int(row[9])
-    attack = _safe_int(row[5])
-    attack_failed = _safe_int(row[6])
-    benign = _safe_int(row[7])
-    unknown = _safe_int(row[8])
+    new_triaged = _safe_int(row[4])
+    attack_success = _safe_int(row[5])
+    attack = _safe_int(row[6])
+    attack_failed = _safe_int(row[7])
+    benign = _safe_int(row[8])
+    unknown = _safe_int(row[9])
     attack_total = attack_success + attack + attack_failed
     avg_triage_ms = _safe_int(row[12])
     profile_counters = _new_profile_counters()
@@ -2887,7 +2915,7 @@ def _read_sqlite_triage(paths):
     return {
         "totalRecords": total_records,
         "batchTotal": 0,
-        "newTriaged": max(total_records - cache_hit - followers_reused - triage_failed, 0),
+        "newTriaged": new_triaged,
         "cacheHit": cache_hit,
         "triageFailed": triage_failed,
         "followersReused": followers_reused,
@@ -2908,7 +2936,9 @@ def _read_sqlite_triage(paths):
         "eventStart": _format_event_time(_parse_event_time(row[10])),
         "eventEnd": _format_event_time(_parse_event_time(row[11])),
         "sourceCounter": Counter({_norm(key): _safe_int(value) for key, value in source_rows}),
-        "threatCounter": Counter({_norm(key): _safe_int(value) for key, value in threat_rows}),
+        "threatTypeCounter": Counter(
+            {_norm(key): _safe_int(value) for key, value in threat_type_rows}
+        ),
         "riskCounter": Counter({_norm(key): _safe_int(value) for key, value in risk_rows}),
         "statusCounter": Counter({_norm(key): _safe_int(value) for key, value in status_rows}),
         **profile_counters,
@@ -2927,7 +2957,7 @@ def _read_triage(paths):
     headers = []
     verdict_counter = Counter()
     source_counter = Counter()
-    threat_counter = Counter()
+    threat_type_counter = Counter()
     risk_counter = Counter()
     status_counter = Counter()
     profile_counters = _new_profile_counters()
@@ -2938,7 +2968,6 @@ def _read_triage(paths):
     fallback_cache = 0
     fallback_failed = 0
     fallback_followers = 0
-    extra_success = 0
     series_total = []
     series_attack = []
     triage_ms_total = 0
@@ -2968,16 +2997,10 @@ def _read_triage(paths):
             verdict = _norm(obj.get("attack_verdict") or "unknown")
             if verdict not in {"attack_success", "attack", "attack_failed", "benign", "unknown"}:
                 verdict = "unknown"
-            verdict_counter[verdict] += 1
-            if obj.get("attack_success") is True and verdict != "attack_success":
-                extra_success += 1
-            if verdict in {"attack_success", "attack", "attack_failed"}:
-                file_attack += 1
-
             source = _norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))
             source_counter[source] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
-            risk_counter[_norm(obj.get("risk_level") or obj.get("threat_level") or obj.get("threat_severity"))] += 1
+            threat_type_counter[_norm(obj.get("_threat_type") or obj.get("threat_type"))] += 1
+            risk_counter[_norm(obj.get("risk_level"))] += 1
             triage_ms = _safe_int(obj.get("triage_ms"))
             if triage_ms > 0:
                 triage_ms_total += triage_ms
@@ -2987,14 +3010,22 @@ def _read_triage(paths):
             triage_source = _norm(obj.get("triage_source"))
             triage_status = _norm(obj.get("triage_status"))
             status_counter[triage_status or triage_source] += 1
+            triage_failed = triage_status in {"failed", "error"}
+
+            if not triage_failed:
+                if verdict == "unknown" and obj.get("attack_success") is True:
+                    verdict = "attack_success"
+                verdict_counter[verdict] += 1
+                if verdict in {"attack_success", "attack", "attack_failed"}:
+                    file_attack += 1
+            else:
+                fallback_failed += 1
 
             if triage_source == "cache" or triage_status == "cached":
                 fallback_cache += 1
             elif triage_source in {"follower", "followers", "follower_reused"} or triage_status == "follower_reused":
                 fallback_followers += 1
-            elif triage_status in {"failed", "error"}:
-                fallback_failed += 1
-            else:
+            elif not triage_failed:
                 fallback_new += 1
 
         series_total.append(file_total)
@@ -3009,7 +3040,7 @@ def _read_triage(paths):
     triage_failed = fallback_failed
     followers_reused = fallback_followers
 
-    attack_success = verdict_counter["attack_success"] + extra_success
+    attack_success = verdict_counter["attack_success"]
     attack = verdict_counter["attack"]
     attack_failed = verdict_counter["attack_failed"]
     attack_total = attack_success + attack + attack_failed
@@ -3043,7 +3074,7 @@ def _read_triage(paths):
         "eventStart": _format_event_time(event_start),
         "eventEnd": _format_event_time(event_end),
         "sourceCounter": source_counter,
-        "threatCounter": threat_counter,
+        "threatTypeCounter": threat_type_counter,
         "riskCounter": risk_counter,
         "statusCounter": status_counter,
         **profile_counters,
@@ -3069,7 +3100,7 @@ def _update_profile_counters(obj, counters):
     counters["directionCounter"][_norm(obj.get("direction") or obj.get("traffic_direction"))] += 1
     counters["resultCounter"][_norm(obj.get("threat_result") or obj.get("attack_verdict"))] += 1
     counters["protocolCounter"][_norm(obj.get("net_type") or obj.get("net_app_proto") or obj.get("protocol"))] += 1
-    counters["severityCounter"][_norm(obj.get("threat_severity") or obj.get("threat_level") or obj.get("risk_level"))] += 1
+    counters["severityCounter"][_norm(obj.get("threat_severity"))] += 1
     counters["responseCounter"][_norm(obj.get("rsp_status_code") or obj.get("status_code"))] += 1
 
     port_value = obj.get("dport") or obj.get("dst_port") or obj.get("destination_port")

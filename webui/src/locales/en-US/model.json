@@ -18,6 +18,12 @@
     "noCost": "No cost",
     "toggleCurrency": "Click to switch between USD and CNY"
   },
+  "modelSelection": {
+    "info": "Model information",
+    "free": "Free",
+    "unavailable": "Not provided",
+    "closeDefault": "Close default model selector"
+  },
   "providerList": {
     "empty": "No providers configured",
     "emptyHint": "Click \"Add Provider\" to get started",

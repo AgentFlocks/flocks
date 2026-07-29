@@ -92,18 +92,65 @@ function mergeFetchedMessages(prev: Message[], fetched: Message[]): Message[] {
   }));
 }
 
-function mergeLatestFetchedMessages(prev: Message[], fetched: Message[]): Message[] {
-  if (prev.length === 0) return normalizeMessageOrder(fetched);
+function mergeCompleteFetchedMessages(
+  prev: Message[],
+  fetched: Message[],
+  provisionalMessageIds: Set<string>,
+  protectedMessageIds: Set<string>,
+): Message[] {
   const fetchedIds = new Set(fetched.map((message) => message.id));
+  const previousById = new Map(prev.map((message) => [message.id, message]));
   const mergedFetched = mergeFetchedMessages(prev, fetched);
-  const firstFetchedTimestamp = mergedFetched[0]?.timestamp ?? Number.POSITIVE_INFINITY;
+  const protectedFetched = mergedFetched.map((message) => (
+    protectedMessageIds.has(message.id)
+      ? previousById.get(message.id) ?? message
+      : message
+  ));
+  const retainedLocal = prev.filter(
+    (message) => (
+      !fetchedIds.has(message.id)
+      && (
+        provisionalMessageIds.has(message.id)
+        || protectedMessageIds.has(message.id)
+      )
+    ),
+  );
+  return normalizeMessageOrder([...protectedFetched, ...retainedLocal]);
+}
+
+function mergeLatestFetchedMessages(
+  prev: Message[],
+  fetched: Message[],
+  provisionalMessageIds: Set<string>,
+  protectedMessageIds: Set<string>,
+): Message[] {
+  if (prev.length === 0 || fetched.length === 0) {
+    return mergeCompleteFetchedMessages(prev, fetched, provisionalMessageIds, protectedMessageIds);
+  }
+
+  const fetchedIds = new Set(fetched.map((message) => message.id));
+  const previousById = new Map(prev.map((message) => [message.id, message]));
+  const mergedFetched = mergeFetchedMessages(prev, fetched);
+  const protectedFetched = mergedFetched.map((message) => (
+    protectedMessageIds.has(message.id)
+      ? previousById.get(message.id) ?? message
+      : message
+  ));
+  const firstFetchedTimestamp = protectedFetched[0]?.timestamp ?? Number.POSITIVE_INFINITY;
   const retainedOlder = prev.filter(
     (message) => !fetchedIds.has(message.id) && message.timestamp <= firstFetchedTimestamp,
   );
-  const retainedNewer = prev.filter(
-    (message) => !fetchedIds.has(message.id) && message.timestamp > firstFetchedTimestamp,
+  const retainedLocalNewer = prev.filter(
+    (message) => (
+      !fetchedIds.has(message.id)
+      && message.timestamp > firstFetchedTimestamp
+      && (
+        provisionalMessageIds.has(message.id)
+        || protectedMessageIds.has(message.id)
+      )
+    ),
   );
-  return normalizeMessageOrder([...retainedOlder, ...mergedFetched, ...retainedNewer]);
+  return normalizeMessageOrder([...retainedOlder, ...protectedFetched, ...retainedLocalNewer]);
 }
 
 function prependOlderMessages(prev: Message[], older: Message[]): Message[] {
@@ -229,6 +276,7 @@ function sessionEffectiveProjectId(session: Session): string {
 export function useSessions(search = '', options?: UseSessionsOptions) {
   const [sessions, setSessions] = useState<Session[]>([]);
   const [loading, setLoading] = useState(true);
+  const [refreshing, setRefreshing] = useState(true);
   const [loadingMore, setLoadingMore] = useState(false);
   const [hasMore, setHasMore] = useState(false);
   const [hasMoreByProject, setHasMoreByProject] = useState<Record<string, boolean>>({});
@@ -292,6 +340,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         setLoading(true);
       }
       if (!append) {
+        setRefreshing(true);
         activeAppendProjectsRef.current.clear();
         setLoadingMore(false);
         setLoadingMoreProjectIds(new Set());
@@ -390,6 +439,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
         }
       } else if (isCurrentRequest()) {
         setLoading(false);
+        setRefreshing(false);
         initializedRef.current = true;
       }
     }
@@ -437,6 +487,7 @@ export function useSessions(search = '', options?: UseSessionsOptions) {
   return {
     sessions,
     loading,
+    refreshing,
     error,
     refetch: fetchSessions,
     updateSessionTitle,
@@ -463,6 +514,14 @@ export function useSessionMessages(sessionId?: string) {
   const firstPageInFlightRequestIdRef = useRef<number | null>(null);
   const olderPageRequestIdRef = useRef(0);
   const olderPageInFlightRequestIdRef = useRef<number | null>(null);
+  const provisionalMessageIdsRef = useRef<Set<string>>(new Set());
+  const messageMutationVersionsRef = useRef<Map<string, number>>(new Map());
+  const mutationVersionRef = useRef(0);
+
+  const markMessageMutation = (messageId: string) => {
+    mutationVersionRef.current += 1;
+    messageMutationVersionsRef.current.set(messageId, mutationVersionRef.current);
+  };
 
   const fetchMessages = useCallback(async () => {
     if (!sessionId || activeSessionIdRef.current !== sessionId) return;
@@ -470,10 +529,10 @@ export function useSessionMessages(sessionId?: string) {
     const requestSessionId = sessionId;
     const requestId = ++firstPageRequestIdRef.current;
     firstPageInFlightRequestIdRef.current = requestId;
-    // A fresh first page invalidates pagination based on an older snapshot.
     olderPageRequestIdRef.current += 1;
     olderPageInFlightRequestIdRef.current = null;
     setLoadingOlder(false);
+    const requestMutationVersion = mutationVersionRef.current;
     const isCurrentRequest = () => (
       activeSessionIdRef.current === requestSessionId
       && firstPageRequestIdRef.current === requestId
@@ -489,10 +548,30 @@ export function useSessionMessages(sessionId?: string) {
       });
       markMeasure('session:messages:first-page', startMark);
       if (!isCurrentRequest()) return;
-      const { messages: messagesData, hasMore, nextBefore } = transformMessageResponse(response.data);
-      setMessages(prev => mergeLatestFetchedMessages(prev, messagesData));
-      setHasMore(hasMore);
-      setNextBefore(nextBefore);
+      const page = transformMessageResponse(response.data);
+      const protectedMessageIds = new Set(
+        Array.from(messageMutationVersionsRef.current.entries())
+          .filter(([, version]) => version > requestMutationVersion)
+          .map(([messageId]) => messageId),
+      );
+      page.messages.forEach((message) => {
+        if (!protectedMessageIds.has(message.id)) {
+          provisionalMessageIdsRef.current.delete(message.id);
+        }
+      });
+      messageMutationVersionsRef.current.forEach((version, messageId) => {
+        if (version <= requestMutationVersion) {
+          messageMutationVersionsRef.current.delete(messageId);
+        }
+      });
+      setMessages(prev => mergeLatestFetchedMessages(
+        prev,
+        page.messages,
+        provisionalMessageIdsRef.current,
+        protectedMessageIds,
+      ));
+      setHasMore(page.hasMore);
+      setNextBefore(page.nextBefore);
     } catch (err: any) {
       if (isCurrentRequest()) {
         setError(err.message || 'Failed to fetch messages');
@@ -564,6 +643,9 @@ export function useSessionMessages(sessionId?: string) {
   // to prevent flash of welcome screen (useEffect runs AFTER paint)
   useLayoutEffect(() => {
     activeSessionIdRef.current = sessionId;
+    provisionalMessageIdsRef.current.clear();
+    messageMutationVersionsRef.current.clear();
+    mutationVersionRef.current = 0;
     setMessages([]);
     setError(null);
     setHasMore(false);
@@ -590,9 +672,12 @@ export function useSessionMessages(sessionId?: string) {
     refetch: fetchMessages,
     loadOlder,
     addMessage: (message: Message) => {
+      provisionalMessageIdsRef.current.add(message.id);
+      markMessageMutation(message.id);
       setMessages(prev => [...prev, message]);
     },
     updateMessage: (messageInfo: any) => {
+      markMessageMutation(messageInfo.id);
       setMessages(prev => {
         const existingIndex = prev.findIndex(m => m.id === messageInfo.id);
         if (existingIndex >= 0) {
@@ -626,6 +711,9 @@ export function useSessionMessages(sessionId?: string) {
           );
           if (tempIndex >= 0) {
             const updated = [...prev];
+            provisionalMessageIdsRef.current.delete(updated[tempIndex].id);
+            messageMutationVersionsRef.current.delete(updated[tempIndex].id);
+            provisionalMessageIdsRef.current.add(messageInfo.id);
             const nextUser = {
               id: messageInfo.id,
               sessionID: messageInfo.sessionID,
@@ -645,6 +733,7 @@ export function useSessionMessages(sessionId?: string) {
         }
 
         // Add new message
+        provisionalMessageIdsRef.current.add(messageInfo.id);
         const nextMessage = {
           id: messageInfo.id,
           sessionID: messageInfo.sessionID,
@@ -675,9 +764,36 @@ export function useSessionMessages(sessionId?: string) {
      * frame-level typing cadence and Markdown parse budget.
      */
     updateMessagePart: (partInfo: any, delta?: string) => {
-      setMessages(prev => applyMessagePartUpdate(prev, partInfo, delta));
+      markMessageMutation(partInfo.messageID);
+      setMessages(prev => {
+        if (!prev.some((message) => message.id === partInfo.messageID)) {
+          provisionalMessageIdsRef.current.add(partInfo.messageID);
+        }
+        return applyMessagePartUpdate(prev, partInfo, delta);
+      });
+    },
+    removeMessage: (messageId: string) => {
+      provisionalMessageIdsRef.current.delete(messageId);
+      messageMutationVersionsRef.current.delete(messageId);
+      setMessages(prev => prev.filter((message) => message.id !== messageId));
+    },
+    clearMessages: () => {
+      firstPageRequestIdRef.current += 1;
+      olderPageRequestIdRef.current += 1;
+      firstPageInFlightRequestIdRef.current = null;
+      olderPageInFlightRequestIdRef.current = null;
+      provisionalMessageIdsRef.current.clear();
+      messageMutationVersionsRef.current.clear();
+      mutationVersionRef.current = 0;
+      setMessages([]);
+      setError(null);
+      setHasMore(false);
+      setNextBefore(null);
+      setLoading(false);
+      setLoadingOlder(false);
     },
     replaceMessageText: (messageId: string, partId: string, text: string) => {
+      markMessageMutation(messageId);
       setMessages(prev => prev.map((message) => {
         if (message.id !== messageId) return message;
 
@@ -698,6 +814,7 @@ export function useSessionMessages(sessionId?: string) {
       }));
     },
     markMessageStopped: (messageId: string) => {
+      markMessageMutation(messageId);
       setMessages(prev => prev.map((message) => {
         if (message.id !== messageId) return message;
         if (message.finish === 'stop') return message;
@@ -713,7 +830,12 @@ export function useSessionMessages(sessionId?: string) {
       setMessages(prev => {
         const targetIndex = prev.findIndex((message) => message.id === messageId);
         if (targetIndex < 0) return prev;
-        return prev.slice(0, options?.includeTarget ? targetIndex : targetIndex + 1);
+        const keepCount = options?.includeTarget ? targetIndex : targetIndex + 1;
+        prev.slice(keepCount).forEach((message) => {
+          provisionalMessageIdsRef.current.delete(message.id);
+          messageMutationVersionsRef.current.delete(message.id);
+        });
+        return prev.slice(0, keepCount);
       });
     },
   };

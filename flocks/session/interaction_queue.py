@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from flocks.session.execution_mode import SessionExecutionMode
 from flocks.utils.id import Identifier
 
 
@@ -35,6 +36,7 @@ class QueuedPrompt(BaseModel):
     mockReply: Optional[str] = None
     tools: Optional[Dict[str, bool]] = None
     system: Optional[str] = None
+    executionMode: SessionExecutionMode = SessionExecutionMode.BUILD
     status: str = "pending"
     createdAt: int = Field(default_factory=lambda: int(time.time() * 1000))
     updatedAt: int = Field(default_factory=lambda: int(time.time() * 1000))
@@ -45,6 +47,7 @@ class InteractionQueue:
 
     _queues: Dict[str, List[QueuedPrompt]] = {}
     _locks: Dict[str, asyncio.Lock] = {}
+    _paused: set[str] = set()
 
     @classmethod
     def _lock_for(cls, session_id: str) -> asyncio.Lock:
@@ -69,6 +72,7 @@ class InteractionQueue:
         mock_reply: Optional[str] = None,
         tools: Optional[Dict[str, bool]] = None,
         system: Optional[str] = None,
+        execution_mode: SessionExecutionMode = SessionExecutionMode.BUILD,
     ) -> QueuedPrompt:
         async with cls._lock_for(session_id):
             queue = cls._queues.setdefault(session_id, [])
@@ -87,6 +91,7 @@ class InteractionQueue:
                 mockReply=mock_reply,
                 tools=dict(tools) if tools else None,
                 system=system,
+                executionMode=execution_mode,
             )
             queue.append(item)
             return item
@@ -133,6 +138,8 @@ class InteractionQueue:
     @classmethod
     async def pop_next(cls, session_id: str) -> Optional[QueuedPrompt]:
         async with cls._lock_for(session_id):
+            if session_id in cls._paused:
+                return None
             queue = cls._queues.get(session_id, [])
             if not queue:
                 return None
@@ -159,6 +166,18 @@ class InteractionQueue:
     async def clear(cls, session_id: str) -> None:
         async with cls._lock_for(session_id):
             cls._queues.pop(session_id, None)
+            cls._paused.discard(session_id)
+
+    @classmethod
+    async def pause(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            if cls._queues.get(session_id):
+                cls._paused.add(session_id)
+
+    @classmethod
+    async def resume(cls, session_id: str) -> None:
+        async with cls._lock_for(session_id):
+            cls._paused.discard(session_id)
 
     @classmethod
     def _find_locked(cls, session_id: str, item_id: str) -> QueuedPrompt:

@@ -2,12 +2,16 @@
 Hook Pipeline
 
 Provides a lightweight hook registry and execution pipeline that mirrors
-oh-my-opencode's lifecycle stages:
-- chat.message
+agent lifecycle stages:
+- user.prompt.submit
+- session.start
 - llm.call.before
 - llm.call.after
 - tool.execute.before
 - tool.execute.after
+- turn.finish
+- subagent.start
+- subagent.stop
 - event
 """
 
@@ -26,11 +30,15 @@ log = Log.create(service="hooks.pipeline")
 
 
 class HookStage:
-    CHAT_MESSAGE = "chat.message"
+    USER_PROMPT_SUBMIT = "user.prompt.submit"
+    SESSION_START = "session.start"
     LLM_BEFORE = "llm.call.before"
     LLM_AFTER = "llm.call.after"
     TOOL_BEFORE = "tool.execute.before"
     TOOL_AFTER = "tool.execute.after"
+    TURN_FINISH = "turn.finish"
+    SUBAGENT_START = "subagent.start"
+    SUBAGENT_STOP = "subagent.stop"
     EVENT = "event"
     CHANNEL_INBOUND = "channel.inbound"
     CHANNEL_OUTBOUND_BEFORE = "channel.outbound.before"
@@ -38,11 +46,15 @@ class HookStage:
 
 
 _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
-    HookStage.CHAT_MESSAGE: 5.0,
+    HookStage.USER_PROMPT_SUBMIT: 5.0,
+    HookStage.SESSION_START: 5.0,
     HookStage.LLM_BEFORE: 5.0,
     HookStage.LLM_AFTER: 5.0,
     HookStage.TOOL_BEFORE: 5.0,
     HookStage.TOOL_AFTER: 5.0,
+    HookStage.TURN_FINISH: 5.0,
+    HookStage.SUBAGENT_START: 5.0,
+    HookStage.SUBAGENT_STOP: 5.0,
     HookStage.CHANNEL_INBOUND: 5.0,
     HookStage.CHANNEL_OUTBOUND_BEFORE: 5.0,
     HookStage.CHANNEL_OUTBOUND_AFTER: 5.0,
@@ -58,7 +70,10 @@ class HookContext:
 
 
 class HookBase:
-    async def chat_message(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+    async def user_prompt_submit(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def session_start(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def llm_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -71,6 +86,15 @@ class HookBase:
         return None
 
     async def tool_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def turn_finish(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def subagent_start(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def subagent_stop(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def event(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -218,12 +242,20 @@ class HookPipeline:
             cls._loaded_project_dir = str(load_project_dir.resolve(strict=False))
 
     @classmethod
-    async def run_chat_message(
+    async def run_user_prompt_submit(
         cls,
         input_data: Dict[str, Any],
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
-        return await cls._run_stage(HookStage.CHAT_MESSAGE, input_data, output_data)
+        return await cls._run_stage(HookStage.USER_PROMPT_SUBMIT, input_data, output_data)
+
+    @classmethod
+    async def run_session_start(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SESSION_START, input_data, output_data)
 
     @classmethod
     async def run_llm_before(
@@ -256,6 +288,30 @@ class HookPipeline:
         output_data: Optional[Dict[str, Any]] = None,
     ) -> HookContext:
         return await cls._run_stage(HookStage.TOOL_AFTER, input_data, output_data)
+
+    @classmethod
+    async def run_turn_finish(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.TURN_FINISH, input_data, output_data)
+
+    @classmethod
+    async def run_subagent_start(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SUBAGENT_START, input_data, output_data)
+
+    @classmethod
+    async def run_subagent_stop(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.SUBAGENT_STOP, input_data, output_data)
 
     @classmethod
     async def run_event(
@@ -411,22 +467,29 @@ class HookPipeline:
 
     @staticmethod
     def _resolve_handler(hook: HookBase, stage: str) -> Optional[Callable[[HookContext], Awaitable[None]]]:
-        if stage == HookStage.CHAT_MESSAGE:
-            return getattr(hook, "chat_message", None)
-        if stage == HookStage.LLM_BEFORE:
-            return getattr(hook, "llm_before", None)
-        if stage == HookStage.LLM_AFTER:
-            return getattr(hook, "llm_after", None)
-        if stage == HookStage.TOOL_BEFORE:
-            return getattr(hook, "tool_before", None)
-        if stage == HookStage.TOOL_AFTER:
-            return getattr(hook, "tool_after", None)
-        if stage == HookStage.EVENT:
-            return getattr(hook, "event", None)
-        if stage == HookStage.CHANNEL_INBOUND:
-            return getattr(hook, "channel_inbound", None)
-        if stage == HookStage.CHANNEL_OUTBOUND_BEFORE:
-            return getattr(hook, "channel_outbound_before", None)
-        if stage == HookStage.CHANNEL_OUTBOUND_AFTER:
-            return getattr(hook, "channel_outbound_after", None)
-        return None
+        method_name = {
+            HookStage.USER_PROMPT_SUBMIT: "user_prompt_submit",
+            HookStage.SESSION_START: "session_start",
+            HookStage.LLM_BEFORE: "llm_before",
+            HookStage.LLM_AFTER: "llm_after",
+            HookStage.TOOL_BEFORE: "tool_before",
+            HookStage.TOOL_AFTER: "tool_after",
+            HookStage.TURN_FINISH: "turn_finish",
+            HookStage.SUBAGENT_START: "subagent_start",
+            HookStage.SUBAGENT_STOP: "subagent_stop",
+            HookStage.EVENT: "event",
+            HookStage.CHANNEL_INBOUND: "channel_inbound",
+            HookStage.CHANNEL_OUTBOUND_BEFORE: "channel_outbound_before",
+            HookStage.CHANNEL_OUTBOUND_AFTER: "channel_outbound_after",
+        }.get(stage)
+        if method_name is None:
+            return None
+
+        handler = getattr(hook, method_name, None)
+        if not callable(handler):
+            return None
+        base_handler = getattr(HookBase, method_name, None)
+        concrete_handler = getattr(type(hook), method_name, None)
+        if base_handler is not None and concrete_handler is base_handler:
+            return None
+        return handler

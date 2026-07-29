@@ -18,17 +18,23 @@ export function useRexComposerControls() {
   const {
     groupedOptions,
     loading,
+    effectiveModelOption,
+    modelPickerAutoOption,
+    selectModelKey,
+    selectedModelAuto,
     selectedModelOption,
     selectedPromptModel,
-    setSelectedModelKey,
-  } = useChatModelOptions();
+    setSelectedModelAuto,
+  } = useChatModelOptions({ enableAuto: true });
 
   return useMemo(() => ({
     rexAgentName: REX_AGENT_NAME,
     rexMentionAgents: agents,
     rexModel: selectedPromptModel,
-    rexSupportsVision: selectedModelOption?.supportsVision ?? defaultSupportsVision,
-    rexContextWindowTokens: selectedModelOption?.contextWindowTokens ?? null,
+    rexModelAuto: selectedModelAuto,
+    onRexModelAutoChange: setSelectedModelAuto,
+    rexSupportsVision: effectiveModelOption?.supportsVision ?? defaultSupportsVision,
+    rexContextWindowTokens: effectiveModelOption?.contextWindowTokens ?? null,
     rexComposerTextareaMinHeight: 48,
     rexComposerTextareaMaxHeight: 120,
     rexToolbarSlot: (
@@ -42,16 +48,20 @@ export function useRexComposerControls() {
         groupedOptions={groupedOptions}
         loading={loading}
         selectedModelOption={selectedModelOption}
-        onSelectModel={(option) => setSelectedModelKey(option.key)}
+        onSelectModel={(option) => selectModelKey(option.key)}
+        autoOption={modelPickerAutoOption}
       />
     ),
   }), [
     agents,
     defaultSupportsVision,
+    effectiveModelOption,
     groupedOptions,
     loading,
+    modelPickerAutoOption,
+    selectModelKey,
+    selectedModelAuto,
     selectedModelOption,
     selectedPromptModel,
-    setSelectedModelKey,
   ]);
 }

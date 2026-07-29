@@ -164,6 +164,8 @@ export interface EntitySheetProps {
   rexAgentName?: string;
   rexMentionAgents?: Agent[];
   rexModel?: { providerID: string; modelID: string } | null;
+  rexModelAuto?: boolean;
+  onRexModelAutoChange?: (enabled: boolean) => void;
   rexSupportsVision?: boolean | null;
   rexContextWindowTokens?: number | null;
   /** Persist and resume the Rex conversation across refreshes when provided. */
@@ -212,6 +214,8 @@ export default function EntitySheet({
   rexAgentName,
   rexMentionAgents,
   rexModel,
+  rexModelAuto = false,
+  onRexModelAutoChange,
   rexSupportsVision,
   rexContextWindowTokens,
   rexSessionStorageKey,
@@ -267,6 +271,7 @@ export default function EntitySheet({
   } = useSessionChat({
     title: `${title} — ${t('entity.rexAssist')}`,
     category: 'entity-config',
+    modelAuto: rexModelAuto,
     contextMessage: rexSystemContext,
     welcomeMessage: rexWelcomeMessage,
     initialSessionId: storedRexSessionId,
@@ -288,8 +293,9 @@ export default function EntitySheet({
 
     (async () => {
       try {
-        await client.get(`/api/session/${stored}`);
+        const response = await client.get(`/api/session/${stored}`);
         if (cancelled) return;
+        onRexModelAutoChange?.(Boolean(response.data?.model_auto));
         setStoredRexSessionId(stored);
       } catch {
         if (cancelled) return;
@@ -305,7 +311,7 @@ export default function EntitySheet({
     return () => {
       cancelled = true;
     };
-  }, [rexSessionStorageKey]);
+  }, [onRexModelAutoChange, rexSessionStorageKey]);
 
   useEffect(() => {
     if (!rexSessionHydrated || !sessionId) return;
@@ -374,6 +380,7 @@ export default function EntitySheet({
 
   useEffect(() => {
     if (!open) {
+      onRexModelAutoChange?.(false);
       setActiveTab(getDefaultTab());
       if (!rexSessionStorageKey) {
         resetRexSession();
@@ -387,7 +394,7 @@ export default function EntitySheet({
       setTestPrompt(effectiveDefaultTestPrompt);
       setDrawerWidth(resolvedInitialWidth());
     }
-  }, [open, mode, defaultTestPrompt, resetRexSession, initialWidth, showTabs, hideRex, hideForm, initialTab, rexSessionStorageKey]);
+  }, [open, mode, defaultTestPrompt, resetRexSession, initialWidth, showTabs, hideRex, hideForm, initialTab, onRexModelAutoChange, rexSessionStorageKey]);
 
   // ── Tab handling ──────────────────────────────────────────────────────────
 
@@ -432,18 +439,15 @@ export default function EntitySheet({
   const openRex = useCallback(
     (msg?: string) => {
       setActiveTab('rex');
-      if (activeRexSessionId && msg) {
-        const payload: Record<string, unknown> = {
-          parts: [{ type: 'text', text: msg }],
-        };
-        if (rexAgentName) payload.agent = rexAgentName;
-        if (rexModel) payload.model = rexModel;
-        client.post(`/api/session/${activeRexSessionId}/prompt_async`, payload);
-      } else if (msg) {
-        createAndSendRex({ text: msg, agent: rexAgentName, model: rexModel }).catch(() => {});
-      }
+      if (!msg) return;
+      createAndSendRex({
+        text: msg,
+        agent: rexAgentName,
+        model: rexModel,
+        modelAuto: rexModelAuto,
+      }).catch(() => {});
     },
-    [activeRexSessionId, createAndSendRex, rexAgentName, rexModel],
+    [createAndSendRex, rexAgentName, rexModel, rexModelAuto],
   );
 
   // ── openTest (exposed via context) ────────────────────────────────────────
@@ -499,9 +503,10 @@ export default function EntitySheet({
       text: prompt,
       agent: rexAgentName,
       model: rexModel,
+      modelAuto: rexModelAuto,
       displayText: buildInstructionDisplayText(label),
     }).catch(() => {});
-  }, [createAndSendRex, handleExtract, rexAgentName, rexModel]);
+  }, [createAndSendRex, handleExtract, rexAgentName, rexModel, rexModelAuto]);
 
   if (!open) return null;
 
@@ -698,6 +703,7 @@ export default function EntitySheet({
                     agentName={rexAgentName}
                     mentionAgents={rexMentionAgents}
                     model={rexModel}
+                    modelAuto={rexModelAuto}
                     supportsVision={rexSupportsVision ?? supportsVision}
                     contextWindowTokens={rexContextWindowTokens}
                     toolbarSlot={rexToolbarSlot}
@@ -709,6 +715,7 @@ export default function EntitySheet({
                       imageParts,
                       agent: agentOverride || rexAgentName,
                       model: modelOverride === undefined ? rexModel : modelOverride,
+                      modelAuto: rexModelAuto,
                       displayText: options?.displayText,
                     }) : undefined}
                     welcomeContent={(

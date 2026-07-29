@@ -500,6 +500,7 @@ class ProviderInfo(BaseModel):
     source: str = Field(default="config", description="Provider source: env, config, custom, api")
     env: List[str] = Field(default_factory=list, description="Environment variable names")
     key: Optional[str] = Field(None, description="API key (if configured)")
+    configured: bool = Field(False, description="Whether runtime credentials are configured")
     options: Dict[str, Any] = Field(default_factory=dict, description="Provider options")
     # Flocks expects models as Dict[modelID, Model], not List[Model]
     models: Dict[str, Dict[str, Any]] = Field(default_factory=dict, description="Available models")
@@ -596,6 +597,7 @@ async def list_providers() -> ProviderListResponse:
                 source="config",  # Provider source: env, config, custom, api
                 env=[],  # Environment variable names (can be enhanced later)
                 key=None,  # API key not exposed in list
+                configured=provider.is_configured(),
                 options={},
                 models=models_dict,
             )
@@ -1177,9 +1179,32 @@ def _is_api_service_builtin(provider_id: str, tools: Optional[List[Any]] = None)
 
 def _set_api_service_tools_enabled(provider_id: str, enabled: bool) -> int:
     """Synchronize the enabled state of all tools under an API service."""
-    matched_tools = _get_api_service_tool_infos(provider_id)
-    for tool_info in matched_tools:
-        tool_info.enabled = enabled
+    from flocks.tool.registry import ToolRegistry
+
+    ToolRegistry.init()
+    with ToolRegistry._refresh_lock:
+        matched_tools = _get_api_service_tool_infos(provider_id)
+        tool_settings = ConfigWriter.list_tool_settings()
+        previous_states = {
+            tool_info.name: bool(tool_info.enabled)
+            for tool_info in matched_tools
+        }
+        for tool_info in matched_tools:
+            default_enabled = ToolRegistry.get_default_enabled(tool_info.name)
+            effective_enabled = enabled and (
+                default_enabled if default_enabled is not None else True
+            )
+            setting = tool_settings.get(tool_info.name)
+            if isinstance(setting, dict) and "enabled" in setting:
+                effective_enabled = enabled and bool(setting["enabled"])
+            tool_info.enabled = effective_enabled
+            if effective_enabled and not previous_states[tool_info.name]:
+                ToolRegistry._reset_failure_state(tool_info.name)
+        if any(
+            previous_states[tool_info.name] != bool(tool_info.enabled)
+            for tool_info in matched_tools
+        ):
+            ToolRegistry._bump_revision("api_service_tool_state")
     if matched_tools:
         try:
             from flocks.server.routes.tool import _invalidate_tool_summary_cache
@@ -1913,6 +1938,10 @@ async def set_provider_credentials(
                 config_dict["name"] = request.provider_name
             ConfigWriter.add_provider(provider_id, config_dict)
 
+        # Config.get() caches resolved secret values. Invalidate it after
+        # persisting credentials so a later session cannot reapply the old key.
+        Config.clear_cache()
+
         # 3. Configure the provider runtime so is_configured() reflects the change
         await _ensure_provider_initialized()
         provider = Provider.get(provider_id)
@@ -2519,14 +2548,14 @@ async def test_provider_credentials(
             # Rank tools by required-parameter count (fewer = simpler);
             # prefer lightweight query/scan tools and avoid file/upload handlers.
             #
-            # NOTE: For services that expose a dedicated login/auth probe
-            # (e.g. qingteng_login, skyeye_login), we want it tried *first* —
+            # NOTE: For services that expose a dedicated login/auth probe, we
+            # want it tried *first* —
             # it is parameter-free and exercises the credential pipeline end
             # to end without invoking business APIs that may need extra
             # required fields beyond the JSON schema (e.g. assets.refresh
             # which the handler validates needs `resource`/`os_type`).
             # Match either the bare keyword (e.g. "login") or the conventional
-            # `<provider>_<keyword>` suffix (e.g. "qingteng_login"). A loose
+            # `<provider>_<keyword>` suffix (e.g. "service_login"). A loose
             # substring match would over-trigger on business tools whose names
             # merely contain the word — for example tdp_login_api_list and
             # tdp_login_weakpwd_list are query endpoints, not probes.

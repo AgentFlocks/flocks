@@ -94,4 +94,14 @@ describe('sessionApi message actions', () => {
     expect(mockDelete).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-1');
     expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/prompt_queue/queue-2/run_now');
   });
+
+  it('calls archive and restore endpoints', async () => {
+    const { sessionApi } = await import('./session');
+
+    await sessionApi.archive('session-1');
+    await sessionApi.restore('session-1');
+
+    expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/archive');
+    expect(mockPost).toHaveBeenCalledWith('/api/session/session-1/restore');
+  });
 });

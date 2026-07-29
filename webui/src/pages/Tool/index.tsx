@@ -227,6 +227,7 @@ export default function ToolPage() {
     error,
     initialized: toolPageInitialized,
     refetch,
+    reload: reloadToolPage,
   } = useToolPage(toolPageParams);
   const [hasLoadedToolPage, setHasLoadedToolPage] = useState(false);
 
@@ -428,7 +429,12 @@ export default function ToolPage() {
             ? { ...current, enabled: false }
             : current
         ));
-        void refreshToolDataAfterMutation();
+        void reloadToolPage().catch((err: unknown) => {
+          toast.error(
+            t('alert.refreshFailedTitle'),
+            extractErrorMessage(err, t('alert.unknownError')),
+          );
+        });
       }
     } catch (err: any) {
       setTestResult({ success: false, error: err.message });

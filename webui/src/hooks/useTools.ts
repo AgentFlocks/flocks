@@ -111,6 +111,11 @@ function refreshToolPlugins(): Promise<ToolRefreshResponse> {
   return toolRefreshInFlight;
 }
 
+function invalidateToolListResources(): void {
+  toolsResource.invalidate();
+  toolPageResources.forEach((resource) => resource.invalidate());
+}
+
 async function refreshToolsResource(
   fetchVisible: () => Promise<unknown>,
 ): Promise<ToolRefreshResponse> {
@@ -122,8 +127,7 @@ async function refreshToolsResource(
     refreshError = error;
   }
 
-  toolsResource.invalidate();
-  toolPageResources.forEach((resource) => resource.invalidate());
+  invalidateToolListResources();
   let listError: unknown;
   try {
     await fetchVisible();
@@ -220,6 +224,15 @@ export function useToolPage(params: ToolListPageParams) {
     [resource],
   );
 
+  const reload = useCallback(() => {
+    invalidateToolListResources();
+    return resource.fetch({
+      force: true,
+      silent: true,
+      rejectOnError: true,
+    });
+  }, [resource]);
+
   return {
     tools: data.items,
     total: data.total,
@@ -230,5 +243,6 @@ export function useToolPage(params: ToolListPageParams) {
     error,
     initialized,
     refetch,
+    reload,
   };
 }

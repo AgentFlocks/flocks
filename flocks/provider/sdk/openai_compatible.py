@@ -28,6 +28,7 @@ from flocks.provider.sdk.openai_base import (
     build_reasoning_metadata,
     create_chat_completion_with_fallbacks,
     _coerce_bool,
+    _is_effective_thinking_enabled,
     _normalize_stream_usage,
     extract_reasoning_content_with_source,
     extract_reasoning_details,
@@ -303,7 +304,11 @@ class OpenAICompatibleProvider(BaseProvider):
         
         self.log.info("openai_compatible.stream.request", {
             "model": model_id,
-            "thinking_enabled": bool(thinking),
+            "thinking_enabled": _is_effective_thinking_enabled(
+                model_id,
+                thinking,
+                extra_body,
+            ),
             "has_tools": bool(tools),
             "max_tokens": max_tokens,
             "include_usage": True,

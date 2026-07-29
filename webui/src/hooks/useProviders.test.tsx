@@ -60,6 +60,29 @@ describe('useProviders', () => {
     ]);
   });
 
+  it('uses the backend credential state instead of treating every connected provider as configured', async () => {
+    listMock.mockResolvedValue({
+      data: {
+        all: [
+          { ...makeProvider('openai', { 'gpt-4o': {} }), configured: false },
+          { ...makeProvider('deepseek'), configured: true },
+        ],
+        connected: ['openai', 'deepseek'],
+      },
+    });
+
+    const { result } = renderHook(() => useProviders());
+
+    await waitFor(() => {
+      expect(result.current.loading).toBe(false);
+    });
+
+    expect(result.current.providers).toMatchObject([
+      { id: 'openai', configured: false, category: 'international' },
+      { id: 'deepseek', configured: true, category: 'connected' },
+    ]);
+  });
+
   it('shares provider list requests across concurrent hook instances', async () => {
     let resolveList: (value: { data: any }) => void = () => {};
     listMock.mockReturnValue(new Promise((resolve) => {

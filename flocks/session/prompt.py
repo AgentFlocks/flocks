@@ -1077,6 +1077,7 @@ class SessionPrompt:
         agent_prompt: Optional[str],
         provider_id: str,
         model_id: str,
+        execution_mode_prompt: Optional[str] = None,
         prompt_tool_names: Iterable[str] = (),
         tool_revision: Optional[int] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
@@ -1164,6 +1165,13 @@ class SessionPrompt:
                 cache_scope="agent",
                 digest_inputs={"agent_name": agent_name, "agent_prompt": agent_prompt or ""},
                 builder=lambda: cls._normalize_prompt_text(agent_prompt),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="execution_mode",
+                cache_scope="runtime",
+                digest_inputs={"prompt": execution_mode_prompt or ""},
+                builder=lambda: cls._normalize_prompt_text(execution_mode_prompt),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

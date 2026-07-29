@@ -267,6 +267,20 @@ class ToolContext:
             always: Always-allow patterns
             metadata: Additional metadata
         """
+        execution_mode = self.extra.get("execution_mode")
+        if execution_mode:
+            from flocks.session.execution_mode import is_permission_allowed
+
+            if not is_permission_allowed(
+                execution_mode,
+                permission,
+                patterns,
+                self,
+            ):
+                raise PermissionError(
+                    "Plan mode may only edit the current session plan file."
+                )
+
         request = PermissionRequest(
             permission=permission,
             patterns=patterns,
@@ -618,6 +632,7 @@ class ToolRegistry:
     # diagnostic only because the plugin loader already isolates each source.
     _plugin_load_errors: List[str] = []
     _revision: int = 0
+    _config_state_token: Optional[tuple[str, int, int, int]] = None
     _failure_state: Dict[str, Dict[str, Any]] = {}
     _failure_disable_threshold: int = 3
     _init_lock = threading.Lock()
@@ -678,22 +693,80 @@ class ToolRegistry:
     def revision(cls) -> int:
         """Return the current registry revision.
 
-        The revision is bumped when plugin or dynamic tools are reloaded so
-        long-lived session caches can detect toolset changes.
+        The revision is bumped when tool membership or enabled state changes
+        so long-lived session caches can detect toolset changes.
         """
+        cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             return cls._revision
 
     @classmethod
+    def _current_config_state_token(cls) -> tuple[str, int, int, int]:
+        """Return a cross-process token for the active flocks config file."""
+        from flocks.config.config_writer import ConfigWriter
+
+        path = ConfigWriter._get_config_path()
+        try:
+            stat = path.stat()
+            return str(path), stat.st_ino, stat.st_mtime_ns, stat.st_size
+        except OSError:
+            return str(path), -1, -1, -1
+
+    @classmethod
+    def _sync_configured_enabled_states(cls) -> None:
+        """Apply config changes written by another server worker.
+
+        Registry revisions and ``ToolInfo.enabled`` values are process-local,
+        while ``flocks.json`` is shared.  Rebuild enabled states whenever the
+        atomically replaced config file changes so a request handled by a
+        different worker immediately observes tool/service toggles and
+        repeated-failure auto-disables.
+        """
+        try:
+            token = cls._current_config_state_token()
+        except Exception:
+            return
+
+        with cls._refresh_lock:
+            if token == cls._config_state_token:
+                return
+
+            previous_states = {
+                name: bool(tool.info.enabled)
+                for name, tool in cls._tools.items()
+            }
+            for name, tool in cls._tools.items():
+                default_enabled = cls._enabled_defaults.get(name)
+                if default_enabled is not None:
+                    tool.info.enabled = default_enabled
+            cls._sync_api_service_states()
+            cls._apply_tool_settings()
+            cls._config_state_token = token
+
+            changed_names = [
+                name
+                for name, tool in cls._tools.items()
+                if previous_states[name] != bool(tool.info.enabled)
+            ]
+            for name in changed_names:
+                if cls._tools[name].info.enabled:
+                    cls._reset_failure_state(name)
+            if changed_names:
+                cls._bump_revision("config_enabled_state_sync")
+
+    @classmethod
     def _bump_revision(cls, reason: str) -> None:
         """Advance the registry revision and invalidate agent prompt caches."""
-        cls._revision += 1
+        with cls._refresh_lock:
+            cls._revision += 1
+            revision = cls._revision
         try:
             from flocks.agent.registry import Agent
             Agent.invalidate_cache()
         except Exception as e:
             log.debug("tool.revision.agent_invalidate_failed", {"error": str(e)})
-        log.debug("tool.registry.revision.bumped", {"revision": cls._revision, "reason": reason})
+        log.debug("tool.registry.revision.bumped", {"revision": revision, "reason": reason})
 
     @classmethod
     def register_function(
@@ -766,6 +839,7 @@ class ToolRegistry:
     def get(cls, name: str) -> Optional[Tool]:
         """Get a tool by name"""
         cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             return cls._tools.get(name)
 
@@ -773,6 +847,7 @@ class ToolRegistry:
     def list_tools(cls, category: Optional[ToolCategory] = None) -> List[ToolInfo]:
         """List all registered tools, optionally filtered by category"""
         cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             tools = list(cls._tools.values())
             if category:
@@ -808,6 +883,40 @@ class ToolRegistry:
                 session_id="default",
                 message_id="default"
             )
+
+        execution_mode = ctx.extra.get("execution_mode")
+        if execution_mode:
+            from flocks.session.execution_mode import (
+                is_tool_allowed,
+                tool_call_denial_reason,
+            )
+
+            if not is_tool_allowed(execution_mode, tool_name):
+                log.warn("tool.execute.execution_mode_denied", {
+                    "name": tool_name,
+                    "execution_mode": str(execution_mode),
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(
+                    success=False,
+                    error=(
+                        f"Tool {tool_name!r} is not available in "
+                        f"{str(execution_mode)!r} execution mode."
+                    ),
+                )
+            denial_reason = tool_call_denial_reason(
+                execution_mode,
+                tool_name,
+                kwargs,
+                ctx,
+            )
+            if denial_reason:
+                log.warn("tool.execute.execution_mode_call_denied", {
+                    "name": tool_name,
+                    "execution_mode": str(execution_mode),
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(success=False, error=denial_reason)
 
         log.info("tool.execute", {
             "name": tool_name,
@@ -1017,6 +1126,7 @@ class ToolRegistry:
     def snapshot_identity(cls) -> tuple[int, tuple[str, ...]]:
         """Return a revision/tool-id identity from one consistent registry state."""
         cls._ensure_initialized()
+        cls._sync_configured_enabled_states()
         with cls._refresh_lock:
             return cls._revision, tuple(cls._tools.keys())
 
@@ -1554,7 +1664,7 @@ class ToolRegistry:
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
             # system/ — questions, model config, memory, MCP management, session management, slash commands
-            ("flocks.tool.system", ["question", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context and status probes
@@ -1588,16 +1698,43 @@ class ToolRegistry:
         if "get_time" not in cls._tools:
             @cls.register_function(
                 name="get_time",
-                description="Get current date and time",
+                description="Get current date and time in ISO 8601 or Unix timestamp format",
                 category=ToolCategory.SYSTEM,
                 native=True,
-                parameters=[]
+                parameters=[
+                    ToolParameter(
+                        name="format",
+                        type=ParameterType.STRING,
+                        description=(
+                            "Output format: 'iso' for ISO 8601, 'unix' for Unix seconds, "
+                            "or 'unix_ms' for Unix milliseconds. Defaults to 'iso'."
+                        ),
+                        required=False,
+                        default="iso",
+                        enum=["iso", "unix", "unix_ms"],
+                    )
+                ]
             )
-            async def get_time(ctx: ToolContext) -> ToolResult:
+            async def get_time(ctx: ToolContext, format: str = "iso") -> ToolResult:
                 from datetime import datetime
+
+                if format not in {"iso", "unix", "unix_ms"}:
+                    return ToolResult(
+                        success=False,
+                        error="format must be one of: iso, unix, unix_ms",
+                    )
+
+                now = datetime.now()
+                if format == "unix":
+                    output = str(int(now.timestamp()))
+                elif format == "unix_ms":
+                    output = str(int(now.timestamp() * 1000))
+                else:
+                    output = now.isoformat()
+
                 return ToolResult(
                     success=True,
-                    output=datetime.now().isoformat()
+                    output=output,
                 )
 
     @classmethod
@@ -1752,7 +1889,7 @@ class ToolRegistry:
     @classmethod
     def _reset_failure_state(cls, tool_name: str) -> None:
         """Reset failure tracking for a tool after success."""
-        if tool_name in cls._failure_state:
+        with cls._refresh_lock:
             cls._failure_state.pop(tool_name, None)
 
     @classmethod
@@ -1817,23 +1954,34 @@ class ToolRegistry:
 
         tool_name = tool.info.name
         key = cls._failure_key(tool_name, params, error)
-        state = cls._failure_state.get(tool_name, {"key": None, "count": 0})
+        with cls._refresh_lock:
+            state = cls._failure_state.get(tool_name, {"key": None, "count": 0})
 
-        if state.get("key") == key:
-            state["count"] = state.get("count", 0) + 1
-        else:
-            state = {"key": key, "count": 1}
+            if state.get("key") == key:
+                state["count"] = state.get("count", 0) + 1
+            else:
+                state = {"key": key, "count": 1}
 
-        cls._failure_state[tool_name] = state
+            cls._failure_state[tool_name] = state
 
-        if state["count"] >= cls._failure_disable_threshold:
-            tool.info.enabled = False
-            log.warn("tool.disabled.repeated_error", {
-                "tool": tool_name,
-                "count": state["count"],
-                "error": error,
-            })
-            return True
+            if state["count"] >= cls._failure_disable_threshold and tool.info.enabled:
+                tool.info.enabled = False
+                try:
+                    from flocks.config.config_writer import ConfigWriter
+
+                    ConfigWriter.set_tool_setting(tool_name, {"enabled": False})
+                except Exception as exc:
+                    log.warn("tool.disabled.repeated_error.persist_failed", {
+                        "tool": tool_name,
+                        "error": str(exc),
+                    })
+                cls._bump_revision("failure_auto_disable")
+                log.warn("tool.disabled.repeated_error", {
+                    "tool": tool_name,
+                    "count": state["count"],
+                    "error": error,
+                })
+                return True
 
         return False
 

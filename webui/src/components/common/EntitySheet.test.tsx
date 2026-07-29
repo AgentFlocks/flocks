@@ -200,6 +200,48 @@ describe('EntitySheet', () => {
       );
     });
 
+    it('propagates manually selected Auto mode to session creation and sending', async () => {
+      const createAndSend = vi.fn().mockResolvedValue('rex-session-auto');
+      mockUseSessionChat.mockReturnValue({
+        sessionId: null,
+        loading: false,
+        error: null,
+        create: vi.fn().mockResolvedValue(undefined),
+        createAndSend,
+        retry: vi.fn().mockResolvedValue(undefined),
+        reset: vi.fn(),
+      });
+
+      render(
+        <EntitySheet
+          {...defaultProps}
+          initialTab="rex"
+          rexAgentName="rex"
+          rexModel={null}
+          rexModelAuto
+        >
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      expect(mockUseSessionChat).toHaveBeenCalledWith(expect.objectContaining({
+        category: 'entity-config',
+        modelAuto: true,
+      }));
+      const sessionChatProps = vi.mocked(SessionChat).mock.calls.at(-1)?.[0] as any;
+      expect(sessionChatProps).toEqual(expect.objectContaining({
+        model: null,
+        modelAuto: true,
+      }));
+
+      await sessionChatProps.onCreateAndSend('hello', [], undefined, undefined);
+      expect(createAndSend).toHaveBeenCalledWith(expect.objectContaining({
+        text: 'hello',
+        model: null,
+        modelAuto: true,
+      }));
+    });
+
     it('renders extract from Rex as a guide action instead of a standalone footer action', async () => {
       const user = userEvent.setup();
       const onExtractFromRex = vi.fn().mockResolvedValue(undefined);
@@ -324,6 +366,30 @@ describe('EntitySheet', () => {
         expect(window.localStorage.getItem(
           'flocks:entity-sheet:rex-session:v1:agent-edit:audit-agent',
         )).toBe('persisted-session-1');
+      });
+    });
+
+    it('restores Auto selection from a persisted Rex session', async () => {
+      const onRexModelAutoChange = vi.fn();
+      window.localStorage.setItem(
+        'flocks:entity-sheet:rex-session:v1:agent-edit:auto-agent',
+        'persisted-auto-session',
+      );
+      mockClientGet.mockResolvedValueOnce({ data: { model_auto: true } });
+
+      render(
+        <EntitySheet
+          {...defaultProps}
+          initialTab="rex"
+          rexSessionStorageKey="agent-edit:auto-agent"
+          onRexModelAutoChange={onRexModelAutoChange}
+        >
+          <div>Form content</div>
+        </EntitySheet>,
+      );
+
+      await waitFor(() => {
+        expect(onRexModelAutoChange).toHaveBeenCalledWith(true);
       });
     });
 

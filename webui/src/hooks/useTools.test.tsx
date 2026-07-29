@@ -414,6 +414,39 @@ describe('useTools', () => {
     expect(listPageMock).toHaveBeenCalledTimes(2);
   });
 
+  it('reloads an auto-disabled tool without refreshing plugins', async () => {
+    listPageMock
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: true }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+          facets: emptyFacets,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          items: [{ name: 'tool-alpha', description: 'alpha tool', category: 'custom', source: 'custom', enabled: false }],
+          total: 1,
+          offset: 0,
+          limit: 20,
+          facets: emptyFacets,
+        },
+      });
+
+    const { result } = renderHook(() => useToolPage({ offset: 0, limit: 20 }));
+    await waitFor(() => expect(result.current.tools[0]?.enabled).toBe(true));
+
+    await act(async () => {
+      await result.current.reload();
+    });
+
+    expect(result.current.tools[0]?.enabled).toBe(false);
+    expect(refreshMock).not.toHaveBeenCalled();
+    expect(listPageMock).toHaveBeenCalledTimes(2);
+  });
+
   it('reports a paged plugin refresh failure after reloading the visible page', async () => {
     listPageMock.mockResolvedValue({
       data: {

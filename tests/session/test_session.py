@@ -7,7 +7,12 @@ import warnings
 from unittest.mock import AsyncMock
 
 import pytest
-from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
+from flocks.auth.context import (
+    API_TOKEN_SERVICE_USER_ID,
+    AuthUser,
+    reset_current_auth_user,
+    set_current_auth_user,
+)
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageInfo, MessageRole, TokenUsage
 from flocks.session.callable_state import add_session_callable_tools, get_session_callable_tools
@@ -29,6 +34,8 @@ async def test_session_create():
     assert session.directory == "/test/dir"
     assert session.title == "Test Session"
     assert session.status == "active"
+    assert session.owner_user_id == API_TOKEN_SERVICE_USER_ID
+    assert session.owner_username == API_TOKEN_SERVICE_USER_ID
 
 
 @pytest.mark.asyncio

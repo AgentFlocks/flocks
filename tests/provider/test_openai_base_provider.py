@@ -624,6 +624,54 @@ class TestOpenAIBaseProviderTemperature:
             "assistant": 1,
         }
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model_id", "extra_body"),
+        [
+            ("kimi-k2.6", {"thinking": {"type": "enabled"}}),
+            ("kimi-k2.7-code", {"thinking": {"type": "enabled"}}),
+            ("kimi-k2.7-code-highspeed", {"thinking": {"type": "enabled"}}),
+            ("kimi-k3", {"reasoning_effort": "max"}),
+        ],
+    )
+    async def test_chat_logs_effective_extra_body_thinking_state(
+        self,
+        model_id,
+        extra_body,
+    ):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+        info = Mock()
+
+        from flocks.provider.provider import ChatMessage
+
+        with patch.object(openai_base_module, "log", Mock(info=info)):
+            await provider.chat(
+                model_id,
+                [ChatMessage(role="user", content="hello")],
+                extra_body=extra_body,
+            )
+
+        _event, payload = info.call_args.args
+        assert payload["thinking_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_kimi_k3_uses_max_completion_tokens(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "kimi-k3",
+            [ChatMessage(role="user", content="hello")],
+            max_tokens=131072,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 131072
+        assert "max_tokens" not in kwargs
+
 
 class TestExtractReasoningContent:
     """Regression: some proxies send stream chunks with ``delta is None``."""
@@ -655,6 +703,108 @@ class TestExtractReasoningContent:
 async def _stream_from_chunks(*chunks):
     for chunk in chunks:
         yield chunk
+
+
+class TestOpenAIBaseProviderStreamingToolCalls:
+    @pytest.mark.asyncio
+    async def test_chat_stream_emits_name_only_marker_before_complete_tool_input(self):
+        provider = MockProviderWithoutCatalog()
+        create = AsyncMock()
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = create
+
+        first_arguments = '{"filePath":"/tmp/report.md","content":"'
+        remaining_arguments = f'{"long content " * 500}"}}'
+        tool_start_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_write",
+                                function=SimpleNamespace(
+                                    name="write",
+                                    arguments=first_arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        tool_arguments_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id=None,
+                                function=SimpleNamespace(
+                                    name=None,
+                                    arguments=remaining_arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=None, tool_calls=None),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(
+            tool_start_chunk,
+            tool_arguments_chunk,
+            finish_chunk,
+        )
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.7-code",
+                [ChatMessage(role="user", content="write a long file")],
+                tools=[{"type": "function", "function": {"name": "write"}}],
+            )
+        ]
+
+        assert len(chunks) == 2
+        assert chunks[0].finish_reason is None
+        assert chunks[0].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {"name": "write", "arguments": ""},
+            }
+        ]
+        assert chunks[1].finish_reason == "tool_calls"
+        assert chunks[1].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "arguments": first_arguments + remaining_arguments,
+                },
+            }
+        ]
 
 
 class TestOpenAIBaseProviderStreamingUsage:
@@ -714,6 +864,53 @@ class TestOpenAIBaseProviderStreamingUsage:
             "prompt_tokens": 11,
             "completion_tokens": 7,
             "total_tokens": 18,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_preserves_nested_reasoning_tokens(self):
+        provider, create = self._build_provider_with_stream()
+
+        content_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="hello", tool_calls=None),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                total_tokens=18,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
+            ),
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=None, finish_reason="stop")],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(
+            content_chunk, usage_chunk, finish_chunk
+        )
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.6-luna",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert chunks[-1].usage == {
+            "prompt_tokens": 11,
+            "completion_tokens": 2,
+            "total_tokens": 18,
+            "reasoning_tokens": 5,
         }
 
     @pytest.mark.asyncio

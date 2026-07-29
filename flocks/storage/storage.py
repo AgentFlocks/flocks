@@ -13,7 +13,7 @@ import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
 import sqlite3
-from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Tuple, Type, TypeVar
+from typing import Any, AsyncIterator, Awaitable, Callable, Dict, List, Optional, Sequence, Tuple, Type, TypeVar
 import json
 import aiosqlite
 from datetime import datetime
@@ -1542,6 +1542,105 @@ class Storage:
         )
 
         cls._log.debug("storage.set", {"key": key, "type": value_type})
+
+    @classmethod
+    async def set_many(cls, entries: Sequence[Tuple[str, Any, str]]) -> None:
+        """Store multiple values atomically in one SQLite transaction."""
+        await cls.mutate_many(set_entries=entries)
+
+    @classmethod
+    async def mutate_many(
+        cls,
+        *,
+        set_entries: Sequence[Tuple[str, Any, str]] = (),
+        delete_keys: Sequence[str] = (),
+        delete_prefixes: Sequence[str] = (),
+    ) -> int:
+        """Apply related set/delete operations in one SQLite transaction."""
+        entries = list(set_entries)
+        keys_to_delete = list(delete_keys)
+        prefixes_to_delete = list(delete_prefixes)
+        if not entries and not keys_to_delete and not prefixes_to_delete:
+            return 0
+
+        routing_paths = {
+            *(cls.route_db_path_for_key(key) for key, _value, _value_type in entries),
+            *(cls.route_db_path_for_key(key) for key in keys_to_delete),
+            *(cls.route_db_path_for_prefix(prefix) for prefix in prefixes_to_delete),
+        }
+        if len(routing_paths) != 1:
+            raise ValueError("Storage.mutate_many operations must target the same database")
+
+        if not entries:
+            serialized_entries = []
+        else:
+            serialized_entries = [
+                (
+                    key,
+                    value.model_dump_json() if isinstance(value, BaseModel) else json.dumps(value),
+                    value_type,
+                )
+                for key, value, value_type in entries
+            ]
+
+        await cls._ensure_init()
+        db_path = next(iter(routing_paths))
+
+        from datetime import UTC
+
+        now = datetime.now(UTC).isoformat()
+
+        async def _write() -> int:
+            async with cls.connect(db_path) as db:
+                try:
+                    await db.execute("BEGIN IMMEDIATE")
+                    for key, serialized, value_type in serialized_entries:
+                        await db.execute(
+                            """
+                            INSERT OR REPLACE INTO storage (key, value, type, created_at, updated_at)
+                            VALUES (?, ?, ?,
+                                COALESCE((SELECT created_at FROM storage WHERE key = ?), ?),
+                                ?)
+                            """,
+                            (key, serialized, value_type, key, now, now),
+                        )
+                    deleted = 0
+                    for key in keys_to_delete:
+                        cursor = await db.execute("DELETE FROM storage WHERE key = ?", (key,))
+                        deleted += max(cursor.rowcount, 0)
+                    for prefix in prefixes_to_delete:
+                        cursor = await db.execute(
+                            f"DELETE FROM storage WHERE {cls._like_prefix_clause()}",
+                            (cls._like_prefix_pattern(prefix),),
+                        )
+                        deleted += max(cursor.rowcount, 0)
+                    await db.commit()
+                    return deleted
+                except BaseException:
+                    await db.rollback()
+                    raise
+
+        deleted = await cls._run_with_corruption_recovery(
+            lambda: cls._run_write_with_retry(
+                _write,
+                action="mutate_many",
+                target=f"{len(entries)} sets/{len(keys_to_delete)} keys/{len(prefixes_to_delete)} prefixes",
+            ),
+            db_path=db_path,
+            action="mutate_many",
+        )
+
+        for key in keys_to_delete:
+            cls._invalidate_runtime_caches(key)
+        for prefix in prefixes_to_delete:
+            cls._invalidate_runtime_caches(prefix)
+        cls._log.debug("storage.mutate_many", {
+            "set_count": len(entries),
+            "delete_key_count": len(keys_to_delete),
+            "delete_prefix_count": len(prefixes_to_delete),
+            "deleted": deleted,
+        })
+        return deleted
 
     @classmethod
     async def get(cls, key: str, model: Optional[Type[T]] = None) -> Optional[T | Any]:
