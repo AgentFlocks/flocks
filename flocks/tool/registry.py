@@ -1663,8 +1663,8 @@ class ToolRegistry:
             ]),
             # security/ — SSH forensics + threat intelligence (optional: asyncssh)
             ("flocks.tool.security", ["ssh_host_cmd", "ssh_run_script"]),
-            # system/ — questions, state, model config, memory, MCP/session management
-            ("flocks.tool.system", ["question", "plan_exit", "mission_record", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
+            # system/ — questions, model config, memory, MCP management, session management, slash commands
+            ("flocks.tool.system", ["question", "plan_exit", "model_config", "memory", "flocks_mcp", "session_manage", "slash_command", "tool_search"]),
             # skill/ — skill management (search, install, status, deps, remove, load)
             ("flocks.tool.skill", ["flocks_skills", "skill_load"]),
             # device/ — security device asset context and status probes

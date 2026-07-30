@@ -24,6 +24,7 @@ from flocks.utils.log import Log
 log = Log.create(service="session.prompt")
 
 if TYPE_CHECKING:
+    from flocks.memory.state.context import MissionPromptContext
     from flocks.session.features.memory import SessionMemory
 
 
@@ -942,18 +943,37 @@ class SessionPrompt:
             if memory_content:
                 prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
 
-        state_context = memory_bootstrap_data.get("state_context")
-        if state_context and state_context.get("inject"):
-            content = state_context.get("content", "")
-            if content:
-                prompts.append(content)
-
         log.debug("prompt.memory_injected", {
             "session_id": session_id,
             "has_main": main_memory is not None,
-            "has_state": state_context is not None,
         })
         return prompts
+
+    @classmethod
+    def _build_mission_snapshot_block(
+        cls,
+        context: Optional["MissionPromptContext"],
+    ) -> Optional[SystemPromptBlock]:
+        """Build an uncached block for mutable Mission State."""
+        if context is None:
+            return None
+        snapshot = cls._normalize_prompt_text(context.snapshot)
+        if not snapshot:
+            return None
+        digest_inputs = {
+            "path": context.path,
+            "snapshot": snapshot,
+        }
+        return SystemPromptBlock(
+            name="mission_snapshot",
+            content=snapshot,
+            cache_scope="runtime",
+            digest_inputs=digest_inputs,
+            cache_key=cls._layer_cache_key(
+                name="mission_snapshot",
+                digest_inputs=digest_inputs,
+            ),
+        )
 
     @classmethod
     def _prompt_blocks_to_list(
@@ -1088,6 +1108,7 @@ class SessionPrompt:
         prompt_tool_names: Iterable[str] = (),
         tool_revision: Optional[int] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
+        mission_context: Optional["MissionPromptContext"] = None,
         static_cache: Optional[SystemPromptCache] = None,
         sandbox_prompt_factory: Optional[AsyncPromptFactory] = None,
         channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
@@ -1133,6 +1154,12 @@ class SessionPrompt:
             session_id=session_id,
             memory_bootstrap_data=memory_bootstrap_data,
         ))
+        mission_guidance = (
+            cls._normalize_prompt_text(mission_context.guidance)
+            if mission_context is not None
+            else ""
+        )
+        mission_snapshot_block = cls._build_mission_snapshot_block(mission_context)
 
         async def build_custom_context() -> Optional[str]:
             return cls._join_prompt_parts(
@@ -1182,11 +1209,19 @@ class SessionPrompt:
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
+                name="mission_guidance",
+                cache_scope="session",
+                digest_inputs={"guidance": mission_guidance},
+                builder=lambda: mission_guidance,
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
                 name="memory_snapshot",
                 cache_scope="session",
                 digest_inputs={"session_id": session_id, "snapshot": memory_snapshot},
                 builder=lambda: memory_snapshot,
             ),
+            mission_snapshot_block,
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
                 name="tool_catalog_awareness",
@@ -1283,9 +1318,10 @@ class SessionPrompt:
             model_id=model_id,
             block_keys=[block.cache_key for block in blocks if block is not None],
         )
-        cached_prompts = cls._read_system_prompt_cache(static_cache, cache_key)
-        if cached_prompts is not None:
-            return cached_prompts
+        if mission_snapshot_block is None:
+            cached_prompts = cls._read_system_prompt_cache(static_cache, cache_key)
+            if cached_prompts is not None:
+                return cached_prompts
 
         prompts = cls._prompt_blocks_to_list(blocks)
         cls._print_system_prompts_for_debug(
@@ -1296,7 +1332,8 @@ class SessionPrompt:
             prompts=prompts,
         )
 
-        cls._write_system_prompt_cache(static_cache, cache_key, prompts)
+        if mission_snapshot_block is None:
+            cls._write_system_prompt_cache(static_cache, cache_key, prompts)
         return list(prompts)
 
     @classmethod

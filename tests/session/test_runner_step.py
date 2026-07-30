@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import flocks.session.runner as runner_mod
+from flocks.memory.state.context import MissionPromptContext
 from flocks.provider.sdk.anthropic import AnthropicProvider
 from flocks.session.message import (
     Message,
@@ -743,6 +744,77 @@ class TestBuildSystemPrompts:
             "channel prompt",
             "runtime prompt",
         ]
+
+    @pytest.mark.asyncio
+    async def test_build_system_prompts_refreshes_mission_snapshot(self):
+        shared_cache = {}
+        session = _make_session("ses_prompts_mission")
+        runner = SessionRunner(session=session, static_cache=shared_cache)
+        agent = _make_agent(name="rex")
+        agent.prompt = "agent prompt"
+
+        env_mock = MagicMock(return_value=["env prompt"])
+        runtime_mock = MagicMock(return_value=["runtime prompt"])
+        custom_mock = AsyncMock(return_value=["custom prompt"])
+        mission_v1 = MissionPromptContext(
+            path="/tmp/.flocks/missions/ses_prompts_mission/mission.md",
+            guidance="mission guidance",
+            snapshot="mission snapshot v1",
+        )
+        mission_v2 = MissionPromptContext(
+            path=mission_v1.path,
+            guidance=mission_v1.guidance,
+            snapshot="mission snapshot v2",
+        )
+
+        with (
+            patch(
+                "flocks.session.prompt.SystemPrompt.provider",
+                return_value=["provider prompt"],
+            ),
+            patch(
+                "flocks.session.prompt.SystemPrompt.environment_stable",
+                env_mock,
+            ),
+            patch(
+                "flocks.session.prompt.SystemPrompt.runtime_metadata",
+                runtime_mock,
+            ),
+            patch(
+                "flocks.session.prompt.SystemPrompt.custom",
+                custom_mock,
+            ),
+        ):
+            prompts1 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                mission_context=mission_v1,
+                static_cache=shared_cache,
+            )
+            prompts2 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                mission_context=mission_v2,
+                static_cache=shared_cache,
+            )
+
+        assert "mission guidance" in prompts1
+        assert "mission guidance" in prompts2
+        assert "mission snapshot v1" in prompts1
+        assert "mission snapshot v1" not in prompts2
+        assert "mission snapshot v2" in prompts2
+        assert prompts2.index("mission guidance") < prompts2.index("mission snapshot v2")
+        env_mock.assert_called_once()
+        runtime_mock.assert_called_once()
+        custom_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_build_system_prompts_rebuilds_when_tool_revision_changes(self):
@@ -2650,6 +2722,12 @@ async def test_process_step_persists_visible_error_when_model_returns_empty_stre
 async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(monkeypatch):
     runner = _make_runner("ses_runner_prompt_guidance_tool_names")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    mission_context = MissionPromptContext(
+        path="/tmp/.flocks/missions/ses_runner_prompt_guidance_tool_names/mission.md",
+        guidance="mission guidance",
+        snapshot="mission snapshot",
+    )
+    runner._mission_context = mission_context
 
     last_user = UserMessageInfo(
         id="msg_user_prompt_guidance",
@@ -2695,6 +2773,7 @@ async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(mo
     assert result.content == "done"
     build_system_prompts.assert_awaited_once()
     assert build_system_prompts.await_args.kwargs["prompt_tool_names"] == ("bash", "memory_search")
+    assert build_system_prompts.await_args.kwargs["mission_context"] is mission_context
 
 
 @pytest.mark.asyncio

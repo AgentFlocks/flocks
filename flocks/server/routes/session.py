@@ -2954,7 +2954,10 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
         request = request.model_copy(update={
             "parts": _replace_text_parts(
                 request.parts,
-                GoalManager.goal_prompt(state.objective),
+                GoalManager.goal_prompt(
+                    state.objective,
+                    session_id=sessionID,
+                ),
             ),
             "display_text": request.display_text or objective,
         })

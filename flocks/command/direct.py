@@ -170,7 +170,10 @@ async def run_direct_command(
             )
         return DirectCommandResult(
             handled=True,
-            prompt=GoalManager.goal_prompt(state.objective),
+            prompt=GoalManager.goal_prompt(
+                state.objective,
+                session_id=session_id,
+            ),
         )
 
     if name == "tools":

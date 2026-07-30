@@ -270,11 +270,6 @@ async def write_tool(
             title=filePath,
         )
     filepath = resolution.resolved_path
-    from flocks.memory.state.mission import agent_mission_mutation_error
-
-    mission_error = await agent_mission_mutation_error(filepath, ctx.session_id)
-    if mission_error:
-        return ToolResult(success=False, error=mission_error, title=filePath)
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":

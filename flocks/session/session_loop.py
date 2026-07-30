@@ -45,6 +45,10 @@ from flocks.session.lifecycle.compaction.compaction import _get_compaction_histo
 from flocks.session.prompt import SessionPrompt
 from flocks.provider.provider import Provider
 from flocks.session.goal import GoalManager
+from flocks.memory.state.context import (
+    MissionContextProvider,
+    MissionPromptContext,
+)
 
 
 log = Log.create(service="session.loop")
@@ -91,6 +95,8 @@ class LoopContext:
     _current_step_task: Optional[asyncio.Task] = field(default=None, repr=False)
     # Memory bootstrap data loaded once on step 1; passed to each SessionRunner
     memory_bootstrap_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
+    # Mission Guidance and mutable State Snapshot refreshed before each model call.
+    mission_context: Optional[MissionPromptContext] = field(default=None, repr=False)
     # Reusable runner artifacts that stay stable across steps in the same loop.
     runner_static_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
     # Overflow compaction attempt counter (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS)
@@ -1030,50 +1036,43 @@ class SessionLoop:
         last_message: MessageInfo,
     ) -> bool:
         """Run TurnFinish and continue the loop when the hook blocks stopping."""
-        mission_reason = await cls._mission_completion_reason(ctx)
-        if mission_reason:
-            decision = "block"
-            reason = mission_reason
-            hook_user = last_user
-        else:
-            decision = ""
-            reason = ""
+        decision = ""
+        reason = ""
         try:
             hook_user = last_user
-            if not mission_reason:
-                from flocks.hooks.pipeline import HookPipeline
+            from flocks.hooks.pipeline import HookPipeline
 
-                if ctx.turn_user_id:
-                    hook_user = (
-                        await Message.get(ctx.session.id, ctx.turn_user_id)
-                        or last_user
-                    )
-                user_text = await Message.get_text_content(hook_user)
-                assistant_text = await Message.get_text_content(last_message)
-                hook_ctx = await HookPipeline.run_turn_finish({
-                    "sessionID": ctx.session.id,
-                    "workspace": ctx.session.directory,
-                    "agent": getattr(last_message, "agent", None) or ctx.agent_name,
-                    "model": {
-                        "providerID": ctx.provider_id,
-                        "modelID": ctx.model_id,
-                    },
-                    "step": ctx.trace_step,
-                    "userMessage": {
-                        "id": hook_user.id,
-                        "content": user_text,
-                    },
-                    "assistantMessage": {
-                        "id": last_message.id,
-                        "content": assistant_text,
-                    },
-                    "finishReason": "stop",
-                    "stopHookActive": ctx.stop_hook_active,
-                })
-                decision = str(
-                    hook_ctx.output.get("decision") or ""
-                ).strip().lower()
-                reason = str(hook_ctx.output.get("reason") or "").strip()
+            if ctx.turn_user_id:
+                hook_user = (
+                    await Message.get(ctx.session.id, ctx.turn_user_id)
+                    or last_user
+                )
+            user_text = await Message.get_text_content(hook_user)
+            assistant_text = await Message.get_text_content(last_message)
+            hook_ctx = await HookPipeline.run_turn_finish({
+                "sessionID": ctx.session.id,
+                "workspace": ctx.session.directory,
+                "agent": getattr(last_message, "agent", None) or ctx.agent_name,
+                "model": {
+                    "providerID": ctx.provider_id,
+                    "modelID": ctx.model_id,
+                },
+                "step": ctx.trace_step,
+                "userMessage": {
+                    "id": hook_user.id,
+                    "content": user_text,
+                },
+                "assistantMessage": {
+                    "id": last_message.id,
+                    "content": assistant_text,
+                },
+                "finishReason": "stop",
+                "stopHookActive": ctx.stop_hook_active,
+            })
+            decision = str(
+                hook_ctx.output.get("decision") or ""
+            ).strip().lower()
+            reason = str(hook_ctx.output.get("reason") or "").strip()
         except Exception as exc:
             log.debug("loop.hook.turn_finish.error", {
                 "session_id": ctx.session.id,
@@ -1201,48 +1200,6 @@ class SessionLoop:
         })
         return True
 
-    @staticmethod
-    async def _mission_completion_reason(ctx: LoopContext) -> Optional[str]:
-        """Return a blocking reason when the current Mission is not complete."""
-        try:
-            refreshed = await Session.get_by_id(ctx.session.id)
-            if refreshed is not None:
-                ctx.session = refreshed
-            if not ctx.session.mission_id:
-                return None
-
-            from flocks.memory.state.mission import MissionStore
-
-            store = MissionStore(ctx.session.directory)
-            state = store.load(ctx.session.mission_id)
-            has_open_tasks = any(
-                task["status"] in {"pending", "running", "failed"}
-                for task in state["tasks"]
-            )
-            if (
-                state["meta"]["status"] in {"completed", "aborted"}
-                or not state["tasks"]
-                or has_open_tasks
-            ):
-                return None
-            gate = store.evaluate_completion(
-                ctx.session.mission_id,
-                session_id=ctx.session.id,
-            )
-            if gate["completed"]:
-                return None
-            return (
-                "The Mission completion gate is not satisfied. "
-                "Resolve these gaps before finishing:\n- "
-                + "\n- ".join(gate["gaps"])
-            )
-        except (FileNotFoundError, OSError, ValueError) as exc:
-            log.warn(
-                "loop.mission.completion_gate_error",
-                {"session_id": ctx.session.id, "error": str(exc)},
-            )
-            return None
-
     @classmethod
     async def _finalize_deferred_failure(
         cls,
@@ -1299,6 +1256,7 @@ class SessionLoop:
                 callbacks=runner_cbs,
                 session_ctx=ctx.session_ctx,
                 memory_bootstrap_data=ctx.memory_bootstrap_data,
+                mission_context=ctx.mission_context,
                 static_cache=ctx.runner_static_cache,
                 defer_step_errors=ctx.auto_failover,
                 failover_available=(
@@ -1562,28 +1520,17 @@ class SessionLoop:
                 except Exception as e:
                     log.error("loop.memory_bootstrap_error", {"error": str(e)})
 
-            # Refresh the root Session's shared Mission snapshot every step.
-            refreshed_session = await Session.get_by_id(ctx.session.id)
-            if refreshed_session is not None:
-                ctx.session = refreshed_session
-            snapshot = dict(ctx.memory_bootstrap_data or {})
-            snapshot.pop("state_context", None)
-            if ctx.session.mission_id:
-                try:
-                    from flocks.memory.state.mission import MissionStore
-
-                    store = MissionStore(ctx.session.directory)
-                    snapshot["state_context"] = {
-                        "path": str(store.mission_path(ctx.session.mission_id)),
-                        "content": store.render_hot_context(ctx.session.mission_id),
-                        "inject": True,
-                    }
-                except (FileNotFoundError, OSError, ValueError) as exc:
-                    log.warn(
-                        "loop.state_snapshot_error",
-                        {"session_id": ctx.session.id, "error": str(exc)},
-                    )
-            ctx.memory_bootstrap_data = snapshot or None
+            try:
+                ctx.mission_context = await MissionContextProvider.load(
+                    workspace_dir=ctx.session.directory,
+                    session_id=ctx.session.id,
+                )
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                ctx.mission_context = None
+                log.warn(
+                    "loop.mission_context_error",
+                    {"session_id": ctx.session.id, "error": str(exc)},
+                )
 
             # Early title generation: fire concurrently with the first LLM call so
             # the title is ready (or nearly so) by the time the response completes.

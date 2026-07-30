@@ -21,6 +21,14 @@ async def test_goal_command_sets_state_and_prompt():
     assert result.text is None
     assert result.prompt is not None
     assert "Active goal: fix failing tests" in result.prompt
+    assert "at least 5 distinct execution steps" in result.prompt
+    assert "at least 10 tool calls" in result.prompt
+    assert ".flocks/missions/goal_command_session/mission.md" in result.prompt
+    assert "ordinary filesystem tools" in result.prompt
+    assert "Goal, Scope, and initial Tasks" in result.prompt
+    assert "automatically loads the Mission State usage guidance" in result.prompt
+    assert "child agents update" not in result.prompt
+    assert "maintains mission.md" not in result.prompt
     assert "specific blocker" in result.prompt
 
     state = await GoalManager.get("goal_command_session")

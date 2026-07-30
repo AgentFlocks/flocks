@@ -1,207 +1,108 @@
-"""Filesystem State v1 and Mission behavior."""
+"""Pure filesystem Mission State behavior."""
 
 from __future__ import annotations
 
-import hashlib
-from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-from flocks.memory.state.mission import MissionStore, mission_state_path_error
+from flocks.memory.state.context import MissionContextProvider
+from flocks.memory.state.mission import (
+    MISSION_STATE_GUIDANCE,
+    mission_dir,
+    mission_path,
+    render_hot_context,
+    render_state_snapshot,
+)
+from flocks.session.goal import GoalManager
 
 
-@pytest.fixture
-def state_workspace(tmp_path: Path) -> Path:
+def test_state_path_is_deterministic_per_session(tmp_path: Path) -> None:
     workspace = tmp_path / "project"
-    workspace.mkdir()
-    return workspace
+
+    assert mission_dir(workspace, "ses-test") == (
+        workspace / ".flocks" / "missions" / "ses-test"
+    )
+    assert mission_path(workspace, "ses-test") == (
+        workspace / ".flocks" / "missions" / "ses-test" / "mission.md"
+    )
 
 
-def test_mission_round_trip_and_zenith_state_shape(
-    state_workspace: Path,
+def test_invalid_session_id_is_rejected(tmp_path: Path) -> None:
+    with pytest.raises(ValueError, match="Invalid session id"):
+        mission_dir(tmp_path, "../escape")
+
+
+def test_missing_mission_file_disables_state(tmp_path: Path) -> None:
+    assert render_hot_context(tmp_path, "ses-empty") == ""
+
+
+def test_filesystem_state_is_rendered_without_parsing(tmp_path: Path) -> None:
+    state_dir = mission_dir(tmp_path, "ses-shared")
+    artifacts_dir = state_dir / "artifacts"
+    artifacts_dir.mkdir(parents=True)
+    (state_dir / "mission.md").write_text(
+        "# Mission\n\n## Goal\nShip the feature.\n",
+        encoding="utf-8",
+    )
+    (state_dir / "progress.md").write_text(
+        "# Progress\n\n- Worker A inspected the API.\n",
+        encoding="utf-8",
+    )
+    (state_dir / "findings.md").write_text(
+        "# Findings\n\n- Candidate authorization issue.\n",
+        encoding="utf-8",
+    )
+    (artifacts_dir / "INDEX.md").write_text(
+        "# Artifacts\n\n- response.txt\n",
+        encoding="utf-8",
+    )
+
+    snapshot = render_state_snapshot(tmp_path, "ses-shared")
+    context = render_hot_context(tmp_path, "ses-shared")
+
+    assert "Ship the feature." in snapshot
+    assert "Worker A inspected the API." in snapshot
+    assert "Candidate authorization issue." in snapshot
+    assert "response.txt" in snapshot
+    assert MISSION_STATE_GUIDANCE not in snapshot
+    assert MISSION_STATE_GUIDANCE in context
+    assert "`mission.md` is owned by the main Agent" in context
+    assert "must not read or edit `mission.md`" in context
+    assert "Before finishing its delegated task" in context
+    assert "Prefer precise edits or" in context
+
+
+@pytest.mark.asyncio
+async def test_context_provider_loads_only_for_active_mission(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    store = MissionStore(state_workspace)
-    state = store.create(
-        mission_id="mission-test",
-        session_id="session-test",
-        original_request="Implement the feature.",
-        todos=[
-            {"id": "inspect", "content": "Inspect the code", "status": "completed"},
-            {"id": "build", "content": "Implement the feature", "status": "in_progress"},
-            {"id": "verify", "content": "Verify with tests", "status": "pending"},
-        ],
-    )
+    session_id = "ses-provider"
+    path = mission_path(tmp_path, session_id)
+    path.parent.mkdir(parents=True)
+    path.write_text("# Mission\n\n## Goal\nShip it.\n", encoding="utf-8")
+    get_goal = AsyncMock(return_value=None)
+    monkeypatch.setattr(GoalManager, "get", get_goal)
 
-    loaded = store.load("mission-test")
-    mission_text = store.mission_path("mission-test").read_text(encoding="utf-8")
-
-    assert state["meta"]["source_session_id"] == "session-test"
-    assert [task["type"] for task in loaded["tasks"]] == [
-        "work",
-        "work",
-        "validate",
-    ]
-    assert loaded["tasks"][0]["status"] == "cleared"
-    assert loaded["tasks"][1]["status"] == "running"
-    assert "# Contract" in mission_text
-    assert "# Attention" in mission_text
-    assert "# Closeout" in mission_text
-    context = store.render_hot_context("mission-test")
-    assert "Mission ID: `mission-test`" in context
-    assert "`mission.md` is private to the main Agent" in context
-    assert "share `progress.md`, `findings.md`, and `artifacts/`" in context
-
-
-def test_running_transition_appends_attempt_record(
-    state_workspace: Path,
-) -> None:
-    store = MissionStore(state_workspace)
-    store.create(
-        mission_id="mission-attempt",
-        session_id="session-attempt",
-        original_request="Run the planned work.",
-        todos=[
-            {"id": "one", "content": "First task", "status": "pending"},
-            {"id": "two", "content": "Second task", "status": "pending"},
-            {"id": "verify", "content": "Verify output", "status": "pending"},
-        ],
-    )
-
-    store.sync_todos(
-        "mission-attempt",
-        [
-            {"id": "one", "content": "First task", "status": "in_progress"},
-            {"id": "two", "content": "Second task", "status": "pending"},
-            {"id": "verify", "content": "Verify output", "status": "pending"},
-        ],
-        session_id="session-attempt",
-    )
-
-    progress = store._read_progress_entries("mission-attempt")
-    attempts = [
-        item
-        for item in progress
-        if item.get("task_id") == "one" and item.get("status") == "running"
-    ]
-    assert len(attempts) == 1
-
-
-def test_completion_requires_validation_and_resolves_after_evidence(
-    state_workspace: Path,
-) -> None:
-    store = MissionStore(state_workspace)
-    store.create(
-        mission_id="mission-gate",
-        session_id="session-gate",
-        original_request="Finish all work.",
-        todos=[
-            {"id": "one", "content": "First task", "status": "pending"},
-            {"id": "two", "content": "Second task", "status": "pending"},
-            {"id": "verify", "content": "Verify output", "status": "pending"},
-        ],
-    )
-
-    gate = store.sync_todos(
-        "mission-gate",
-        [
-            {"id": "one", "content": "First task", "status": "completed"},
-            {"id": "two", "content": "Second task", "status": "completed"},
-            {"id": "verify", "content": "Verify output", "status": "completed"},
-        ],
-        session_id="session-gate",
-    )
-    assert gate["completed"] is False
-    assert any("validation" in gap.lower() for gap in gate["gaps"])
-
-    store.record(
-        "mission-gate",
-        session_id="session-gate",
-        kind="validation",
-        summary="Independent checks passed",
-        status="passed",
-        source_refs=["test-output"],
-    )
-    completed = store.evaluate_completion(
-        "mission-gate",
-        session_id="session-gate",
-    )
-
-    assert completed["completed"] is True
-    assert completed["state"]["meta"]["status"] == "completed"
-    assert completed["state"]["closeout"]
-
-
-def test_artifact_is_versioned_and_hash_verified(
-    state_workspace: Path,
-) -> None:
-    source = state_workspace / "scan.json"
-    source.write_text('{"ok": true}', encoding="utf-8")
-    store = MissionStore(state_workspace)
-    store.create(
-        mission_id="mission-artifact",
-        session_id="session-artifact",
-        original_request="Collect evidence.",
-        todos=[
-            {"id": "one", "content": "Collect", "status": "pending"},
-            {"id": "two", "content": "Analyze", "status": "pending"},
-            {"id": "verify", "content": "Verify evidence", "status": "pending"},
-        ],
-    )
-
-    result = store.record(
-        "mission-artifact",
-        session_id="session-artifact",
-        kind="artifact",
-        summary="Scanner output",
-        artifact_path=str(source),
-    )
-    stored = store.mission_dir("mission-artifact") / result["artifact_path"]
-
-    assert stored.read_text(encoding="utf-8") == '{"ok": true}'
-    assert hashlib.sha256(stored.read_bytes()).hexdigest() in (
-        store.mission_dir("mission-artifact")
-        / "artifacts"
-        / "INDEX.md"
-    ).read_text(encoding="utf-8")
-
-
-def test_mission_paths_are_protected(
-    state_workspace: Path,
-) -> None:
-    protected = state_workspace / ".flocks" / "missions" / "m1" / "mission.md"
-    allowed = state_workspace / ".flocks" / "MEMORY.md"
-
-    assert mission_state_path_error(protected, state_workspace)
-    assert mission_state_path_error(allowed, state_workspace) is None
-
-
-def test_concurrent_progress_records_receive_unique_sequences(
-    state_workspace: Path,
-) -> None:
-    store = MissionStore(state_workspace)
-    store.create(
-        mission_id="mission-concurrent",
-        session_id="session-concurrent",
-        original_request="Record concurrent work.",
-        todos=[
-            {"id": "one", "content": "First task", "status": "pending"},
-            {"id": "two", "content": "Second task", "status": "pending"},
-            {"id": "verify", "content": "Verify output", "status": "pending"},
-        ],
-    )
-
-    def record(index: int) -> int:
-        result = store.record(
-            "mission-concurrent",
-            session_id=f"session-{index}",
-            kind="progress",
-            summary=f"Attempt {index}",
+    assert (
+        await MissionContextProvider.load(
+            workspace_dir=tmp_path,
+            session_id=session_id,
         )
-        return int(result["sequence"])
+        is None
+    )
 
-    with ThreadPoolExecutor(max_workers=5) as pool:
-        sequences = list(pool.map(record, range(10)))
+    get_goal.return_value = SimpleNamespace(status="active")
+    context = await MissionContextProvider.load(
+        workspace_dir=tmp_path,
+        session_id=session_id,
+    )
 
-    assert len(sequences) == len(set(sequences))
-    assert sorted(sequences) == list(range(2, 12))
+    assert context is not None
+    assert context.path == str(path)
+    assert context.guidance == MISSION_STATE_GUIDANCE
+    assert "Mission State Snapshot" in context.snapshot
+    assert MISSION_STATE_GUIDANCE not in context.snapshot

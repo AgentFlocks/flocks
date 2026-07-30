@@ -382,30 +382,6 @@ async def bash_tool(
     1. Host execution (default) - directly on the host machine
     2. Sandbox execution - inside a Docker container (when sandbox config is present)
     """
-    normalized_command = command.replace("\\", "/")
-    if ".flocks/missions" in normalized_command:
-        mutation_markers = (
-            ">",
-            "rm ",
-            "mv ",
-            "cp ",
-            "tee ",
-            "sed -i",
-            "perl -i",
-            "truncate ",
-            "touch ",
-            "mkdir ",
-        )
-        lowered = normalized_command.lower()
-        if any(marker in lowered for marker in mutation_markers):
-            return ToolResult(
-                success=False,
-                error=(
-                    "Mission state is protected from shell mutation. "
-                    "Use todo or mission_record instead."
-                ),
-            )
-
     # Resolve working directory
     base_dir = get_tool_base_dir()
     cwd = _resolve_workdir(base_dir, workdir)

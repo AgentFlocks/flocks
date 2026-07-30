@@ -157,77 +157,6 @@ def _verification_nudge_needed(todos: List[TodoInfo]) -> bool:
     return True
 
 
-async def _original_user_request(session_id: str) -> str:
-    """Return the latest non-synthetic user request that triggered planning."""
-    from flocks.session.message import Message, MessageRole
-
-    for message in reversed(await Message.list(session_id)):
-        if message.role != MessageRole.USER or getattr(message, "synthetic", False):
-            continue
-        content = await Message.get_text_content(message)
-        if content and content.strip():
-            return content.strip()
-    return "Complete the current multi-step user task."
-
-
-async def _sync_mission(
-    ctx: ToolContext,
-    todos: List[TodoInfo],
-) -> Dict[str, Any] | None:
-    """Create or update the Mission bound to this session."""
-    from flocks.memory.state.mission import MissionStore
-    from flocks.session.session import Session
-
-    session = await Session.get_by_id(ctx.session_id)
-    if session is None:
-        return None
-
-    store = MissionStore(session.directory)
-    mission_id = session.mission_id
-    if mission_id:
-        try:
-            current = store.load(mission_id)
-        except (FileNotFoundError, ValueError):
-            current = None
-        if current and current["meta"]["status"] in {"completed", "aborted"}:
-            return {
-                "missionID": mission_id,
-                "status": current["meta"]["status"],
-                "closed": True,
-            }
-    elif len(todos) >= 3:
-        mission_id = store.generate_id(session.id)
-        store.create(
-            mission_id=mission_id,
-            session_id=session.id,
-            original_request=await _original_user_request(session.id),
-            todos=todos,
-        )
-        updated = await Session.update(
-            session.project_id,
-            session.id,
-            mission_id=mission_id,
-        )
-        if updated is None:
-            raise RuntimeError("Failed to bind the new Mission to the session")
-    if not mission_id:
-        return None
-
-    result = store.sync_todos(
-        mission_id,
-        todos,
-        session_id=session.id,
-    )
-    state = result["state"]
-    return {
-        "missionID": mission_id,
-        "status": state["meta"]["status"],
-        "revision": state["meta"]["revision"],
-        "completed": result["completed"],
-        "completionGaps": result["gaps"],
-    }
-
-
 @ToolRegistry.register_function(
     name="todo",
     description=TODO_DESCRIPTION,
@@ -307,7 +236,6 @@ async def todo_tool(
 
     old_todos = await Todo.get(ctx.session_id)
     normalized_todos = _normalize_todos(todos)
-    mission_result = await _sync_mission(ctx, normalized_todos)
     if _all_terminal(normalized_todos):
         await Todo.update_active(ctx.session_id, [])
     else:
@@ -326,7 +254,6 @@ async def todo_tool(
         "oldTodos": old_serialized,
         "newTodos": new_serialized,
         "verificationNudgeNeeded": verification_nudge_needed,
-        "mission": mission_result,
     }
     
     return ToolResult(
@@ -339,6 +266,5 @@ async def todo_tool(
             "oldTodos": old_serialized,
             "newTodos": new_serialized,
             "verificationNudgeNeeded": verification_nudge_needed,
-            "mission": mission_result,
         }
     )

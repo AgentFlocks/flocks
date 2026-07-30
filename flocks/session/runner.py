@@ -17,7 +17,7 @@ import re
 import sys
 import time
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
+from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple, TYPE_CHECKING
 from dataclasses import dataclass, field
 
 import httpcore
@@ -78,6 +78,9 @@ from flocks.session.execution_mode import (
     runtime_execution_mode,
 )
 from flocks.session.plan_file import session_plan_file
+
+if TYPE_CHECKING:
+    from flocks.memory.state.context import MissionPromptContext
 
 
 log = Log.create(service="session.runner")
@@ -306,6 +309,7 @@ class SessionRunner:
         abort_event: Optional[asyncio.Event] = None,
         session_ctx: Optional[Any] = None,  # SessionContext interface
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
+        mission_context: Optional["MissionPromptContext"] = None,
         static_cache: Optional[Dict[str, Any]] = None,
         defer_step_errors: bool = False,
         failover_available: bool = False,
@@ -324,6 +328,7 @@ class SessionRunner:
         self._recent_tool_calls: List[tuple[str, str]] = []  # Track recent (tool_name, args_json) for doom loop
         self.session_ctx = session_ctx  # SessionContext interface for decoupled access
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
+        self._mission_context = mission_context
         self._static_cache = static_cache if static_cache is not None else {}
         self._defer_step_errors = defer_step_errors
         self._failover_available = failover_available
@@ -1481,6 +1486,7 @@ class SessionRunner:
             prompt_tool_names=prompt_tool_names,
             tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
+            mission_context=self._mission_context,
             static_cache=self._static_cache,
             sandbox_prompt_factory=sandbox_prompt_factory,
             channel_context_prompt_factory=channel_context_prompt_factory,

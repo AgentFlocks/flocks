@@ -19,7 +19,6 @@ class ToolCatalogMetadata(BaseModel):
 
 
 ALWAYS_LOAD_TOOL_NAMES: Set[str] = {
-    "mission_record",
     "question",
     "tool_search",
 }
@@ -46,7 +45,6 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "schedule_task_delete": ["scheduled-task", "task-management"],
     "schedule_task_rerun": ["scheduled-task", "task-management"],
     "todo": ["task-management", "progress-tracking"],
-    "mission_record": ["mission", "state", "evidence", "progress-tracking"],
     "run_workflow": ["workflow", "execution"],
     "run_workflow_node": ["workflow", "execution"],
     "question": ["user-interaction", "clarification"],

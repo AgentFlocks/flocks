@@ -292,13 +292,31 @@ class GoalManager:
         return await cls.save(session_id, state)
 
     @classmethod
-    def goal_prompt(cls, objective: str) -> str:
+    def goal_prompt(
+        cls,
+        objective: str,
+        *,
+        session_id: Optional[str] = None,
+    ) -> str:
+        state_directory = (
+            f".flocks/missions/{session_id}"
+            if session_id
+            else ".flocks/missions/<session-id>"
+        )
         return (
             "[Goal mode]\n"
             f"Active goal: {objective}\n\n"
             "If the active goal is ambiguous or underspecified, ask the user a "
             "clarifying question using the question tool and wait for the answer "
             "instead of continuing autonomously. "
+            "Use shared Mission State only when you expect this goal to require "
+            "at least 5 distinct execution steps or at least 10 tool calls. For "
+            "simpler goals, do not activate Mission State. To activate it, use "
+            f"ordinary filesystem tools to create `{state_directory}/mission.md`, "
+            "`progress.md`, `findings.md`, and `artifacts/INDEX.md`. Initialize "
+            "`mission.md` with the Goal, Scope, and initial Tasks. Once "
+            "`mission.md` exists, the Harness automatically loads the Mission "
+            "State usage guidance. "
             "Work toward the active goal. Continue taking concrete steps until the goal "
             "is complete or blocked. In your final response, make the current outcome "
             "clear with evidence of completed work or the specific blocker."
