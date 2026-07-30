@@ -272,6 +272,12 @@ export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text
   return text;
 }
 
+export function getThinkingFirstSentence(text: string): string {
+  const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
+  const sentenceEnd = firstLine.search(/[。！？!?]|\.(?=\s|$)/);
+  return sentenceEnd >= 0 ? firstLine.slice(0, sentenceEnd + 1) : firstLine;
+}
+
 const StreamingReasoningText = memo(function StreamingReasoningText({
   content,
   isStreaming,
@@ -4014,7 +4020,7 @@ export default function SessionChat({
                           }}
                           className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
-                          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                          <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
                             <Paperclip className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
@@ -4588,8 +4594,16 @@ function ChatMessageBubbleInner({
                             <Brain className="h-[15px] w-[15px]" />
                           )}
                         </span>
-                        <span className="min-w-0">{t('chat.process.deepThinking')}</span>
+                        <span className="shrink-0">{t('chat.process.deepThinking')}</span>
                         <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
+                        {!isExpanded && (
+                          <span
+                            data-testid="chat-process-reasoning-preview"
+                            className="min-w-0 flex-1 truncate font-normal text-[#9da29f] dark:text-zinc-500"
+                          >
+                            {getThinkingFirstSentence(thinkingText)}
+                          </span>
+                        )}
                       </button>
                       {isExpanded && isVisible && (
                         <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">

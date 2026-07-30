@@ -466,9 +466,12 @@ describe('SessionPage session actions menu', () => {
 
     await screen.findByRole('button', { name: 'executionMode.title' });
     const agentButton = screen.getByRole('button', { name: 'chat.addMenu.agent' });
+    const agentIconContainer = agentButton.querySelector('svg')?.parentElement;
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
+    expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(agentIconContainer?.className).not.toContain('shadow-');
   });
 
   it('persists Plan per session', async () => {
@@ -2920,6 +2923,11 @@ describe('SessionPage session actions menu', () => {
     const workflowButton = screen.getByRole('button', { name: 'chat.addMenu.workflows' });
     const menuButtons = screen.getAllByRole('button');
     expect(menuButtons.indexOf(skillButton)).toBeLessThan(menuButtons.indexOf(workflowButton));
+    for (const button of [skillButton, workflowButton]) {
+      const iconContainer = button.querySelector('svg')?.parentElement;
+      expect(iconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+      expect(iconContainer?.className).not.toContain('shadow-');
+    }
 
     await user.click(workflowButton);
     expect(screen.queryByText('security')).not.toBeInTheDocument();

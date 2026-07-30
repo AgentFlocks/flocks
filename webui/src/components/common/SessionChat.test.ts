@@ -21,6 +21,7 @@ import {
   getMessageErrorText,
   getMessageGroupClassName,
   getRenderableThinkingText,
+  getThinkingFirstSentence,
   getRenderableFileUrl,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
@@ -1517,7 +1518,10 @@ describe('SessionChat composer controls', () => {
     await user.click(screen.getByRole('button', { name: '添加' }));
 
     expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
-    expect(screen.getByText('文件和图片')).toBeInTheDocument();
+    const filesMenuItem = screen.getByRole('menuitem', { name: '文件和图片' });
+    const filesIconContainer = filesMenuItem.querySelector('svg')?.parentElement;
+    expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(filesIconContainer?.className).not.toContain('shadow-');
     await user.click(screen.getByRole('button', { name: '智能体' }));
     expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '技能' }));
@@ -1646,6 +1650,14 @@ describe('getRenderableThinkingText', () => {
 
   it('keeps meaningful reasoning text', () => {
     expect(getRenderableThinkingText({ type: 'reasoning', text: '需要更新 todo 状态' } as any)).toBe('需要更新 todo 状态');
+  });
+});
+
+describe('getThinkingFirstSentence', () => {
+  it('extracts the first sentence from the first non-empty line', () => {
+    expect(getThinkingFirstSentence('先检查上下文。再读取文件。')).toBe('先检查上下文。');
+    expect(getThinkingFirstSentence('Inspect the context.\nThen read the file.')).toBe('Inspect the context.');
+    expect(getThinkingFirstSentence('\n用户问了两个问题：\n1. 第一个问题')).toBe('用户问了两个问题：');
   });
 });
 
@@ -2045,7 +2057,7 @@ describe('SessionChat intermediate process collapse', () => {
               messageID: 'assistant-process',
               sessionID: 'sess-1',
               type: 'reasoning',
-              text: '需要先读取工作流文件',
+              text: '需要先读取工作流文件。然后检查配置。',
             } as any,
             {
               id: 'tool-1',
@@ -2099,7 +2111,31 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
     expect(screen.getByTestId('chat-process-reasoning-step').querySelector('button')).toHaveClass('text-sm');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).toHaveTextContent('需要先读取工作流文件。');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveTextContent('然后检查配置');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
+  });
+
+  it('hides the reasoning preview while the reasoning body is expanded', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-expanded-reasoning',
+        role: 'assistant',
+        parts: [{
+          id: 'reason-expanded',
+          messageID: 'assistant-expanded-reasoning',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '用户问了两个问题：\n1. 第一个问题',
+        } as any],
+      }),
+      isActive: true,
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: true,
+    }));
+
+    expect(screen.queryByTestId('chat-process-reasoning-preview')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('1. 第一个问题');
   });
 
   it('opens process groups while an assistant message is active and collapses after completion', () => {

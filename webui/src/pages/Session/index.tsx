@@ -162,7 +162,7 @@ function ComposerResourcePicker({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+        <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
           <Icon className="h-3.5 w-3.5" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -2838,7 +2838,7 @@ export default function SessionPage() {
                 aria-haspopup="menu"
                 aria-expanded={showAgentOptions}
               >
-                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
                   <Bot className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
