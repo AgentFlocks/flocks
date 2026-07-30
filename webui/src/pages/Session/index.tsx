@@ -623,6 +623,7 @@ export default function SessionPage() {
   const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
   const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
+  const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [relativeTimeClock, setRelativeTimeClock] = useState(0);
@@ -1365,7 +1366,11 @@ export default function SessionPage() {
   }, [proPolicyEnabled, selectedSessionId]);
 
   const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
-    if (!selectedSessionId || !proPolicyEnabled) return;
+    if (!proPolicyEnabled) return;
+    if (!selectedSessionId) {
+      setDraftPermissionMode(permissionMode);
+      return;
+    }
     try {
       await flocksproPolicyApi.setSession(selectedSessionId, permissionMode);
       setSessionPermissionMode(permissionMode);
@@ -1374,6 +1379,39 @@ export default function SessionPage() {
       toast.error(t('chat.error', 'Error'), message);
     }
   }, [proPolicyEnabled, selectedSessionId, t, toast]);
+
+  const permissionModeLabels = useMemo<Record<PermissionMode, string>>(
+    () => ({
+      readonly: t('permissionMode.readonly'),
+      'require-confirm': t('permissionMode.requireConfirm'),
+      'auto-allow-all': t('permissionMode.autoAllowAll'),
+    }),
+    [t],
+  );
+
+  const permissionModeOptions = useMemo(
+    () => ([
+      {
+        value: 'readonly' as const,
+        label: permissionModeLabels.readonly,
+        description: t('permissionMode.readonlyDesc'),
+      },
+      {
+        value: 'require-confirm' as const,
+        label: permissionModeLabels['require-confirm'],
+        description: t('permissionMode.requireConfirmDesc'),
+      },
+      {
+        value: 'auto-allow-all' as const,
+        label: permissionModeLabels['auto-allow-all'],
+        description: t('permissionMode.autoAllowAllDesc'),
+      },
+    ]),
+    [permissionModeLabels, t],
+  );
+  const currentPermissionMode = selectedSessionId
+    ? (sessionPermissionMode ?? 'require-confirm')
+    : draftPermissionMode;
 
   useEffect(() => {
     if (selectedSession?.model_auto) {
@@ -1585,6 +1623,16 @@ export default function SessionPage() {
       });
       const newSessionId = response.data.id;
 
+      if (proPolicyEnabled) {
+        try {
+          await flocksproPolicyApi.setSession(newSessionId, draftPermissionMode);
+          setSessionPermissionMode(draftPermissionMode);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          toast.error(t('chat.error', 'Error'), message);
+        }
+      }
+
       addSession(response.data);
       await fetchProjects(undefined, searchQuery);
       setSelectedSessionFallback(response.data);
@@ -1635,6 +1683,8 @@ export default function SessionPage() {
     selectedExecutionMode,
     selectedModelAuto,
     selectedProjectIDForCreate,
+    draftPermissionMode,
+    proPolicyEnabled,
     toast,
     t,
   ]);
@@ -3218,43 +3268,52 @@ export default function SessionPage() {
                 </div>
               )}
               </div>
-              {proPolicyEnabled && selectedSessionId && (
+              {proPolicyEnabled && (
                 <div className="relative" data-permission-mode-selector>
                   <button
                     type="button"
                     onClick={() => setShowPermissionModeOptions((open) => !open)}
                     className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                    title="Permission Mode"
+                    title={t('permissionMode.title')}
                   >
                     <Shield className="h-3 w-3 shrink-0" />
                     <span className="max-w-[116px] truncate font-medium">
-                      {sessionPermissionMode ?? 'require-confirm'}
+                      {permissionModeLabels[currentPermissionMode]}
                     </span>
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
-                    <div className="absolute right-0 bottom-full z-50 mb-2 w-52 rounded-lg border border-zinc-200 bg-white p-1.5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                      {([
-                        ['readonly', '禁止命令执行'],
-                        ['require-confirm', '每次确认'],
-                        ['auto-allow-all', '自动允许'],
-                      ] as const).map(([mode, label]) => (
-                        <button
-                          key={mode}
-                          type="button"
-                          onClick={() => {
-                            void handlePermissionModeChange(mode);
-                            setShowPermissionModeOptions(false);
-                          }}
-                          className={`w-full rounded-md px-2 py-1.5 text-left text-xs transition-colors ${
-                            (sessionPermissionMode ?? 'require-confirm') === mode
-                              ? 'bg-zinc-50 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
-                              : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
-                          }`}
-                        >
-                          {label}
-                        </button>
-                      ))}
+                    <div className="absolute right-0 bottom-full z-50 mb-2 w-72 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                      <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
+                        <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
+                          {t('permissionMode.title')}
+                        </div>
+                        <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
+                          {t('permissionMode.menuHint')}
+                        </div>
+                      </div>
+                      <div className="space-y-1 p-1.5">
+                        {permissionModeOptions.map(({ value: mode, label, description }) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => {
+                              void handlePermissionModeChange(mode);
+                              setShowPermissionModeOptions(false);
+                            }}
+                            className={`w-full rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
+                              currentPermissionMode === mode
+                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                            }`}
+                          >
+                            <div className="text-sm font-medium">{label}</div>
+                            <div className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                              {description}
+                            </div>
+                          </button>
+                        ))}
+                      </div>
                     </div>
                   )}
                 </div>

@@ -676,11 +676,9 @@ class TestFeishuNativeCommands:
             mode_init.await_args.args[0]["operation"] == "session.mode.initialize"
         )
         assert mode_init.await_args.args[0]["entry"] == "channel"
-        # The previous session must be archived so it no longer appears in the
-        # active IM session list used for scheduled-task target resolution.
-        update_mock.assert_awaited_once()
-        assert update_mock.await_args.args == ("channel", "session_old")
-        assert update_mock.await_args.kwargs["status"] == "archived"
+        # Rebinding only changes the active IM target; it must preserve the
+        # existing session and its history for later WebUI inspection.
+        update_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_new_command_inherits_auto_model_mode(self, monkeypatch):
