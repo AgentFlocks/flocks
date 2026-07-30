@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from flocks.agent.agent import AvailableAgent
 from flocks.agent.registry import Agent
@@ -29,6 +29,54 @@ class DirectCommandResult:
     prompt: Optional[str] = None
     clear_screen: bool = False
     clear_history: bool = False
+
+
+CommandStatusCallback = Callable[[str, Optional[str]], Awaitable[None]]
+
+
+async def _publish_command_status(
+    callback: Optional[CommandStatusCallback],
+    status: str,
+    message: Optional[str] = None,
+) -> None:
+    """Publish best-effort foreground status for a long-running command."""
+    if callback is None:
+        return
+    try:
+        await callback(status, message)
+    except Exception:
+        return
+
+
+def _format_dream_result(result: Any, target_label: str) -> str:
+    """Format the visible result of one manual Dream run."""
+    changed_memory_files = tuple(getattr(result, "changed_memory_files", ()) or ())
+    changed_skills = tuple(getattr(result, "changed_skills", ()) or ())
+    memory_result = (
+        f"Updated {', '.join(changed_memory_files)}"
+        if changed_memory_files
+        else "Updated"
+        if getattr(result, "memory_changed", False)
+        else "No changes"
+    )
+    skill_result = (
+        f"Updated {', '.join(changed_skills)}"
+        if changed_skills
+        else "Updated"
+        if getattr(result, "skill_changed", False)
+        else "No changes"
+    )
+    lines = [
+        "Dream completed",
+        "",
+        f"- Target: {target_label}",
+        f"- Evidence processed: {result.processed_sources}",
+        f"- Memory: {memory_result}",
+        f"- Skill: {skill_result}",
+    ]
+    if getattr(result, "backlog", False):
+        lines.append("- Backlog: More evidence remains for a later Dream")
+    return "\n".join(lines)
 
 
 def is_agent_safe_direct_command(command: CommandInfo) -> bool:
@@ -136,6 +184,7 @@ async def run_direct_command(
     args_json: Optional[Any] = None,
     surface: Optional[CommandSurface] = None,
     session_id: Optional[str] = None,
+    status_callback: Optional[CommandStatusCallback] = None,
 ) -> DirectCommandResult:
     """Execute a direct command and return its result."""
     resolved = Command.resolve(name)
@@ -197,39 +246,35 @@ async def run_direct_command(
             if is_registered_project_id(session.project_id)
             else DreamTarget.global_only()
         )
+        target_label = (
+            f"Project {target.scope_id}"
+            if is_registered_project_id(target.scope_id)
+            else "Global"
+        )
+        await _publish_command_status(
+            status_callback,
+            "dreaming",
+            f"Dream is reviewing {target_label} evidence for durable Memory and Skill updates…",
+        )
         try:
             result = await run_dream_bridge(
                 target,
                 parent_session_id=session.id,
             )
         except Exception as exc:
-            return DirectCommandResult(
+            command_result = DirectCommandResult(
                 handled=True,
                 success=False,
                 text=f"Dream failed: {exc}",
             )
-        if result.processed_sources == 0:
-            return DirectCommandResult(
-                handled=True,
-                text="Dream completed: no new self-improvement evidence.",
-            )
-        if result.memory_changed and result.skill_changed:
-            outcome = "Memory and Skill updated"
-        elif result.memory_changed:
-            outcome = "Memory updated"
-        elif result.skill_changed:
-            outcome = "Skill updated"
-        elif result.changed:
-            outcome = "self-improvement applied"
         else:
-            outcome = "no Memory or Skill changes"
-        return DirectCommandResult(
-            handled=True,
-            text=(
-                f"Dream completed: {outcome}; "
-                f"processed {result.processed_sources} source(s)."
-            ),
-        )
+            command_result = DirectCommandResult(
+                handled=True,
+                text=_format_dream_result(result, target_label),
+            )
+        finally:
+            await _publish_command_status(status_callback, "idle")
+        return command_result
 
     if name == "tools":
         if not args or args == "list":

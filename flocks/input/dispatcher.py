@@ -110,6 +110,9 @@ async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> Dispat
         async def _collect_prompt(prompt: str) -> None:
             llm_prompts.append(prompt)
 
+        async def _publish_status(status: str, message: Optional[str]) -> None:
+            await sink.publish_command_status(event, status, message)
+
         # Pass only optional callbacks, not the bound methods on the sink: those
         # are always truthy even when no concrete callback was registered.
         clear_cb = getattr(sink, "_clear_screen", None)
@@ -119,6 +122,7 @@ async def dispatch_user_input(event: UserInputEvent, sink: OutputSink) -> Dispat
             parsed_command=parsed,
             send_text=_collect_text,
             send_prompt=_collect_prompt,
+            send_status=_publish_status,
             clear_screen=clear_cb,
             clear_history=clear_history_cb,
             surface=sink.surface,

@@ -659,6 +659,11 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
     assert result.changed is True
     assert result.memory_changed is True
     assert result.skill_changed is False
+    assert result.changed_memory_files == (
+        "global/USER.md",
+        "global/MEMORY.md",
+    )
+    assert result.changed_skills == ()
     assert agent_run.await_args.kwargs["agent_name"] == "self-improve"
     assert "Existing Skill catalog" in agent_run.await_args.kwargs["prompt"]
     assert "Project uses Ruff" in (memory_root / "MEMORY.md").read_text()
@@ -821,6 +826,8 @@ async def test_dream_bridge_applies_skill_without_syncing_memory_index(
     assert result.changed is True
     assert result.memory_changed is False
     assert result.skill_changed is True
+    assert result.changed_memory_files == ()
+    assert result.changed_skills == ("release-check",)
     sync.assert_not_awaited()
     invalidate.assert_called_once_with()
 

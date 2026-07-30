@@ -101,6 +101,8 @@ class DreamBridgeResult:
     backlog: bool
     memory_changed: bool = False
     skill_changed: bool = False
+    changed_memory_files: tuple[str, ...] = ()
+    changed_skills: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

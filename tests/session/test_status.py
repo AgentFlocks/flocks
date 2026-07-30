@@ -3,7 +3,7 @@ Tests for flocks/session/core/status.py
 
 Covers:
 - SessionStatus get/set/clear/clear_all
-- All status types: idle, busy, retry, compacting
+- All status types: idle, busy, retry, compacting, dreaming
 - Default idle behavior
 - Instance-scoped state isolation
 """
@@ -14,6 +14,7 @@ from flocks.session.core.status import (
     SessionStatus,
     SessionStatusBusy,
     SessionStatusCompacting,
+    SessionStatusDreaming,
     SessionStatusIdle,
     SessionStatusRetry,
 )
@@ -73,6 +74,12 @@ class TestSessionStatusSetGet:
         status = SessionStatus.get("ses_4")
         assert status.message == "Summarizing..."
 
+    def test_set_dreaming_and_get(self):
+        SessionStatus.set("ses_dream", SessionStatusDreaming(message="Dreaming..."))
+        status = SessionStatus.get("ses_dream")
+        assert isinstance(status, SessionStatusDreaming)
+        assert status.message == "Dreaming..."
+
     def test_set_idle_removes_from_state(self):
         SessionStatus.set("ses_5", SessionStatusBusy())
         # Setting to idle should clean up the entry
@@ -122,9 +129,16 @@ class TestSessionStatusList:
     def test_list_shows_non_idle_sessions(self):
         SessionStatus.set("ses_x", SessionStatusBusy())
         SessionStatus.set("ses_y", SessionStatusCompacting())
+        SessionStatus.set("ses_z", SessionStatusDreaming(message="Dreaming..."))
         result = SessionStatus.list()
         assert "ses_x" in result
         assert "ses_y" in result
+        assert "ses_z" in result
+
+    def test_dreaming_session_is_reported_as_busy(self):
+        SessionStatus.set("ses_dream", SessionStatusDreaming(message="Dreaming..."))
+
+        assert "ses_dream" in SessionStatus.get_busy_session_ids()
 
     def test_list_returns_copy(self):
         SessionStatus.set("ses_x", SessionStatusBusy())
@@ -164,6 +178,10 @@ class TestStatusModels:
         from flocks.session.core.status import COMPACTING_DEFAULT_MESSAGE
         comp = SessionStatusCompacting()
         assert comp.message == COMPACTING_DEFAULT_MESSAGE
+
+    def test_dreaming_requires_message(self):
+        with pytest.raises(Exception):
+            SessionStatusDreaming()
 
     def test_retry_missing_fields_raises(self):
         with pytest.raises(Exception):

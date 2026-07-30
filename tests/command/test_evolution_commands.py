@@ -29,10 +29,20 @@ async def test_dream_command_runs_current_project_agent() -> None:
         return_value=SimpleNamespace(
             changed=True,
             processed_sources=2,
+            backlog=False,
             memory_changed=True,
             skill_changed=True,
+            changed_memory_files=(
+                "global/USER.md",
+                "project/MEMORY.md",
+            ),
+            changed_skills=("release-check",),
         )
     )
+    statuses = []
+
+    async def publish_status(status: str, message: str | None) -> None:
+        statuses.append((status, message))
 
     with (
         patch(
@@ -47,11 +57,51 @@ async def test_dream_command_runs_current_project_agent() -> None:
         result = await run_direct_command(
             "dream",
             session_id=session.id,
+            status_callback=publish_status,
         )
 
     assert result.success is True
-    assert "Memory and Skill updated" in result.text
+    assert result.text == (
+        "Dream completed\n\n"
+        "- Target: Project prj_test\n"
+        "- Evidence processed: 2\n"
+        "- Memory: Updated global/USER.md, project/MEMORY.md\n"
+        "- Skill: Updated release-check"
+    )
+    assert statuses[0][0] == "dreaming"
+    assert "Project prj_test" in statuses[0][1]
+    assert statuses[-1] == ("idle", None)
     bridge.assert_awaited_once_with(
         DreamTarget.project("prj_test"),
         parent_session_id="ses_test",
     )
+
+
+@pytest.mark.asyncio
+async def test_dream_command_clears_foreground_status_after_failure() -> None:
+    session = SimpleNamespace(id="ses_test", project_id="default")
+    statuses = []
+
+    async def publish_status(status: str, message: str | None) -> None:
+        statuses.append((status, message))
+
+    with (
+        patch(
+            "flocks.session.session.Session.get_by_id",
+            new=AsyncMock(return_value=session),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.run_dream_bridge",
+            new=AsyncMock(side_effect=RuntimeError("model unavailable")),
+        ),
+    ):
+        result = await run_direct_command(
+            "dream",
+            session_id=session.id,
+            status_callback=publish_status,
+        )
+
+    assert result.success is False
+    assert result.text == "Dream failed: model unavailable"
+    assert statuses[0][0] == "dreaming"
+    assert statuses[-1] == ("idle", None)

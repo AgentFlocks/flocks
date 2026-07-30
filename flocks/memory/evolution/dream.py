@@ -377,11 +377,20 @@ async def run_dream_bridge(
             write_permission_patterns=sorted(memory_permissions | skill_permissions),
         )
 
-        memory_changed = any(
-            (file_path.read_text(encoding="utf-8") if file_path.exists() else None) != original_files[key]
+        changed_memory_files = tuple(
+            _document_label(key)
             for key, file_path in file_targets.items()
+            if (file_path.read_text(encoding="utf-8") if file_path.exists() else None)
+            != original_files[key]
         )
+        memory_changed = bool(changed_memory_files)
         skill_changed = validate_skill_changes(root, skills_before)
+        skills_after = skill_contents(root)
+        changed_skills = tuple(
+            relative_path.split("/", 1)[0]
+            for relative_path in sorted(skills_before.keys() | skills_after.keys())
+            if skills_before.get(relative_path) != skills_after.get(relative_path)
+        )
         if memory_changed:
             await _sync_memory_indexes(
                 config,
@@ -398,4 +407,6 @@ async def run_dream_bridge(
             backlog,
             memory_changed=memory_changed,
             skill_changed=skill_changed,
+            changed_memory_files=changed_memory_files,
+            changed_skills=changed_skills,
         )
