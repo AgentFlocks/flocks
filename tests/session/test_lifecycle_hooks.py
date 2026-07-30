@@ -188,6 +188,7 @@ async def test_turn_finish_block_creates_synthetic_continuation() -> None:
         "sourceAssistantMessageID": assistant.id,
     }
     hook_payload = run_hook.await_args.args[0]
+    assert hook_payload["sessionCategory"] == ctx.session.category
     assert hook_payload["finishReason"] == "stop"
     assert hook_payload["stopHookActive"] is False
     callbacks.event_publish_callback.assert_awaited_once()

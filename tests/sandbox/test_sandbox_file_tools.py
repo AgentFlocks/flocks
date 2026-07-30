@@ -5,7 +5,7 @@ Sandbox-aware file tool tests.
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -110,6 +110,91 @@ async def test_file_tools_allow_only_host_memory_root_in_sandbox(
     assert memory_file.read_text(encoding="utf-8") == (
         "# Global Memory\n\nnew fact\n"
     )
+
+
+@pytest.mark.asyncio
+async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
+    tmp_path: Path,
+) -> None:
+    sandbox_dir = tmp_path / "sandbox"
+    home_dir = tmp_path / "home"
+    sandbox_dir.mkdir()
+    skill_root = home_dir / ".flocks" / "plugins" / "skills"
+    managed_path = skill_root / "managed-skill" / "SKILL.md"
+    unmanaged_path = skill_root / "manual-skill" / "SKILL.md"
+    managed_content = (
+        "---\n"
+        "name: managed-skill\n"
+        "description: Use this managed test Skill.\n"
+        "metadata:\n"
+        "  managed_by: flocks\n"
+        "---\n\n"
+        "Initial workflow.\n"
+    )
+    unmanaged_content = (
+        "---\n"
+        "name: manual-skill\n"
+        "description: Use this manually maintained test Skill.\n"
+        "---\n\n"
+        "Manual workflow.\n"
+    )
+    unmanaged_path.parent.mkdir(parents=True)
+    unmanaged_path.write_text(unmanaged_content, encoding="utf-8")
+    ctx = _sandbox_ctx(
+        str(sandbox_dir),
+        workspace_access="rw",
+        agent="self-improve",
+    )
+
+    with (
+        patch("pathlib.Path.home", return_value=home_dir),
+        patch(
+            "flocks.memory.evolution.skill_guard.Skill.all",
+            new=AsyncMock(return_value=[]),
+        ),
+    ):
+        create_result = await ToolRegistry.execute(
+            "write",
+            ctx=ctx,
+            filePath=str(managed_path),
+            content=managed_content,
+        )
+        read_result = await ToolRegistry.execute(
+            "read",
+            ctx=ctx,
+            filePath=str(managed_path),
+        )
+        overwrite_result = await ToolRegistry.execute(
+            "write",
+            ctx=ctx,
+            filePath=str(managed_path),
+            content=managed_content.replace("Initial", "Overwritten"),
+        )
+        edit_result = await ToolRegistry.execute(
+            "edit",
+            ctx=ctx,
+            filePath=str(managed_path),
+            oldString="Initial workflow.",
+            newString="Improved workflow.",
+        )
+        unmanaged_result = await ToolRegistry.execute(
+            "edit",
+            ctx=ctx,
+            filePath=str(unmanaged_path),
+            oldString="Manual workflow.",
+            newString="Changed workflow.",
+        )
+
+    assert create_result.success
+    assert read_result.success
+    assert "Initial workflow." in (read_result.output or "")
+    assert not overwrite_result.success
+    assert "use edit" in (overwrite_result.error or "")
+    assert edit_result.success
+    assert "Improved workflow." in managed_path.read_text(encoding="utf-8")
+    assert not unmanaged_result.success
+    assert "existing managed Skills" in (unmanaged_result.error or "")
+    assert unmanaged_path.read_text(encoding="utf-8") == unmanaged_content
 
 
 @pytest.mark.asyncio

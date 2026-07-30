@@ -258,8 +258,12 @@ async def lifespan(app: FastAPI):
     )
     log.info("question_handler.initialized")
     
-    # Memory is always enabled.
+    # Memory is always enabled; Dream scheduling remains configurable.
     try:
+        config = await Config.get()
+        from flocks.memory.config import resolve_memory_config
+
+        memory_cfg = resolve_memory_config(config)
         from flocks.hooks.builtin import register_builtin_hooks
 
         await _run_startup_phase(
@@ -268,6 +272,16 @@ async def lifespan(app: FastAPI):
             register_builtin_hooks,
         )
         log.info("hooks.registered")
+        if memory_cfg.dream.enabled:
+            from flocks.memory.evolution.scheduler import (
+                MemoryEvolutionScheduler,
+            )
+
+            await _run_startup_phase(
+                log,
+                "memory.evolution.start",
+                MemoryEvolutionScheduler.start,
+            )
     except Exception as e:
         # Hook registration failure should not stop server startup
         log.warn("hooks.register_failed", {"error": str(e)})
@@ -490,6 +504,13 @@ async def lifespan(app: FastAPI):
         await ConsoleSyncScheduler.stop()
     except Exception as exc:
         log.warning("console.sync.stop_failed", {"error": str(exc)})
+
+    try:
+        from flocks.memory.evolution.scheduler import MemoryEvolutionScheduler
+
+        await MemoryEvolutionScheduler.stop()
+    except Exception as exc:
+        log.warning("memory.evolution.stop_failed", {"error": str(exc)})
 
     # Notify SSE clients before stopping sessions, MCP transports, and other
     # long-lived runtime services so browser listeners see the shutdown event.

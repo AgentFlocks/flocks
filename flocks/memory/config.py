@@ -204,6 +204,25 @@ Never write or edit Daily Memory. Do not continue task work in this flush turn.
     )
 
 
+class MemoryDreamConfig(BaseModel):
+    """Scheduled and manual Dream self-improvement configuration."""
+
+    enabled: bool = Field(
+        True,
+        description="Enable scheduled and manual Dream self-improvement",
+    )
+    interval_hours: float = Field(
+        24,
+        gt=0,
+        description="Hours between successful background Dream bridging runs",
+    )
+    recent_daily_days: int = Field(
+        7,
+        ge=0,
+        description="Number of recent daily memory files included in extraction",
+    )
+
+
 class CompactionConfig(BaseModel):
     """
     Dynamic compaction configuration.
@@ -322,6 +341,10 @@ class MemoryConfig(BaseModel):
     auto_flush: MemoryAutoFlushConfig = Field(
         default_factory=MemoryAutoFlushConfig,
         description="Auto flush configuration"
+    )
+    dream: MemoryDreamConfig = Field(
+        default_factory=MemoryDreamConfig,
+        description="Scheduled and manual Dream self-improvement",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,

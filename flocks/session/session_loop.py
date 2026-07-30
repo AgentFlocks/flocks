@@ -1002,6 +1002,7 @@ class SessionLoop:
             prompt = await Message.get_text_content(last_user)
             hook_ctx = await HookPipeline.run_user_prompt_submit({
                 "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_user, "agent", None) or ctx.agent_name,
                 "model": {
@@ -1043,6 +1044,7 @@ class SessionLoop:
             assistant_text = await Message.get_text_content(last_message)
             hook_ctx = await HookPipeline.run_turn_finish({
                 "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_message, "agent", None) or ctx.agent_name,
                 "model": {

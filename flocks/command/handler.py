@@ -11,6 +11,7 @@ from flocks.input.events import ParsedCommand
 
 SendText = Callable[[str], Awaitable[None]]
 SendPrompt = Callable[[str], Awaitable[None]]
+SendStatus = Callable[[str, Optional[str]], Awaitable[None]]
 ClearScreen = Callable[[], Awaitable[None]]
 ClearHistory = Callable[[], Awaitable[None]]
 
@@ -21,6 +22,7 @@ async def handle_slash_command(
     parsed_command: Optional[ParsedCommand] = None,
     send_text: SendText,
     send_prompt: SendPrompt,
+    send_status: Optional[SendStatus] = None,
     clear_screen: Optional[ClearScreen] = None,
     clear_history: Optional[ClearHistory] = None,
     surface: Optional[CommandSurface] = None,
@@ -58,6 +60,7 @@ async def handle_slash_command(
         args_json=parsed.args_json,
         surface=surface,
         session_id=session_id,
+        status_callback=send_status,
     )
     if not result.handled:
         return False

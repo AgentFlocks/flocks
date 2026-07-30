@@ -289,6 +289,27 @@ def test_parse_skill_md_with_metadata(tmp_path):
     assert skill_info.install_specs[0].formula == "gh"
 
 
+def test_parse_skill_md_with_managed_by_metadata(tmp_path):
+    """SKILL.md exposes the direct metadata ownership marker."""
+    skill_dir = tmp_path / "managed-skill"
+    skill_dir.mkdir()
+    skill_file = skill_dir / "SKILL.md"
+    skill_file.write_text(
+        "---\n"
+        "name: managed-skill\n"
+        "description: Skill managed by Flocks self-improvement\n"
+        "metadata:\n"
+        "  managed_by: flocks\n"
+        "---\n"
+    )
+
+    skill_info = Skill._parse_skill_md(str(skill_file))
+
+    assert skill_info is not None
+    assert skill_info.metadata is not None
+    assert skill_info.metadata.managed_by == "flocks"
+
+
 def test_parse_skill_md_openclaw_metadata(tmp_path):
     """SKILL.md with metadata.openclaw → same fields populated via openclaw key."""
     skill_dir = tmp_path / "openclaw-skill"

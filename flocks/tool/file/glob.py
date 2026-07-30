@@ -158,6 +158,7 @@ async def glob_tool(
             ctx,
             path or ".",
             allow_host_memory=True,
+            allow_host_skills=True,
         )
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=path or pattern)

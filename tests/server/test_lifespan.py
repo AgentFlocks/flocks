@@ -32,7 +32,7 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
         return None
 
     async def fake_config_get():
-        return SimpleNamespace(memory=MemoryConfig())
+        return SimpleNamespace(memory=MemoryConfig(dream={"enabled": False}))
 
     async def fake_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)

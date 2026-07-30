@@ -957,7 +957,10 @@ function getCurrentTurnAssistantMessages(
 }
 
 export function isActiveSessionStatus(status?: { type?: string } | null): boolean {
-  return status?.type === 'busy' || status?.type === 'compacting' || status?.type === 'retry';
+  return status?.type === 'busy'
+    || status?.type === 'compacting'
+    || status?.type === 'dreaming'
+    || status?.type === 'retry';
 }
 
 export function getEditingActionBarClassName(): string {
@@ -1557,6 +1560,8 @@ export default function SessionChat({
   const [composerPreview, setComposerPreview] = useState<{ url: string; alt?: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactingMessage, setCompactingMessage] = useState('');
+  const [isDreaming, setIsDreaming] = useState(false);
+  const [dreamingMessage, setDreamingMessage] = useState('');
   const [goalBanner, setGoalBanner] = useState<GoalBannerState | null>(null);
   const [dismissedGoalKey, setDismissedGoalKey] = useState(() => readDismissedGoalKey(sessionId));
   const {
@@ -1828,6 +1833,8 @@ export default function SessionChat({
           abortedMessageIdRef.current = null;
           suppressStreamingUntilIdleRef.current = false;
           setIsStreaming(false);
+          setIsDreaming(false);
+          setDreamingMessage('');
           setGoalBanner(null);
           setDismissedGoalKey('');
           clearMessages();
@@ -1842,6 +1849,8 @@ export default function SessionChat({
             ) setIsStreaming(true);
             setIsCompacting(false);
             isCompactingRef.current = false;
+            setIsDreaming(false);
+            setDreamingMessage('');
           } else if (action.statusType === 'compacting') {
             sessionBusyRef.current = true;
             if (
@@ -1850,10 +1859,22 @@ export default function SessionChat({
             ) setIsStreaming(true);
             setIsCompacting(true);
             isCompactingRef.current = true;
+            setIsDreaming(false);
+            setDreamingMessage('');
             setCompactingMessage(action.message || t('chat.compacting'));
             // Reset progress state on each new compaction cycle so a stale
             // run's stages do not leak into a fresh "Compacting..." panel.
             setCompactionStages([]);
+          } else if (action.statusType === 'dreaming') {
+            sessionBusyRef.current = true;
+            if (
+              !abortingRef.current &&
+              !suppressStreamingUntilIdleRef.current
+            ) setIsStreaming(true);
+            setIsCompacting(false);
+            isCompactingRef.current = false;
+            setIsDreaming(true);
+            setDreamingMessage(action.message || t('chat.dreaming'));
           } else if (action.statusType === 'idle') {
             sessionBusyRef.current = false;
             suppressStreamingUntilIdleRef.current = false;
@@ -1862,6 +1883,8 @@ export default function SessionChat({
             setIsCompacting(false);
             isCompactingRef.current = false;
             setCompactingMessage('');
+            setIsDreaming(false);
+            setDreamingMessage('');
             setCompactionStages([]);
             refetch();
             void refreshContextUsage({ skipIfFreshMs: 500 });
@@ -1983,6 +2006,8 @@ export default function SessionChat({
         case 'session-error':
           setIsStreaming(false);
           setIsCompacting(false);
+          setIsDreaming(false);
+          setDreamingMessage('');
           setCompactionStages([]);
           stopContextUsageRefreshing();
           void refreshContextUsage({ skipIfFreshMs: 500 });
@@ -2109,6 +2134,8 @@ export default function SessionChat({
     setIsDragOver(false);
     setIsCompacting(false);
     setCompactingMessage('');
+    setIsDreaming(false);
+    setDreamingMessage('');
     setCompactionStages([]);
     setGoalBanner(null);
     setDismissedGoalKey('');
@@ -2164,12 +2191,23 @@ export default function SessionChat({
         if (status?.type === 'busy' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
+          setIsDreaming(false);
+          setDreamingMessage('');
         } else if (status?.type === 'compacting' && !suppressStreamingUntilIdleRef.current) {
           sessionBusyRef.current = true;
           setIsStreaming(true);
           setIsCompacting(true);
           isCompactingRef.current = true;
+          setIsDreaming(false);
+          setDreamingMessage('');
           setCompactingMessage(status.message || t('chat.compacting'));
+        } else if (status?.type === 'dreaming' && !suppressStreamingUntilIdleRef.current) {
+          sessionBusyRef.current = true;
+          setIsStreaming(true);
+          setIsCompacting(false);
+          isCompactingRef.current = false;
+          setIsDreaming(true);
+          setDreamingMessage(status.message || t('chat.dreaming'));
         } else {
           sessionBusyRef.current = false;
         }
@@ -3402,13 +3440,20 @@ export default function SessionChat({
                     </div>
                     <div className="flex flex-col min-w-0 w-full">
                       <div className={getStandaloneThinkingBubbleClassName(compact)}>
-                        <div className="flex items-center gap-2 text-sm text-gray-500">
-                          <div className="flex gap-0.5">
-                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
-                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
-                            <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                        {isDreaming ? (
+                          <div className="flex items-center gap-2 text-sm text-violet-600 dark:text-violet-300">
+                            <Loader2 className="w-4 h-4 animate-spin" />
+                            <span>{dreamingMessage || t('chat.dreaming')}</span>
                           </div>
-                        </div>
+                        ) : (
+                          <div className="flex items-center gap-2 text-sm text-gray-500">
+                            <div className="flex gap-0.5">
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }} />
+                              <div className="w-1.5 h-1.5 bg-gray-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }} />
+                            </div>
+                          </div>
+                        )}
                       </div>
                     </div>
                   </div>

@@ -524,6 +524,7 @@ async def edit_tool(
             ctx,
             filePath,
             allow_host_memory=True,
+            allow_host_skills=True,
         )
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=filePath)
@@ -649,6 +650,26 @@ async def edit_tool(
 
     content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
     diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
+
+    if (
+        ctx.agent == "self-improve"
+        and Path(filepath).name == "SKILL.md"
+    ):
+        from flocks.memory.evolution.skill_guard import (
+            validate_evolution_skill_edit,
+        )
+
+        evolution_error = validate_evolution_skill_edit(
+            Path(filepath),
+            raw_content_old,
+            content_new,
+        )
+        if evolution_error:
+            return ToolResult(
+                success=False,
+                error=evolution_error,
+                title=title,
+            )
 
     await ctx.ask(
         permission="edit",

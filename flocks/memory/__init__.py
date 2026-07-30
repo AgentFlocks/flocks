@@ -34,6 +34,7 @@ from flocks.memory.config import (
     MemoryCacheConfig,
     MemoryBatchConfig,
     MemoryAutoFlushConfig,
+    MemoryDreamConfig,
     resolve_memory_config,
 )
 
@@ -74,6 +75,7 @@ __all__ = [
     "MemoryCacheConfig",
     "MemoryBatchConfig",
     "MemoryAutoFlushConfig",
+    "MemoryDreamConfig",
     "resolve_memory_config",
     
     # Utils
