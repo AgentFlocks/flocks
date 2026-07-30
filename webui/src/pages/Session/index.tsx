@@ -65,6 +65,7 @@ const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
+const RECENT_SEARCH_SESSION_LIMIT = 5;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
@@ -670,6 +671,7 @@ export default function SessionPage() {
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
@@ -716,6 +718,14 @@ export default function SessionPage() {
     projectIds: sessionProjectIds,
     pageSize: sessionListPageSize,
   });
+  const searchPanelSessions = useMemo(() => {
+    const sortedSessions = [...sessions].sort(
+      (left, right) => (right.time?.updated ?? 0) - (left.time?.updated ?? 0),
+    );
+    return searchQuery.trim()
+      ? sortedSessions
+      : sortedSessions.slice(0, RECENT_SEARCH_SESSION_LIMIT);
+  }, [searchQuery, sessions]);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const {
@@ -986,6 +996,7 @@ export default function SessionPage() {
     [projects, sessions, t],
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
+  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
   const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
   const visibleTaskSessions = taskSessionsCollapsedToFirstPage
     ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
@@ -1490,6 +1501,10 @@ export default function SessionPage() {
       setCreating(false);
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
+
+  const handleCreateSessionInProject = useCallback((projectId: string) => {
+    void handleCreateSession(projectId);
+  }, [handleCreateSession]);
 
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     const previousModelKey = selectedModelKey;
@@ -2036,6 +2051,14 @@ export default function SessionPage() {
       setSelectedSessionId(sessionId);
     }
   }, [handleToggleCheck, selectMode]);
+  const handleCloseSessionSearch = useCallback(() => {
+    setSessionSearchOpen(false);
+    setSearchQuery('');
+  }, []);
+  const handleSelectSearchResult = useCallback((sessionId: string) => {
+    handleSelectSessionRow(sessionId);
+    handleCloseSessionSearch();
+  }, [handleCloseSessionSearch, handleSelectSessionRow]);
   const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
     setMovePickerSessionId(null);
     setOpenMenuSessionId((current) => {
@@ -2200,14 +2223,14 @@ export default function SessionPage() {
     <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
+        className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
           sidebarCollapsed
             ? 'w-0 border-transparent opacity-0'
             : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
         }`}
         aria-label={t('managementTitle')}
       >
-        {/* Header：始终显示标题、新建与搜索 */}
+        {/* Header */}
         <div className="flex-shrink-0 px-3 pb-2 pt-3.5">
           <div className="mb-2 flex h-8 items-center justify-between px-1">
             <div className="min-w-0">
@@ -2218,9 +2241,19 @@ export default function SessionPage() {
                 {t('sessionCount', { count: sessions.length })}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => setSessionSearchOpen(true)}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.07] dark:hover:text-white"
+              title={t('openTaskSearch')}
+              aria-label={t('openTaskSearch')}
+              aria-expanded={sessionSearchOpen}
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
           </div>
 
-          <div className="space-y-0.5">
+          <div>
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
                 ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
@@ -2233,29 +2266,76 @@ export default function SessionPage() {
                 {t('newSession')}
               </button>
             </div>
-
-            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t('filterConversations', 'Search tasks')}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-1.5 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-md text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
-                  title={t('clearSearch')}
-                  aria-label={t('clearSearch')}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
           </div>
         </div>
+
+        {sessionSearchOpen && (
+          <div
+            role="dialog"
+            aria-label={t('taskSearchDialog')}
+            aria-modal="true"
+            onClick={handleCloseSessionSearch}
+            className="fixed inset-0 z-[80] flex items-start justify-center bg-black/20 px-4 pt-[18vh] backdrop-blur-[1px] dark:bg-black/45"
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              className="w-full max-w-[620px] overflow-hidden rounded-2xl border border-black/[0.12] bg-[#fdfdfc] shadow-[0_24px_70px_rgba(22,27,34,0.24)] dark:border-white/[0.11] dark:bg-[#303030] dark:shadow-[0_28px_80px_rgba(0,0,0,0.55)]"
+            >
+              <div className="relative h-[52px] border-b border-black/[0.07] dark:border-white/[0.08]">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[#7b8087] dark:text-[#a7adb5]" />
+                <input
+                  autoFocus
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      handleCloseSessionSearch();
+                    }
+                  }}
+                  placeholder={t('filterConversations', 'Search tasks')}
+                  className="h-full w-full border-0 bg-transparent pl-12 pr-12 text-[15px] font-medium text-[#3f444a] outline-none placeholder:text-[#858a91] dark:text-[#e1e5ea] dark:placeholder:text-[#9298a0]"
+                />
+                <button
+                  type="button"
+                  onClick={handleCloseSessionSearch}
+                  className="absolute right-3 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.06] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                  title={t('closeTaskSearch')}
+                  aria-label={t('closeTaskSearch')}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="max-h-[420px] overflow-y-auto p-2">
+                <div className="px-2 pb-1.5 pt-1 text-[11px] font-medium text-[#969aa0] dark:text-[#8f9ba8]">
+                  {t(searchQuery.trim() ? 'searchResults' : 'recentTasks')}
+                </div>
+                {searchPanelSessions.length > 0 ? (
+                  <div className="space-y-0.5">
+                    {searchPanelSessions.map((session) => (
+                      <button
+                        key={session.id}
+                        type="button"
+                        onClick={() => handleSelectSearchResult(session.id)}
+                        className="flex h-10 w-full min-w-0 items-center gap-2.5 rounded-xl px-3 text-left text-sm text-[#4e5359] transition-colors hover:bg-black/[0.055] hover:text-[#202328] focus:bg-black/[0.055] focus:outline-none dark:text-[#d1d5da] dark:hover:bg-white/[0.09] dark:hover:text-white dark:focus:bg-white/[0.09]"
+                      >
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#6aa7ee]" />
+                        <span className="min-w-0 flex-1 truncate font-medium">{session.title}</span>
+                        <span className="max-w-[110px] shrink-0 truncate text-xs text-[#969aa0] dark:text-[#8f9ba8]">
+                          {session.projectName || getPathBasename(session.directory)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-10 text-center text-sm text-[#969aa0] dark:text-[#8f9ba8]">
+                    {t('noResults')}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Session list */}
         <div
@@ -2363,6 +2443,23 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleCreateSessionInProject(group.id);
+                          }}
+                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
+                          className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                            isSelectedProject ? 'opacity-100' : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
+                          }`}
+                          title={t('createSessionInProject', { project: group.label })}
+                          aria-label={t('createSessionInProject', { project: group.label })}
+                        >
+                          {creating && isSelectedProject
+                            ? <Loader2 className="h-3 w-3 animate-spin" />
+                            : <Plus className="h-3 w-3" />}
+                        </button>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
@@ -2509,6 +2606,21 @@ export default function SessionPage() {
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleCreateSession(TASK_SESSION_GROUP_ID);
+                      }}
+                      disabled={creating}
+                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] opacity-0 transition-all hover:bg-black/[0.04] hover:text-[#474b51] group-hover/tasks-section:opacity-100 group-focus-within/tasks-section:opacity-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      title={t('createTaskSession')}
+                      aria-label={t('createTaskSession')}
+                    >
+                      {creating && taskGroupSelected
+                        ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : <Plus className="h-3 w-3" />}
                     </button>
                   </div>
                   {!taskGroupCollapsed && (

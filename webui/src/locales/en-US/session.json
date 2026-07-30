@@ -490,6 +490,11 @@
     "copyPathFailed": "Failed to copy project path",
     "saveFailed": "Failed to save project"
   },
+  "openTaskSearch": "Search tasks",
+  "closeTaskSearch": "Close task search",
+  "taskSearchDialog": "Task search",
+  "recentTasks": "Recent tasks",
+  "searchResults": "Search results",
   "filterConversations": "Search tasks",
   "noResults": "No matching tasks",
   "showMore": "Show {{count}} more",
