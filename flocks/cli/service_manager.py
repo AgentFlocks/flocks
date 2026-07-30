@@ -31,6 +31,7 @@ from flocks.cli.service_control import (
     read_logs,
     read_supervisor_status,
     request_restart,
+    request_restart_backend,
     request_stop,
     stream_logs,
     supervisor_is_running,
@@ -60,6 +61,7 @@ WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
     "src\\win\\async.c",
     "src/win/async.c",
 )
+WEBUI_BUILD_IGNORED_DIRS = frozenset({"dist", "node_modules", ".vite"})
 WATCHDOG_PID_FILENAME = "watchdog.pid"
 SUPERVISOR_START_TIMEOUT_SECONDS = 180.0
 
@@ -1111,16 +1113,47 @@ def _build_webui_dist(root: Path, config: ServiceConfig, console) -> None:
             raise ServiceError("WebUI 构建失败。")
 
 
+def _webui_needs_build(webui_dir: Path) -> bool:
+    """Return whether WebUI sources are newer than the production bundle."""
+    index_path = webui_dir / "dist" / "index.html"
+    if not index_path.is_file():
+        return True
+
+    built_at = index_path.stat().st_mtime_ns
+    if webui_dir.stat().st_mtime_ns > built_at:
+        return True
+
+    for current, directories, files in os.walk(webui_dir):
+        directories[:] = [name for name in directories if name not in WEBUI_BUILD_IGNORED_DIRS]
+        current_dir = Path(current)
+        try:
+            if any((current_dir / name).stat().st_mtime_ns > built_at for name in directories + files):
+                return True
+        except FileNotFoundError:
+            # A concurrent source edit is itself sufficient reason to rebuild.
+            return True
+    return False
+
+
 def _ensure_webui_dist(root: Path, config: ServiceConfig, console) -> None:
     """Ensure the FastAPI process can serve the production WebUI bundle."""
     from flocks.server.static_webui import WebUIDistMissingError, ensure_webui_dist_dir
 
+    webui_dir = root / "webui"
     try:
-        ensure_webui_dist_dir()
-        return
+        dist_dir = ensure_webui_dist_dir()
     except WebUIDistMissingError:
         if config.skip_frontend_build:
             raise
+    else:
+        source_dist_dir = webui_dir / "dist"
+        if (
+            config.skip_frontend_build
+            or not (webui_dir / "package.json").is_file()
+            or dist_dir != source_dist_dir.resolve()
+            or not _webui_needs_build(webui_dir)
+        ):
+            return
 
     _build_webui_dist(root, config, console)
     ensure_webui_dist_dir()
@@ -1565,6 +1598,21 @@ def restart_all(config: ServiceConfig, console) -> None:
     with service_lock(paths):
         _stop_all_unlocked(console, paths=paths)
         _start_all_unlocked(config, console, paths=paths)
+
+
+def restart_server(console) -> None:
+    """Restart only the backend through the running supervisor daemon."""
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        if not supervisor_is_running(paths):
+            raise ServiceError("Flocks daemon 未运行；请执行 `flocks restart` 进行全量重启。")
+        try:
+            status = request_restart_backend(paths=paths)
+        except Exception as error:
+            raise ServiceError(f"Flocks server 重启请求失败：{error}") from error
+        _print_status_payload(status.raw, console, include_daemon_step=False)
+        if not _startup_payload_is_ready(status.raw):
+            raise ServiceError(_startup_failure_message(status.raw))
 
 
 def _print_static_port_migration_hint(config: ServiceConfig, console) -> None:

@@ -32,6 +32,29 @@ class SessionRevert:
     
     Provides simplified API for route handlers.
     """
+
+    @classmethod
+    async def ensure_replayable(cls, session: SessionInfo, message_id: str) -> None:
+        """Reject replay across the latest project-move boundary."""
+
+        metadata = session.metadata if isinstance(session.metadata, dict) else {}
+        move_metadata = metadata.get("projectMove")
+        if not isinstance(move_metadata, dict):
+            return
+        boundary_message_id = move_metadata.get("boundaryMessageID")
+        if not boundary_message_id:
+            return
+
+        messages = await Message.list(session.id, include_archived=True)
+        message_ids = [message.id for message in messages]
+        if boundary_message_id not in message_ids or message_id not in message_ids:
+            raise ValueError(
+                "移动项目前的历史消息不能重发或重新生成"
+            )
+        if message_ids.index(message_id) <= message_ids.index(boundary_message_id):
+            raise ValueError(
+                "移动项目前的历史消息不能重发或重新生成"
+            )
     
     @classmethod
     async def revert(
@@ -54,18 +77,36 @@ class SessionRevert:
         session = await Session.get_by_id(session_id)
         if not session:
             raise ValueError(f"Session {session_id} not found")
-        
-        input_obj = RevertInput(
-            session_id=session_id,
-            message_id=message_id,
-            part_id=part_id,
-        )
-        
-        return await SessionRevertManager.revert(
-            project_id=session.project_id,
-            input=input_obj,
-            worktree=session.directory,
-        )
+
+        async with Session.active_operation(session_id) as active_session:
+            if part_id is not None:
+                parts = await Message.parts(message_id, session_id)
+                part_belongs_to_message = any(
+                    (
+                        part.get("id")
+                        if isinstance(part, dict)
+                        else getattr(part, "id", None)
+                    ) == part_id
+                    for part in parts
+                )
+                if not part_belongs_to_message:
+                    raise ValueError(
+                        f"Part {part_id} does not belong to message {message_id}"
+                    )
+
+            await cls.ensure_replayable(active_session, message_id)
+
+            input_obj = RevertInput(
+                session_id=session_id,
+                message_id=message_id,
+                part_id=part_id,
+            )
+
+            return await SessionRevertManager.revert(
+                project_id=active_session.project_id,
+                input=input_obj,
+                worktree=active_session.directory,
+            )
     
     @classmethod
     async def unrevert(cls, session_id: str) -> SessionInfo:
@@ -164,9 +205,15 @@ class SessionRevertManager:
                     continue
                 
                 # Check if this is the revert point
-                if (msg.id == input.message_id and not input.part_id) or \
-                   (hasattr(part, "id") and part.id == input.part_id) or \
-                   (isinstance(part, dict) and part.get("id") == input.part_id):
+                is_requested_part = (
+                    input.part_id is not None
+                    and msg.id == input.message_id
+                    and (
+                        (hasattr(part, "id") and part.id == input.part_id)
+                        or (isinstance(part, dict) and part.get("id") == input.part_id)
+                    )
+                )
+                if (msg.id == input.message_id and not input.part_id) or is_requested_part:
                     # Check if remaining parts have useful content
                     has_useful = any(
                         (isinstance(p, dict) and p.get("type") in ["text", "tool"]) or

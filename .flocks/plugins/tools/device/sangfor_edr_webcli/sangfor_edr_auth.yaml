@@ -1,15 +1,14 @@
 name: sangfor_edr_auth
 description: >
-  Manage Sangfor EDR browser authentication state. Use status_auth_state or
-  validate_auth_state before opening pages; use ensure_auth_state to reuse a
-  valid saved auth-state or automatically refresh full browser state through
-  browser daemon / CDP when credentials are configured. Browser actions start
-  or recover the daemon automatically and return structured recovery guidance.
+  Manage a matched Sangfor EDR cookie/login_token pair. ensure_auth_state and
+  refresh_auth_state use HTTP login by default. browser_login is used only when
+  the user explicitly selects browser/CDP automation. The implementation is in
+  sangfor_edr_http_login.py; every action probes the saved authentication first
+  and skips login while it remains valid.
 description_cn: >
-  管理深信服 EDR 浏览器登录态。先用 status_auth_state 或 validate_auth_state
-  检查已保存 state；当 state 缺失或失效且已配置账密时，ensure_auth_state
-  通过 browser daemon / CDP 驱动真实登录页自动登录并重新保存完整浏览器 state。
-  需要浏览器的 action 会自动启动或恢复 daemon，失败时返回结构化恢复指引。
+  管理深信服 EDR 成套的 Cookie 与 login_token。ensure_auth_state 和
+  refresh_auth_state 默认使用 HTTP 登录；仅用户明确选择 browser_login 时
+  使用 browser/CDP 自动化。每次操作先探测现有认证，有效时跳过登录。
 category: custom
 enabled: true
 requires_confirmation: false
@@ -19,13 +18,14 @@ inputSchema:
   properties:
     action:
       type: string
-      enum: [status_auth_state, ensure_auth_state, validate_auth_state, refresh_auth_state, complete_manual_login]
+      enum: [status_auth_state, ensure_auth_state, validate_auth_state, refresh_auth_state, http_login, browser_login, complete_manual_login]
       default: ensure_auth_state
       description: >
         Authentication action. status_auth_state returns non-sensitive saved
         state/credential availability; ensure_auth_state reuses existing state
         when it appears valid and refreshes when needed; validate_auth_state
-        checks only; refresh_auth_state always performs CDP-assisted browser login;
+        checks only; refresh_auth_state uses HTTP login without browser fallback;
+        http_login and browser_login explicitly select one login method;
         complete_manual_login validates a user-completed login and saves its browser state.
     captcha_code:
       type: string
@@ -39,6 +39,16 @@ inputSchema:
     password:
       type: string
       description: Optional password to save as a secret before running auth.
+    auto_ocr_code:
+      type: boolean
+      default: true
+      description: Whether to recognize the HTTP/browser captcha with OCR when captcha_code is omitted.
+    max_captcha_retry:
+      type: integer
+      minimum: 1
+      maximum: 10
+      default: 5
+      description: Maximum number of HTTP/browser login attempts when captcha validation fails.
     auth_state_path:
       type: string
       description: Optional auth-state path. Defaults to ~/.flocks/browser/sangfor-edr/auth-state.json.
@@ -61,10 +71,6 @@ inputSchema:
       type: string
       default: "#button,input[name='button'],.login-opr-btn,#login,#submit,.login-btn,.btn-login,button[type='submit'],input[type='submit']"
       description: Optional comma-separated selectors for the EDR login submit control.
-    force_refresh:
-      type: boolean
-      default: false
-      description: Force CDP-assisted browser login even if auth-state exists.
   required: [action]
 handler:
   type: script

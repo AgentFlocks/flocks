@@ -29,6 +29,13 @@
   "shareEnabled": "会话已共享给本地账号（只读）",
   "shareDisabled": "已取消会话共享",
   "shareUpdateFailed": "更新共享状态失败",
+  "moveToProjectAction": "移动到项目",
+  "moveToProjectTitle": "选择目标项目",
+  "moveToProjectBack": "返回任务操作",
+  "moveToProjectEmpty": "暂无可用项目",
+  "moveToProjectRunning": "任务运行时无法移动",
+  "moveToProjectSuccess": "已移动到项目“{{project}}”",
+  "moveToProjectFailed": "移动任务失败",
   "moreActions": "更多操作",
   "selectMode": "批量选择",
   "cancelSelect": "取消",
@@ -107,7 +114,7 @@
   },
   "agentPicker": {
     "title": "选择对话 Agent",
-    "hint": "新会话首条默认由 Rex 处理；输入 @Agent 可路由单条消息",
+    "hint": "Rex 为默认智能体；选择后以子智能体标签路由当前消息",
     "filter": {
       "all": "全部",
       "builtin": "内置",
@@ -290,6 +297,24 @@
       "errorGeneric": "上传失败，请重试",
       "imageNotSupported": "当前模型不支持图片分析，请在模型配置中选择支持视觉的模型",
       "imageNotSupportedBanner": "当前模型不支持图片分析"
+    },
+    "addMenu": {
+      "title": "添加",
+      "files": "文件和图片",
+      "agent": "智能体",
+      "workflows": "工作流",
+      "skills": "技能",
+      "selectWorkflow": "选择工作流",
+      "selectSkill": "选择技能",
+      "noWorkflows": "暂无可用工作流",
+      "noSkills": "暂无可用技能"
+    },
+    "references": {
+      "selected": "已选择的资源",
+      "subagent": "子智能体",
+      "skill": "技能",
+      "workflow": "工作流",
+      "remove": "移除 {{type}} {{name}}"
     },
     "tool": {
       "pending": "等待中",

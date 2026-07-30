@@ -106,24 +106,19 @@ const EMPTY_STATS: Required<Stats> = {
   fieldStats: EMPTY_FIELD_STATS,
 };
 
-const LABELS: Record<string, string> = {
+const PHASE_LABELS: Record<string, string> = {
   exploit: '漏洞利用',
   recon: '侦察探测',
   post_exploit: '后渗透',
   control: '控制通信',
-  tunneling: '隧道通信',
-  file: '文件风险',
-  c2: '控制通信',
-  trojan: '木马',
-  ransom: '勒索',
-  shell: '命令执行',
-  botnet: '僵尸网络',
-  success: '攻击成功',
-  failed: '攻击失败',
-  unknown: '待确认',
+  unknown: '未知阶段',
+};
+
+const DIRECTION_LABELS: Record<string, string> = {
   in: '入站',
   out: '出站',
   lateral: '横向',
+  unknown: '未知方向',
 };
 
 const TIME_RANGE_OPTIONS: ChoiceOption<TimeRangeKey>[] = [
@@ -271,8 +266,8 @@ function refreshLabel(value: RefreshKey) {
   return REFRESH_OPTIONS.find((option) => option.value === value)?.label || '关闭';
 }
 
-function labelOf(item: CounterItem) {
-  return LABELS[item.key || item.label] || LABELS[item.label] || item.label;
+function labelOf(item: CounterItem, labels?: Record<string, string>) {
+  return labels?.[item.key || item.label] || labels?.[item.label] || item.label;
 }
 
 function truncate(value: string, max = 34) {
@@ -415,8 +410,8 @@ export default function SocOverviewPage() {
       <main className="panel-grid">
         <Panel title="TOP 威胁名称"><RankList rows={stats.topThreats.slice(0, 8)} /></Panel>
         <Panel title="威胁类型分布"><TileList rows={stats.fieldStats.threatTypes} /></Panel>
-        <Panel title="攻击阶段"><ProgressList rows={stats.fieldStats.threatPhases} /></Panel>
-        <Panel title="流量方向与响应"><SplitRanks leftTitle="流量方向" leftRows={stats.fieldStats.directions} rightTitle="响应码" rightRows={stats.fieldStats.statusCodes} /></Panel>
+        <Panel title="攻击阶段"><ProgressList rows={stats.fieldStats.threatPhases} labels={PHASE_LABELS} /></Panel>
+        <Panel title="流量方向与响应"><SplitRanks leftTitle="流量方向" leftRows={stats.fieldStats.directions} leftLabels={DIRECTION_LABELS} rightTitle="响应码" rightRows={stats.fieldStats.statusCodes} /></Panel>
         <Panel title="高频 HTTP 主机"><RankList rows={stats.fieldStats.topHosts} mono /></Panel>
         <Panel title="高频地址与规则"><SplitRanks leftTitle="源地址" leftRows={stats.fieldStats.topSourceIps} rightTitle="规则 ID" rightRows={stats.fieldStats.topRules} mono /></Panel>
       </main>
@@ -563,13 +558,13 @@ function Panel({ title, children }: { title: string; children: React.ReactNode }
   );
 }
 
-function RankList({ rows, mono = false }: { rows: CounterItem[]; mono?: boolean }) {
+function RankList({ rows, mono = false, labels }: { rows: CounterItem[]; mono?: boolean; labels?: Record<string, string> }) {
   return (
     <div className="rank-list">
       {rows.length ? rows.map((item, index) => (
         <div key={`${item.label}-${index}`}>
           <span>{String(index + 1).padStart(2, '0')}</span>
-          <b className={mono ? 'mono' : ''} title={item.label}>{truncate(labelOf(item), mono ? 44 : 30)}</b>
+          <b className={mono ? 'mono' : ''} title={item.label}>{truncate(labelOf(item, labels), mono ? 44 : 30)}</b>
           <em>{formatNumber(item.value)}</em>
         </div>
       )) : <div className="empty">暂无数据</div>}
@@ -582,7 +577,7 @@ function TileList({ rows }: { rows: CounterItem[] }) {
     <div className="tile-list">
       {rows.slice(0, 9).map((item) => (
         <div key={item.label}>
-          <b>{labelOf(item)}</b>
+          <b>{item.label}</b>
           <span>{formatNumber(item.value)}</span>
         </div>
       ))}
@@ -591,13 +586,13 @@ function TileList({ rows }: { rows: CounterItem[] }) {
   );
 }
 
-function ProgressList({ rows }: { rows: CounterItem[] }) {
+function ProgressList({ rows, labels }: { rows: CounterItem[]; labels?: Record<string, string> }) {
   const total = Math.max(1, rows.reduce((value, item) => value + item.value, 0));
   return (
     <div className="progress-list">
       {rows.map((item) => (
         <div key={item.label}>
-          <span>{labelOf(item)}</span>
+          <span>{labelOf(item, labels)}</span>
           <i><b style={{ width: `${Math.max(4, (item.value / total) * 100)}%` }} /></i>
           <em>{formatNumber(item.value)}</em>
         </div>
@@ -607,10 +602,10 @@ function ProgressList({ rows }: { rows: CounterItem[] }) {
   );
 }
 
-function SplitRanks({ leftTitle, leftRows, rightTitle, rightRows, mono = false }: { leftTitle: string; leftRows: CounterItem[]; rightTitle: string; rightRows: CounterItem[]; mono?: boolean }) {
+function SplitRanks({ leftTitle, leftRows, leftLabels, rightTitle, rightRows, mono = false }: { leftTitle: string; leftRows: CounterItem[]; leftLabels?: Record<string, string>; rightTitle: string; rightRows: CounterItem[]; mono?: boolean }) {
   return (
     <div className="split-ranks">
-      <div><h3>{leftTitle}</h3><RankList rows={leftRows.slice(0, 4)} mono={mono} /></div>
+      <div><h3>{leftTitle}</h3><RankList rows={leftRows.slice(0, 4)} mono={mono} labels={leftLabels} /></div>
       <div><h3>{rightTitle}</h3><RankList rows={rightRows.slice(0, 4)} mono={mono} /></div>
     </div>
   );

@@ -174,6 +174,14 @@ export const sessionApi = {
   },
 
   /**
+   * 将任务及其子任务移动到指定项目
+   */
+  moveToProject: async (sessionId: string, projectID: string): Promise<SessionResponse> => {
+    const response = await client.patch(`/api/session/${sessionId}/project`, { projectID });
+    return response.data;
+  },
+
+  /**
    * 本地共享会话（所有本地账号可见，只读）
    */
   shareLocal: async (sessionId: string) => {

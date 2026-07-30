@@ -172,7 +172,7 @@ def _build_ws_client(
         native_client_cls = ws_module.Client
 
         class _Dispatcher:
-            def do_without_validation(self, payload: bytes) -> None:
+            def _do_without_validation(self, payload: bytes) -> None:
                 try:
                     data = json.loads(payload.decode("utf-8"))
                 except Exception as e:
@@ -180,6 +180,9 @@ def _build_ws_client(
                     return None
                 event_handler(data)
                 return None
+
+            def do_without_validation(self, payload: bytes) -> None:
+                return self._do_without_validation(payload)
 
         class _CompatWSClient:
             def __init__(self) -> None:
