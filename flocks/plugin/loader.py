@@ -460,40 +460,18 @@ class PluginLoader:
         - ``fn()``.
 
         Plugins opt into host-visible startup failure with the generic
-        ``flocks.plugins.critical`` group. Critical failures block effects only
-        when the optional ``flockspro`` component is installed; pure OSS
-        deployments always isolate entry-point failures.
+        ``flocks.plugins.critical`` group. Core does not interpret a
+        plugin's product, license, or installation state.
         """
         result = result or PluginLoadResult()
-        try:
-            pro_installed = importlib.util.find_spec("flockspro") is not None
-        except Exception as exc:
-            # If the installation state cannot be determined, preserve the OSS
-            # boundary and do not let plugin discovery block Core effects.
-            pro_installed = False
-            log.warning(
-                "plugin.flockspro.installation_check_failed",
-                {"error": str(exc)},
-            )
 
         def record_critical_failure(
             name: str,
             event: str,
             context: Dict[str, Any],
         ) -> None:
-            if pro_installed:
-                result.critical_entrypoint_failures.append(name)
-                log.error(event, context)
-                return
-
-            log.warning(
-                "plugin.entrypoint.critical_failure_isolated",
-                {
-                    **context,
-                    "event": event,
-                    "reason": "flockspro_not_installed",
-                },
-            )
+            result.critical_entrypoint_failures.append(name)
+            log.error(event, context)
 
         try:
             entry_points = importlib.metadata.entry_points()

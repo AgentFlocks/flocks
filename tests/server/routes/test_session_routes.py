@@ -150,7 +150,9 @@ class TestSessionCRUD:
 
         profile = await get_session_execution_profile(data["id"])
         assert profile is not None
-        assert profile["permission_mode"] == "require-confirm"
+        assert profile["entry"] == "interactive"
+        assert profile["source"] == "webui.session.create"
+        assert "permission_mode" not in profile
 
     @pytest.mark.asyncio
     async def test_create_session_emits_canonical_created_event(
@@ -167,14 +169,27 @@ class TestSessionCRUD:
         response = await client.post("/api/session", json={})
 
         assert response.status_code == status.HTTP_200_OK
-        payload = emit_event.await_args.args[0]
-        info = payload["properties"]["info"]
-        assert payload["type"] == "session.created"
+        created_payload, profile_payload = [
+            call.args[0] for call in emit_event.await_args_list
+        ]
+        info = created_payload["properties"]["info"]
+        assert created_payload["type"] == "session.created"
         assert info == {
             "id": response.json()["id"],
             "title": response.json()["title"],
             "parentID": None,
             "projectID": response.json()["projectID"],
+        }
+        assert profile_payload == {
+            "type": "session.execution_profile.updated",
+            "properties": {
+                "session_id": response.json()["id"],
+                "entry": "interactive",
+                "session_execution_profile": {
+                    "entry": "interactive",
+                    "source": "webui.session.create",
+                },
+            },
         }
 
     @pytest.mark.asyncio

@@ -12,7 +12,8 @@ def legacy_tool_permission_prompt_required() -> bool:
     """Return whether ``ctx.ask`` should block on ``PermissionNext``.
 
     OSS tool permissions (write/read/edit/external_directory) are not
-    interactively gated.  Pro command confirmation uses ``PolicyGateHook``.
+    interactively gated. Optional execution-policy extensions own command
+    confirmation.
     """
     return False
 

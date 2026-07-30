@@ -653,12 +653,14 @@ class SessionBindingService:
                 source="channel.binding.create",
             )
             profile = await get_session_execution_profile(session.id)
-            await HookPipeline.run_action_before(
+            await HookPipeline.run_event(
                 {
-                    "operation": "session.mode.initialize",
-                    "session_id": session.id,
-                    "entry": "channel",
-                    "session_execution_profile": profile or {},
+                    "type": "session.execution_profile.updated",
+                    "properties": {
+                        "session_id": session.id,
+                        "entry": "channel",
+                        "session_execution_profile": profile or {},
+                    },
                 }
             )
         except Exception:

@@ -962,12 +962,14 @@ class InboundDispatcher:
                 source="channel.command.new_session",
             )
             profile = await get_session_execution_profile(new_session.id)
-            await HookPipeline.run_action_before(
+            await HookPipeline.run_event(
                 {
-                    "operation": "session.mode.initialize",
-                    "session_id": new_session.id,
-                    "entry": "channel",
-                    "session_execution_profile": profile or {},
+                    "type": "session.execution_profile.updated",
+                    "properties": {
+                        "session_id": new_session.id,
+                        "entry": "channel",
+                        "session_execution_profile": profile or {},
+                    },
                 }
             )
         except Exception:

@@ -17,7 +17,7 @@ class TestDelegateTaskTolerance:
         assert "prompt" in schema.required
         assert "load_skills" not in schema.required
         assert "description" not in schema.required
-        assert "permission_mode" in schema.properties
+        assert "permission_mode" not in schema.properties
         assert "run_in_background" not in schema.properties
         # Legacy batch shape is gone: tasks=[...] is no longer a public option.
         assert "tasks" not in schema.properties
@@ -79,55 +79,6 @@ class TestDelegateTaskTolerance:
         assert any(
             call.kwargs.get("patch", {}).get("entry") == "delegate"
             and "permission_mode" not in call.kwargs.get("patch", {})
-            for call in update_profile.await_args_list
-        )
-
-    @pytest.mark.asyncio
-    async def test_delegate_task_allows_explicit_child_permission_mode(self):
-        from flocks.tool.agent.delegate_task import delegate_task_tool
-
-        parent_session = SimpleNamespace(
-            id="test-session",
-            project_id="proj",
-            directory="/tmp/project",
-            provider=None,
-            model=None,
-            agent="rex",
-            metadata={},
-        )
-        child_session = SimpleNamespace(id="ses-child")
-        with (
-            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
-            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
-            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
-            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent_session)),
-            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child_session)),
-            patch(
-                "flocks.session.execution_profile.get_session_execution_profile",
-                AsyncMock(return_value={"permission_mode": "auto-allow-all", "entry": "interactive"}),
-            ),
-            patch(
-                "flocks.session.execution_profile.upsert_session_execution_profile",
-                AsyncMock(),
-            ) as update_profile,
-            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
-            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace(
-                action="stop",
-                error=None,
-                last_message=None,
-            ))),
-        ):
-            result = await delegate_task_tool(
-                _make_ctx(),
-                subagent_type="asset-survey",
-                prompt="Inspect the repository",
-                permission_mode="require-confirm",
-            )
-
-        assert result.success is True
-        assert any(
-            call.kwargs.get("patch", {}).get("requested_permission_mode")
-            == "require-confirm"
             for call in update_profile.await_args_list
         )
 
