@@ -578,10 +578,18 @@ describe('SessionPage session actions menu', () => {
     const tasksSection = tasksHeading.closest('section');
     const projectsSection = projectsHeading.closest('section');
     const newSessionButton = screen.getByRole('button', { name: 'newSession' });
-    const searchInput = screen.getByPlaceholderText('filterConversations');
+    const searchButton = screen.getByRole('button', { name: 'openTaskSearch' });
+    expect(screen.queryByPlaceholderText('filterConversations')).not.toBeInTheDocument();
+    await user.click(searchButton);
+    const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
+    const searchInput = within(searchDialog).getByPlaceholderText('filterConversations');
+    expect(searchDialog).toHaveClass('fixed', 'inset-0', 'justify-center');
+    expect(searchDialog.firstElementChild).toHaveClass('max-w-[620px]', 'rounded-2xl');
     expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
-    expect(searchInput.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
-    expect(searchInput).toHaveClass('text-sm', 'font-medium');
+    expect(searchButton.closest('div')).toContainElement(screen.getByText('managementTitle'));
+    expect(searchInput).toHaveFocus();
+    expect(searchInput).toHaveClass('text-[15px]', 'font-medium');
+    await user.click(within(searchDialog).getByRole('button', { name: 'closeTaskSearch' }));
     expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(tasksHeading.nextElementSibling).toHaveTextContent('(1)');
@@ -603,13 +611,68 @@ describe('SessionPage session actions menu', () => {
     expect(tasksToggle).toContainElement(tasksHeading);
     expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'createTaskSession' })).not.toBeInTheDocument();
+    const createTaskButton = screen.getByRole('button', { name: 'createTaskSession' });
+    expect(createTaskButton).toHaveClass(
+      'opacity-0',
+      'group-hover/tasks-section:opacity-100',
+      'group-focus-within/tasks-section:opacity-100',
+    );
 
     await user.click(tasksToggle);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
 
     await user.click(tasksToggle);
     expect(screen.getByText('Original Session')).toBeInTheDocument();
+  });
+
+  it('shows the five most recently updated sessions when search opens', async () => {
+    const user = userEvent.setup();
+    const recentSessions = Array.from({ length: 6 }, (_, index) => ({
+      ...session,
+      id: `recent-${index + 1}`,
+      slug: `recent-${index + 1}`,
+      title: `Recent ${index + 1}`,
+      time: {
+        ...session.time,
+        updated: session.time.updated + index,
+      },
+    }));
+    useSessions.mockReturnValue({
+      sessions: recentSessions,
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+    await user.click(screen.getByRole('button', { name: 'openTaskSearch' }));
+
+    const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
+    expect(within(searchDialog).getAllByRole('button')).toHaveLength(6);
+    expect(within(searchDialog).queryByText('Recent 1')).not.toBeInTheDocument();
+    expect(within(searchDialog).getByText('Recent 6')).toBeInTheDocument();
+    expect(within(searchDialog).getByText('recentTasks')).toBeInTheDocument();
+
+    await user.click(within(searchDialog).getByText('Recent 6'));
+    expect(screen.queryByRole('dialog', { name: 'taskSearchDialog' })).not.toBeInTheDocument();
+  });
+
+  it('creates a new session from the tasks row', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await screen.findByText('tasksSection');
+    await user.click(screen.getByRole('button', { name: 'createTaskSession' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+      });
+    });
   });
 
   it('keeps the workbench canvas, sidebar, selected row, and dark palette classes stable', async () => {
@@ -1202,6 +1265,7 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
+    await user.click(screen.getByRole('button', { name: 'openTaskSearch' }));
     await user.type(screen.getByPlaceholderText('filterConversations'), 'nothing matches');
     await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
     const nameInput = screen.getByLabelText('projectDialog.nameLabel');
@@ -1319,7 +1383,7 @@ describe('SessionPage session actions menu', () => {
 
     const projectRow = (await screen.findByText('Shared Labs')).closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
+    expect(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' })).toBeDisabled();
     await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
     expect(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.copyPathAction' })).toBeInTheDocument();
     expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'shareAction' })).not.toBeInTheDocument();
@@ -1341,6 +1405,7 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
     await screen.findByText('tasksSection');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'openTaskSearch' }));
     const searchInput = screen.getByPlaceholderText('filterConversations');
     fireEvent.change(searchInput, { target: { value: 'a' } });
     fireEvent.change(searchInput, { target: { value: 'ab' } });
@@ -1412,10 +1477,19 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('does not show a create-session button on a project row', async () => {
+  it('creates a session from a specific project row', async () => {
+    const user = userEvent.setup();
     const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
     client.get.mockResolvedValue({
       data: [currentProject, { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' }],
+    });
+    client.post.mockResolvedValue({
+      data: {
+        ...secondSession,
+        id: 'session-labs',
+        projectID: 'prj_project2',
+        title: 'New Session',
+      },
     });
 
     renderSessionPage();
@@ -1423,7 +1497,23 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
+    const projectActionsButton = within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' });
+    const createProjectSessionButton = within(projectRow as HTMLElement).getByRole('button', {
+      name: 'createSessionInProject',
+    });
+    expect(projectActionsButton.nextElementSibling).toBe(createProjectSessionButton);
+    await user.click(createProjectSessionButton);
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+        projectID: 'prj_project2',
+      });
+    });
+    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'session-labs',
+      projectID: 'prj_project2',
+    }));
   });
 
   it('opens the actions menu for a session item', async () => {
