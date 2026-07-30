@@ -24,6 +24,7 @@ from flocks.workflow.execution_store import (
     DEFAULT_COMPACT_SIZE_THRESHOLD,
     DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
     DEFAULT_LARGE_LIST_KEYS,
+    DEFAULT_MAX_INLINE_COLLECTION_BYTES,
     _trim_execution_history,
     compact_history_for_storage,
     compact_execution_summary,
@@ -74,6 +75,24 @@ def test_compact_outputs_keeps_small_lists_verbatim() -> None:
 
     assert compacted["enriched_alerts"] == small
     assert "_enriched_alerts_count" not in compacted
+
+
+def test_compact_outputs_strips_small_count_large_alert_lists() -> None:
+    large_record = {"body": "x" * DEFAULT_MAX_INLINE_COLLECTION_BYTES}
+    outputs = {"enriched_alerts_with_triage": [large_record]}
+
+    compacted = compact_outputs_for_storage(outputs)
+
+    assert compacted == {"_enriched_alerts_with_triage_count": 1}
+
+
+def test_compact_outputs_summarizes_small_count_large_unknown_sequences() -> None:
+    outputs = {"unknown_payload": [{"body": "x" * DEFAULT_MAX_INLINE_COLLECTION_BYTES}]}
+
+    compacted = compact_outputs_for_storage(outputs)
+
+    assert compacted["unknown_payload"]["_type"] == "list"
+    assert compacted["unknown_payload"]["count"] == 1
 
 
 def test_compact_outputs_summarizes_unknown_large_sequences() -> None:
@@ -351,6 +370,7 @@ def test_default_large_list_keys_cover_stream_alert_dedup_outputs() -> None:
         "raw_alerts",
         "normalized_alerts",
         "filtered_alerts",
+        "enriched_alerts_with_triage",
     }
     assert expected <= DEFAULT_LARGE_LIST_KEYS
 

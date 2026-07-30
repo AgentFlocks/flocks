@@ -53,10 +53,7 @@ def _summarize_for_observability(value: Any, *, depth: int = 0) -> Any:
             return {"_type": "string", "chars": len(value), "preview": value[:200]}
         return value
     if isinstance(value, dict):
-        return {
-            key: _summarize_for_observability(item, depth=depth + 1)
-            for key, item in islice(value.items(), 50)
-        }
+        return {key: _summarize_for_observability(item, depth=depth + 1) for key, item in islice(value.items(), 50)}
     if isinstance(value, (list, tuple, set)):
         if isinstance(value, (list, tuple)):
             preview_items = value[:3]
@@ -332,6 +329,14 @@ class WorkflowEngine:
                 # ── Phase 2: execute ready items ──────────────────────────
                 use_parallel = self.max_parallel_workers > 1 and len(ready) > 1
                 exec_results: List[_ExecOutcome] = []
+                _outs: Optional[Dict[str, Any]] = None
+                _so = ""
+                _sfut = None
+                _exec_args = None
+                _fut_map = None
+                _fut = None
+                _f2 = None
+                _pool = None
 
                 # Call on_step_start hooks (always from main thread)
                 step_tokens: Dict[int, Any] = {}
@@ -679,7 +684,7 @@ class WorkflowEngine:
 
                     # Enqueue downstream (skip for failed node when stop_on_error)
                     if _stop_exc is None:
-                        state.record_vertex_output(_nid, _eo.outputs)
+                        state.record_vertex_output_keys(_nid, _eo.outputs)
                         for edge, edge_inputs in edge_resolver.resolve(
                             node=_nd,
                             node_inputs=_inp,
@@ -689,6 +694,26 @@ class WorkflowEngine:
                             q.append((edge.to, edge_inputs, _nid))
 
                 state.steps += len(exec_results)
+                # Break references held by this iteration before the next
+                # downstream node starts. Explicit edge mappings only protect
+                # the queued payload; stale outcomes/futures would otherwise
+                # keep excluded values alive for another execution window.
+                ready.clear()
+                exec_results.clear()
+                step_tokens.clear()
+                if _exec_args is not None:
+                    _exec_args.clear()
+                if _fut_map is not None:
+                    _fut_map.clear()
+                _eo = None
+                _inp = {}
+                _outs = None
+                _so = ""
+                _sfut = None
+                _fut = None
+                _f2 = None
+                _pool = None
+                step_res = None
                 if _stop_exc is not None:
                     raise _stop_exc
                 if cancel is not None and cancel():
@@ -993,7 +1018,9 @@ class WorkflowEngine:
         scopes: List[Dict[str, Any]],
         path: str,
     ) -> tuple[bool, Any]:
-        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path_from_scopes(scopes, path)
+        return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path_from_scopes(
+            scopes, path
+        )
 
     def _try_get_by_path(self, data: Any, path: str) -> tuple[bool, Any]:
         return EdgeResolver(dataflow_mode=self.dataflow_mode, trace=self.trace).try_get_by_path(data, path)

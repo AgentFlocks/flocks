@@ -30,6 +30,8 @@
 receive_alert -> normalize -> filter_logs -> dedup_and_write
 ```
 
+节点边使用显式字段映射并启用严格映射模式。每一跳只传递当前阶段的告警列表、统计和后续必需配置，不透传完整上游 payload。
+
 | 顺序 | 节点 | 作用 |
 | --- | --- | --- |
 | 1 | `receive_alert` | 接收输入，判断输入模式和来源类型。 |
