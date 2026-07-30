@@ -284,7 +284,8 @@ def restart(
     webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port"),
 ):
     """
-    Restart Flocks service.
+    Restart Flocks service. Agents must use `flocks restart --server-only`;
+    bare restart stops the supervisor and terminates the running agent.
     """
     try:
         if server_only:
