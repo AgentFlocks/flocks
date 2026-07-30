@@ -9,3 +9,8 @@ routes:
     handler: handlers.get_activity
     timeoutMs: 5000
     description: Incremental alert denoise and triage activity
+  - method: GET
+    path: /task-center
+    handler: handlers.get_task_center
+    timeoutMs: 5000
+    description: Task center scheduler and workflow execution statistics
