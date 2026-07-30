@@ -84,6 +84,10 @@ EXPECTED_MAPPING_KEYS = {
             "persist_triage_output",
             "soc_db_path",
             "jsonl_output_dir",
+            "cursor_revision",
+            "cursor_invalidated",
+            "_batch_lease_fd",
+            "batch_lease_token",
         },
         ("concurrent_triage", "commit_cursor"): {
             "cursor_enabled",
@@ -105,6 +109,10 @@ EXPECTED_MAPPING_KEYS = {
             "soc_db_path",
             "output_paths",
             "output_dir",
+            "cursor_revision",
+            "cursor_invalidated",
+            "_batch_lease_fd",
+            "batch_lease_token",
         },
         ("commit_cursor", "summarize"): {
             "cursor_enabled",
@@ -125,6 +133,9 @@ EXPECTED_MAPPING_KEYS = {
             "soc_db_path",
             "output_paths",
             "output_dir",
+            "cursor_commit_error",
+            "cursor_revision",
+            "cursor_invalidated",
         },
     },
 }
@@ -293,3 +304,55 @@ def test_triage_execution_drops_loader_payload_before_commit_and_summary(
     assert steps["commit_cursor"].inputs["_triage_persistence_succeeded"] is True
     assert "pending_cursor" not in steps["summarize"].inputs
     assert "enriched_alerts_with_triage" in steps["summarize"].inputs
+
+
+def test_production_triage_lease_survives_node_boundaries_and_is_released(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    flocks_root = tmp_path / "flocks-root"
+    _use_flocks_root(monkeypatch, flocks_root)
+
+    class FakeWorkspaceManager:
+        @classmethod
+        def get_instance(cls) -> FakeWorkspaceManager:
+            return cls()
+
+        def get_workspace_dir(self) -> Path:
+            return tmp_path / "workspace"
+
+    monkeypatch.setattr(flocks.workspace.manager, "WorkspaceManager", FakeWorkspaceManager)
+    date = "2026-07-30"
+    input_path = (
+        flocks_root
+        / "workspace"
+        / "workflows"
+        / "stream_alert_denoise"
+        / date
+        / "dedup_result_001.jsonl"
+    )
+    input_path.parent.mkdir(parents=True)
+    input_path.write_text("", encoding="utf-8")
+
+    raw = _workflow_dict("stream_alert_triage")
+    workflow = Workflow.from_dict(raw)
+    engine = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(tool_registry=SimpleNamespace(cancel_checker=None)),
+        node_timeout_s=None,
+        history_mode="full",
+        dataflow_mode=resolve_workflow_dataflow_mode(workflow.metadata),
+        max_parallel_workers=1,
+    )
+
+    for _ in range(2):
+        result = engine.run(
+            initial_inputs={"input_date": date, "triage_output_mode": "none"},
+            retain_history=True,
+        )
+        steps = {step.node_id: step for step in result.history}
+        assert all(step.error is None for step in result.history)
+        lease_fd = steps["load_dedup_file"].outputs["_batch_lease_fd"]
+        assert isinstance(lease_fd, int)
+        assert steps["concurrent_triage"].inputs["_batch_lease_fd"] == lease_fd
+        assert steps["commit_cursor"].inputs["_batch_lease_fd"] == lease_fd

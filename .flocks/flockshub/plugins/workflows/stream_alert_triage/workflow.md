@@ -56,7 +56,7 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 ```
 
 日期变化时直接从新日期的第一个文件开始；旧日期未消费完的数据按设计丢弃，不跨天补偿。
-游标只接受 `version=1` 且序号、偏移量为非负整数；版本或字段类型损坏时从当日第一个文件重新读取。
+游标只接受 `version=2`，除序号和偏移量外还保存 device ID、file ID、文件头 SHA-256 以及游标前最多 4 KiB 内容的 SHA-256。恢复时任一文件身份或内容锚点不匹配都会设置 `cursor_invalidated=true`，并从该文件头重新读取；旧版或损坏游标也按同样方式安全重置。打开文件后会再次校验，避免校验与读取之间发生同名替换而沿用旧偏移。
 
 ### 显式重放模式
 
@@ -69,7 +69,7 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 
 ## 游标提交语义
 
-`load_dedup_file` 只输出 `pending_cursor`。只有 `concurrent_triage` 完成研判且所有启用的持久化目标成功后，`commit_cursor` 才通过 `flush`、`fsync` 和 `os.replace` 原子写入生产游标。
+自动模式在读取游标前获取工作流级批次租约，租约覆盖 `load -> triage -> persist -> commit`，异常或提交完成后释放。`load_dedup_file` 只输出 `pending_cursor` 和读取时的 `cursor_revision`。只有 `concurrent_triage` 完成研判、缓存和所有启用的持久化目标成功后，`commit_cursor` 才在独立游标锁内执行 revision CAS 与单调性校验，并通过 run 级唯一临时文件、`flush`、`fsync` 和 `os.replace` 原子写入生产游标。文件身份失效触发的明确重置仍需通过 CAS，但允许偏移回到文件头。
 
 | 情况 | 推进生产游标 |
 | --- | --- |
@@ -77,6 +77,8 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 | 单条研判失败，但失败状态已形成 | 是 |
 | 只消费 header、空行或完整坏行 | 是 |
 | SOC DB 或启用的 JSONL 写入失败 | 否 |
+| 研判缓存写入失败 | 否 |
+| 游标 revision 已被其他执行修改 | 否，返回 `stale_cursor_commit` |
 | 节点超时、取消或进程退出 | 否 |
 | 没有读取任何新字节 | 否 |
 | 显式重放模式 | 否 |
@@ -93,7 +95,8 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 ## 研判与持久化
 
 - 同批相同 `dedup_key` 只研判 leader，followers 复用结果。
-- 跨批命中 `triage_cache.pkl` 时直接复用，不调用 LLM。
+- 跨批命中 `triage_cache.pkl` 时直接复用，不调用 LLM；缓存锁覆盖 cache miss、LLM 研判和保存阶段，避免并发执行重复研判相同批次。
+- 缓存使用 run 级唯一临时文件原子保存；保存失败会抛出异常并阻止生产游标提交。
 - 默认 `triage_output_mode=soc_db`；也支持 `jsonl`、`both` 和 `none`。
 - SOC DB 只接收明确 `is_duplicate=false`、有非空 `dedup_key` 且批内首次出现的告警。
 - 研判正文只保存在 `triage_report` 字段，不生成逐告警 markdown 文件。
@@ -106,6 +109,9 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 | --- | --- |
 | `cursor_enabled` | 是否为自动目录生产模式 |
 | `cursor_before` | 本次读取前的生产或重放游标 |
+| `cursor_revision` | 本次读取到的生产游标内容摘要，用于提交 CAS |
+| `cursor_invalidated` | 文件身份、内容锚点或游标结构失效后是否从文件头重置 |
+| `cursor_commit_error` | 游标提交错误；并发 revision 变化时为 `stale_cursor_commit` |
 | `pending_cursor` | 本批成功消费字节之后的待提交位置 |
 | `next_cursor` | 显式重放调用方可回传的续读位置 |
 | `cursor_committed` | 本次是否实际写入生产游标 |
@@ -131,5 +137,7 @@ load_dedup_file -> concurrent_triage -> commit_cursor -> summarize
 - 文件 001 剩余 6 条、002 有更多数据时，本批读取 6 + 4。
 - header、空行、坏 JSON、非对象、半行和超大行符合各自 offset 规则。
 - SOC DB 或 JSONL 写失败时游标不变。
+- 缓存写失败、重叠生产执行或 stale cursor commit 均不会推进游标。
+- 同名文件替换及同 inode 重写会使 v2 游标失效并从文件头重读。
 - 显式重放可通过 `next_cursor` 续读且不污染生产游标。
 - 工作流 JSON 可解析，所有节点 Python 代码可通过 AST 解析，相关测试通过。

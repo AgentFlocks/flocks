@@ -55,7 +55,7 @@
 ```
 
 日期切换会忽略旧日期游标，从新日期第一个文件开始。前一天未消费完的数据会丢弃，这是当前设计的明确取舍。
-游标只接受 `version=1` 且序号、偏移量为非负整数；版本或字段类型损坏时从当日第一个文件重新读取。
+游标只接受 `version=2`。除序号和偏移量外，还会校验 device ID、file ID、文件头 SHA-256 和游标前最多 4 KiB 内容的 SHA-256；身份或内容不匹配、旧版本以及字段损坏都会设置 `cursor_invalidated=true` 并从当前文件头安全重读。文件打开后会执行二次校验，避免校验与读取之间的同名替换竞态。
 
 ### 显式重放模式
 
@@ -85,11 +85,16 @@
 {
   "input_path": "~/.flocks/workspace/workflows/stream_alert_denoise/<YYYY-MM-DD>/dedup_result_001.jsonl",
   "resume_cursor": {
-    "version": 1,
+    "version": 2,
     "date": "<YYYY-MM-DD>",
     "file_seq": 1,
     "file_name": "dedup_result_001.jsonl",
     "byte_offset": 1837294,
+    "device_id": 16777234,
+    "file_id": 123456,
+    "head_hash": "<64 位 SHA-256>",
+    "boundary_start": 1833198,
+    "boundary_hash": "<64 位 SHA-256>",
     "file_index": 0,
     "path": "~/.flocks/workspace/workflows/stream_alert_denoise/<YYYY-MM-DD>/dedup_result_001.jsonl"
   }
@@ -118,7 +123,7 @@
 
 ## 5. 游标与提交条件
 
-入口节点只计算 `pending_cursor`。生产游标由 `commit_cursor` 在 `concurrent_triage` 成功后原子提交。
+自动模式在读取游标前获取批次租约，覆盖完整的 `load -> triage -> persist -> commit`；重叠执行会以 `production_batch_lease_busy` 失败，提交或异常后释放。入口节点只计算 `pending_cursor` 和 `cursor_revision`。生产游标由 `commit_cursor` 在 `concurrent_triage` 成功后，在游标文件锁内通过 revision CAS 和单调性校验原子提交。
 
 提交生产游标的情况：
 
@@ -130,11 +135,13 @@
 
 - SOC DB 写入失败。
 - 启用 JSONL 时 JSONL 写入失败。
+- 研判缓存写入失败。
+- 当前游标 revision 与读取时不一致，或新位置违反单调性。
 - 节点超时、取消或进程退出。
 - 本批没有读取任何新字节。
 - 显式重放模式。
 
-游标写入使用同目录临时文件、`flush()`、`os.fsync()` 和 `os.replace()`。单条研判失败不会阻塞流，失败告警保留 `triage_status=failed`、`triage_error`、`triage_attack_verdict=unknown` 和 `triage_attack_success=unknown`。模型判定节点直接生成这两个字段：`triage_attack_verdict` 表示是否攻击，枚举为 `attack | non_attack | unknown`；`triage_attack_success` 表示攻击结果，枚举为 `success | failed | unknown`。原始告警的 `attack_verdict`、`attack_success`、`threat_result` 等字段保持不变，不参与研判结果字段的生成。
+游标写入使用包含 run ID 的同目录唯一临时文件、`flush()`、`os.fsync()` 和 `os.replace()`；CAS 失败返回 `stale_cursor_commit`。文件身份失效触发的明确重置仍要求 revision 未变化，但允许偏移回到文件头。单条研判失败不会阻塞流，失败告警保留 `triage_status=failed`、`triage_error`、`triage_attack_verdict=unknown` 和 `triage_attack_success=unknown`。模型判定节点直接生成这两个字段：`triage_attack_verdict` 表示是否攻击，枚举为 `attack | non_attack | unknown`；`triage_attack_success` 表示攻击结果，枚举为 `success | failed | unknown`。原始告警的 `attack_verdict`、`attack_success`、`threat_result` 等字段保持不变，不参与研判结果字段的生成。
 
 ## 6. 输出与副作用
 
@@ -167,7 +174,7 @@
 
 `persist_triage_output=true` 是兼容参数，会在 `soc_db` 模式下额外启用 JSONL。
 
-主要增量状态输出：`cursor_enabled`、`cursor_before`、`pending_cursor`、`next_cursor`、`cursor_committed`、`committed_cursor`、`has_more`、`batch_records`、`batch_bytes` 和 `load_stats`。
+主要增量状态输出：`cursor_enabled`、`cursor_before`、`cursor_revision`、`cursor_invalidated`、`pending_cursor`、`next_cursor`、`cursor_committed`、`committed_cursor`、`has_more`、`batch_records`、`batch_bytes` 和 `load_stats`。批次租约句柄与 token 仅用于节点间内部传递，不属于业务输出。
 
 ## 7. 调度与吞吐
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import ast
-import datetime
+import hashlib
 import io
 import json
 import os
@@ -10,6 +10,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import flocks.config
+import pytest
 from flocks.workflow import Workflow, WorkflowEngine
 from flocks.workflow.repl_runtime import PythonExecRuntime
 
@@ -48,12 +49,38 @@ def _write_alerts(path: Path, ids: range | list[int]) -> None:
     )
 
 
+def _write_named_alerts(path: Path, prefix: str, count: int = 20) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        "".join(
+            json.dumps({"id": f"{prefix}-{index:03d}", "dedup_key": f"key-{index:03d}"}) + "\n"
+            for index in range(count)
+        ),
+        encoding="utf-8",
+    )
+
+
 def _use_flocks_root(monkeypatch, root: Path) -> None:
     class FakeConfig:
         def get_global(self) -> SimpleNamespace:
             return SimpleNamespace(data_dir=root / "data")
 
     monkeypatch.setattr(flocks.config, "Config", FakeConfig)
+
+
+def _release_loader_lease(outputs: dict[str, object]) -> None:
+    lease_fd = outputs.get("_batch_lease_fd")
+    if not isinstance(lease_fd, int):
+        return
+    _run_node(
+        "commit_cursor",
+        {
+            "cursor_enabled": True,
+            "pending_cursor": None,
+            "_batch_lease_fd": lease_fd,
+            "batch_lease_token": outputs.get("batch_lease_token"),
+        },
+    )
 
 
 def test_explicit_replay_is_bounded_resumable_and_reads_appends(tmp_path: Path) -> None:
@@ -81,6 +108,88 @@ def test_explicit_replay_is_bounded_resumable_and_reads_appends(tmp_path: Path) 
         {"input_path": str(input_path), "resume_cursor": second["next_cursor"]},
     )
     assert [item["id"] for item in appended["enriched_alerts"]] == list(range(20, 30))
+
+
+def test_replaced_input_file_invalidates_resume_cursor(tmp_path: Path) -> None:
+    input_path = tmp_path / "dedup_result_001.jsonl"
+    replacement = tmp_path / "replacement.jsonl"
+    _write_named_alerts(input_path, "aaa")
+
+    first = _run_node("load_dedup_file", {"input_path": str(input_path)})
+    _write_named_alerts(replacement, "bbb")
+    os.replace(replacement, input_path)
+    resumed = _run_node(
+        "load_dedup_file",
+        {"input_path": str(input_path), "resume_cursor": first["next_cursor"]},
+    )
+
+    assert [item["id"] for item in resumed["enriched_alerts"]] == [
+        f"bbb-{index:03d}" for index in range(10)
+    ]
+    assert resumed["load_stats"]["cursor_invalidated"] is True
+
+
+def test_same_inode_rewrite_invalidates_resume_cursor(tmp_path: Path) -> None:
+    input_path = tmp_path / "dedup_result_001.jsonl"
+    _write_named_alerts(input_path, "aaa")
+    first = _run_node("load_dedup_file", {"input_path": str(input_path)})
+    original_file_id = input_path.stat().st_ino
+
+    payload = "".join(
+        json.dumps({"id": f"bbb-{index:03d}", "dedup_key": f"key-{index:03d}"}) + "\n"
+        for index in range(20)
+    )
+    with input_path.open("r+", encoding="utf-8") as stream:
+        stream.seek(0)
+        stream.write(payload)
+        stream.truncate()
+    assert input_path.stat().st_ino == original_file_id
+
+    resumed = _run_node(
+        "load_dedup_file",
+        {"input_path": str(input_path), "resume_cursor": first["next_cursor"]},
+    )
+
+    assert [item["id"] for item in resumed["enriched_alerts"]] == [
+        f"bbb-{index:03d}" for index in range(10)
+    ]
+    assert resumed["load_stats"]["cursor_invalidated"] is True
+
+
+def test_same_inode_head_rewrite_invalidates_cursor_beyond_boundary_anchor(tmp_path: Path) -> None:
+    input_path = tmp_path / "dedup_result_001.jsonl"
+    input_path.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "id": f"aaa-{index:03d}",
+                    "dedup_key": f"key-{index:03d}",
+                    "padding": "x" * 1200,
+                }
+            )
+            + "\n"
+            for index in range(20)
+        ),
+        encoding="utf-8",
+    )
+    first = _run_node("load_dedup_file", {"input_path": str(input_path)})
+    assert first["next_cursor"]["byte_offset"] > 8192
+    original_file_id = input_path.stat().st_ino
+
+    with input_path.open("r+", encoding="utf-8") as stream:
+        payload = stream.read()
+        stream.seek(0)
+        stream.write(payload.replace("aaa-000", "bbb-000", 1))
+        stream.truncate()
+    assert input_path.stat().st_ino == original_file_id
+
+    resumed = _run_node(
+        "load_dedup_file",
+        {"input_path": str(input_path), "resume_cursor": first["next_cursor"]},
+    )
+
+    assert resumed["enriched_alerts"][0]["id"] == "bbb-000"
+    assert resumed["load_stats"]["cursor_invalidated"] is True
 
 
 def test_auto_mode_sorts_numeric_sequences_and_spans_files(monkeypatch, tmp_path: Path) -> None:
@@ -273,10 +382,10 @@ def test_production_cursor_is_only_advanced_by_commit_node(monkeypatch, tmp_path
     )
 
     first = _run_node("load_dedup_file", {"input_date": date})
-    retry_before_commit = _run_node("load_dedup_file", {"input_date": date})
+    with pytest.raises(RuntimeError, match="production_batch_lease_busy"):
+        _run_node("load_dedup_file", {"input_date": date})
 
     assert not cursor_path.exists()
-    assert [item["id"] for item in retry_before_commit["enriched_alerts"]] == list(range(10))
 
     commit_inputs = dict(first)
     commit_inputs["triage_stats"] = {"triage_failed": 1}
@@ -289,6 +398,7 @@ def test_production_cursor_is_only_advanced_by_commit_node(monkeypatch, tmp_path
     assert saved_cursor["byte_offset"] == first["pending_cursor"]["byte_offset"]
     assert saved_cursor["updated_at"]
     assert [item["id"] for item in remaining["enriched_alerts"]] == [10, 11]
+    _release_loader_lease(remaining)
 
 
 def test_triage_timeout_does_not_commit_production_cursor(monkeypatch, tmp_path: Path) -> None:
@@ -428,6 +538,7 @@ def test_cursor_date_change_and_truncation_restart_current_input(monkeypatch, tm
 
     date_reset = _run_node("load_dedup_file", {"input_date": "2026-07-30"})
     assert date_reset["enriched_alerts"] == [{"id": 1, "dedup_key": "key-1"}]
+    _release_loader_lease(date_reset)
 
     cursor_path.write_text(
         json.dumps(
@@ -443,6 +554,7 @@ def test_cursor_date_change_and_truncation_restart_current_input(monkeypatch, tm
     )
     truncated = _run_node("load_dedup_file", {"input_date": "2026-07-30"})
     assert truncated["enriched_alerts"] == [{"id": 1, "dedup_key": "key-1"}]
+    _release_loader_lease(truncated)
 
     input_path.write_bytes(b'{"id": 2')
     truncated_partial = _run_node("load_dedup_file", {"input_date": "2026-07-30"})
@@ -452,6 +564,7 @@ def test_cursor_date_change_and_truncation_restart_current_input(monkeypatch, tm
     assert truncated_partial["pending_cursor"]["byte_offset"] == 0
     assert truncated_partial["next_cursor"]["byte_offset"] == 0
     assert truncated_partial["has_more"] is True
+    _release_loader_lease(truncated_partial)
 
 
 def test_semantically_invalid_production_cursor_restarts_from_file_head(monkeypatch, tmp_path: Path) -> None:
@@ -495,6 +608,7 @@ def test_semantically_invalid_production_cursor_restarts_from_file_head(monkeypa
         assert outputs["cursor_before"] is None
         assert [item["id"] for item in outputs["enriched_alerts"]] == [1, 2]
         assert outputs["load_stats"]["bad_lines"] == 0
+        _release_loader_lease(outputs)
 
 
 def test_successful_triage_sets_persistence_gate(monkeypatch, tmp_path: Path) -> None:
@@ -507,6 +621,171 @@ def test_successful_triage_sets_persistence_gate(monkeypatch, tmp_path: Path) ->
     )
 
     assert outputs["_triage_persistence_succeeded"] is True
+
+
+def test_production_triage_batch_lease_blocks_overlapping_run(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "flocks-root"
+    _use_flocks_root(monkeypatch, root)
+    date = "2026-07-30"
+    input_path = (
+        root
+        / "workspace"
+        / "workflows"
+        / "stream_alert_denoise"
+        / date
+        / "dedup_result_001.jsonl"
+    )
+    _write_alerts(input_path, [])
+
+    first = _run_node("load_dedup_file", {"input_date": date})
+    assert isinstance(first["_batch_lease_fd"], int)
+
+    with pytest.raises(RuntimeError, match="production_batch_lease_busy"):
+        _run_node("load_dedup_file", {"input_date": date})
+
+    triaged = _run_node(
+        "concurrent_triage",
+        {**first, "triage_output_mode": "none"},
+    )
+    _run_node(
+        "commit_cursor",
+        {
+            **triaged,
+            "_triage_persistence_succeeded": True,
+        },
+    )
+
+    retry = _run_node("load_dedup_file", {"input_date": date})
+    _run_node(
+        "commit_cursor",
+        {
+            **retry,
+            "pending_cursor": None,
+        },
+    )
+
+
+def test_stale_cursor_commit_cannot_overwrite_newer_cursor(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "flocks-root"
+    _use_flocks_root(monkeypatch, root)
+    cursor_path = (
+        root
+        / "workspace"
+        / "workflows"
+        / "stream_alert_triage"
+        / ".triage_cursor.json"
+    )
+    identity = {
+        "version": 2,
+        "date": "2026-07-30",
+        "file_seq": 1,
+        "file_name": "dedup_result_001.jsonl",
+        "device_id": 1,
+        "file_id": 2,
+        "head_hash": hashlib.sha256(b"").hexdigest(),
+        "boundary_start": 0,
+        "boundary_hash": hashlib.sha256(b"").hexdigest(),
+    }
+
+    newer = _run_node(
+        "commit_cursor",
+        {
+            "cursor_enabled": True,
+            "cursor_before": None,
+            "cursor_revision": None,
+            "pending_cursor": {**identity, "byte_offset": 200},
+            "_triage_persistence_succeeded": True,
+            "_run_id": "newer",
+        },
+    )
+    stale = _run_node(
+        "commit_cursor",
+        {
+            "cursor_enabled": True,
+            "cursor_before": None,
+            "cursor_revision": None,
+            "pending_cursor": {**identity, "byte_offset": 100},
+            "_triage_persistence_succeeded": True,
+            "_run_id": "stale",
+        },
+    )
+
+    assert newer["cursor_committed"] is True
+    assert stale["cursor_committed"] is False
+    assert stale["cursor_commit_error"] == "stale_cursor_commit"
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["byte_offset"] == 200
+    assert not list(cursor_path.parent.glob(".triage_cursor.json.*.tmp"))
+
+
+def test_invalidated_cursor_reset_requires_cas_and_cannot_move_to_older_date(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    root = tmp_path / "flocks-root"
+    _use_flocks_root(monkeypatch, root)
+    cursor_path = (
+        root
+        / "workspace"
+        / "workflows"
+        / "stream_alert_triage"
+        / ".triage_cursor.json"
+    )
+    identity = {
+        "version": 2,
+        "date": "2026-07-30",
+        "file_seq": 1,
+        "file_name": "dedup_result_001.jsonl",
+        "device_id": 1,
+        "file_id": 2,
+        "head_hash": hashlib.sha256(b"old-head").hexdigest(),
+        "boundary_start": 0,
+        "boundary_hash": hashlib.sha256(b"old-boundary").hexdigest(),
+    }
+    _run_node(
+        "commit_cursor",
+        {
+            "cursor_enabled": True,
+            "cursor_revision": None,
+            "pending_cursor": {**identity, "byte_offset": 200},
+            "_triage_persistence_succeeded": True,
+        },
+    )
+
+    current_revision = hashlib.sha256(cursor_path.read_bytes()).hexdigest()
+    reset = _run_node(
+        "commit_cursor",
+        {
+            "cursor_enabled": True,
+            "cursor_revision": current_revision,
+            "cursor_invalidated": True,
+            "pending_cursor": {
+                **identity,
+                "byte_offset": 100,
+                "device_id": 3,
+                "file_id": 4,
+                "head_hash": hashlib.sha256(b"new-head").hexdigest(),
+                "boundary_hash": hashlib.sha256(b"new-boundary").hexdigest(),
+            },
+            "_triage_persistence_succeeded": True,
+        },
+    )
+    assert reset["cursor_committed"] is True
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["byte_offset"] == 100
+
+    reset_revision = hashlib.sha256(cursor_path.read_bytes()).hexdigest()
+    older = _run_node(
+        "commit_cursor",
+        {
+            "cursor_enabled": True,
+            "cursor_revision": reset_revision,
+            "cursor_invalidated": True,
+            "pending_cursor": {**identity, "date": "2026-07-29", "byte_offset": 0},
+            "_triage_persistence_succeeded": True,
+        },
+    )
+    assert older["cursor_committed"] is False
+    assert older["cursor_commit_error"] == "stale_cursor_commit"
+    assert json.loads(cursor_path.read_text(encoding="utf-8"))["date"] == "2026-07-30"
 
 
 def test_workflow_wires_commit_after_persistence_and_has_dynamic_samples() -> None:
@@ -562,27 +841,42 @@ def test_jsonl_counter_write_failure_is_not_swallowed() -> None:
     assert not any(isinstance(node, ast.ExceptHandler) for node in ast.walk(function))
 
 
-def test_commit_writer_uses_atomic_replace_and_fsync(tmp_path: Path) -> None:
-    tree = ast.parse(_node_code("commit_cursor"))
-    function = next(
-        node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name == "_commit_cursor_atomic"
+def test_commit_writer_uses_atomic_replace_and_fsync(monkeypatch, tmp_path: Path) -> None:
+    root = tmp_path / "flocks-root"
+    _use_flocks_root(monkeypatch, root)
+    cursor_path = (
+        root
+        / "workspace"
+        / "workflows"
+        / "stream_alert_triage"
+        / ".triage_cursor.json"
     )
-    namespace = {"datetime": datetime, "json": json, "os": os}
-    exec(compile(ast.Module(body=[function], type_ignores=[]), str(WORKFLOW_PATH), "exec"), namespace)
-    cursor_path = tmp_path / ".triage_cursor.json"
 
-    committed = namespace["_commit_cursor_atomic"](
-        cursor_path,
+    outputs = _run_node(
+        "commit_cursor",
         {
-            "date": "2026-07-30",
-            "file_seq": 3,
-            "file_name": "dedup_result_003.jsonl",
-            "byte_offset": 123,
-            "skipping_oversized_line": True,
+            "cursor_enabled": True,
+            "cursor_revision": None,
+            "_triage_persistence_succeeded": True,
+            "_run_id": "atomic-test",
+            "pending_cursor": {
+                "version": 2,
+                "date": "2026-07-30",
+                "file_seq": 3,
+                "file_name": "dedup_result_003.jsonl",
+                "byte_offset": 123,
+                "device_id": 1,
+                "file_id": 2,
+                "head_hash": hashlib.sha256(b"").hexdigest(),
+                "boundary_start": 0,
+                "boundary_hash": hashlib.sha256(b"").hexdigest(),
+                "skipping_oversized_line": True,
+            },
         },
     )
+    committed = outputs["committed_cursor"]
 
     assert json.loads(cursor_path.read_text(encoding="utf-8")) == committed
     assert committed["updated_at"]
     assert committed["skipping_oversized_line"] is True
-    assert not (tmp_path / ".triage_cursor.json.tmp").exists()
+    assert not list(cursor_path.parent.glob(".triage_cursor.json.*.tmp"))

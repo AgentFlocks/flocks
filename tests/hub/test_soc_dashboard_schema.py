@@ -408,6 +408,27 @@ def test_soc_dashboard_command_graph_uses_model_outcome_partition():
     assert "'待人工复核'" in command_graph
 
 
+def test_soc_overview_uses_backend_five_class_verdicts():
+    page_path = (
+        Path(__file__).resolve().parents[2]
+        / ".flocks"
+        / "flockshub"
+        / "plugins"
+        / "webuis"
+        / "soc_ui"
+        / "soc_overview"
+        / "src"
+        / "index.tsx"
+    )
+    source = page_path.read_text(encoding="utf-8")
+
+    assert "verdicts?: CounterItem[]" in source
+    assert "verdicts: list(value.verdicts)" in source
+    assert "stats.triage.totalRecords - success - failed" not in source
+    for key in ("attack_success", "attack", "attack_failed", "non_attack", "unknown"):
+        assert key in source
+
+
 def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
     db_path = tmp_path / "soc.db"
     asset_date = "2026-07-14"

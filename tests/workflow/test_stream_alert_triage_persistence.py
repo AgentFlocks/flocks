@@ -4,12 +4,15 @@ import ast
 import datetime as datetime_module
 import json
 import os
+import pickle
 import re
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import pytest
 
 
 WORKFLOW_PATH = (
@@ -202,6 +205,19 @@ def test_soc_db_persistence_failure_is_reraised() -> None:
         for handler in persistence_try.handlers
         for child in ast.walk(handler)
     )
+
+
+def test_cache_save_failure_is_reraised_and_cleans_unique_temp_file(tmp_path: Path) -> None:
+    functions = _load_functions("_save_cache_atomic")
+    functions["pickle"] = pickle
+    functions["threading"] = threading
+    cache_path = tmp_path / "cache-target"
+    cache_path.mkdir()
+
+    with pytest.raises(RuntimeError, match="failed to save triage cache"):
+        functions["_save_cache_atomic"](str(cache_path), {"key": {"value": 1}})
+
+    assert not list(tmp_path.glob("cache-target.*.tmp"))
 
 
 def test_soc_db_merge_preserves_original_attack_fields_and_updates_triage_fields() -> None:
