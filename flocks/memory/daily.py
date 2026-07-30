@@ -1,7 +1,7 @@
 """
 Daily Memory File Manager
 
-Manages daily memory files in .flocks/memory/daily/ directory.
+Manages Daily Memory files below the configured data directory.
 Files are named by date: YYYY-MM-DD.md
 """
 

@@ -119,7 +119,7 @@ class MemoryBootstrap:
     
     async def load_main_memory(self) -> Optional[Dict[str, Any]]:
         """
-        Load main MEMORY.md file from .flocks/memory/
+        Load the main MEMORY.md file from the configured data Memory root.
         
         Returns:
             Dict with path and content, or None if not found
@@ -255,7 +255,7 @@ class MemoryBootstrap:
         today: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         """
-        Load daily memory files from .flocks/memory/daily/
+        Load Daily Memory files from the configured data Memory root.
         
         Args:
             days_back: Number of days back to load
