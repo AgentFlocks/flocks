@@ -96,6 +96,7 @@ const DEFAULT_TIME_RANGE = '7d';
 const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
 const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
 const CUSTOM_COMMAND_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
+const SOC_MOCK_ACTIVITY_KEY = 'soc-dashboard-mock-activity-v1';
 const TIME_RANGE_OPTIONS = [
   { value: '15m', label: '最近15分钟' },
   { value: '2h', label: '最近2小时' },
@@ -127,6 +128,22 @@ function readCustomCommandTitle() {
     return window.localStorage.getItem(CUSTOM_COMMAND_TITLE_KEY)?.trim() || '';
   } catch {
     return '';
+  }
+}
+
+function readMockActivityEnabled() {
+  if (typeof window === 'undefined') return false;
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    const queryValue = params.get('mockActivity');
+    if (queryValue !== null) {
+      return ['1', 'true', 'yes', 'on'].includes(queryValue.trim().toLowerCase());
+    }
+    return ['1', 'true', 'yes', 'on'].includes(
+      (window.localStorage.getItem(SOC_MOCK_ACTIVITY_KEY) || '').trim().toLowerCase(),
+    );
+  } catch {
+    return false;
   }
 }
 
@@ -2300,6 +2317,7 @@ export default function Page() {
   const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
   const [rightRailView, setRightRailView] = useState('aiTasks');
   const [customCommandTitle, setCustomCommandTitle] = useState(readCustomCommandTitle);
+  const [mockActivityEnabled, setMockActivityEnabled] = useState(readMockActivityEnabled);
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -2366,6 +2384,8 @@ export default function Page() {
     const handleStorage = (event) => {
       if (event.key === CUSTOM_COMMAND_TITLE_KEY) {
         setCustomCommandTitle((event.newValue || '').trim());
+      } else if (event.key === SOC_MOCK_ACTIVITY_KEY) {
+        setMockActivityEnabled(readMockActivityEnabled());
       }
     };
     window.addEventListener(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, refreshTitle);
@@ -2647,8 +2667,12 @@ export default function Page() {
   }, [activity.batchUpdatedAt]);
 
   const displayActivity = useMemo(
-    () => (activityHasVisibleEvents(activity) ? activity : createMockActivityState()),
-    [activity],
+    () => (
+      !activityHasVisibleEvents(activity) && mockActivityEnabled
+        ? createMockActivityState()
+        : activity
+    ),
+    [activity, mockActivityEnabled],
   );
   const displayActivityBusy = Boolean(
     displayActivity.denoise.current
