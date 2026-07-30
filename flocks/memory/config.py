@@ -5,7 +5,7 @@ Defines configuration structures for the memory system.
 """
 
 from typing import Optional, List, Literal
-from pydantic import AliasChoices, BaseModel, Field
+from pydantic import BaseModel, Field
 
 
 class MemoryEmbeddingConfig(BaseModel):
@@ -184,7 +184,7 @@ Preserve durable knowledge from this Session, then reply `NO_REPLY`.
 Classify each candidate in order:
 1. Secret, guess, transient state, one-off result, or cheaply rediscoverable
    fact: skip it.
-2. Repeatable procedure: skip it; Skill evolution happens outside this flush.
+2. Repeatable procedure: skip it; Dream self-improvement handles Skills.
 3. User information or preference: `USER.md`.
 4. Current-project-only knowledge: Project `MEMORY.md`.
 5. Cross-project declarative Agent or environment knowledge: Global `MEMORY.md`.
@@ -217,32 +217,12 @@ class MemoryDreamConfig(BaseModel):
     )
 
 
-class MemorySkillEvolutionConfig(BaseModel):
-    """Turn-driven Skill Agent configuration."""
-
-    enabled: bool = Field(
-        True,
-        description="Create or update user skills from successful tool turns",
-    )
-    tool_iteration_interval: int = Field(
-        10,
-        ge=1,
-        validation_alias=AliasChoices(
-            "tool_iteration_interval",
-            "min_completed_tools",
-        ),
-        description=(
-            "Accumulated AgentLoop tool iterations between Skill reviews"
-        ),
-    )
-
-
 class MemoryEvolutionConfig(BaseModel):
-    """Shared Dream and Skill evolution configuration."""
+    """Dream self-improvement configuration."""
 
     enabled: bool = Field(
         True,
-        description="Enable scheduled Dream and turn-driven skill evolution",
+        description="Enable scheduled and manual Dream self-improvement",
     )
     max_session_messages: int = Field(
         100,
@@ -263,9 +243,6 @@ class MemoryEvolutionConfig(BaseModel):
         ),
     )
     dream: MemoryDreamConfig = Field(default_factory=MemoryDreamConfig)
-    skill: MemorySkillEvolutionConfig = Field(
-        default_factory=MemorySkillEvolutionConfig,
-    )
 
 
 class CompactionConfig(BaseModel):
@@ -393,7 +370,7 @@ class MemoryConfig(BaseModel):
     )
     evolution: MemoryEvolutionConfig = Field(
         default_factory=MemoryEvolutionConfig,
-        description="Scheduled Dream and turn-driven Skill evolution",
+        description="Scheduled and manual Dream self-improvement",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,

@@ -1,4 +1,4 @@
-"""Tests for scheduled Dream bridging and turn-driven Skill evolution."""
+"""Tests for scheduled and manual Dream self-improvement."""
 
 import asyncio
 import json
@@ -8,43 +8,33 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from flocks.hooks.builtin.session_evolution import SessionEvolutionHook
-from flocks.hooks.pipeline import HookContext, HookStage
 from flocks.memory.config import MemoryConfig
 from flocks.memory.evolution import (
     DreamTarget,
     EvolutionCheckpointStore,
-    SourceSnapshot,
     MemoryEvolutionScheduler,
-    process_skill_turn,
+    SourceSnapshot,
     run_dream_bridge,
 )
 from flocks.memory.evolution.common import (
-    SkillEvolutionStateStore,
-    TurnEvidence,
-    _build_turn_evidence,
-    _build_turn_review,
     _collect_dream_sources,
     _daily_delta,
     _hash_text,
-    _load_turn_evidence,
     _redact_sensitive,
     _session_delta,
 )
 from flocks.memory.evolution.dream import DREAM_SYSTEM_PROMPT
-from flocks.memory.evolution.skill import (
-    SKILL_SYSTEM_PROMPT,
-    _serialize_skill_catalog,
-    _skill_contents,
-    _validate_skill_changes,
-    run_manual_skill_evolution,
+from flocks.memory.evolution.skill_guard import (
+    serialize_skill_catalog,
+    skill_catalog,
+    skill_contents,
+    validate_skill_changes,
 )
 from flocks.memory.evolution.scheduler import (
     _LAST_SUCCESS_KEY,
     _TICK_SECONDS,
 )
 from flocks.memory.types import MemoryScope
-from flocks.session.background_tasks import pending_background_tasks
 from flocks.session.message import (
     TextPart,
     ToolPart,
@@ -55,6 +45,23 @@ from flocks.session.prompt import SessionPrompt
 from flocks.storage import Storage
 
 
+@pytest.fixture(autouse=True)
+def isolate_dream_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep Dream Skill discovery and writes inside each test directory."""
+
+    async def empty_catalog() -> list[dict[str, str]]:
+        return []
+
+    monkeypatch.setattr(
+        "flocks.memory.evolution.dream.user_skill_root",
+        lambda: tmp_path / "skills",
+    )
+    monkeypatch.setattr(
+        "flocks.memory.evolution.dream.skill_catalog",
+        empty_catalog,
+    )
+
+
 def test_memory_config_exposes_evolution_without_learning_alias() -> None:
     properties = MemoryConfig.model_json_schema()["properties"]
 
@@ -62,11 +69,7 @@ def test_memory_config_exposes_evolution_without_learning_alias() -> None:
     assert "learning" not in properties
     config = MemoryConfig()
     assert config.evolution.dream.interval_hours == 24
-    assert config.evolution.skill.tool_iteration_interval == 10
-    legacy = MemoryConfig(
-        evolution={"skill": {"min_completed_tools": 7}}
-    )
-    assert legacy.evolution.skill.tool_iteration_interval == 7
+    assert not hasattr(config.evolution, "skill")
     assert not hasattr(config, "learning")
 
 
@@ -159,59 +162,22 @@ def _skill_document(name: str, body: str = "Run the proven workflow.") -> str:
     )
 
 
-def _review(
-    *,
-    user_message_id: str = "msg_1",
-    assistant_message_id: str = "msg_2",
-) -> SimpleNamespace:
-    content = "user: run it\nassistant: done"
-    return SimpleNamespace(
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        trigger_reasons=("tool_iteration_threshold",),
-        content=content,
-    )
-
-
-def _evidence(
-    tool_iterations: int,
-    *,
-    user_message_id: str = "msg_1",
-    assistant_message_id: str = "msg_2",
-) -> TurnEvidence:
-    return TurnEvidence(
-        session_id="ses_test",
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        messages=(),
-        user_index=0,
-        assistant_index=0,
-        tool_iterations=tool_iterations,
-    )
-
-
 def test_skill_change_validation_restores_unmanaged_preimage(
     tmp_path: Path,
 ) -> None:
     root = tmp_path / "skills"
     skill_path = root / "manual-skill" / "SKILL.md"
     skill_path.parent.mkdir(parents=True)
-    original = (
-        "---\n"
-        "name: manual-skill\n"
-        "description: A manually maintained Skill.\n"
-        "---\n\n"
-        "Original workflow.\n"
-    )
+    original = "---\nname: manual-skill\ndescription: A manually maintained Skill.\n---\n\nOriginal workflow.\n"
     skill_path.write_text(original, encoding="utf-8")
-    before = _skill_contents(root)
+    before = skill_contents(root)
     skill_path.write_text(
         _skill_document("manual-skill", "Unauthorized update."),
         encoding="utf-8",
     )
 
     with pytest.raises(RuntimeError, match="not Evolution-managed"):
-        _validate_skill_changes(root, before)
+        validate_skill_changes(root, before)
 
     assert skill_path.read_text(encoding="utf-8") == original
 
@@ -220,9 +186,11 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
     for heading in (
         "# Role",
         "# Inputs",
-        "# Memory destinations",
-        "# Rules",
-        "# Workflow",
+        "# Canonical destinations",
+        "# Classification",
+        "# Evidence and Memory rules",
+        "# Skill decision tree",
+        "# Integrated workflow",
         "# Tool use",
         "# Completion",
     ):
@@ -231,30 +199,27 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
     assert "Do not output JSON" in DREAM_SYSTEM_PROMPT
     assert "Use `write` only to create a missing" in DREAM_SYSTEM_PROMPT
     assert "using `edit` for a precise change" in DREAM_SYSTEM_PROMPT
-    assert "Assistant text is never" in DREAM_SYSTEM_PROMPT
+    assert "Assistant text is not" in DREAM_SYSTEM_PROMPT
     assert "not independent corroboration" in DREAM_SYSTEM_PROMPT
     assert "exactly one canonical destination" in DREAM_SYSTEM_PROMPT
     assert "If it describes the user" in DREAM_SYSTEM_PROMPT
-    assert "If it applies only to the current project" in DREAM_SYSTEM_PROMPT
+    assert "true only for the current project" in DREAM_SYSTEM_PROMPT
     assert "Project evidence belongs here by default" not in DREAM_SYSTEM_PROMPT
-    assert "sole rule for choosing among them" in DREAM_SYSTEM_PROMPT
     assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
 
-def test_evolution_prompts_use_agent_workflows_without_proposals() -> None:
-    for prompt in (DREAM_SYSTEM_PROMPT, SKILL_SYSTEM_PROMPT):
-        assert "# Role" in prompt
-        assert "# Workflow" in prompt
-        assert "# Tool use" in prompt
-        assert "NO_CHANGES" in prompt
-        assert "Return strict JSON" not in prompt
-    assert "proposal" not in SKILL_SYSTEM_PROMPT.lower()
-    assert "metadata.managed_by: flocks" in SKILL_SYSTEM_PROMPT
-    assert "Read the complete existing managed" in SKILL_SYSTEM_PROMPT
-    assert "# Change decision" in SKILL_SYSTEM_PROMPT
-    assert "do not create a competing" in SKILL_SYSTEM_PROMPT
-    assert "load the built-in\n  `skill-builder`" in SKILL_SYSTEM_PROMPT
-    assert "unresolved failure" in SKILL_SYSTEM_PROMPT
+def test_dream_prompt_integrates_memory_and_skill_decisions() -> None:
+    assert "one integrated decision process" in DREAM_SYSTEM_PROMPT
+    assert "metadata.managed_by: flocks" in DREAM_SYSTEM_PROMPT
+    assert "do not save it" in DREAM_SYSTEM_PROMPT
+    assert "Never modify or shadow" in DREAM_SYSTEM_PROMPT
+    assert "built-in `skill-builder`" in DREAM_SYSTEM_PROMPT
+    assert "unresolved failure" in DREAM_SYSTEM_PROMPT
+    assert "at most one Skill per Dream" in DREAM_SYSTEM_PROMPT
+    assert "use `read` on every listed" in DREAM_SYSTEM_PROMPT
+    assert "treat its current state as empty" in DREAM_SYSTEM_PROMPT
+    assert "Use `bash` only for read-only inspection" in DREAM_SYSTEM_PROMPT
+    assert "use `write` or `edit`" in DREAM_SYSTEM_PROMPT
 
 
 def test_skill_catalog_budget_preserves_valid_complete_json_entries() -> None:
@@ -262,14 +227,12 @@ def test_skill_catalog_budget_preserves_valid_complete_json_entries() -> None:
         {
             "name": "first",
             "description": "First reusable workflow",
-            "location": "/skills/first/SKILL.md",
             "source": "global",
             "managed_by": "flocks",
         },
         {
             "name": "second",
             "description": "Second reusable workflow",
-            "location": "/skills/second/SKILL.md",
             "source": "project",
             "managed_by": "",
         },
@@ -280,13 +243,39 @@ def test_skill_catalog_budget_preserves_valid_complete_json_entries() -> None:
         separators=(",", ":"),
     )
 
-    serialized = _serialize_skill_catalog(
+    serialized = serialize_skill_catalog(
         catalog,
         len(first_only),
     )
 
     assert len(serialized) <= len(first_only)
     assert json.loads(serialized) == [catalog[0]]
+
+
+@pytest.mark.asyncio
+async def test_skill_catalog_contains_only_decision_metadata() -> None:
+    skill = SimpleNamespace(
+        name="release-check",
+        description="Use when validating a release.",
+        location="/skills/release-check/SKILL.md",
+        source="global",
+        metadata=SimpleNamespace(managed_by="flocks"),
+    )
+
+    with patch(
+        "flocks.memory.evolution.skill_guard.Skill.all",
+        new=AsyncMock(return_value=[skill]),
+    ):
+        catalog = await skill_catalog()
+
+    assert catalog == [
+        {
+            "name": "release-check",
+            "description": "Use when validating a release.",
+            "source": "global",
+            "managed_by": "flocks",
+        }
+    ]
 
 
 def test_prompt_injects_uppercase_user_profile_before_memory() -> None:
@@ -338,7 +327,7 @@ async def test_checkpoint_is_pipeline_specific_and_detects_changes(
 
 
 @pytest.mark.asyncio
-async def test_session_delta_is_incremental_and_filters_non_text() -> None:
+async def test_session_delta_is_incremental_and_includes_tool_evidence() -> None:
     messages = [
         _message("msg_1", "user", _text("msg_1", "old")),
         _message("msg_2", "assistant", _text("msg_2", "new answer")),
@@ -367,8 +356,42 @@ async def test_session_delta_is_incremental_and_filters_non_text() -> None:
     assert "new answer" in snapshot.content
     assert "hidden" not in snapshot.content
     assert "call_1" not in snapshot.content
+    assert '"tool": "shell"' in snapshot.content
+    assert '"status": "completed"' in snapshot.content
     assert snapshot.last_message_id == "msg_4"
     assert backlog is True
+
+
+@pytest.mark.asyncio
+async def test_session_delta_redacts_tool_payload_secrets() -> None:
+    messages = [
+        _message(
+            "msg_1",
+            "assistant",
+            _completed_tool(
+                "msg_1",
+                "call_1",
+                input_data={"authorization": "Bearer private-token"},
+                output="password=private-value",
+            ),
+        )
+    ]
+
+    with patch(
+        "flocks.memory.evolution.common.Message.list_with_parts",
+        new=AsyncMock(return_value=messages),
+    ):
+        snapshot, _ = await _session_delta(
+            "ses_test",
+            None,
+            max_messages=10,
+            max_chars=10_000,
+        )
+
+    assert snapshot is not None
+    assert "private-token" not in snapshot.content
+    assert "private-value" not in snapshot.content
+    assert "[REDACTED]" in snapshot.content
 
 
 @pytest.mark.asyncio
@@ -582,6 +605,7 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         last_message_id="msg_2",
     )
     config = MemoryConfig()
+
     async def run_agent(**_: object) -> None:
         (memory_root / "MEMORY.md").write_text(
             "# Memory\n\n- Project uses Ruff\n",
@@ -591,6 +615,8 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
             "# User\n\n- Prefers concise answers\n",
             encoding="utf-8",
         )
+
+    agent_run = AsyncMock(side_effect=run_agent)
 
     with (
         patch(
@@ -616,7 +642,7 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         ),
         patch(
             "flocks.memory.evolution.dream.run_evolution_agent",
-            new=AsyncMock(side_effect=run_agent),
+            new=agent_run,
         ),
         patch(
             "flocks.memory.evolution.dream._sync_memory_indexes",
@@ -626,6 +652,10 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         result = await run_dream_bridge()
 
     assert result.changed is True
+    assert result.memory_changed is True
+    assert result.skill_changed is False
+    assert agent_run.await_args.kwargs["agent_name"] == "self-improve"
+    assert "Existing Skill catalog" in agent_run.await_args.kwargs["prompt"]
     assert "Project uses Ruff" in (memory_root / "MEMORY.md").read_text()
     assert "Prefers concise answers" in (memory_root / "USER.md").read_text()
     checkpoint = await EvolutionCheckpointStore.get(
@@ -638,7 +668,7 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
 
 
 @pytest.mark.asyncio
-async def test_dream_bridge_supplies_complete_memory_without_syncing_no_changes(
+async def test_dream_bridge_supplies_memory_paths_without_inlining_contents(
     tmp_path: Path,
 ) -> None:
     await Storage.init(tmp_path / "dream-complete-input.db")
@@ -700,8 +730,11 @@ async def test_dream_bridge_supplies_complete_memory_without_syncing_no_changes(
 
     assert result.changed is False
     user_prompt = agent_run.await_args.kwargs["prompt"]
-    assert "- head-marker" in user_prompt
-    assert "- tail-marker" in user_prompt
+    assert str(memory_root / "MEMORY.md") in user_prompt
+    assert str(memory_root / "USER.md") in user_prompt
+    assert "- head-marker" not in user_prompt
+    assert "- tail-marker" not in user_prompt
+    assert "# Current Memory file data" not in user_prompt
     assert "do-not-send" not in user_prompt
     assert "[REDACTED]" in user_prompt
     assert collect.await_args.kwargs["max_chars"] > 0
@@ -713,6 +746,78 @@ async def test_dream_bridge_supplies_complete_memory_without_syncing_no_changes(
     )
     assert checkpoint is not None
     assert checkpoint["last_message_id"] == "msg_complete"
+
+
+@pytest.mark.asyncio
+async def test_dream_bridge_applies_skill_without_syncing_memory_index(
+    tmp_path: Path,
+) -> None:
+    await Storage.init(tmp_path / "dream-skill.db")
+    memory_root = tmp_path / "memory"
+    memory_root.mkdir()
+    (memory_root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    (memory_root / "USER.md").write_text("# User\n", encoding="utf-8")
+    source = SourceSnapshot(
+        source_type="session",
+        source_key="ses_skill",
+        content="user: repeat the verified release workflow",
+        content_hash="delta",
+        line_count=1,
+        last_message_id="msg_skill",
+    )
+    skill_path = tmp_path / "skills" / "release-check" / "SKILL.md"
+
+    async def apply_skill(**_: object) -> None:
+        skill_path.parent.mkdir(parents=True)
+        skill_path.write_text(
+            _skill_document("release-check"),
+            encoding="utf-8",
+        )
+
+    sync = AsyncMock()
+    invalidate = Mock()
+    with (
+        patch(
+            "flocks.memory.evolution.dream.Config.get",
+            new=AsyncMock(return_value=SimpleNamespace(memory=MemoryConfig())),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Config.resolve_default_llm",
+            new=AsyncMock(
+                return_value={
+                    "provider_id": "test-provider",
+                    "model_id": "test-model",
+                }
+            ),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.Config.get_data_path",
+            return_value=tmp_path,
+        ),
+        patch(
+            "flocks.memory.evolution.dream._collect_dream_sources",
+            new=AsyncMock(return_value=([source], False, [])),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.run_evolution_agent",
+            new=AsyncMock(side_effect=apply_skill),
+        ),
+        patch(
+            "flocks.memory.evolution.dream._sync_memory_indexes",
+            new=sync,
+        ),
+        patch(
+            "flocks.memory.evolution.dream.invalidate_skill_caches",
+            new=invalidate,
+        ),
+    ):
+        result = await run_dream_bridge()
+
+    assert result.changed is True
+    assert result.memory_changed is False
+    assert result.skill_changed is True
+    sync.assert_not_awaited()
+    invalidate.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -937,542 +1042,39 @@ async def test_dream_bridge_retries_without_rolling_back_when_checkpoint_commit_
     assert user_path.read_text() == "old user\n"
 
 
-def test_turn_review_redacts_trace_without_correction_trigger() -> None:
-    messages = [
-        _message("msg_1", "assistant", _text("msg_1", "previous")),
-        _message("msg_2", "user", _text("msg_2", "不对，应该用新的流程")),
-        _message(
-            "msg_3",
-            "assistant",
-            _failed_tool("msg_3", "call_1"),
-            _completed_tool(
-                "msg_3",
-                "call_2",
-                input_data={"api_key": "secret-value"},
-                output="Authorization: Bearer abcdefghijklmnop",
-            ),
-            _text("msg_3", "done"),
-            finish="stop",
-        ),
-    ]
-    config = MemoryConfig()
-
-    evidence = _build_turn_evidence(
-        session_id="ses_test",
-        user_message_id="msg_2",
-        assistant_message_id="msg_3",
-        messages=messages,
-    )
-    assert evidence is not None
-    review = _build_turn_review(
-        evidence=evidence,
-        config=config,
-    )
-
-    assert review is not None
-    assert review.trigger_reasons == ("tool_iteration_threshold",)
-    assert "call_1" not in review.content
-    assert '"index": 1' in review.content
-    assert "secret-value" not in review.content
-    assert "abcdefghijklmnop" not in review.content
-    assert "[REDACTED]" in review.content
-
-
-def test_turn_evidence_counts_agentloop_rounds_not_calls() -> None:
-    parallel_tools = tuple(
-        _completed_tool("msg_2", f"call_{index}")
-        for index in range(10)
-    )
-    messages = [
-        _message("msg_1", "user", _text("msg_1", "run it")),
-        _message(
-            "msg_2",
-            "assistant",
-            *parallel_tools,
-            _completed_tool(
-                "msg_2",
-                "call_ignored",
-                part_metadata={"ignored": True},
-            ),
-        ),
-        _message(
-            "msg_3",
-            "assistant",
-            _completed_tool("msg_3", "call_next"),
-        ),
-        _message(
-            "msg_4",
-            "assistant",
-            _text("msg_4", "done"),
-            finish="stop",
-        ),
-    ]
-
-    evidence = _build_turn_evidence(
-        session_id="ses_test",
-        user_message_id="msg_1",
-        assistant_message_id="msg_4",
-        messages=messages,
-    )
-
-    assert evidence is not None
-    assert evidence.tool_iterations == 2
-
-
-@pytest.mark.asyncio
-async def test_load_turn_evidence_reads_session_once() -> None:
-    messages = [
-        _message("msg_1", "user", _text("msg_1", "run it")),
-        _message(
-            "msg_2",
-            "assistant",
-            _completed_tool("msg_2", "call_1"),
-        ),
-        _message(
-            "msg_3",
-            "assistant",
-            _text("msg_3", "done"),
-            finish="stop",
-        ),
-    ]
-    list_messages = AsyncMock(return_value=messages)
-
-    with patch(
-        "flocks.memory.evolution.common.Message.list_with_parts",
-        new=list_messages,
-    ):
-        evidence = await _load_turn_evidence(
-            session_id="ses_test",
-            user_message_id="msg_1",
-            assistant_message_id="msg_3",
-        )
-
-    assert evidence is not None
-    assert evidence.tool_iterations == 1
-    list_messages.assert_awaited_once_with(
-        "ses_test",
-        include_archived=True,
-    )
-
-
-def test_turn_review_requires_tool_trace_unless_manual() -> None:
-    messages = [
-        _message("msg_1", "user", _text("msg_1", "run the workflow")),
-        _message(
-            "msg_2",
-            "assistant",
-            _text("msg_2", "done"),
-            finish="stop",
-        ),
-    ]
-    config = MemoryConfig()
-
-    evidence = _build_turn_evidence(
-        session_id="ses_test",
-        user_message_id="msg_1",
-        assistant_message_id="msg_2",
-        messages=messages,
-    )
-    assert evidence is not None
-    automatic = _build_turn_review(
-        evidence=evidence,
-        config=config,
-    )
-    manual = _build_turn_review(
-        evidence=evidence,
-        config=config,
-        force=True,
-    )
-
-    assert automatic is None
-    assert manual is not None
-    assert manual.trigger_reasons == ("manual",)
-
-
-def test_turn_review_starts_after_previous_review_watermark() -> None:
-    messages = [
-        _message("msg_1", "user", _text("msg_1", "old request")),
-        _message(
-            "msg_2",
-            "assistant",
-            _completed_tool(
-                "msg_2",
-                "old_call",
-                output="old tool evidence",
-            ),
-            finish="stop",
-        ),
-        _message("msg_3", "user", _text("msg_3", "new request")),
-        _message(
-            "msg_4",
-            "assistant",
-            _completed_tool(
-                "msg_4",
-                "new_call",
-                output="new tool evidence",
-            ),
-            finish="stop",
-        ),
-    ]
-
-    evidence = _build_turn_evidence(
-        session_id="ses_test",
-        user_message_id="msg_3",
-        assistant_message_id="msg_4",
-        messages=messages,
-    )
-    assert evidence is not None
-    review = _build_turn_review(
-        evidence=evidence,
-        config=MemoryConfig(),
-        since_message_id="msg_2",
-    )
-
-    assert review is not None
-    assert "new request" in review.content
-    assert "new tool evidence" in review.content
-    assert "old request" not in review.content
-    assert "old tool evidence" not in review.content
-
-
 def test_redaction_handles_nested_keys_and_inline_secrets() -> None:
     value = {
+        "authorization": "Bearer abcdefghijklmnop",
         "nested": {
-            "password": "hunter2",
-            "cmd": ("TOKEN=abc123 AWS_SECRET_ACCESS_KEY=cloud-secret curl -H 'Bearer secret-token'"),
-        }
+            "api_key": "sk-abcdefghijklmnop",
+            "note": "password=hunter2",
+        },
     }
 
     redacted = _redact_sensitive(value)
 
-    assert redacted["nested"]["password"] == "[REDACTED]"
-    assert "abc123" not in redacted["nested"]["cmd"]
-    assert "cloud-secret" not in redacted["nested"]["cmd"]
-    assert "secret-token" not in redacted["nested"]["cmd"]
+    assert redacted["authorization"] == "[REDACTED]"
+    assert redacted["nested"]["api_key"] == "[REDACTED]"
+    assert "hunter2" not in redacted["nested"]["note"]
 
 
 @pytest.mark.asyncio
-async def test_evolution_schema_removes_legacy_proposal_table(
+async def test_evolution_schema_removes_legacy_skill_tables(
     tmp_path: Path,
 ) -> None:
-    await Storage.init(tmp_path / "evolution-schema.db")
+    await Storage.init(tmp_path / "legacy-schema.db")
     async with Storage.connect() as db:
-        await db.execute(
-            "CREATE TABLE memory_skill_proposals (id TEXT PRIMARY KEY)"
-        )
+        await db.execute("CREATE TABLE memory_skill_proposals (id TEXT PRIMARY KEY)")
+        await db.execute("CREATE TABLE memory_skill_evolution_state (session_id TEXT PRIMARY KEY)")
         await db.commit()
 
     await EvolutionCheckpointStore.ensure_schema()
 
     async with Storage.connect() as db:
-        cursor = await db.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table' AND name = 'memory_skill_proposals'
-            """
-        )
-        assert await cursor.fetchone() is None
-        cursor = await db.execute(
-            """
-            SELECT name
-            FROM sqlite_master
-            WHERE type = 'table'
-                AND name = 'memory_skill_evolution_state'
-            """
-        )
-        assert await cursor.fetchone() is not None
+        cursor = await db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'memory_skill_%'")
+        rows = await cursor.fetchall()
 
-
-@pytest.mark.asyncio
-async def test_process_skill_turn_runs_agent_with_one_loaded_session_snapshot(
-    tmp_path: Path,
-) -> None:
-    await Storage.init(tmp_path / "skill-turn.db")
-    config = MemoryConfig()
-    review = _review()
-    skill_root = tmp_path / "skills"
-    skill_path = skill_root / "pytest-workflow" / "SKILL.md"
-    session = SimpleNamespace(
-        id="ses_test",
-        category="user",
-        status="active",
-        project_id="default",
-        directory=str(tmp_path),
-    )
-
-    async def run_agent(**_: object) -> None:
-        skill_path.parent.mkdir(parents=True)
-        skill_path.write_text(
-            _skill_document("pytest-workflow"),
-            encoding="utf-8",
-    )
-
-    agent_run = AsyncMock(side_effect=run_agent)
-    load_evidence = AsyncMock(return_value=_evidence(10))
-    with (
-        patch(
-            "flocks.memory.evolution.skill.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace(memory=config)),
-        ),
-        patch(
-            "flocks.session.session.Session.get_by_id",
-            new=AsyncMock(return_value=session),
-        ),
-        patch(
-            "flocks.memory.evolution.skill._load_turn_evidence",
-            new=load_evidence,
-        ),
-        patch(
-            "flocks.memory.evolution.skill._build_turn_review",
-            new=Mock(return_value=review),
-        ),
-        patch(
-            "flocks.memory.evolution.skill._skill_catalog",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch(
-            "flocks.memory.evolution.skill.run_evolution_agent",
-            new=agent_run,
-        ),
-        patch(
-            "flocks.memory.evolution.skill._invalidate_skill_caches",
-        ),
-    ):
-        changed = await process_skill_turn(
-            session_id="ses_test",
-            user_message_id="msg_1",
-            assistant_message_id="msg_2",
-            provider_id="test-provider",
-            model_id="test-model",
-            skill_root=skill_root,
-        )
-
-    assert changed is True
-    assert skill_path.exists()
-    agent_run.assert_awaited_once()
-    assert agent_run.await_args.kwargs["agent_name"] == "learn"
-    assert "skills/*/SKILL.md" in (
-        agent_run.await_args.kwargs["write_permission_patterns"]
-    )
-    load_evidence.assert_awaited_once_with(
-        session_id="ses_test",
-        user_message_id="msg_1",
-        assistant_message_id="msg_2",
-    )
-    async with Storage.connect() as db:
-        cursor = await db.execute(
-            """
-            SELECT COUNT(*)
-            FROM memory_evolution_checkpoints
-            WHERE pipeline = 'skill'
-            """
-        )
-        assert (await cursor.fetchone())[0] == 0
-    state = await SkillEvolutionStateStore.get("ses_test")
-    assert state is not None
-    assert state.last_reviewed_message_id == "msg_2"
-    assert state.pending_tool_iterations == 0
-
-
-@pytest.mark.asyncio
-async def test_manual_learn_reuses_the_session_messages_it_loaded() -> None:
-    session = SimpleNamespace(
-        id="ses_test",
-        category="user",
-        provider="test-provider",
-        model="test-model",
-    )
-    messages = [
-        _message("msg_1", "user", _text("msg_1", "run it")),
-        _message(
-            "msg_2",
-            "assistant",
-            _text("msg_2", "done"),
-            finish="stop",
-        ),
-    ]
-    messages[1].info.providerID = "test-provider"
-    messages[1].info.modelID = "test-model"
-    list_messages = AsyncMock(return_value=messages)
-    process = AsyncMock(return_value=False)
-
-    with (
-        patch(
-            "flocks.session.session.Session.get_by_id",
-            new=AsyncMock(return_value=session),
-        ),
-        patch(
-            "flocks.session.message.Message.list_with_parts",
-            new=list_messages,
-        ),
-        patch(
-            "flocks.memory.evolution.skill.process_skill_turn",
-            new=process,
-        ),
-    ):
-        changed = await run_manual_skill_evolution("ses_test")
-
-    assert changed is False
-    list_messages.assert_awaited_once_with(
-        "ses_test",
-        include_archived=True,
-    )
-    evidence = process.await_args.kwargs["turn_evidence"]
-    assert evidence.messages == tuple(messages)
-    assert evidence.user_message_id == "msg_1"
-    assert evidence.assistant_message_id == "msg_2"
-
-
-@pytest.mark.asyncio
-async def test_skill_trigger_accumulates_tool_iterations_across_turns(
-    tmp_path: Path,
-) -> None:
-    await Storage.init(tmp_path / "skill-iterations.db")
-    config = MemoryConfig(
-        evolution={"skill": {"tool_iteration_interval": 10}}
-    )
-    skill_root = tmp_path / "skills"
-    skill_path = skill_root / "pytest-workflow" / "SKILL.md"
-    session = SimpleNamespace(
-        id="ses_test",
-        category="user",
-        status="active",
-        project_id="default",
-        directory=str(tmp_path),
-    )
-    review = _review(assistant_message_id="msg_4")
-    evidence = [
-        _evidence(6),
-        _evidence(
-            4,
-            user_message_id="msg_3",
-            assistant_message_id="msg_4",
-        ),
-    ]
-
-    async def run_agent(**_: object) -> None:
-        skill_path.parent.mkdir(parents=True)
-        skill_path.write_text(
-            _skill_document("pytest-workflow"),
-            encoding="utf-8",
-        )
-
-    with (
-        patch(
-            "flocks.memory.evolution.skill.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace(memory=config)),
-        ),
-        patch(
-            "flocks.session.session.Session.get_by_id",
-            new=AsyncMock(return_value=session),
-        ),
-        patch(
-            "flocks.memory.evolution.skill._load_turn_evidence",
-            new=AsyncMock(side_effect=evidence),
-        ),
-        patch(
-            "flocks.memory.evolution.skill._build_turn_review",
-            new=Mock(return_value=review),
-        ) as build_review,
-        patch(
-            "flocks.memory.evolution.skill._skill_catalog",
-            new=AsyncMock(return_value=[]),
-        ),
-        patch(
-            "flocks.memory.evolution.skill.run_evolution_agent",
-            new=AsyncMock(side_effect=run_agent),
-        ),
-        patch(
-            "flocks.memory.evolution.skill._invalidate_skill_caches",
-        ),
-    ):
-        first = await process_skill_turn(
-            session_id="ses_test",
-            user_message_id="msg_1",
-            assistant_message_id="msg_2",
-            provider_id="test-provider",
-            model_id="test-model",
-            skill_root=skill_root,
-        )
-        pending = await SkillEvolutionStateStore.get("ses_test")
-        second = await process_skill_turn(
-            session_id="ses_test",
-            user_message_id="msg_3",
-            assistant_message_id="msg_4",
-            provider_id="test-provider",
-            model_id="test-model",
-            skill_root=skill_root,
-        )
-
-    assert first is False
-    assert pending is not None
-    assert pending.pending_tool_iterations == 6
-    assert second is True
-    build_review.assert_called_once()
-    assert (
-        build_review.call_args.kwargs["since_message_id"]
-        is None
-    )
-    state = await SkillEvolutionStateStore.get("ses_test")
-    assert state is not None
-    assert state.pending_tool_iterations == 0
-    assert state.last_reviewed_message_id == "msg_4"
-
-
-@pytest.mark.asyncio
-async def test_turn_finish_schedules_only_skill_review_without_blocking() -> None:
-    hook = SessionEvolutionHook()
-    review = AsyncMock(return_value=False)
-    before = set(pending_background_tasks())
-
-    with patch("flocks.memory.evolution.skill.process_skill_turn", review):
-        await hook.turn_finish(
-            HookContext(
-                stage=HookStage.TURN_FINISH,
-                input={
-                    "sessionID": "ses_test",
-                    "sessionCategory": "user",
-                    "model": {
-                        "providerID": "test-provider",
-                        "modelID": "test-model",
-                    },
-                    "userMessage": {"id": "msg_1", "content": "run it"},
-                    "assistantMessage": {"id": "msg_2", "content": "done"},
-                },
-            )
-        )
-        created = set(pending_background_tasks()) - before
-        assert len(created) == 1
-        await created.pop()
-
-    review.assert_awaited_once_with(
-        session_id="ses_test",
-        user_message_id="msg_1",
-        assistant_message_id="msg_2",
-        provider_id="test-provider",
-        model_id="test-model",
-    )
-
-
-@pytest.mark.asyncio
-async def test_turn_finish_skips_temporary_agent_sessions() -> None:
-    hook = SessionEvolutionHook()
-
-    with patch(
-        "flocks.hooks.builtin.session_evolution.schedule_skill_review"
-    ) as schedule:
-        await hook.turn_finish(
-            HookContext(
-                stage=HookStage.TURN_FINISH,
-                input={
-                    "sessionID": "ses_evolution",
-                    "sessionCategory": "task",
-                },
-            )
-        )
-
-    schedule.assert_not_called()
+    assert rows == []
 
 
 @pytest.mark.asyncio

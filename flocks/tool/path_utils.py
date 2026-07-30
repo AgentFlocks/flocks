@@ -90,8 +90,8 @@ def _resolve_host_skill_path(
     ctx: ToolContext,
     path: str,
 ) -> Optional[tuple[str, str]]:
-    """Resolve Learn writes inside the host user Skill root."""
-    if ctx.agent != "learn":
+    """Resolve self-improve writes inside the host user Skill root."""
+    if ctx.agent != "self-improve":
         return None
     expanded = Path(str(path).strip()).expanduser()
     if not expanded.is_absolute():
@@ -128,7 +128,7 @@ async def resolve_tool_path(
     Sandbox mode:
     - resolve against sandbox workspace root
     - reject path traversal and symlink escapes
-    - optionally allow the host Memory root or Learn's user Skill root
+    - optionally allow the host Memory root or self-improve's user Skill root
     """
     raw_path = path
     context_workspace = (

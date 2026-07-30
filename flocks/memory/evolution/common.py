@@ -21,7 +21,6 @@ from flocks.memory.paths import (
 from flocks.memory.types import MemoryScope
 from flocks.session.message import (
     Message,
-    MessageWithParts,
     TextPart,
     ToolPart,
 )
@@ -32,7 +31,7 @@ from flocks.utils.log import Log
 log = Log.create(service="memory.evolution")
 Pipeline = Literal["dream"]
 SourceType = Literal["session", "daily"]
-_PIPELINE_LOCKS = {"dream": asyncio.Lock(), "skill": asyncio.Lock()}
+_DREAM_LOCK = asyncio.Lock()
 _TOOL_PAYLOAD_MIN_CHARS = 256
 
 _SENSITIVE_KEY_RE = re.compile(
@@ -72,16 +71,9 @@ CREATE TABLE IF NOT EXISTS memory_evolution_checkpoints (
 CREATE INDEX IF NOT EXISTS idx_memory_evolution_checkpoint_updated
 ON memory_evolution_checkpoints(pipeline, scope, scope_id, updated_at);
 
-CREATE TABLE IF NOT EXISTS memory_skill_evolution_state (
-    session_id TEXT PRIMARY KEY,
-    last_counted_message_id TEXT,
-    last_reviewed_message_id TEXT,
-    pending_tool_iterations INTEGER NOT NULL DEFAULT 0,
-    updated_at TEXT NOT NULL
-);
-
 DROP INDEX IF EXISTS idx_memory_skill_proposals_status;
 DROP TABLE IF EXISTS memory_skill_proposals;
+DROP TABLE IF EXISTS memory_skill_evolution_state;
 """
 
 
@@ -107,6 +99,8 @@ class DreamBridgeResult:
     changed: bool
     processed_sources: int
     backlog: bool
+    memory_changed: bool = False
+    skill_changed: bool = False
 
 
 @dataclass(frozen=True)
@@ -133,38 +127,6 @@ class DreamTarget:
     @property
     def scheduler_key(self) -> str:
         return f"{self.scope.value}:{self.scope_id}"
-
-
-@dataclass(frozen=True)
-class TurnReview:
-    """Canonical context and tool trace for one successful turn."""
-
-    user_message_id: str
-    assistant_message_id: str
-    trigger_reasons: tuple[str, ...]
-    content: str
-
-
-@dataclass(frozen=True)
-class TurnEvidence:
-    """One validated successful Turn backed by one Session history read."""
-
-    session_id: str
-    user_message_id: str
-    assistant_message_id: str
-    messages: tuple[MessageWithParts, ...]
-    user_index: int
-    assistant_index: int
-    tool_iterations: int
-
-
-@dataclass(frozen=True)
-class SkillEvolutionState:
-    """Per-Session Hermes-style Skill review trigger state."""
-
-    last_counted_message_id: Optional[str] = None
-    last_reviewed_message_id: Optional[str] = None
-    pending_tool_iterations: int = 0
 
 
 class EvolutionCheckpointStore:
@@ -303,141 +265,6 @@ class EvolutionCheckpointStore:
         )
 
 
-class SkillEvolutionStateStore:
-    """Persist accumulated tool-loop iterations and the review watermark."""
-
-    @classmethod
-    async def get(cls, session_id: str) -> Optional[SkillEvolutionState]:
-        await EvolutionCheckpointStore.ensure_schema()
-        async with Storage.connect() as db:
-            cursor = await db.execute(
-                """
-                SELECT last_counted_message_id, last_reviewed_message_id,
-                       pending_tool_iterations
-                FROM memory_skill_evolution_state
-                WHERE session_id = ?
-                """,
-                (session_id,),
-            )
-            row = await cursor.fetchone()
-        if row is None:
-            return None
-        return SkillEvolutionState(
-            last_counted_message_id=row[0],
-            last_reviewed_message_id=row[1],
-            pending_tool_iterations=int(row[2] or 0),
-        )
-
-    @classmethod
-    async def record_turn(
-        cls,
-        session_id: str,
-        assistant_message_id: str,
-        tool_iterations: int,
-    ) -> SkillEvolutionState:
-        """Count one completed Turn exactly once and return updated state."""
-        await EvolutionCheckpointStore.ensure_schema()
-        now = _now_iso()
-        async with Storage.connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                cursor = await db.execute(
-                    """
-                    SELECT last_counted_message_id, last_reviewed_message_id,
-                           pending_tool_iterations
-                    FROM memory_skill_evolution_state
-                    WHERE session_id = ?
-                    """,
-                    (session_id,),
-                )
-                row = await cursor.fetchone()
-                if row is None:
-                    last_counted = None
-                    last_reviewed = None
-                    pending = 0
-                else:
-                    last_counted = row[0]
-                    last_reviewed = row[1]
-                    pending = int(row[2] or 0)
-
-                if last_counted is None or last_counted < assistant_message_id:
-                    last_counted = assistant_message_id
-                    pending += max(int(tool_iterations), 0)
-
-                await db.execute(
-                    """
-                    INSERT INTO memory_skill_evolution_state (
-                        session_id, last_counted_message_id,
-                        last_reviewed_message_id, pending_tool_iterations,
-                        updated_at
-                    ) VALUES (?, ?, ?, ?, ?)
-                    ON CONFLICT(session_id) DO UPDATE SET
-                        last_counted_message_id =
-                            excluded.last_counted_message_id,
-                        last_reviewed_message_id =
-                            excluded.last_reviewed_message_id,
-                        pending_tool_iterations =
-                            excluded.pending_tool_iterations,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        session_id,
-                        last_counted,
-                        last_reviewed,
-                        pending,
-                        now,
-                    ),
-                )
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
-        return SkillEvolutionState(
-            last_counted_message_id=last_counted,
-            last_reviewed_message_id=last_reviewed,
-            pending_tool_iterations=pending,
-        )
-
-    @classmethod
-    async def commit_review(
-        cls,
-        session_id: str,
-        assistant_message_id: str,
-    ) -> None:
-        """Reset the counter and advance the Skill review watermark."""
-        await EvolutionCheckpointStore.ensure_schema()
-        now = _now_iso()
-        async with Storage.connect() as db:
-            await db.execute("BEGIN IMMEDIATE")
-            try:
-                await db.execute(
-                    """
-                    INSERT INTO memory_skill_evolution_state (
-                        session_id, last_counted_message_id,
-                        last_reviewed_message_id, pending_tool_iterations,
-                        updated_at
-                    ) VALUES (?, ?, ?, 0, ?)
-                    ON CONFLICT(session_id) DO UPDATE SET
-                        last_counted_message_id =
-                            excluded.last_counted_message_id,
-                        last_reviewed_message_id =
-                            excluded.last_reviewed_message_id,
-                        pending_tool_iterations = 0,
-                        updated_at = excluded.updated_at
-                    """,
-                    (
-                        session_id,
-                        assistant_message_id,
-                        assistant_message_id,
-                        now,
-                    ),
-                )
-                await db.commit()
-            except BaseException:
-                await db.rollback()
-                raise
-
-
 def _now_iso() -> str:
     return datetime.now(UTC).isoformat()
 
@@ -479,6 +306,33 @@ def _real_text(message: Any) -> str:
     return "\n".join(chunks)
 
 
+def _tool_evidence(message: Any, *, per_tool_chars: int) -> list[str]:
+    """Serialize bounded, redacted tool evidence for Skill decisions."""
+    blocks: list[str] = []
+    for part in message.parts:
+        if not isinstance(part, ToolPart) or not _is_real_tool_part(part):
+            continue
+        state = part.state
+        payload = {
+            "tool": part.tool,
+            "status": state.status,
+            "input": _redact_sensitive(getattr(state, "input", None)),
+            "output": _redact_sensitive(getattr(state, "output", None)),
+            "error": _redact_sensitive(getattr(state, "error", None)),
+        }
+        blocks.append(
+            _truncate_middle(
+                json.dumps(
+                    payload,
+                    ensure_ascii=False,
+                    default=str,
+                ),
+                per_tool_chars,
+            )
+        )
+    return blocks
+
+
 async def _session_delta(
     session_id: str,
     checkpoint: Optional[dict[str, Any]],
@@ -504,12 +358,25 @@ async def _session_delta(
     blocks: list[str] = []
     consumed: list[Any] = []
     content_length = 0
+    per_tool_chars = max(
+        max_chars // max(max_messages * 2, 1),
+        _TOOL_PAYLOAD_MIN_CHARS,
+    )
     for message in pending:
         if len(consumed) >= max_messages:
             break
         role = _message_role(message)
         text = _real_text(message) if role in {"user", "assistant"} else ""
-        block = f"{role}: {text}" if text else ""
+        parts = [f"{role}: {text}"] if text else []
+        if role == "assistant":
+            parts.extend(
+                f"tool: {tool_text}"
+                for tool_text in _tool_evidence(
+                    message,
+                    per_tool_chars=per_tool_chars,
+                )
+            )
+        block = "\n".join(parts)
         if block:
             remaining = max(max_chars - content_length, 1)
             if blocks and len(block) > remaining:
@@ -774,134 +641,3 @@ def _redact_sensitive(value: Any, *, key: Optional[str] = None) -> Any:
 def _is_real_tool_part(part: ToolPart) -> bool:
     metadata = part.metadata or {}
     return not bool(metadata.get("ignored") or metadata.get("synthetic"))
-
-
-def _build_turn_evidence(
-    *,
-    session_id: str,
-    user_message_id: str,
-    assistant_message_id: str,
-    messages: list[MessageWithParts],
-) -> Optional[TurnEvidence]:
-    """Validate and summarize one successful Turn from loaded messages."""
-    positions = {message.info.id: index for index, message in enumerate(messages)}
-    user_index = positions.get(user_message_id)
-    assistant_index = positions.get(assistant_message_id)
-    if user_index is None or assistant_index is None or user_index > assistant_index:
-        return None
-
-    assistant = messages[assistant_index]
-    if (
-        _message_role(assistant) != "assistant"
-        or getattr(assistant.info, "finish", None) != "stop"
-        or getattr(assistant.info, "error", None)
-    ):
-        return None
-
-    iterations = 0
-    for message in messages[user_index : assistant_index + 1]:
-        if _message_role(message) != "assistant":
-            continue
-        if any(
-            isinstance(part, ToolPart) and _is_real_tool_part(part)
-            for part in message.parts
-        ):
-            iterations += 1
-    return TurnEvidence(
-        session_id=session_id,
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        messages=tuple(messages),
-        user_index=user_index,
-        assistant_index=assistant_index,
-        tool_iterations=iterations,
-    )
-
-
-async def _load_turn_evidence(
-    *,
-    session_id: str,
-    user_message_id: str,
-    assistant_message_id: str,
-) -> Optional[TurnEvidence]:
-    """Load Session history once and resolve one successful Turn."""
-    messages = await Message.list_with_parts(
-        session_id,
-        include_archived=True,
-    )
-    return _build_turn_evidence(
-        session_id=session_id,
-        user_message_id=user_message_id,
-        assistant_message_id=assistant_message_id,
-        messages=messages,
-    )
-
-
-def _build_turn_review(
-    *,
-    evidence: TurnEvidence,
-    config: MemoryConfig,
-    since_message_id: Optional[str] = None,
-    force: bool = False,
-) -> Optional[TurnReview]:
-    """Build bounded Learn input without loading Session history again."""
-    messages = evidence.messages
-    positions = {message.info.id: index for index, message in enumerate(messages)}
-    since_index = positions.get(since_message_id) if since_message_id else None
-    review_start = since_index + 1 if since_index is not None else 0
-    review_messages = messages[
-        review_start : evidence.assistant_index + 1
-    ]
-    review_messages = review_messages[-config.evolution.max_session_messages :]
-    tool_parts: list[ToolPart] = []
-    for message in review_messages:
-        tool_parts.extend(
-            part
-            for part in message.parts
-            if isinstance(part, ToolPart) and _is_real_tool_part(part)
-        )
-    if not force and not tool_parts:
-        return None
-
-    context_blocks: list[str] = []
-    for message in review_messages:
-        role = _message_role(message)
-        if role not in {"user", "assistant"}:
-            continue
-        text = _real_text(message)
-        if text:
-            context_blocks.append(f"{role}: {text}")
-    context_budget = max(config.evolution.max_input_chars // 6, 1000)
-    context = _truncate_tail("\n\n".join(context_blocks), context_budget)
-
-    trace_budget = max(config.evolution.max_input_chars // 2, 1000)
-    per_tool_budget = max(
-        trace_budget // max(len(tool_parts), 1),
-        _TOOL_PAYLOAD_MIN_CHARS,
-    )
-    trace_blocks: list[str] = []
-    for index, part in enumerate(tool_parts, start=1):
-        state = part.state
-        payload = {
-            "index": index,
-            "tool": part.tool,
-            "status": state.status,
-            "input": _redact_sensitive(getattr(state, "input", None)),
-            "output": _redact_sensitive(getattr(state, "output", None)),
-            "error": _redact_sensitive(getattr(state, "error", None)),
-        }
-        serialized = json.dumps(payload, ensure_ascii=False, default=str)
-        trace_blocks.append(_truncate_middle(serialized, per_tool_budget))
-    trace = "\n".join(trace_blocks) or "(no tool calls)"
-    content = (
-        "## Session context since previous Skill review\n"
-        f"{context}\n\n"
-        "## Tool trace since previous Skill review\n"
-        f"{trace}"
-    )
-    return TurnReview(
-        user_message_id=evidence.user_message_id,
-        assistant_message_id=evidence.assistant_message_id,
-        trigger_reasons=("manual" if force else "tool_iteration_threshold",),
-        content=content,
-    )

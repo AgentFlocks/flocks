@@ -65,7 +65,7 @@ async def run_evolution_agent(
                 ],
                 PermissionRule(
                     permission="bash",
-                    action="deny",
+                    action="allow",
                     pattern="*",
                 ),
             ]
@@ -113,9 +113,7 @@ async def run_evolution_agent(
             working_directory=directory,
         )
         if result.action == "error":
-            raise RuntimeError(
-                result.error or f"{agent_name} evolution Agent failed"
-            )
+            raise RuntimeError(result.error or f"{agent_name} evolution Agent failed")
     finally:
         try:
             await asyncio.shield(Session.delete(project_id, session.id))

@@ -28,7 +28,7 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
     with (
         patch(
             "flocks.memory.evolution.agent_runner.Agent.get",
-            new=AsyncMock(return_value=SimpleNamespace(name="dream")),
+            new=AsyncMock(return_value=SimpleNamespace(name="self-improve")),
         ),
         patch(
             "flocks.memory.evolution.agent_runner.Session.create",
@@ -56,7 +56,7 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
         ),
     ):
         result = await run_evolution_agent(
-            agent_name="dream",
+            agent_name="self-improve",
             prompt="evidence",
             project_id="default",
             directory="/workspace",
@@ -68,36 +68,25 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
     assert result is None
     assert created.await_args.kwargs["category"] == "task"
     assert created.await_args.kwargs["memory_enabled"] is False
-    assert (
-        created.await_args.kwargs["metadata"]["hideFromSessionManager"]
-        is True
-    )
+    assert created.await_args.kwargs["metadata"]["hideFromSessionManager"] is True
     assert message_create.await_args.kwargs["model"] == {
         "providerID": "provider",
         "modelID": "model",
     }
     permission_rules = created.await_args.kwargs["permission"]
     assert any(
-        rule.permission == "edit"
-        and rule.action == "allow"
-        and rule.pattern == "memory/MEMORY.md"
+        rule.permission == "edit" and rule.action == "allow" and rule.pattern == "memory/MEMORY.md"
         for rule in permission_rules
     )
+    assert any(rule.permission == "edit" and rule.action == "deny" and rule.pattern == "*" for rule in permission_rules)
     assert any(
-        rule.permission == "edit"
-        and rule.action == "deny"
-        and rule.pattern == "*"
-        for rule in permission_rules
-    )
-    assert any(
-        rule.permission == "bash" and rule.action == "deny"
-        for rule in permission_rules
+        rule.permission == "bash" and rule.action == "allow" and rule.pattern == "*" for rule in permission_rules
     )
     loop.assert_awaited_once_with(
         session_id="ses_evolution",
         provider_id="provider",
         model_id="model",
-        agent_name="dream",
+        agent_name="self-improve",
         working_directory="/workspace",
     )
     deleted.assert_awaited_once_with("default", "ses_evolution")
@@ -106,21 +95,20 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
 
 def test_evolution_agents_are_hidden_and_have_expected_tools() -> None:
     agent_root = Path(__file__).parents[2] / "flocks" / "agent" / "agents"
-    dream = load_agent(agent_root / "dream", native=True)
-    learn = load_agent(agent_root / "learn", native=True)
+    self_improve = load_agent(
+        agent_root / "self_improve",
+        native=True,
+    )
 
-    assert dream is not None
-    assert dream.hidden is True
-    assert dream.delegatable is False
-    assert dream.tools == [
+    assert self_improve is not None
+    assert self_improve.hidden is True
+    assert self_improve.delegatable is False
+    assert self_improve.tools == [
         "read",
         "write",
         "edit",
         "glob",
         "grep",
+        "bash",
+        "skill_load",
     ]
-    assert learn is not None
-    assert learn.hidden is True
-    assert learn.delegatable is False
-    assert "skill_load" in learn.tools
-    assert "bash" not in learn.tools

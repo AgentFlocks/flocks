@@ -297,7 +297,7 @@ def test_parse_skill_md_with_managed_by_metadata(tmp_path):
     skill_file.write_text(
         "---\n"
         "name: managed-skill\n"
-        "description: Skill managed by Flocks Learn\n"
+        "description: Skill managed by Flocks self-improvement\n"
         "metadata:\n"
         "  managed_by: flocks\n"
         "---\n"

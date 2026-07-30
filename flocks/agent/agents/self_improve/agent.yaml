@@ -1,5 +1,5 @@
-name: learn
-description: Hidden temporary agent that learns reusable user Skills from successful Session trajectories.
+name: self-improve
+description: Hidden Dream Agent that improves durable Memory and reusable user Skills.
 mode: subagent
 hidden: true
 tags: [system, evolution]
@@ -11,4 +11,5 @@ tools:
   - edit
   - glob
   - grep
+  - bash
   - skill_load

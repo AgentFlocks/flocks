@@ -1,4 +1,4 @@
-"""Tests for explicit Dream and Skill evolution commands."""
+"""Tests for the explicit Dream self-improvement command."""
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
@@ -12,14 +12,11 @@ from flocks.memory.evolution.common import DreamTarget
 
 def test_evolution_commands_are_registered_as_direct_commands() -> None:
     dream = Command.get("dream")
-    learn = Command.get("learn")
 
     assert dream is not None
     assert dream.execution_kind == "direct"
     assert dream.requires_existing_session is True
-    assert learn is not None
-    assert learn.execution_kind == "direct"
-    assert learn.requires_existing_session is True
+    assert Command.get("learn") is None
 
 
 @pytest.mark.asyncio
@@ -32,6 +29,8 @@ async def test_dream_command_runs_current_project_agent() -> None:
         return_value=SimpleNamespace(
             changed=True,
             processed_sources=2,
+            memory_changed=True,
+            skill_changed=True,
         )
     )
 
@@ -51,25 +50,8 @@ async def test_dream_command_runs_current_project_agent() -> None:
         )
 
     assert result.success is True
+    assert "Memory and Skill updated" in result.text
     bridge.assert_awaited_once_with(
         DreamTarget.project("prj_test"),
         parent_session_id="ses_test",
     )
-
-
-@pytest.mark.asyncio
-async def test_learn_command_runs_manual_skill_agent() -> None:
-    learn = AsyncMock(return_value=False)
-
-    with patch(
-        "flocks.memory.evolution.skill.run_manual_skill_evolution",
-        new=learn,
-    ):
-        result = await run_direct_command(
-            "learn",
-            session_id="ses_test",
-        )
-
-    assert result.success is True
-    assert result.text == "Skill learning completed: no Skill changes."
-    learn.assert_awaited_once_with("ses_test")

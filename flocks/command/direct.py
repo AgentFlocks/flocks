@@ -211,42 +211,23 @@ async def run_direct_command(
         if result.processed_sources == 0:
             return DirectCommandResult(
                 handled=True,
-                text="Dream completed: no new Memory evidence.",
+                text="Dream completed: no new self-improvement evidence.",
             )
-        outcome = "Memory updated" if result.changed else "no Memory changes"
+        if result.memory_changed and result.skill_changed:
+            outcome = "Memory and Skill updated"
+        elif result.memory_changed:
+            outcome = "Memory updated"
+        elif result.skill_changed:
+            outcome = "Skill updated"
+        elif result.changed:
+            outcome = "self-improvement applied"
+        else:
+            outcome = "no Memory or Skill changes"
         return DirectCommandResult(
             handled=True,
             text=(
                 f"Dream completed: {outcome}; "
                 f"processed {result.processed_sources} source(s)."
-            ),
-        )
-
-    if name == "learn":
-        if not session_id:
-            return DirectCommandResult(
-                handled=True,
-                success=False,
-                text="Usage: /learn requires an active session.",
-            )
-        from flocks.memory.evolution.skill import (
-            run_manual_skill_evolution,
-        )
-
-        try:
-            changed = await run_manual_skill_evolution(session_id)
-        except Exception as exc:
-            return DirectCommandResult(
-                handled=True,
-                success=False,
-                text=f"Skill learning failed: {exc}",
-            )
-        return DirectCommandResult(
-            handled=True,
-            text=(
-                "Skill learning completed: Skill updated."
-                if changed
-                else "Skill learning completed: no Skill changes."
             ),
         )
 

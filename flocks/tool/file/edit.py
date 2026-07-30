@@ -651,8 +651,11 @@ async def edit_tool(
     content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
     diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
 
-    if ctx.agent == "learn":
-        from flocks.memory.evolution.skill import (
+    if (
+        ctx.agent == "self-improve"
+        and Path(filepath).name == "SKILL.md"
+    ):
+        from flocks.memory.evolution.skill_guard import (
             validate_evolution_skill_edit,
         )
 

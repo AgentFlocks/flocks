@@ -310,10 +310,10 @@ class TestBuildSystemPrompts:
     @pytest.mark.asyncio
     async def test_evolution_subagent_child_uses_full_prompt(self):
         agent = AgentInfo(
-            name="dream",
+            name="self-improve",
             mode="subagent",
             tags=["system", "evolution"],
-            prompt="You are the Dream Agent.",
+            prompt="You are the self-improve Agent.",
         )
         with (
             patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
@@ -322,15 +322,15 @@ class TestBuildSystemPrompts:
                 AsyncMock(
                     return_value=SimpleNamespace(
                         parent_id="ses-parent",
-                        metadata={"evolution": "dream"},
+                        metadata={"evolution": "self-improve"},
                     )
                 ),
             ),
         ):
             prompts = await SessionPrompt.build_system_prompts(
-                session_id="ses-dream",
+                session_id="ses-self-improve",
                 session_directory="/tmp/project",
-                agent_name="dream",
+                agent_name="self-improve",
                 agent_prompt=agent.prompt,
                 provider_id="anthropic",
                 model_id="claude-sonnet",

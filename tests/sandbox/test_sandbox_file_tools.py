@@ -71,7 +71,11 @@ async def test_file_tools_allow_only_host_memory_root_in_sandbox(
     memory_file = data_dir / "memory" / "MEMORY.md"
     memory_file.parent.mkdir(parents=True)
     memory_file.write_text("# Global Memory\n\nold fact\n", encoding="utf-8")
-    ctx = _sandbox_ctx(str(sandbox_dir), workspace_access="rw")
+    ctx = _sandbox_ctx(
+        str(sandbox_dir),
+        workspace_access="rw",
+        agent="self-improve",
+    )
 
     with patch("flocks.config.Config.get_data_path", return_value=data_dir):
         read_result = await ToolRegistry.execute(
@@ -109,7 +113,7 @@ async def test_file_tools_allow_only_host_memory_root_in_sandbox(
 
 
 @pytest.mark.asyncio
-async def test_sandbox_learn_can_manage_only_marked_host_skills(
+async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
     tmp_path: Path,
 ) -> None:
     sandbox_dir = tmp_path / "sandbox"
@@ -139,13 +143,13 @@ async def test_sandbox_learn_can_manage_only_marked_host_skills(
     ctx = _sandbox_ctx(
         str(sandbox_dir),
         workspace_access="rw",
-        agent="learn",
+        agent="self-improve",
     )
 
     with (
         patch("pathlib.Path.home", return_value=home_dir),
         patch(
-            "flocks.memory.evolution.skill.Skill.all",
+            "flocks.memory.evolution.skill_guard.Skill.all",
             new=AsyncMock(return_value=[]),
         ),
     ):
@@ -189,7 +193,7 @@ async def test_sandbox_learn_can_manage_only_marked_host_skills(
     assert edit_result.success
     assert "Improved workflow." in managed_path.read_text(encoding="utf-8")
     assert not unmanaged_result.success
-    assert "Evolution-managed" in (unmanaged_result.error or "")
+    assert "existing managed Skills" in (unmanaged_result.error or "")
     assert unmanaged_path.read_text(encoding="utf-8") == unmanaged_content
 
 

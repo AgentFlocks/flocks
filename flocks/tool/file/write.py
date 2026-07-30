@@ -362,8 +362,11 @@ async def write_tool(
                 title=title
             )
 
-    if ctx.agent == "learn":
-        from flocks.memory.evolution.skill import (
+    if (
+        ctx.agent == "self-improve"
+        and Path(filepath).name == "SKILL.md"
+    ):
+        from flocks.memory.evolution.skill_guard import (
             validate_evolution_skill_write,
         )
 

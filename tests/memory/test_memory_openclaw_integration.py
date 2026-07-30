@@ -257,7 +257,7 @@ class TestMemoryBootstrap:
         assert "Global `MEMORY.md`" in prompt
         assert "Project `MEMORY.md`" in prompt
         assert "exactly one destination" in prompt
-        assert "Skill evolution happens outside this flush" in prompt
+        assert "Dream self-improvement handles Skills" in prompt
         assert "Do not continue task work in this flush turn" in prompt
     
     @pytest.mark.asyncio
