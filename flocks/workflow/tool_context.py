@@ -108,17 +108,19 @@ async def build_workflow_tool_context(
             source="workflow.runtime.tool_context",
         )
         profile = await get_session_execution_profile(effective_session_id)
-        await HookPipeline.run_action_before(
+        await HookPipeline.run_event(
             {
-                "operation": "session.mode.initialize",
-                "session_id": effective_session_id,
-                "entry": "workflow",
-                "workflow_context": {
-                    "source": "workflow_runtime",
-                    "workflow_id": workflow_id,
-                    "action_name": action_name,
+                "type": "session.execution_profile.updated",
+                "properties": {
+                    "session_id": effective_session_id,
+                    "entry": "workflow",
+                    "workflow_context": {
+                        "source": "workflow_runtime",
+                        "workflow_id": workflow_id,
+                        "action_name": action_name,
+                    },
+                    "session_execution_profile": profile or {},
                 },
-                "session_execution_profile": profile or {},
             }
         )
     except Exception:

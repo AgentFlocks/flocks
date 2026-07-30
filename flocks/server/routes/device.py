@@ -60,54 +60,12 @@ from flocks.tool.device.store import (
 router = APIRouter()
 
 
-async def _emit_device_audit_fallback(event_type: str, payload: dict[str, Any]) -> None:
-    """Persist device audit even when the default sink is still a no-op."""
-    try:
-        from flocks.audit import NullAuditSink, get_sink
-
-        sink_cls = get_sink()
-        if sink_cls is not NullAuditSink:
-            return
-    except Exception:
-        return
-
-    try:
-        from flockspro.audit.service import AuditEvent
-        from flockspro.audit.sinks import SqliteAuditSink
-    except Exception:
-        # OSS or flockspro not installed: nothing to persist.
-        return
-
-    failed = bool(payload.get("error") or payload.get("reason"))
-    event = AuditEvent(
-        event_type=event_type,
-        category="device",
-        action="credentials_reveal",
-        status="error" if failed else "ok",
-        result="failed" if failed else "success",
-        user_id=str(payload.get("user_id")) if payload.get("user_id") else None,
-        user_name=str(payload.get("username")) if payload.get("username") else None,
-        resource_type="device",
-        resource_id=str(payload.get("device_id")) if payload.get("device_id") else None,
-        ip=str(payload.get("ip")) if payload.get("ip") else None,
-        payload=payload,
-        metadata=payload,
-    )
-    await SqliteAuditSink().write(event)
-
-
 async def _emit_device_audit(event_type: str, payload: dict[str, Any]) -> None:
     try:
         await emit_audit_event(event_type, payload)
     except Exception:
         # Audit failures must not block credential reveal.
         pass
-    try:
-        await _emit_device_audit_fallback(event_type, payload)
-    except Exception:
-        pass
-
-
 # ===========================================================================
 # Group routes
 # ===========================================================================

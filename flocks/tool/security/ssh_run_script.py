@@ -1,7 +1,7 @@
 """Neutral SSH script execution primitive.
 
 Flocks supplies file handling and remote execution only.  Script analysis,
-approval, audit semantics, and enforcement are FlocksPro responsibilities.
+approval, audit semantics, and enforcement are extension responsibilities.
 """
 
 from __future__ import annotations

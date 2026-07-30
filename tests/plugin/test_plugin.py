@@ -151,21 +151,16 @@ class TestPluginLoader:
             "flocks.plugin.loader.importlib.metadata.entry_points",
             lambda: _EntryPoints(),
         )
-        monkeypatch.setattr(
-            "flocks.plugin.loader.importlib.util.find_spec",
-            lambda _name: object(),
-        )
-
         result = PluginLoader.load_all(project_dir=tmp_path)
 
         assert result.has_critical_entrypoint_failure is True
         assert result.critical_entrypoint_failures == ["critical-test-plugin"]
         assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
 
-    def test_load_all_isolates_critical_group_failure_without_flockspro(
+    def test_load_all_marks_critical_group_failure_without_product_checks(
         self, monkeypatch, tmp_path: Path
     ):
-        """Pure OSS must not turn a critical entry-point error into a blocker."""
+        """Critical group semantics do not depend on a product installation."""
 
         class _CriticalEntryPoint:
             name = "critical-test-plugin"
@@ -186,20 +181,15 @@ class TestPluginLoader:
             "flocks.plugin.loader.importlib.metadata.entry_points",
             lambda: _EntryPoints(),
         )
-        monkeypatch.setattr(
-            "flocks.plugin.loader.importlib.util.find_spec",
-            lambda _name: None,
-        )
-
         result = PluginLoader.load_all(project_dir=tmp_path)
 
-        assert result.has_critical_entrypoint_failure is False
-        assert PluginLoader.has_runtime_critical_entrypoint_failure() is False
+        assert result.has_critical_entrypoint_failure is True
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
 
-    def test_load_all_isolates_critical_marker_from_regular_plugin_without_flockspro(
+    def test_load_all_marks_critical_marker_from_regular_plugin(
         self, monkeypatch, tmp_path: Path
     ):
-        """Pure OSS must isolate a critical marker raised by a normal plugin."""
+        """A plugin can explicitly declare its own critical startup failure."""
 
         class _RegularEntryPoint:
             name = "regular-test-plugin"
@@ -220,31 +210,19 @@ class TestPluginLoader:
             "flocks.plugin.loader.importlib.metadata.entry_points",
             lambda: _EntryPoints(),
         )
-        monkeypatch.setattr(
-            "flocks.plugin.loader.importlib.util.find_spec",
-            lambda _name: None,
-        )
-
         result = PluginLoader.load_all(project_dir=tmp_path)
 
-        assert result.has_critical_entrypoint_failure is False
-        assert PluginLoader.has_runtime_critical_entrypoint_failure() is False
+        assert result.has_critical_entrypoint_failure is True
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
 
-    def test_load_all_isolates_metadata_scan_failure_when_flockspro_check_fails(
+    def test_load_all_marks_metadata_scan_failure_without_product_checks(
         self, monkeypatch, tmp_path: Path
     ):
-        """An indeterminate Pro installation state preserves the OSS boundary."""
-
-        def _installation_check(_name: str):
-            raise ValueError("invalid module spec")
+        """Entry-point metadata failures are critical independently of product."""
 
         def _scan_error():
             raise RuntimeError("entrypoint metadata unavailable")
 
-        monkeypatch.setattr(
-            "flocks.plugin.loader.importlib.util.find_spec",
-            _installation_check,
-        )
         monkeypatch.setattr(
             "flocks.plugin.loader.importlib.metadata.entry_points",
             _scan_error,
@@ -252,8 +230,8 @@ class TestPluginLoader:
 
         result = PluginLoader.load_all(project_dir=tmp_path)
 
-        assert result.has_critical_entrypoint_failure is False
-        assert PluginLoader.has_runtime_critical_entrypoint_failure() is False
+        assert result.has_critical_entrypoint_failure is True
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
 
     def test_register_and_load_tools(self, tmp_path: Path):
         """Simulates the TOOLS extension point."""

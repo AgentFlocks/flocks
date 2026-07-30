@@ -2,7 +2,7 @@
 Shared neutral SSH transport utilities.
 
 Provides credential resolution, connection pooling, and command transport.
-Security policy and audit semantics are implemented by FlocksPro extensions.
+Security policy and audit semantics are implemented by optional extensions.
 """
 
 import asyncio

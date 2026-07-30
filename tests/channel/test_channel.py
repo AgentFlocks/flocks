@@ -636,7 +636,7 @@ class TestFeishuNativeCommands:
         monkeypatch.setattr("flocks.session.session.Session.update", update_mock)
         profile_upsert = AsyncMock(return_value=None)
         profile_get = AsyncMock(return_value={"entry": "channel", "revision": 1})
-        mode_init = AsyncMock(return_value=SimpleNamespace(output={}))
+        profile_event = AsyncMock(return_value=SimpleNamespace(output={}))
         monkeypatch.setattr(
             "flocks.session.execution_profile.upsert_session_execution_profile",
             profile_upsert,
@@ -646,8 +646,8 @@ class TestFeishuNativeCommands:
             profile_get,
         )
         monkeypatch.setattr(
-            "flocks.hooks.pipeline.HookPipeline.run_action_before",
-            mode_init,
+            "flocks.hooks.pipeline.HookPipeline.run_event",
+            profile_event,
         )
 
         handled = await dispatcher._handle_feishu_native_command(
@@ -673,9 +673,12 @@ class TestFeishuNativeCommands:
         assert profile_upsert.await_args.kwargs["patch"]["entry"] == "channel"
         assert profile_upsert.await_args.kwargs["patch"]["channel_id"] == "feishu"
         assert profile_upsert.await_args.kwargs["patch"]["account_id"] == "default"
-        mode_init.assert_awaited_once()
-        assert mode_init.await_args.args[0]["operation"] == "session.mode.initialize"
-        assert mode_init.await_args.args[0]["entry"] == "channel"
+        profile_event.assert_awaited_once()
+        assert profile_event.await_args.args[0]["type"] == "session.execution_profile.updated"
+        assert profile_event.await_args.args[0]["properties"]["entry"] == "channel"
+        # Rebinding only changes the active IM target; it must preserve the
+        # existing session and its history for later WebUI inspection.
+        update_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_new_command_inherits_auto_model_mode(self, monkeypatch):
