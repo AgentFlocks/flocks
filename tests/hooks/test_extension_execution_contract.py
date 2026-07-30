@@ -28,8 +28,6 @@ from flocks.plugin import ExtensionPoint, PluginLoader
 from flocks.server import auth
 import flocks.server.app as server_app_module
 from flocks.server.app import auth_guard_middleware
-from flocks.server.routes import mcp as mcp_routes
-from flocks.server.routes import workflow as workflow_routes
 from flocks.tool.registry import (
     ParameterType,
     Tool,
@@ -998,59 +996,6 @@ async def test_http_and_channel_ingress_emit_before_and_after() -> None:
     assert channel_payload["message"] is message
     assert channel_payload["text"] == "original transport text"
     assert channel_payload["evidence"] is message.raw
-
-
-@pytest.mark.asyncio
-async def test_wrapped_control_actions_stop_and_preserve_raw_arguments() -> None:
-    observed: list[tuple[str, dict]] = []
-
-    class Stopper(HookBase):
-        async def action_before(self, ctx):
-            observed.append((ctx.stage, dict(ctx.input)))
-            return {"execution": {"stop": True}}
-
-        async def action_after(self, ctx):
-            observed.append((ctx.stage, dict(ctx.input)))
-
-    HookPipeline.register("stopper", Stopper())
-    mcp_request = mcp_routes.McpAddRequest(name="example", config={"url": None})
-    workflow_request = workflow_routes.WorkflowCreateRequest(
-        name="raw workflow",
-        workflowJson={"nodes": []},
-    )
-    webhook_request = Request({
-        "type": "http",
-        "method": "POST",
-        "scheme": "http",
-        "path": "/webhook/workflows/workflow-1/trigger-1",
-        "headers": [],
-        "client": ("127.0.0.1", 12345),
-        "server": ("testserver", 80),
-    })
-    operations = [
-        (mcp_routes.add_mcp_server, (mcp_request,), "request", mcp_request),
-        (workflow_routes.create_workflow, (workflow_request,), "req", workflow_request),
-        (
-            workflow_routes.invoke_workflow_webhook_trigger,
-            ("workflow-1", "trigger-1", webhook_request),
-            "request",
-            webhook_request,
-        ),
-    ]
-
-    for endpoint, args, argument_name, argument_value in operations:
-        with pytest.raises(ExecutionStopped):
-            await endpoint(*args)
-        before_payload = observed[-1][1]
-        if argument_name is not None:
-            assert before_payload["arguments"][argument_name] is argument_value
-
-    assert [stage for stage, _payload in observed] == [
-        stage
-        for _endpoint, _args, _argument_name, _argument_value in operations
-        for stage in ("action.before", "action.after")
-    ]
-    assert all(payload["outcome"] == "stopped" for stage, payload in observed if stage == "action.after")
 
 
 @pytest.mark.asyncio

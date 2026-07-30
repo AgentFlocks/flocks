@@ -155,6 +155,31 @@ class TestSessionCRUD:
         assert profile["permission_mode"] == "require-confirm"
 
     @pytest.mark.asyncio
+    async def test_create_session_emits_canonical_created_event(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Session creation emits the canonical Bus lifecycle event."""
+        from flocks.hooks.pipeline import HookPipeline
+
+        emit_event = AsyncMock()
+        monkeypatch.setattr(HookPipeline, "run_event", emit_event)
+
+        response = await client.post("/api/session", json={})
+
+        assert response.status_code == status.HTTP_200_OK
+        payload = emit_event.await_args.args[0]
+        info = payload["properties"]["info"]
+        assert payload["type"] == "session.created"
+        assert info == {
+            "id": response.json()["id"],
+            "title": response.json()["title"],
+            "parentID": None,
+            "projectID": response.json()["projectID"],
+        }
+
+    @pytest.mark.asyncio
     async def test_create_ordinary_session_uses_process_cwd(
         self,
         client: AsyncClient,

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from httpx import AsyncClient
 from unittest.mock import AsyncMock
 
@@ -486,6 +486,28 @@ class TestProviderRoutes:
 # ===========================================================================
 # Config routes
 # ===========================================================================
+
+def test_http_mutation_routers_do_not_wrap_action_lifecycle() -> None:
+    """HTTP mutation routes must not enter generic action approval hooks."""
+    from flocks.server.routes import agent as agent_routes
+    from flocks.server.routes import channel as channel_routes
+    from flocks.server.routes import config as config_routes
+    from flocks.server.routes import mcp as mcp_routes
+    from flocks.server.routes import skill as skill_routes
+    from flocks.server.routes import workflow as workflow_routes
+
+    routers = (
+        agent_routes.router,
+        channel_routes.router,
+        config_routes.router,
+        mcp_routes.router,
+        skill_routes.router,
+        workflow_routes.router,
+        workflow_routes.webhook_router,
+    )
+
+    assert all(type(router) is APIRouter for router in routers)
+
 
 class TestConfigRoutes:
     @pytest.mark.asyncio

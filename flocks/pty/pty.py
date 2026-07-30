@@ -137,8 +137,16 @@ class Pty:
         return session.info if session else None
     
     @classmethod
-    async def create(cls, input_data: CreateInput) -> PtyInfo:
-        """Create a PTY session through the neutral action lifecycle."""
+    async def create(
+        cls,
+        input_data: CreateInput,
+        *,
+        use_action_lifecycle: bool = True,
+    ) -> PtyInfo:
+        """Create a PTY session, optionally applying execution policy hooks."""
+        if not use_action_lifecycle:
+            return await cls._create(input_data)
+
         from flocks.hooks.execution import execute_with_hooks
 
         return await execute_with_hooks(
@@ -365,8 +373,18 @@ class Pty:
                 session.process.setwinsize(rows, cols)
     
     @classmethod
-    async def write(cls, pty_id: str, data: str) -> None:
-        """Write terminal bytes through the neutral action lifecycle."""
+    async def write(
+        cls,
+        pty_id: str,
+        data: str,
+        *,
+        use_action_lifecycle: bool = True,
+    ) -> None:
+        """Write terminal bytes, optionally applying execution policy hooks."""
+        if not use_action_lifecycle:
+            await cls._write_async(pty_id, data)
+            return
+
         from flocks.hooks.execution import execute_with_hooks
 
         await execute_with_hooks(
@@ -400,7 +418,13 @@ class Pty:
                 log.error("pty.write.error", {"id": pty_id, "error": str(e)})
     
     @classmethod
-    async def connect(cls, pty_id: str, ws: Any) -> Optional[Dict[str, Callable]]:
+    async def connect(
+        cls,
+        pty_id: str,
+        ws: Any,
+        *,
+        use_action_lifecycle: bool = True,
+    ) -> Optional[Dict[str, Callable]]:
         """
         Connect WebSocket to PTY session - matches Flocks's Pty.connect()
         
@@ -435,7 +459,11 @@ class Pty:
         
         async def on_message(message: str) -> None:
             """Handle incoming message from WebSocket"""
-            await cls.write(pty_id, message)
+            await cls.write(
+                pty_id,
+                message,
+                use_action_lifecycle=use_action_lifecycle,
+            )
         
         def on_close() -> None:
             """Handle WebSocket close"""
