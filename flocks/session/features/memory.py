@@ -65,7 +65,10 @@ class SessionMemory:
             try:
                 config = await Config.get()
                 if getattr(config, "memory", None) is None:
-                    log.info("session.memory.no_config", {"session_id": self.session_id})
+                    log.info(
+                        "session.memory.no_config",
+                        {"session_id": self.session_id},
+                    )
                 memory_config = resolve_memory_config(config)
                 
                 self._manager = MemoryManager.get_instance(
@@ -139,7 +142,7 @@ class SessionMemory:
                 "session_id": self.session_id,
                 "error": str(e),
             })
-            return []
+            raise
     
     async def write(
         self,
