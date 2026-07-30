@@ -21,7 +21,7 @@ DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
 FACTS_TABLE = "soc_dashboard_alert_facts"
 ACTIVITY_TABLE = "soc_dashboard_activity"
 META_TABLE = "soc_dashboard_meta"
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 ACTIVITY_DEFAULT_LIMIT = 20
 ACTIVITY_MAX_LIMIT = 50
 ACTIVITY_WINDOW_MS = 3000
@@ -79,10 +79,10 @@ _FACT_COLUMNS = (
     "triage_persisted_at",
     "triage_status",
     "triage_source",
-    "verdict",
+    "triage_attack_verdict",
     "risk_level",
     "triage_ms",
-    "attack_success",
+    "triage_attack_success",
 )
 
 
@@ -104,8 +104,31 @@ def _fact_expressions(prefix):
     kill_chain = _json_value(prefix, "kill_chain_phase")
     direction = _json_value(prefix, "direction")
     traffic_direction = _json_value(prefix, "traffic_direction")
-    result = _json_value(prefix, "threat_result")
-    verdict = _json_value(prefix, "attack_verdict")
+    raw_result = _json_value(prefix, "threat_result")
+    raw_verdict = _json_value(prefix, "attack_verdict")
+    triage_attack_verdict = _json_value(prefix, "triage_attack_verdict")
+    triage_attack_success = _json_value(prefix, "triage_attack_success")
+    normalized_triage_verdict = (
+        f"CASE WHEN LOWER(COALESCE({triage_attack_verdict}, '')) "
+        "IN ('attack', 'non_attack', 'unknown') "
+        f"THEN LOWER({triage_attack_verdict}) "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) "
+        "IN ('attack_success', 'attack_failed') THEN 'attack' "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) = 'benign' "
+        "THEN 'non_attack' ELSE 'unknown' END"
+    )
+    normalized_triage_success = (
+        f"CASE WHEN {normalized_triage_verdict} != 'attack' THEN 'unknown' "
+        f"WHEN LOWER(COALESCE({triage_attack_success}, '')) "
+        "IN ('success', 'failed', 'unknown') "
+        f"THEN LOWER({triage_attack_success}) "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) = 'attack_success' "
+        "THEN 'success' "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) = 'attack_failed' "
+        "THEN 'failed' "
+        f"WHEN LOWER(COALESCE({triage_attack_success}, '')) IN ('1', 'true') "
+        "THEN 'success' ELSE 'unknown' END"
+    )
     protocol = _json_value(prefix, "net_type")
     app_protocol = _json_value(prefix, "net_app_proto")
     protocol_fallback = _json_value(prefix, "protocol")
@@ -121,7 +144,6 @@ def _fact_expressions(prefix):
     triage_source = _json_value(prefix, "triage_source")
     triage_report = _json_value(prefix, "triage_report")
     triage_ms = _json_value(prefix, "triage_ms")
-    attack_success = _json_value(prefix, "attack_success")
     has_triage = (
         "CASE WHEN "
         f"NULLIF({triage_status}, '') IS NOT NULL "
@@ -140,7 +162,9 @@ def _fact_expressions(prefix):
         f"COALESCE({prefix}.is_duplicate, 0)",
         f"COALESCE(NULLIF({phase}, ''), NULLIF({attack_phase}, ''), NULLIF({kill_chain}, ''), 'unknown')",
         f"COALESCE(NULLIF({direction}, ''), NULLIF({traffic_direction}, ''), 'unknown')",
-        f"COALESCE(NULLIF({result}, ''), NULLIF({verdict}, ''), 'unknown')",
+        f"CASE WHEN {has_triage} = 1 "
+        f"THEN {normalized_triage_success} "
+        f"ELSE COALESCE(NULLIF({raw_result}, ''), NULLIF({raw_verdict}, ''), 'unknown') END",
         f"COALESCE(NULLIF({protocol}, ''), NULLIF({app_protocol}, ''), "
         f"NULLIF({protocol_fallback}, ''), 'unknown')",
         f"COALESCE(NULLIF({severity}, ''), 'unknown')",
@@ -151,10 +175,10 @@ def _fact_expressions(prefix):
         f"COALESCE({triage_persisted_at}, '')",
         f"COALESCE({triage_status}, '')",
         f"COALESCE({triage_source}, '')",
-        f"COALESCE({verdict}, 'unknown')",
+        normalized_triage_verdict,
         f"COALESCE(NULLIF({risk_level}, ''), 'unknown')",
         f"COALESCE(CAST({triage_ms} AS INTEGER), 0)",
-        f"CASE WHEN {attack_success} IN (1, '1', 'true') THEN 1 ELSE 0 END",
+        normalized_triage_success,
     )
 
 
@@ -374,10 +398,10 @@ def _ensure_sqlite_schema():
                     triage_persisted_at TEXT,
                     triage_status TEXT,
                     triage_source TEXT,
-                    verdict TEXT,
+                    triage_attack_verdict TEXT,
                     risk_level TEXT,
                     triage_ms INTEGER NOT NULL DEFAULT 0,
-                    attack_success INTEGER NOT NULL DEFAULT 0
+                    triage_attack_success TEXT NOT NULL DEFAULT 'unknown'
                 )
                 """
             )
@@ -972,16 +996,52 @@ DIRECTION_LABELS = {
 }
 
 RESULT_LABELS = {
-    "success": "攻击成功",
-    "succeeded": "攻击成功",
-    "failed": "攻击失败",
-    "blocked": "已阻断",
     "attack_success": "攻击成功",
     "attack": "攻击行为",
     "attack_failed": "攻击失败",
-    "benign": "良性",
+    "non_attack": "非攻击",
     "unknown": "待确认",
 }
+
+
+def _triage_outcome_key(record):
+    verdict = _triage_attack_verdict_value(record)
+    result = _triage_attack_success_value(record)
+    if verdict == "attack":
+        if result == "success":
+            return "attack_success"
+        if result == "failed":
+            return "attack_failed"
+        return "attack"
+    if verdict == "non_attack":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_verdict_value(record):
+    verdict = _norm(record.get("triage_attack_verdict") or "unknown")
+    if verdict in {"attack", "non_attack", "unknown"}:
+        return verdict
+    if verdict in {"attack_success", "attack_failed"}:
+        return "attack"
+    if verdict == "benign":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_success_value(record):
+    raw_verdict = _norm(record.get("triage_attack_verdict") or "unknown")
+    verdict = _triage_attack_verdict_value(record)
+    result = _norm(record.get("triage_attack_success") or "unknown")
+    if verdict == "attack" and result in {"success", "failed", "unknown"}:
+        return result
+    if verdict != "attack":
+        return "unknown"
+    if raw_verdict == "attack_success" or record.get("triage_attack_success") is True:
+        return "success"
+    if raw_verdict == "attack_failed":
+        return "failed"
+    return "unknown"
 
 
 async def get_activity(ctx, request):
@@ -1388,13 +1448,16 @@ def _activity_event(row):
             "dedupKey": _first_activity_text(record, "dedup_key"),
         }
     else:
-        verdict = _norm(record.get("attack_verdict") or "unknown")
+        verdict = _triage_attack_verdict_value(record)
+        attack_success = _triage_attack_success_value(record)
+        outcome = _triage_outcome_key(record)
         event["result"] = {
             "triageStatus": triage_status or "completed",
             "triageSource": str(record.get("triage_source") or "").strip().lower() or "triaged",
             "durationMs": _safe_int(record.get("triage_ms")),
             "verdict": verdict,
-            "verdictLabel": RESULT_LABELS.get(verdict, "待确认"),
+            "attackSuccess": attack_success,
+            "verdictLabel": RESULT_LABELS.get(outcome, "待确认"),
             "threatSeverity": _first_activity_text(record, "threat_severity"),
             "riskLevel": _first_activity_text(record, "risk_level"),
             "reportTitle": _first_activity_text(record, "report_title"),
@@ -1620,7 +1683,7 @@ def _get_stats(params):
             {"key": "attack_success", "label": "攻击成功", "value": triage["attackSuccess"], "color": "#ff4d6d"},
             {"key": "attack", "label": "攻击行为", "value": triage["attack"], "color": "#ffb020"},
             {"key": "attack_failed", "label": "攻击失败", "value": triage["attackFailed"], "color": "#2ee6a6"},
-            {"key": "benign", "label": "良性", "value": triage["benign"], "color": "#58a6ff"},
+            {"key": "non_attack", "label": "非攻击", "value": triage["benign"], "color": "#58a6ff"},
             {"key": "unknown", "label": "未知", "value": triage["unknown"], "color": "#9b8cff"},
         ],
         "topThreatTypes": _counter_items(
@@ -2034,9 +2097,7 @@ def _sqlite_timeline(conn, settings, where_clause, query_params, dates, start_ti
         f"COALESCE(SUM(has_triage), 0) AS triage_count, "
         f"COALESCE(SUM(CASE WHEN has_triage = 1 "
         f"AND LOWER(triage_status) NOT IN ('failed', 'error') "
-        f"AND (LOWER(verdict) IN ('attack_success', 'attack', 'attack_failed') "
-        f"OR (attack_success = 1 AND LOWER(verdict) NOT IN "
-        f"('attack_success', 'attack', 'attack_failed', 'benign'))) "
+        f"AND LOWER(triage_attack_verdict) = 'attack' "
         f"THEN 1 ELSE 0 END), 0) AS attack_count "
         f"FROM {settings['facts_table']} WHERE {where_clause} AND event_time IS NOT NULL "
         f"GROUP BY bucket_index ORDER BY bucket_index",
@@ -2152,7 +2213,6 @@ def _read_sqlite_triage(paths):
         "OR LOWER(triage_status) = 'follower_reused')"
     )
     failed_condition = "LOWER(triage_status) IN ('failed', 'error')"
-    resolved_condition = f"NOT ({failed_condition})"
     new_triage_condition = (
         f"NOT {cache_condition} AND NOT {follower_condition} AND NOT ({failed_condition})"
     )
@@ -2166,17 +2226,18 @@ def _read_sqlite_triage(paths):
                 f"THEN 1 ELSE 0 END), 0), "
                 f"COALESCE(SUM(CASE WHEN {new_triage_condition} "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND "
-                f"(LOWER(verdict) = 'attack_success' OR (attack_success = 1 AND LOWER(verdict) NOT IN "
-                f"('attack_success', 'attack', 'attack_failed', 'benign'))) THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack' "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'attack' "
+                f"AND LOWER(triage_attack_success) = 'success' THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'attack' "
+                f"AND LOWER(triage_attack_success) NOT IN ('success', 'failed') "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack_failed' "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'attack' "
+                f"AND LOWER(triage_attack_success) = 'failed' "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'benign' "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'non_attack' "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) NOT IN "
-                f"('attack_success', 'attack', 'attack_failed', 'benign') AND attack_success <> 1 "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) "
+                f"NOT IN ('attack', 'non_attack') "
                 f"THEN 1 ELSE 0 END), 0), MIN(event_time), MAX(event_time), "
                 f"COALESCE(ROUND(AVG(CASE WHEN triage_ms > 0 THEN triage_ms END)), 0) "
                 f"FROM {settings['facts_table']} WHERE {triage_where}",
@@ -2321,9 +2382,8 @@ def _read_triage(paths):
 
             total_records += 1
             file_total += 1
-            verdict = _norm(obj.get("attack_verdict") or "unknown")
-            if verdict not in {"attack_success", "attack", "attack_failed", "benign", "unknown"}:
-                verdict = "unknown"
+            verdict = _triage_attack_verdict_value(obj)
+            outcome = _triage_outcome_key(obj)
             source = _norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))
             source_counter[source] += 1
             threat_type_counter[_norm(obj.get("_threat_type") or obj.get("threat_type"))] += 1
@@ -2332,7 +2392,7 @@ def _read_triage(paths):
             if triage_ms > 0:
                 triage_ms_total += triage_ms
                 triage_ms_count += 1
-            _update_profile_counters(obj, profile_counters)
+            _update_profile_counters(obj, profile_counters, triage_result=True)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
             triage_source = _norm(obj.get("triage_source"))
             triage_status = _norm(obj.get("triage_status"))
@@ -2340,10 +2400,8 @@ def _read_triage(paths):
             triage_failed = triage_status in {"failed", "error"}
 
             if not triage_failed:
-                if verdict == "unknown" and obj.get("attack_success") is True:
-                    verdict = "attack_success"
-                verdict_counter[verdict] += 1
-                if verdict in {"attack_success", "attack", "attack_failed"}:
+                verdict_counter[outcome] += 1
+                if verdict == "attack":
                     file_attack += 1
             else:
                 fallback_failed += 1
@@ -2371,7 +2429,7 @@ def _read_triage(paths):
     attack = verdict_counter["attack"]
     attack_failed = verdict_counter["attack_failed"]
     attack_total = attack_success + attack + attack_failed
-    benign = verdict_counter["benign"]
+    benign = verdict_counter["non_attack"]
     unknown = verdict_counter["unknown"]
 
     series_total = _expand_series(series_total, total_records, seed=23)
@@ -2422,10 +2480,15 @@ def _new_profile_counters():
     }
 
 
-def _update_profile_counters(obj, counters):
+def _update_profile_counters(obj, counters, *, triage_result=False):
     counters["phaseCounter"][_norm(obj.get("threat_phase") or obj.get("attack_phase") or obj.get("kill_chain_phase"))] += 1
     counters["directionCounter"][_norm(obj.get("direction") or obj.get("traffic_direction"))] += 1
-    counters["resultCounter"][_norm(obj.get("threat_result") or obj.get("attack_verdict"))] += 1
+    result = (
+        _triage_attack_success_value(obj)
+        if triage_result
+        else obj.get("threat_result") or obj.get("attack_verdict")
+    )
+    counters["resultCounter"][_norm(result)] += 1
     counters["protocolCounter"][_norm(obj.get("net_type") or obj.get("net_app_proto") or obj.get("protocol"))] += 1
     counters["severityCounter"][_norm(obj.get("threat_severity"))] += 1
     counters["responseCounter"][_norm(obj.get("rsp_status_code") or obj.get("status_code"))] += 1
@@ -2476,7 +2539,7 @@ def _build_closed_loop(triage):
     total = triage["totalRecords"]
     auto_closed = triage["attackFailed"] + triage["benign"]
     manual = triage["unknown"]
-    pending = triage["triageFailed"] + triage["unknown"]
+    pending = triage["unknown"]
     resolved = max(total - pending, 0)
     return {
         "autoClosed": auto_closed,

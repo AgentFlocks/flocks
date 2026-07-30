@@ -149,6 +149,40 @@ def test_soc_db_persistence_uses_filtered_first_seen_alerts() -> None:
     assert write_calls[0].args[1].id == "first_seen_soc_alerts"
 
 
+def test_apply_triage_fields_preserves_original_alert_fields() -> None:
+    apply_triage_fields = _load_functions("_apply_triage_fields")["_apply_triage_fields"]
+    record = {
+        "attack_verdict": "raw-verdict",
+        "attack_success": True,
+        "threat_result": "raw-result",
+    }
+
+    apply_triage_fields(
+        record,
+        {
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "failed",
+            "risk_level": "High",
+            "report_title": "Model report",
+            "triage_report": "# Model report",
+            "attack_verdict": "model-verdict",
+            "attack_success": False,
+            "threat_result": "model-result",
+        },
+    )
+
+    assert record == {
+        "attack_verdict": "raw-verdict",
+        "attack_success": True,
+        "threat_result": "raw-result",
+        "triage_attack_verdict": "attack",
+        "triage_attack_success": "failed",
+        "risk_level": "High",
+        "report_title": "Model report",
+        "triage_report": "# Model report",
+    }
+
+
 def test_soc_db_persistence_failure_is_reraised() -> None:
     tree = ast.parse(_concurrent_triage_code())
     persistence_try = next(
@@ -167,6 +201,125 @@ def test_soc_db_persistence_failure_is_reraised() -> None:
         isinstance(child, ast.Raise)
         for handler in persistence_try.handlers
         for child in ast.walk(handler)
+    )
+
+
+def test_soc_db_merge_preserves_original_attack_fields_and_updates_triage_fields() -> None:
+    merge_record = _load_functions("_merge_triage_record")["_merge_triage_record"]
+
+    merged = merge_record(
+        {
+            "attack_success": True,
+            "attack_verdict": "attack_success",
+            "threat_result": "success",
+        },
+        {"triage_attack_success": "unknown", "triage_attack_verdict": "non_attack"},
+    )
+
+    assert merged["attack_success"] is True
+    assert merged["attack_verdict"] == "attack_success"
+    assert merged["threat_result"] == "success"
+    assert merged["triage_attack_success"] == "unknown"
+    assert merged["triage_attack_verdict"] == "non_attack"
+
+
+def test_apply_triage_fields_namespaces_model_attack_fields() -> None:
+    apply_fields = _load_functions("_apply_triage_fields")["_apply_triage_fields"]
+    record = {"attack_success": True, "attack_verdict": "attack_success"}
+
+    apply_fields(
+        record,
+        {
+            "triage_attack_success": "unknown",
+            "triage_attack_verdict": "non_attack",
+            "risk_level": "Low",
+        },
+    )
+
+    assert record["attack_success"] is True
+    assert record["attack_verdict"] == "attack_success"
+    assert record["triage_attack_success"] == "unknown"
+    assert record["triage_attack_verdict"] == "non_attack"
+    assert record["risk_level"] == "Low"
+
+
+def test_apply_triage_fields_validates_direct_model_dimensions() -> None:
+    apply_fields = _load_functions("_apply_triage_fields")["_apply_triage_fields"]
+    cases = [
+        (("attack", "success"), ("attack", "success")),
+        (("attack", "failed"), ("attack", "failed")),
+        (("attack", "unknown"), ("attack", "unknown")),
+        (("non_attack", "success"), ("non_attack", "unknown")),
+        (("unknown", "failed"), ("unknown", "unknown")),
+        (("invalid", "invalid"), ("unknown", "unknown")),
+    ]
+
+    for (model_verdict, model_success), (attack_verdict, attack_success) in cases:
+        record: dict[str, object] = {}
+        apply_fields(
+            record,
+            {
+                "triage_attack_verdict": model_verdict,
+                "triage_attack_success": model_success,
+            },
+        )
+        assert record["triage_attack_verdict"] == attack_verdict
+        assert record["triage_attack_success"] == attack_success
+
+
+def test_llm_attack_outcome_generates_the_two_persisted_fields_directly() -> None:
+    functions = _load_functions("_normalize_triage_outcome", "_llm_attack_outcome")
+    functions.update(
+        {
+            "_strip_think": lambda value: value,
+            "_ask_llm": lambda _prompt: json.dumps(
+                {
+                    "triage_attack_verdict": "attack",
+                    "triage_attack_success": "failed",
+                }
+            ),
+        }
+    )
+
+    assert functions["_llm_attack_outcome"]("analysis") == {
+        "triage_attack_verdict": "attack",
+        "triage_attack_success": "failed",
+    }
+
+
+def test_current_triage_cache_requires_the_two_field_schema() -> None:
+    functions = _load_functions("_normalize_triage_outcome", "_is_current_triage_fields")
+    functions.update(
+        {
+            "TRIAGE_FIELDS": (
+                "triage_attack_verdict",
+                "triage_attack_success",
+                "risk_level",
+                "report_title",
+                "triage_report",
+            ),
+            "_is_valid_triage_report": lambda value: value == "valid-report",
+        }
+    )
+    is_current = functions["_is_current_triage_fields"]
+
+    assert is_current(
+        {
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "success",
+            "risk_level": "High",
+            "report_title": "title",
+            "triage_report": "valid-report",
+        }
+    )
+    assert not is_current(
+        {
+            "attack_verdict": "attack_success",
+            "attack_success": True,
+            "risk_level": "High",
+            "report_title": "title",
+            "triage_report": "valid-report",
+        }
     )
 
 

@@ -49,18 +49,14 @@ const FILTER_VALUE_TEXT: Record<string, Record<string, string>> = {
     exploit: '利用',
     exploitation: '利用',
   },
-  threat_result: {
-    attack_success: '攻击成功',
-    success: '成功',
-    succeeded: '成功',
-    attack_failed: '攻击失败',
-    failed: '失败',
-    blocked: '已阻断',
-    detected: '已检测',
-    attack: '攻击行为',
-    benign: '安全',
-    safe: '安全',
-    normal: '正常',
+  triage_attack_success: {
+    success: '攻击成功',
+    failed: '攻击失败',
+    unknown: '未知',
+  },
+  triage_attack_verdict: {
+    attack: '攻击',
+    non_attack: '非攻击',
     unknown: '未知',
   },
 };

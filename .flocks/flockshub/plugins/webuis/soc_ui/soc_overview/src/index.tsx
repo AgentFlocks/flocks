@@ -274,10 +274,6 @@ function truncate(value: string, max = 34) {
   return value.length > max ? `${value.slice(0, max)}...` : value;
 }
 
-function count(items: CounterItem[], key: string) {
-  return items.find((item) => item.key === key || item.label === key)?.value || 0;
-}
-
 export default function SocOverviewPage() {
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
@@ -349,10 +345,11 @@ export default function SocOverviewPage() {
     { label: '目标端口', value: stats.fieldStats.uniqueDestinationPorts, hint: '字段 dport' },
   ], [stats]);
 
-  const resultTotal = Math.max(stats.denoise.totalUnique, 1);
-  const success = stats.triage.attackSuccess || count(stats.fieldStats.threatResults, 'success');
-  const failed = stats.triage.attackFailed || count(stats.fieldStats.threatResults, 'failed');
-  const unknown = Math.max(0, stats.denoise.totalUnique - success - failed) || count(stats.fieldStats.threatResults, 'unknown');
+  const resultTotal = stats.triage.totalRecords;
+  const resultDenominator = Math.max(resultTotal, 1);
+  const success = stats.triage.attackSuccess;
+  const failed = stats.triage.attackFailed;
+  const unknown = Math.max(0, stats.triage.totalRecords - success - failed);
 
   return (
     <div className="soc-overview-root">
@@ -391,14 +388,14 @@ export default function SocOverviewPage() {
         <div className="section-head">
           <div>
             <h2>告警研判结果</h2>
-            <p>按 threat_result 与研判结论聚合。</p>
+            <p>按模型研判的是否攻击与攻击结果字段聚合。</p>
           </div>
           <b>{formatNumber(resultTotal)} 条有效告警</b>
         </div>
         <div className="result-bar">
-          <span className="success" style={{ width: `${(success / resultTotal) * 100}%` }} />
-          <span className="unknown" style={{ width: `${(unknown / resultTotal) * 100}%` }} />
-          <span className="failed" style={{ width: `${(failed / resultTotal) * 100}%` }} />
+          <span className="success" style={{ width: `${(success / resultDenominator) * 100}%` }} />
+          <span className="unknown" style={{ width: `${(unknown / resultDenominator) * 100}%` }} />
+          <span className="failed" style={{ width: `${(failed / resultDenominator) * 100}%` }} />
         </div>
         <div className="result-legend">
           <span><i className="success" />攻击成功 {formatNumber(success)}</span>

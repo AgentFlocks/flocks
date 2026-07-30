@@ -85,7 +85,10 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         "_threat_type": "web_attack",
         "triage_status": "ok",
         "_triage_persisted_at": "2026-07-14T13:00:00",
-        "attack_verdict": "attack",
+        "attack_verdict": "benign",
+        "attack_success": False,
+        "triage_attack_verdict": "attack",
+        "triage_attack_success": "unknown",
     }
     with sqlite3.connect(db_path) as conn:
         conn.execute(
@@ -139,6 +142,8 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
     updated_first_record = {
         **first_record,
         "_triage_persisted_at": "2026-07-14T13:02:00",
+        "triage_attack_verdict": "attack_failed",
+        "triage_attack_success": False,
         "triage_report": "# Updated report",
     }
     with sqlite3.connect(db_path) as conn:
@@ -190,7 +195,8 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
             "SELECT meta_value FROM soc_dashboard_meta WHERE meta_key='schema_version'"
         ).fetchone()[0]
         updated_fact = conn.execute(
-            "SELECT triage_persisted_at, verdict FROM soc_dashboard_alert_facts "
+            "SELECT triage_persisted_at, triage_attack_verdict, triage_attack_success "
+            "FROM soc_dashboard_alert_facts "
             "WHERE row_key = '1'"
         ).fetchone()
 
@@ -216,21 +222,53 @@ def test_soc_dashboard_migrates_legacy_alert_records_schema(tmp_path: Path):
         (2, "2", "hids", "Malware download", "malware", 1),
     ]
     assert "COALESCE(NULLIF(NEW.row_id, ''), CAST(NEW.rowid AS TEXT))" in trigger_sql
-    assert updated_fact == ("2026-07-14T13:02:00", "attack")
-    assert schema_version == "3"
+    assert updated_fact == ("2026-07-14T13:02:00", "attack", "failed")
+    assert schema_version == "4"
 
 
 def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
     db_path = tmp_path / "soc.db"
     asset_date = "2026-07-14"
     records = [
-        {"triage_status": "ok", "attack_verdict": "attack_success", "attack_success": True},
-        {"triage_status": "ok", "attack_verdict": "attack"},
-        {"triage_status": "ok", "attack_verdict": "attack_failed"},
-        {"triage_status": "ok", "attack_verdict": "benign"},
-        {"triage_status": "ok", "attack_verdict": "unknown"},
-        {"triage_status": "failed", "attack_verdict": "unknown"},
-        {"triage_status": "failed", "attack_verdict": "benign"},
+        {
+            "triage_status": "ok",
+            "attack_verdict": "attack_failed",
+            "attack_success": False,
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "success",
+        },
+        {
+            "triage_status": "ok",
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "unknown",
+        },
+        {
+            "triage_status": "ok",
+            "attack_verdict": "attack_success",
+            "attack_success": True,
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "failed",
+        },
+        {
+            "triage_status": "ok",
+            "triage_attack_verdict": "non_attack",
+            "triage_attack_success": "success",
+        },
+        {
+            "triage_status": "ok",
+            "triage_attack_verdict": "unknown",
+            "triage_attack_success": "unknown",
+        },
+        {
+            "triage_status": "failed",
+            "triage_attack_verdict": "unknown",
+            "triage_attack_success": "unknown",
+        },
+        {
+            "triage_status": "failed",
+            "triage_attack_verdict": "non_attack",
+            "triage_attack_success": "unknown",
+        },
         {"triage_status": "ok", "attack_verdict": "legacy", "attack_success": True},
     ]
     severity_values = ["low", "critical", "high", "medium", "low", "critical", "high", "medium"]
@@ -292,17 +330,22 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
             "SELECT threat_name, threat_type, severity, risk_level "
             "FROM soc_dashboard_alert_facts ORDER BY alert_row_id LIMIT 1"
         ).fetchone()
+        normalized_non_attack = conn.execute(
+            "SELECT triage_attack_verdict, triage_attack_success "
+            "FROM soc_dashboard_alert_facts ORDER BY alert_row_id LIMIT 1 OFFSET 3"
+        ).fetchone()
 
     assert triage["totalRecords"] == 8
     assert triage["newTriaged"] == 6
-    assert triage["attackSuccess"] == 2
+    assert triage["attackSuccess"] == 1
     assert triage["attack"] == 1
     assert triage["attackFailed"] == 1
-    assert triage["attackTotal"] == 4
-    assert triage["benign"] == 1
-    assert triage["unknown"] == 1
+    assert triage["attackTotal"] == 3
+    assert triage["benign"] == 2
+    assert triage["unknown"] == 3
     assert triage["triageFailed"] == 2
     assert first_fact == ("threat-name-0", "threat-type-0", "low", "High")
+    assert normalized_non_attack == ("non_attack", "unknown")
     assert dict(triage["threatTypeCounter"]) == {
         f"threat-type-{index}": 1 for index in range(len(records))
     }
@@ -313,9 +356,56 @@ def test_soc_dashboard_triage_outcomes_partition_records(tmp_path: Path):
         "medium": 2,
     }
     assert dict(triage["riskCounter"]) == {"high": 8}
-    assert closed_loop["pending"] == 3
-    assert triage["attackTotal"] + triage["benign"] + closed_loop["pending"] == 8
+    assert closed_loop["manualDecision"] == triage["unknown"]
+    assert closed_loop["pending"] == triage["unknown"]
+    assert triage["attackTotal"] + triage["benign"] + triage["unknown"] == 8
     assert sum(timeline["attack"]) == triage["attackTotal"]
+
+    overview_handlers = _load_overview_handlers()
+    overview_handlers.DEFAULT_SQLITE_DB = db_path
+    overview_triage = overview_handlers._read_triage(
+        [
+            overview_handlers._RecordSource(
+                path=db_path,
+                role="triage",
+                date=asset_date,
+                data_source="sqlite",
+            )
+        ]
+    )
+
+    assert overview_triage["attackSuccess"] == 1
+    assert overview_triage["attack"] == 1
+    assert overview_triage["attackFailed"] == 1
+    assert overview_triage["attackTotal"] == 3
+    assert overview_triage["benign"] == 2
+    assert overview_triage["unknown"] == 3
+
+
+def test_soc_dashboard_command_graph_uses_model_outcome_partition():
+    page_path = (
+        Path(__file__).resolve().parents[2]
+        / ".flocks"
+        / "flockshub"
+        / "plugins"
+        / "webuis"
+        / "soc_ui"
+        / "soc_dashboard"
+        / "src"
+        / "Page.tsx"
+    )
+    source = page_path.read_text(encoding="utf-8")
+    start = source.index("function CommandGraph(")
+    end = source.index("\nfunction CommandMetric(", start)
+    command_graph = source[start:end]
+
+    assert "value: stats.triage.attackTotal" in command_graph
+    assert "value: stats.triage.benign" in command_graph
+    assert "value: stats.triage.unknown" in command_graph
+    assert "value: stats.closedLoop.pending" not in command_graph
+    assert "'安全事件'" in command_graph
+    assert "'非安全事件'" in command_graph
+    assert "'待人工复核'" in command_graph
 
 
 def test_soc_overview_keeps_threat_names_and_types_separate(tmp_path: Path):
@@ -375,6 +465,8 @@ def test_soc_dashboard_activity_does_not_mix_name_type_or_risk_fields():
             {
                 "_threat_type": "web_attack",
                 "triage_status": "ok",
+                "triage_attack_verdict": "attack",
+                "triage_attack_success": "failed",
                 "threat_level": "critical",
             }
         ),
@@ -386,6 +478,9 @@ def test_soc_dashboard_activity_does_not_mix_name_type_or_risk_fields():
     assert event["alert"]["threatType"] == "web_attack"
     assert event["result"]["threatSeverity"] == ""
     assert event["result"]["riskLevel"] == ""
+    assert event["result"]["verdict"] == "attack"
+    assert event["result"]["attackSuccess"] == "failed"
+    assert event["result"]["verdictLabel"] == "攻击失败"
 
 
 def test_soc_alert_verdict_does_not_fall_back_to_risk_or_threat_level():
@@ -394,7 +489,54 @@ def test_soc_alert_verdict_does_not_fall_back_to_risk_or_threat_level():
     assert operations._verdict_bucket(
         {"risk_level": "attack_success", "threat_level": "attack_failed"}
     ) == "unknown"
-    assert operations._verdict_bucket({"attack_verdict": "attack_success"}) == "success"
+    assert operations._verdict_bucket(
+        {"triage_attack_verdict": "attack", "triage_attack_success": "success"}
+    ) == "success"
+
+
+def test_soc_alert_verdict_uses_model_triage_instead_of_raw_attack_result():
+    operations = _load_alert_operations()
+
+    assert operations._verdict_bucket(
+        {
+            "attack_verdict": "attack_success",
+            "attack_success": True,
+            "threat_result": "success",
+            "triage_attack_verdict": "non_attack",
+            "triage_attack_success": "unknown",
+        }
+    ) == "benign"
+    assert operations._verdict_bucket(
+        {
+            "attack_verdict": "attack_success",
+            "attack_success": True,
+            "threat_result": "success",
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "failed",
+        }
+    ) == "failed"
+    assert operations._verdict_bucket(
+        {
+            "attack_verdict": "attack_failed",
+            "attack_success": False,
+            "threat_result": "failed",
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "success",
+        }
+    ) == "success"
+    assert operations._verdict_bucket(
+        {"triage_attack_verdict": "attack", "triage_attack_success": "unknown"}
+    ) == "attack"
+    assert operations._verdict_bucket(
+        {"triage_attack_verdict": "unknown", "triage_attack_success": "unknown"}
+    ) == "unknown"
+    assert operations._triage_attack_success(
+        {"triage_attack_verdict": "non_attack", "triage_attack_success": "success"}
+    ) == "unknown"
+    assert operations._verdict_bucket(
+        {"attack_verdict": "attack_success", "attack_success": True, "threat_result": "success"}
+    ) == "unknown"
+    assert operations._verdict_bucket({"threat_result": "success"}) == "unknown"
 
 
 def test_soc_dashboard_activity_exposes_live_denoise_workflow_progress(tmp_path: Path):

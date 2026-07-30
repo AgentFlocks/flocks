@@ -1417,15 +1417,15 @@ function CommandGraph({ stats, activity }) {
           h('em', { key: 'text' }, triageActive ? '处理中' : '安全事件'),
         ]),
       ]),
-      h('div', { title: 'AI 研判结论为良性的事件数量', key: 'benign' }, [
+      h('div', { title: 'AI 研判结论为非攻击或良性的事件数量', key: 'benign' }, [
         h(AnimatedNumber, { tag: 'b', value: stats.triage.benign, key: 'value' }),
         h('span', { className: 'outcome-label', key: 'label' }, [
           h('i', { key: 'ai' }, 'AI判定'),
           h('em', { key: 'text' }, '非安全事件'),
         ]),
       ]),
-      h('div', { title: 'AI 判定需要进入人工复核的事件数量', key: 'manual' }, [
-        h(AnimatedNumber, { tag: 'b', value: stats.closedLoop.pending, key: 'value' }),
+      h('div', { title: 'AI 研判结论为未知、需要进入人工复核的事件数量', key: 'manual' }, [
+        h(AnimatedNumber, { tag: 'b', value: stats.triage.unknown, key: 'value' }),
         h('span', { className: 'outcome-label', key: 'label' }, [
           h('i', { key: 'ai' }, 'AI判定'),
           h('em', { key: 'text' }, '待人工复核'),
