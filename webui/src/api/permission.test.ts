@@ -21,7 +21,7 @@ describe('permissionApi', () => {
     const { permissionApi } = await import('./permission');
 
     await expect(permissionApi.list()).resolves.toEqual(permissions);
-    expect(mockGet).toHaveBeenCalledWith('/permission');
+    expect(mockGet).toHaveBeenCalledWith('/api/permission');
   });
 
   it('submits the selected reply protocol', async () => {
@@ -30,7 +30,7 @@ describe('permissionApi', () => {
 
     await permissionApi.reply('permission/1', { allow: true, always: true });
 
-    expect(mockPost).toHaveBeenCalledWith('/permission/permission%2F1/reply', {
+    expect(mockPost).toHaveBeenCalledWith('/api/permission/permission%2F1/reply', {
       allow: true,
       always: true,
     });

@@ -1024,32 +1024,39 @@ class _AuthGuardMiddleware:
             return
 
         request = _HookRequest(scope, receive)
-        try:
-            await _run_http_middleware_hooks(request, {"stage": "before_auth"})
-            _blocked, token, _user = await apply_auth_for_request(request)
-        except StarletteHTTPException as exc:
-            response = JSONResponse(
-                status_code=exc.status_code,
-                content={"error": "AuthError", "message": exc.detail},
-            )
-            await response(scope, receive, send)
-            return
-        except Exception as exc:
-            log.error(
-                "auth.middleware.unexpected",
-                {"path": request.url.path, "error": repr(exc)},
-            )
-            response = JSONResponse(
-                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
-            )
-            await response(scope, receive, send)
-            return
+        # HTTP ingress identity is created by the authentication lifecycle.
+        # Keep its generic scope and opaque context alive through the endpoint:
+        # prompt execution is often spawned from the endpoint in a child task,
+        # where the Pro gate must be able to restore that verified identity.
+        with execution_lifecycle_scope():
+            try:
+                await _run_http_middleware_hooks(request, {"stage": "before_auth"})
+                _blocked, token, _user = await apply_auth_for_request(request)
+            except StarletteHTTPException as exc:
+                response = JSONResponse(
+                    status_code=exc.status_code,
+                    content={"error": "AuthError", "message": exc.detail},
+                )
+                await response(scope, receive, send)
+                return
+            except Exception as exc:
+                log.error(
+                    "auth.middleware.unexpected",
+                    {"path": request.url.path, "error": repr(exc)},
+                )
+                response = JSONResponse(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    content={"error": "InternalError", "message": "鉴权处理异常，请稍后重试"},
+                )
+                await response(scope, receive, send)
+                return
 
-        try:
-            await self.app(scope, request.downstream_receive(), send)
-        finally:
-            clear_auth_context(token)
+            try:
+                extension_context = getattr(request.state, "extension_context", None)
+                with execution_context_scope(extension_context):
+                    await self.app(scope, request.downstream_receive(), send)
+            finally:
+                clear_auth_context(token)
 
 
 app.add_middleware(_AuthGuardMiddleware)

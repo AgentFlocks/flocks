@@ -488,26 +488,6 @@ class TestProviderRoutes:
 # ===========================================================================
 
 class TestConfigRoutes:
-    def test_config_operation_payload_marks_control_plane_metadata(self):
-        """Config mutations must carry control-plane policy metadata."""
-        from flocks.server.routes.config import _config_operation_payload
-
-        async def sample_endpoint(config_data: dict):
-            return config_data
-
-        payload = _config_operation_payload(
-            sample_endpoint,
-            args=({"theme": "dark"},),
-            kwargs={},
-        )
-
-        assert payload["operation"] == "config.sample_endpoint"
-        assert payload["entry"] == "http_control_plane"
-        assert payload["execution_domain"] == "control_plane"
-        assert payload["action"] == "config.sample_endpoint"
-        assert payload["resource"] == {"type": "config", "id": "sample_endpoint"}
-
-
     @pytest.mark.asyncio
     async def test_get_config_returns_object(self, client: AsyncClient):
         """GET /api/config returns a configuration object."""

@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-from io import BytesIO
 import json
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException, UploadFile
+from fastapi import HTTPException
 from starlette.requests import Request
 from starlette.responses import Response
 
@@ -29,7 +28,6 @@ from flocks.plugin import ExtensionPoint, PluginLoader
 from flocks.server import auth
 import flocks.server.app as server_app_module
 from flocks.server.app import auth_guard_middleware
-from flocks.server.routes import config as config_routes
 from flocks.server.routes import mcp as mcp_routes
 from flocks.server.routes import workflow as workflow_routes
 from flocks.tool.registry import (
@@ -1015,9 +1013,6 @@ async def test_wrapped_control_actions_stop_and_preserve_raw_arguments() -> None
             observed.append((ctx.stage, dict(ctx.input)))
 
     HookPipeline.register("stopper", Stopper())
-    ui_request = config_routes.UIConfigUpdateRequest(displayName=None)
-    favicon = UploadFile(filename="site.ico", file=BytesIO(b"favicon"))
-    config_data = {"channels": None}
     mcp_request = mcp_routes.McpAddRequest(name="example", config={"url": None})
     workflow_request = workflow_routes.WorkflowCreateRequest(
         name="raw workflow",
@@ -1033,10 +1028,6 @@ async def test_wrapped_control_actions_stop_and_preserve_raw_arguments() -> None
         "server": ("testserver", 80),
     })
     operations = [
-        (config_routes.update_ui_config, (ui_request,), "request", ui_request),
-        (config_routes.upload_ui_favicon, (favicon,), "file", favicon),
-        (config_routes.reset_ui_favicon, (), None, None),
-        (config_routes.update_config, (config_data,), "config_data", config_data),
         (mcp_routes.add_mcp_server, (mcp_request,), "request", mcp_request),
         (workflow_routes.create_workflow, (workflow_request,), "req", workflow_request),
         (

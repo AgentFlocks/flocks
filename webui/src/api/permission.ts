@@ -19,7 +19,7 @@ export interface PermissionReply {
 
 export const permissionApi = {
   list: async (): Promise<PendingPermission[]> => {
-    const response = await client.get<PendingPermission[]>('/permission');
+    const response = await client.get<PendingPermission[]>('/api/permission');
     return response.data;
   },
 
@@ -27,6 +27,6 @@ export const permissionApi = {
     permissionId: string,
     reply: PermissionReply,
   ): Promise<void> => {
-    await client.post(`/permission/${encodeURIComponent(permissionId)}/reply`, reply);
+    await client.post(`/api/permission/${encodeURIComponent(permissionId)}/reply`, reply);
   },
 };

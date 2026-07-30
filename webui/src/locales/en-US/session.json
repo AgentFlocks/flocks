@@ -114,6 +114,16 @@
       }
     }
   },
+  "permissionMode": {
+    "title": "Permission Mode",
+    "menuHint": "Choose the command execution control mode",
+    "readonly": "Block command execution",
+    "readonlyDesc": "Blocks execution of any command",
+    "requireConfirm": "Require confirmation",
+    "requireConfirmDesc": "Low-risk commands run directly",
+    "autoAllowAll": "Auto allow",
+    "autoAllowAllDesc": "Runs commands without confirmation"
+  },
   "agentPicker": {
     "title": "Choose Chat Agent",
     "hint": "Rex is the default; selections route the current message as a subagent reference",
