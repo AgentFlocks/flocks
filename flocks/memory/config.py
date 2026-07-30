@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field
 
 class MemoryEmbeddingConfig(BaseModel):
     """Embedding provider configuration"""
+    enabled: bool = Field(
+        False,
+        description="Enable vector embeddings for Memory search",
+    )
     provider: Literal["auto", "openai", "google", "local"] = Field(
         "auto",
         description="Embedding provider (auto=try openai then google)"
@@ -29,6 +33,15 @@ class MemoryEmbeddingConfig(BaseModel):
     timeout_ms: int = Field(
         60000,
         description="Request timeout in milliseconds"
+    )
+
+
+class MemorySearchConfig(BaseModel):
+    """Memory search configuration."""
+
+    embedding: MemoryEmbeddingConfig = Field(
+        default_factory=MemoryEmbeddingConfig,
+        description="Embedding configuration",
     )
 
 
@@ -205,11 +218,11 @@ Never write or edit Daily Memory. Do not continue task work in this flush turn.
 
 
 class MemoryDreamConfig(BaseModel):
-    """Long-term memory extraction configuration."""
+    """Scheduled and manual Dream self-improvement configuration."""
 
     enabled: bool = Field(
         True,
-        description="Extract durable facts from incremental sessions and daily memory",
+        description="Enable scheduled and manual Dream self-improvement",
     )
     interval_hours: float = Field(
         24,
@@ -221,34 +234,6 @@ class MemoryDreamConfig(BaseModel):
         ge=0,
         description="Number of recent daily memory files included in extraction",
     )
-
-
-class MemoryEvolutionConfig(BaseModel):
-    """Dream self-improvement configuration."""
-
-    enabled: bool = Field(
-        True,
-        description="Enable scheduled and manual Dream self-improvement",
-    )
-    max_session_messages: int = Field(
-        100,
-        ge=1,
-        description="Maximum recent session messages processed per run",
-    )
-    max_input_chars: int = Field(
-        60000,
-        ge=1000,
-        description="Maximum source characters supplied to each evolution prompt",
-    )
-    catch_up_sessions: int = Field(
-        20,
-        ge=0,
-        description=(
-            "Maximum changed sessions included in one Dream bridge batch; "
-            "zero means unlimited"
-        ),
-    )
-    dream: MemoryDreamConfig = Field(default_factory=MemoryDreamConfig)
 
 
 class CompactionConfig(BaseModel):
@@ -328,10 +313,6 @@ class CompactionConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     """Complete memory system configuration"""
-    enabled: bool = Field(
-        True,
-        description="Enable memory system"
-    )
     sources: List[Literal["memory", "session"]] = Field(
         ["memory"],
         description="Memory sources to index"
@@ -346,9 +327,9 @@ class MemoryConfig(BaseModel):
     )
     
     # Sub-configurations
-    embedding: MemoryEmbeddingConfig = Field(
-        default_factory=MemoryEmbeddingConfig,
-        description="Embedding configuration"
+    search: MemorySearchConfig = Field(
+        default_factory=MemorySearchConfig,
+        description="Memory search configuration",
     )
     chunking: MemoryChunkingConfig = Field(
         default_factory=MemoryChunkingConfig,
@@ -374,11 +355,29 @@ class MemoryConfig(BaseModel):
         default_factory=MemoryAutoFlushConfig,
         description="Auto flush configuration"
     )
-    evolution: MemoryEvolutionConfig = Field(
-        default_factory=MemoryEvolutionConfig,
+    dream: MemoryDreamConfig = Field(
+        default_factory=MemoryDreamConfig,
         description="Scheduled and manual Dream self-improvement",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,
         description="Dynamic compaction configuration (auto-scales to model context)"
     )
+
+
+def resolve_memory_config(app_config: object) -> MemoryConfig:
+    """Resolve runtime Memory config, using defaults when absent.
+
+    Args:
+        app_config: Loaded application configuration.
+
+    Returns:
+        Configured Memory settings, or defaults when the application has no
+        Memory section.
+    """
+    memory_config = getattr(app_config, "memory", None)
+    if isinstance(memory_config, MemoryConfig):
+        return memory_config
+    if isinstance(memory_config, dict):
+        return MemoryConfig(**memory_config)
+    return MemoryConfig()

@@ -7,7 +7,7 @@ import time
 from typing import Optional
 
 from flocks.config import Config
-from flocks.memory.config import MemoryConfig
+from flocks.memory.config import resolve_memory_config
 from flocks.memory.evolution.common import DreamTarget
 from flocks.memory.evolution.dream import (
     list_dream_targets,
@@ -71,13 +71,11 @@ class MemoryEvolutionScheduler:
     async def _tick_once(cls, now_ts: Optional[float] = None) -> None:
         now = time.time() if now_ts is None else now_ts
         app_config = await Config.get()
-        config = getattr(app_config, "memory", None)
-        if not isinstance(config, MemoryConfig):
-            return
-        if not config.enabled or not config.evolution.enabled or not config.evolution.dream.enabled:
+        config = resolve_memory_config(app_config)
+        if not config.dream.enabled:
             return
 
-        interval_seconds = config.evolution.dream.interval_hours * 60 * 60
+        interval_seconds = config.dream.interval_hours * 60 * 60
         for target in await list_dream_targets():
             target_key = target.scheduler_key
             retry_after = cls._retry_after_by_target.get(target_key, 0)

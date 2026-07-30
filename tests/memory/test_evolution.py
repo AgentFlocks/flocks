@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from flocks.memory.config import MemoryConfig
+from flocks.memory.config import MemoryConfig, resolve_memory_config
 from flocks.memory.evolution import (
     DreamTarget,
     EvolutionCheckpointStore,
@@ -62,15 +62,33 @@ def isolate_dream_skills(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     )
 
 
-def test_memory_config_exposes_evolution_without_learning_alias() -> None:
+def test_memory_config_exposes_one_dream_config() -> None:
     properties = MemoryConfig.model_json_schema()["properties"]
 
-    assert "evolution" in properties
+    assert "dream" in properties
+    assert "search" in properties
+    assert "embedding" not in properties
+    assert "enabled" not in properties
+    assert "evolution" not in properties
     assert "learning" not in properties
     config = MemoryConfig()
-    assert config.evolution.dream.interval_hours == 24
-    assert not hasattr(config.evolution, "skill")
+    assert config.search.embedding.enabled is False
+    assert config.dream.interval_hours == 24
+    assert not hasattr(config.dream, "max_session_messages")
+    assert not hasattr(config.dream, "max_input_chars")
+    assert not hasattr(config.dream, "catch_up_sessions")
+    assert not hasattr(config.dream, "skill")
     assert not hasattr(config, "learning")
+
+
+def test_resolve_memory_config_defaults_dream_and_preserves_explicit() -> None:
+    default_config = resolve_memory_config(SimpleNamespace(memory=None))
+    explicit_config = MemoryConfig(dream={"enabled": False})
+
+    assert default_config.dream.enabled is True
+    assert resolve_memory_config(
+        SimpleNamespace(memory=explicit_config),
+    ) is explicit_config
 
 
 def _message(
@@ -210,6 +228,8 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
     assert "Project `Project Context`" in DREAM_SYSTEM_PROMPT
     assert "Project `Lessons and Corrections`" in DREAM_SYSTEM_PROMPT
     assert "Project `References`" in DREAM_SYSTEM_PROMPT
+    assert "reorganize each writable Global or Project `MEMORY.md`" in DREAM_SYSTEM_PROMPT
+    assert "do not reorganize `USER.md`" in DREAM_SYSTEM_PROMPT
     assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
 
@@ -609,7 +629,6 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
         line_count=1,
         last_message_id="msg_2",
     )
-    config = MemoryConfig()
 
     async def run_agent(**_: object) -> None:
         (memory_root / "MEMORY.md").write_text(
@@ -626,7 +645,7 @@ async def test_dream_bridge_updates_both_files_and_commits_cursors(
     with (
         patch(
             "flocks.memory.evolution.dream.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace(memory=config)),
+            new=AsyncMock(return_value=SimpleNamespace(memory=None)),
         ),
         patch(
             "flocks.memory.evolution.dream.Config.resolve_default_llm",
@@ -1094,7 +1113,6 @@ async def test_scheduler_runs_due_dream_and_persists_success(
     tmp_path: Path,
 ) -> None:
     await Storage.init(tmp_path / "scheduler.db")
-    config = MemoryConfig()
     result = SimpleNamespace(
         changed=False,
         processed_sources=0,
@@ -1105,7 +1123,7 @@ async def test_scheduler_runs_due_dream_and_persists_success(
     with (
         patch(
             "flocks.memory.evolution.scheduler.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace(memory=config)),
+            new=AsyncMock(return_value=SimpleNamespace(memory=None)),
         ),
         patch(
             "flocks.memory.evolution.scheduler.run_dream_bridge",
@@ -1126,7 +1144,7 @@ async def test_scheduler_runs_due_dream_and_persists_success(
 def test_scheduler_defaults_to_daily_run_and_half_hour_checks() -> None:
     config = MemoryConfig()
 
-    assert config.evolution.dream.interval_hours == 24
+    assert config.dream.interval_hours == 24
     assert _TICK_SECONDS == 30 * 60
 
 

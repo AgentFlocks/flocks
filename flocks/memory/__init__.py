@@ -28,14 +28,15 @@ from flocks.memory.types import (
 from flocks.memory.config import (
     MemoryConfig,
     MemoryEmbeddingConfig,
+    MemorySearchConfig,
     MemoryChunkingConfig,
     MemorySyncConfig,
     MemoryQueryConfig,
     MemoryCacheConfig,
     MemoryBatchConfig,
     MemoryAutoFlushConfig,
-    MemoryEvolutionConfig,
     MemoryDreamConfig,
+    resolve_memory_config,
 )
 
 from flocks.memory.utils import (
@@ -69,14 +70,15 @@ __all__ = [
     # Config
     "MemoryConfig",
     "MemoryEmbeddingConfig",
+    "MemorySearchConfig",
     "MemoryChunkingConfig",
     "MemorySyncConfig",
     "MemoryQueryConfig",
     "MemoryCacheConfig",
     "MemoryBatchConfig",
     "MemoryAutoFlushConfig",
-    "MemoryEvolutionConfig",
     "MemoryDreamConfig",
+    "resolve_memory_config",
     
     # Utils
     "compute_hash",

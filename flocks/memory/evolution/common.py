@@ -29,6 +29,10 @@ from flocks.utils.log import Log
 
 
 log = Log.create(service="memory.evolution")
+
+_DREAM_MAX_SESSION_MESSAGES = 100
+_DREAM_MAX_INPUT_CHARS = 60_000
+_DREAM_CATCH_UP_SESSIONS = 20
 Pipeline = Literal["dream"]
 SourceType = Literal["session", "daily"]
 _DREAM_LOCK = asyncio.Lock()
@@ -511,7 +515,6 @@ async def _collect_dream_sources(
     """Collect one bounded bridge batch and its MemoryManager sync targets."""
     from flocks.session.session import Session
 
-    evolution = config.evolution
     sessions = await Session.list_all_unfiltered()
     all_eligible_sessions = [
         session for session in sessions if session.category == "user" and session.status != "deleted"
@@ -521,7 +524,7 @@ async def _collect_dream_sources(
     session_prefixes = _unique_session_prefixes(all_eligible_sessions)
     if max_chars is None:
         total_source_budget = max(
-            (evolution.max_input_chars * 2) // 3,
+            (_DREAM_MAX_INPUT_CHARS * 2) // 3,
             2000,
         )
     else:
@@ -534,7 +537,7 @@ async def _collect_dream_sources(
     included_session_ids: set[str] = set()
 
     for session in eligible_sessions:
-        if evolution.catch_up_sessions > 0 and changed_sessions >= evolution.catch_up_sessions:
+        if changed_sessions >= _DREAM_CATCH_UP_SESSIONS:
             backlog = True
             break
         if remaining_budget <= 0:
@@ -550,7 +553,7 @@ async def _collect_dream_sources(
         snapshot, source_backlog = await _session_delta(
             session.id,
             checkpoint,
-            max_messages=evolution.max_session_messages,
+            max_messages=_DREAM_MAX_SESSION_MESSAGES,
             max_chars=remaining_budget,
             scope=target.scope,
             scope_id=target.scope_id,
@@ -567,7 +570,7 @@ async def _collect_dream_sources(
     memory_root = Config.get_data_path() / "memory"
     for path in _recent_daily_paths(
         memory_root,
-        evolution.dream.recent_daily_days,
+        config.dream.recent_daily_days,
     ):
         if remaining_budget <= 0:
             backlog = True

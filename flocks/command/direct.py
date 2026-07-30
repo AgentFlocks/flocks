@@ -229,6 +229,8 @@ async def run_direct_command(
                 success=False,
                 text="Usage: /dream requires an active session.",
             )
+        from flocks.config import Config
+        from flocks.memory.config import resolve_memory_config
         from flocks.memory.evolution.common import DreamTarget
         from flocks.memory.evolution.dream import run_dream_bridge
         from flocks.memory.paths import is_registered_project_id
@@ -240,6 +242,13 @@ async def run_direct_command(
                 handled=True,
                 success=False,
                 text="Session not found.",
+            )
+        memory_config = resolve_memory_config(await Config.get())
+        if not memory_config.dream.enabled:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Dream is disabled",
             )
         target = (
             DreamTarget.project(session.project_id)

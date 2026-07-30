@@ -258,40 +258,30 @@ async def lifespan(app: FastAPI):
     )
     log.info("question_handler.initialized")
     
-    # Register built-in hooks if memory is enabled
+    # Memory is always enabled; Dream scheduling remains configurable.
     try:
         config = await Config.get()
-        # ``config.memory`` may be ``None`` when the memory system is not
-        # configured at all; in that case there is nothing to register.
-        memory_cfg = getattr(config, "memory", None)
-        memory_enabled = bool(getattr(memory_cfg, "enabled", False)) if memory_cfg else False
-        evolution_cfg = (
-            getattr(memory_cfg, "evolution", None)
-            if memory_cfg
-            else None
+        from flocks.memory.config import resolve_memory_config
+
+        memory_cfg = resolve_memory_config(config)
+        from flocks.hooks.builtin import register_builtin_hooks
+
+        await _run_startup_phase(
+            log,
+            "hooks.register_builtin",
+            register_builtin_hooks,
         )
-        evolution_enabled = (
-            bool(getattr(evolution_cfg, "enabled", False))
-            if evolution_cfg
-            else False
-        )
-        if memory_enabled and evolution_enabled:
-            from flocks.hooks.builtin import register_builtin_hooks
+        log.info("hooks.registered")
+        if memory_cfg.dream.enabled:
             from flocks.memory.evolution.scheduler import (
                 MemoryEvolutionScheduler,
             )
 
             await _run_startup_phase(
                 log,
-                "hooks.register_builtin",
-                register_builtin_hooks,
-            )
-            await _run_startup_phase(
-                log,
                 "memory.evolution.start",
                 MemoryEvolutionScheduler.start,
             )
-            log.info("hooks.registered")
     except Exception as e:
         # Hook registration failure should not stop server startup
         log.warn("hooks.register_failed", {"error": str(e)})

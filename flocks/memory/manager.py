@@ -152,12 +152,17 @@ class MemoryManager:
         self.config = config
         
         # Provider configuration
-        self._requested_provider = config.embedding.provider
-        self.provider_id: Optional[str] = config.embedding.provider
-        if self.provider_id == "auto":
+        self._embedding_enabled = config.search.embedding.enabled
+        self._requested_provider = config.search.embedding.provider
+        self.provider_id: Optional[str] = (
+            config.search.embedding.provider
+            if self._embedding_enabled
+            else None
+        )
+        if self._embedding_enabled and self.provider_id == "auto":
             self.provider_id = "openai"  # Default fallback
         
-        self.embedding_model = config.embedding.model
+        self.embedding_model = config.search.embedding.model
         
         # Components (lazy initialization)
         self.search_engine: Optional[HybridSearch] = None
@@ -205,19 +210,28 @@ class MemoryManager:
 
         if project_id in cls._instances:
             instance = cls._instances[project_id]
+            old_enabled = instance._embedding_enabled
             old_provider = instance._requested_provider
             old_model = instance.embedding_model
 
             instance.config = config
             instance.workspace_dir = Path(workspace_dir)
 
-            new_provider = config.embedding.provider
-            new_model = config.embedding.model
+            new_enabled = config.search.embedding.enabled
+            new_provider = config.search.embedding.provider
+            new_model = config.search.embedding.model
 
-            if new_provider != old_provider or new_model != old_model:
+            if (
+                new_enabled != old_enabled
+                or new_provider != old_provider
+                or new_model != old_model
+            ):
+                instance._embedding_enabled = new_enabled
                 instance._requested_provider = new_provider
                 instance.provider_id = (
-                    "openai" if new_provider == "auto" else new_provider
+                    ("openai" if new_provider == "auto" else new_provider)
+                    if new_enabled
+                    else None
                 )
                 instance.embedding_model = new_model
                 instance._initialized = False
@@ -225,6 +239,8 @@ class MemoryManager:
                 instance.indexer = None
                 log.info("manager.config_changed", {
                     "project_id": project_id,
+                    "old_enabled": old_enabled,
+                    "new_enabled": new_enabled,
                     "old_provider": old_provider,
                     "new_provider": new_provider,
                     "old_model": old_model,
@@ -253,25 +269,26 @@ class MemoryManager:
             
             try:
                 await Storage._ensure_init()
-                await Provider.init()
                 
-                provider = Provider.get(self.provider_id) if self.provider_id else None
-                if not provider or not provider.supports_embeddings():
-                    for fallback_id in ["openai", "google"]:
-                        fallback = Provider.get(fallback_id)
-                        if fallback and fallback.supports_embeddings():
-                            log.warn("manager.provider.fallback", {
-                                "from": self.provider_id,
-                                "to": fallback_id,
-                            })
-                            self.provider_id = fallback_id
-                            break
-                    else:
-                        log.info(
-                            "manager.embedding.unavailable",
-                            {"project_id": self.project_id},
-                        )
-                        self.provider_id = None
+                if self._embedding_enabled:
+                    await Provider.init()
+                    provider = Provider.get(self.provider_id) if self.provider_id else None
+                    if not provider or not provider.supports_embeddings():
+                        for fallback_id in ["openai", "google"]:
+                            fallback = Provider.get(fallback_id)
+                            if fallback and fallback.supports_embeddings():
+                                log.warn("manager.provider.fallback", {
+                                    "from": self.provider_id,
+                                    "to": fallback_id,
+                                })
+                                self.provider_id = fallback_id
+                                break
+                        else:
+                            log.info(
+                                "manager.embedding.unavailable",
+                                {"project_id": self.project_id},
+                            )
+                            self.provider_id = None
                 
                 self.search_engine = HybridSearch(
                     project_id=self.project_id,
@@ -602,10 +619,10 @@ class MemoryManager:
         """
         # TODO: Implement comprehensive status collection
         return MemoryProviderStatus(
-            enabled=self.config.enabled,
+            enabled=True,
             provider=self.provider_id or "fts",
             model=self.embedding_model,
-            requested_provider=self.config.embedding.provider,
+            requested_provider=self.config.search.embedding.provider,
             workspace_dir=str(self.workspace_dir),
             sources=[MemorySource(s) for s in self.config.sources],
             cache={"enabled": self.config.cache.enabled},

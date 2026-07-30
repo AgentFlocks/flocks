@@ -7,6 +7,7 @@ import pytest
 
 from flocks.command.command import Command
 from flocks.command.direct import run_direct_command
+from flocks.memory.config import MemoryConfig
 from flocks.memory.evolution.common import DreamTarget
 
 
@@ -45,6 +46,12 @@ async def test_dream_command_runs_current_project_agent() -> None:
         statuses.append((status, message))
 
     with (
+        patch(
+            "flocks.config.Config.get",
+            new=AsyncMock(
+                return_value=SimpleNamespace(memory=MemoryConfig()),
+            ),
+        ),
         patch(
             "flocks.session.session.Session.get_by_id",
             new=AsyncMock(return_value=session),
@@ -87,6 +94,12 @@ async def test_dream_command_clears_foreground_status_after_failure() -> None:
 
     with (
         patch(
+            "flocks.config.Config.get",
+            new=AsyncMock(
+                return_value=SimpleNamespace(memory=MemoryConfig()),
+            ),
+        ),
+        patch(
             "flocks.session.session.Session.get_by_id",
             new=AsyncMock(return_value=session),
         ),
@@ -105,3 +118,42 @@ async def test_dream_command_clears_foreground_status_after_failure() -> None:
     assert result.text == "Dream failed: model unavailable"
     assert statuses[0][0] == "dreaming"
     assert statuses[-1] == ("idle", None)
+
+
+@pytest.mark.asyncio
+async def test_dream_command_reports_explicitly_disabled_dream() -> None:
+    session = SimpleNamespace(id="ses_test", project_id="default")
+    bridge = AsyncMock()
+    statuses = []
+
+    async def publish_status(status: str, message: str | None) -> None:
+        statuses.append((status, message))
+
+    with (
+        patch(
+            "flocks.config.Config.get",
+            new=AsyncMock(
+                return_value=SimpleNamespace(
+                    memory=MemoryConfig(dream={"enabled": False}),
+                ),
+            ),
+        ),
+        patch(
+            "flocks.session.session.Session.get_by_id",
+            new=AsyncMock(return_value=session),
+        ),
+        patch(
+            "flocks.memory.evolution.dream.run_dream_bridge",
+            new=bridge,
+        ),
+    ):
+        result = await run_direct_command(
+            "dream",
+            session_id=session.id,
+            status_callback=publish_status,
+        )
+
+    assert result.success is False
+    assert result.text == "Dream is disabled"
+    assert statuses == []
+    bridge.assert_not_awaited()

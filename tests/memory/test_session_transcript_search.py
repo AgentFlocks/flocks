@@ -2,7 +2,7 @@
 
 from pathlib import Path
 import sqlite3
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 import uuid
 
 import pytest
@@ -517,8 +517,10 @@ async def test_memory_search_uses_fts_without_embedding_provider(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(Provider, "init", AsyncMock())
-    monkeypatch.setattr(Provider, "get", lambda _provider_id: None)
+    provider_init = AsyncMock()
+    provider_get = Mock()
+    monkeypatch.setattr(Provider, "init", provider_init)
+    monkeypatch.setattr(Provider, "get", provider_get)
     async with Storage.connect(Storage.get_db_path()) as db:
         await db.execute(
             """
@@ -548,6 +550,8 @@ async def test_memory_search_uses_fts_without_embedding_provider(
     results = await manager.search("durable")
 
     assert manager.provider_id is None
+    provider_init.assert_not_awaited()
+    provider_get.assert_not_called()
     assert [result.path for result in results] == ["MEMORY.md"]
 
 

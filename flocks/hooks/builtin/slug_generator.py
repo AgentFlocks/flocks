@@ -46,7 +46,7 @@ Reply with ONLY the slug, nothing else. Examples: "vendor-pitch", "api-design", 
 """
         
         # Get provider configuration
-        provider_id = getattr(config.memory.embedding, 'provider', 'openai')
+        provider_id = getattr(config.memory.search.embedding, 'provider', 'openai')
         if provider_id == "auto":
             provider_id = "openai"
         

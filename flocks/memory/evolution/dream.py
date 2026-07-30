@@ -7,7 +7,7 @@ import os
 from typing import Optional
 
 from flocks.config import Config
-from flocks.memory.config import MemoryConfig
+from flocks.memory.config import resolve_memory_config
 from flocks.memory.paths import (
     GLOBAL_MEMORY_FILENAME,
     GLOBAL_SCOPE_ID,
@@ -22,6 +22,7 @@ from .common import (
     DreamBridgeResult,
     DreamTarget,
     EvolutionCheckpointStore,
+    _DREAM_MAX_INPUT_CHARS,
     _DREAM_LOCK,
     _collect_dream_sources,
     _redact_sensitive,
@@ -94,7 +95,14 @@ same information across USER, Global Memory, Project Memory, and Skills.
 
 # Memory section routing
 
-After choosing a Memory file, use exactly one section:
+Use exactly these top-level sections, in this order:
+
+- Global `MEMORY.md`: `## Environment and Tools`,
+  `## Lessons and Corrections`, `## References`.
+- Project `MEMORY.md`: `## Project Context`,
+  `## Lessons and Corrections`, `## References`.
+
+After choosing a Memory file, use exactly one of its sections:
 
 - Global `Environment and Tools`: stable cross-project facts about the Agent's
   environment, tools, and integrations.
@@ -127,6 +135,9 @@ After choosing a Memory file, use exactly one section:
 - A Global-only Dream must ignore project-specific candidates.
 - A Project Dream may move a wrongly global project entry to Project Memory
   only when current-project evidence clearly supports the correction.
+- Before completing, reorganize each writable Global or Project `MEMORY.md`
+  into its canonical top-level sections, preserving durable content while
+  moving, merging, and deduplicating entries; do not reorganize `USER.md`.
 
 # Skill decision tree
 
@@ -238,12 +249,8 @@ async def run_dream_bridge(
     """Run one incremental Dream batch in the hidden self-improve Agent."""
     target = target or DreamTarget.global_only()
     app_config = await Config.get()
-    config = getattr(app_config, "memory", None)
-    if not isinstance(config, MemoryConfig):
-        return DreamBridgeResult(False, 0, False)
-    if not config.enabled or not config.evolution.enabled:
-        return DreamBridgeResult(False, 0, False)
-    if not config.evolution.dream.enabled:
+    config = resolve_memory_config(app_config)
+    if not config.dream.enabled:
         return DreamBridgeResult(False, 0, False)
 
     default_model = await Config.resolve_default_llm()
@@ -295,7 +302,7 @@ async def run_dream_bridge(
                 original_files[key] = None
 
         fixed_reserve = 6000
-        variable_budget = config.evolution.max_input_chars - fixed_reserve
+        variable_budget = _DREAM_MAX_INPUT_CHARS - fixed_reserve
         if variable_budget < 2000:
             raise ValueError("Dream input budget is too small")
 
@@ -342,7 +349,7 @@ async def run_dream_bridge(
             skill_catalog=catalog_text,
             source_text=source_text,
         )
-        if len(user_prompt) > config.evolution.max_input_chars:
+        if len(user_prompt) > _DREAM_MAX_INPUT_CHARS:
             raise ValueError("Dream input exceeded its budget after safe serialization")
 
         workspace = next(

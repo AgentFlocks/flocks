@@ -46,17 +46,12 @@ async def get_hooks_stats() -> HookStatsResponse:
 )
 async def get_hooks_status() -> Dict[str, Any]:
     """Get hook system status"""
-    from flocks.config import Config
-    
     try:
-        config = await Config.get()
-        memory_config = config.memory
-        
         # Get stats
         stats = get_hook_stats()
         
         return {
-            "enabled": getattr(memory_config, "enabled", False),
+            "enabled": True,
             "stats": stats,
         }
         
