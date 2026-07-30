@@ -377,16 +377,7 @@ class Session:
         
         # Default memory_enabled from config if not explicitly set
         if "memory_enabled" not in kwargs:
-            try:
-                from flocks.config import Config
-                cfg = await Config.get()
-                memory_cfg = getattr(cfg, "memory", None)
-                if isinstance(memory_cfg, dict):
-                    kwargs["memory_enabled"] = bool(memory_cfg.get("enabled", False))
-                elif memory_cfg is not None and hasattr(memory_cfg, "enabled"):
-                    kwargs["memory_enabled"] = bool(getattr(memory_cfg, "enabled"))
-            except Exception as e:
-                log.warn("session.memory.default.error", {"error": str(e)})
+            kwargs["memory_enabled"] = True
 
         # Bind root ownership here; children inherit ownership from their parent below.
         if parent_id is None and (

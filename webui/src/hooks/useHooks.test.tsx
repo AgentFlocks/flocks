@@ -16,12 +16,6 @@ vi.mock('@/api/hooks', () => ({
 function makeHookStatus(overrides: Record<string, unknown> = {}) {
   return {
     enabled: true,
-    session_memory: {
-      enabled: true,
-      message_count: 3,
-      use_llm_slug: false,
-      slug_timeout: 10,
-    },
     stats: {
       total_event_keys: 2,
       total_handlers: 4,

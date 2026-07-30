@@ -9,6 +9,7 @@ Writes files to the local filesystem with:
 
 import os
 from difflib import unified_diff
+from pathlib import Path
 from typing import Optional
 
 from flocks.tool.registry import (
@@ -193,6 +194,39 @@ async def _maybe_redirect_to_default_outputs(
         return resolved_path
 
 
+def _existing_memory_write_error(filepath: str) -> Optional[str]:
+    """Prevent invalid whole-file replacement of Memory files."""
+    from flocks.config import Config
+    from flocks.memory.paths import (
+        DAILY_AGENT_WRITE_ERROR,
+        is_daily_memory_path,
+        is_registered_project_id,
+    )
+
+    path = Path(filepath).expanduser().resolve(strict=False)
+    memory_root = (
+        Config.get_data_path() / "memory"
+    ).expanduser().resolve(strict=False)
+    if is_daily_memory_path(memory_root, path):
+        return DAILY_AGENT_WRITE_ERROR
+
+    protected_files = {
+        memory_root / "MEMORY.md",
+        memory_root / "USER.md",
+    }
+    is_project_memory = (
+        path.name == "MEMORY.md"
+        and path.parent.parent == memory_root / "projects"
+        and is_registered_project_id(path.parent.name)
+    )
+    if path.exists() and (path in protected_files or is_project_memory):
+        return (
+            "Existing Memory files cannot be overwritten with write. "
+            "Read the current content and use edit for a precise change."
+        )
+    return None
+
+
 @ToolRegistry.register_function(
     name="write",
     description=DESCRIPTION,
@@ -248,7 +282,11 @@ async def write_tool(
             content = str(content)
 
     try:
-        resolution = await resolve_tool_path(ctx, filePath)
+        resolution = await resolve_tool_path(
+            ctx,
+            filePath,
+            allow_host_memory=True,
+        )
         if resolution.sandbox_root is None:
             redirected_path = await _maybe_redirect_to_default_outputs(
                 ctx,
@@ -262,6 +300,7 @@ async def write_tool(
                     redirected_path,
                     base_dir=resolution.base_dir,
                     worktree=resolution.worktree,
+                    allow_host_memory=True,
                 )
     except ValueError as exc:
         return ToolResult(
@@ -270,6 +309,13 @@ async def write_tool(
             title=filePath,
         )
     filepath = resolution.resolved_path
+    memory_error = _existing_memory_write_error(filepath)
+    if memory_error:
+        return ToolResult(
+            success=False,
+            error=memory_error,
+            title=filePath,
+        )
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":
@@ -313,7 +359,7 @@ async def write_tool(
                 error=f"Failed to read existing file: {str(e)}",
                 title=title
             )
-    
+
     # Generate diff
     diff = trim_diff(generate_diff(filepath, old_content, content))
     

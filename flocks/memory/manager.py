@@ -384,7 +384,7 @@ class MemoryManager:
         """
         # TODO: Implement comprehensive status collection
         return MemoryProviderStatus(
-            enabled=self.config.enabled,
+            enabled=True,
             provider=self.provider_id,
             model=self.embedding_model,
             requested_provider=self.config.embedding.provider,

@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from flocks.memory.config import MemoryConfig
 from flocks.server import app as app_module
 
 
@@ -31,7 +32,7 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
         return None
 
     async def fake_config_get():
-        return SimpleNamespace(memory=SimpleNamespace(enabled=False))
+        return SimpleNamespace(memory=MemoryConfig())
 
     async def fake_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -59,6 +60,11 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
         sys.modules,
         "flocks.config.config_writer",
         types.SimpleNamespace(ensure_config_files=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "flocks.hooks.builtin",
+        types.SimpleNamespace(register_builtin_hooks=lambda: None),
     )
     monkeypatch.setitem(
         sys.modules,

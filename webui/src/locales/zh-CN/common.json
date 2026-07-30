@@ -285,18 +285,6 @@
     "disabled": "已禁用",
     "totalHandlers": "处理器总数",
     "eventKeys": "事件键数量",
-    "autoSave": "自动保存",
-    "autoSaveLabel": "创建新会话时自动保存",
-    "messageCount": "保存消息数量",
-    "messageCountLabel": "条",
-    "useLlmSlug": "LLM 生成文件名",
-    "useLlmSlugLabel": "使用 LLM 生成文件名",
-    "yes": "是",
-    "no": "否",
-    "slugTimeout": "超时时间",
-    "slugTimeoutLabel": "秒",
-    "autoSaveEnabled": "自动保存已启用",
-    "autoSaveDesc": "当您创建新会话时（类似 /new 命令），上一个会话的对话将自动保存到记忆系统中。",
     "registeredHooks": "已注册的 Hooks",
     "handlers": "个处理器"
   }
