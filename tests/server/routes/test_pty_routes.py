@@ -137,6 +137,29 @@ async def test_public_pty_write_uses_neutral_action_lifecycle_payload(
 
 
 @pytest.mark.asyncio
+async def test_http_pty_create_skips_action_lifecycle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    input_data = CreateInput(command="/bin/sh")
+    created = PtyInfo(
+        id="pty_http",
+        title="Terminal",
+        command="/bin/sh",
+        args=[],
+        cwd="/tmp",
+        status=PtyStatus.RUNNING,
+        pid=123,
+    )
+    create = AsyncMock(return_value=created)
+    monkeypatch.setattr(pty_routes.Pty, "create", create)
+
+    response = await pty_routes.create_session(input_data)
+
+    assert response.id == "pty_http"
+    create.assert_awaited_once_with(input_data, use_action_lifecycle=False)
+
+
+@pytest.mark.asyncio
 async def test_pty_websocket_keeps_authenticated_context_for_full_connection(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -185,3 +208,8 @@ async def test_pty_websocket_keeps_authenticated_context_for_full_connection(
     await pty_routes.connect_session(websocket, "pty_123")
 
     assert observed == [("websocket-user", {"opaque_transfer": "verified"})]
+    pty_routes.Pty.connect.assert_awaited_once_with(
+        "pty_123",
+        websocket,
+        use_action_lifecycle=False,
+    )

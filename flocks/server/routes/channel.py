@@ -16,10 +16,9 @@ from flocks.channel.gateway.manager import default_manager
 from flocks.channel.registry import default_registry
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
-from flocks.server.routes.action_lifecycle import ActionLifecycleRouter
 from flocks.utils.log import Log
 
-router = ActionLifecycleRouter(lifecycle_domain="channel")
+router = APIRouter()
 log = Log.create(service="channel.routes")
 
 

@@ -905,6 +905,12 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
 
     from flocks.session.execution_profile import PROFILE_METADATA_KEY
 
+    session_execution_profile = {
+        "entry": "interactive",
+        "source": "webui.session.create",
+        "permission_mode": "require-confirm",
+    }
+
     if request.projectID and request.projectID not in {
         DEFAULT_PROJECT_ID,
         TASK_SESSION_GROUP_ID,
@@ -926,13 +932,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             owner_username=(parent_session.owner_username if parent_session else current_user.username),
             model_auto=request.model_auto,
             model_pinned=False,
-            metadata={
-                PROFILE_METADATA_KEY: {
-                    "entry": "interactive",
-                    "source": "webui.session.create",
-                    "permission_mode": "require-confirm",
-                }
-            },
+            metadata={PROFILE_METADATA_KEY: session_execution_profile},
             **({"category": request.category} if request.category else {}),
         )
     except ProjectDeletionError as exc:
@@ -941,21 +941,6 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             detail=str(exc),
         ) from exc
     Project.invalidate_session_stats()
-    try:
-        from flocks.hooks.pipeline import HookPipeline
-        from flocks.session.execution_profile import get_session_execution_profile
-
-        profile = await get_session_execution_profile(session.id)
-        await HookPipeline.run_action_before(
-            {
-                "operation": "session.mode.initialize",
-                "session_id": session.id,
-                "entry": "interactive",
-                "session_execution_profile": profile or {},
-            }
-        )
-    except Exception:
-        pass
 
     log.info("session.created", {"session_id": session.id})
     try:

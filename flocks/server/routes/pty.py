@@ -67,7 +67,7 @@ async def list_sessions():
 async def create_session(input_data: CreateInput):
     """Create a new PTY session - operationId: pty.create"""
     try:
-        info = await Pty.create(input_data)
+        info = await Pty.create(input_data, use_action_lifecycle=False)
         return _to_response(info)
     except Exception as e:
         log.error("pty.create.error", {"error": str(e)})
@@ -165,14 +165,17 @@ async def connect_session(websocket: WebSocket, pty_id: str):
 
                     await websocket.accept()
 
-                    # Connect to PTY
-                    handlers = await Pty.connect(pty_id, websocket)
+                    # HTTP/WebSocket ingress is authenticated separately and
+                    # must not enter the execution action lifecycle.
+                    handlers = await Pty.connect(
+                        pty_id,
+                        websocket,
+                        use_action_lifecycle=False,
+                    )
                     if not handlers:
                         await websocket.close(code=4004, reason="Session not found")
                         return
 
-                    # Each received frame is routed through Pty.write(), whose
-                    # public primitive owns the neutral action lifecycle.
                     while True:
                         try:
                             data = await websocket.receive_text()
