@@ -64,6 +64,8 @@ _DENOISE_DETAIL_CACHE_MAX = 64
 _stats_response_cache: OrderedDict = OrderedDict()
 _STATS_RESPONSE_CACHE_TTL = 300.0
 _STATS_RESPONSE_CACHE_MAX = 32
+_token_usage_cache = {"updatedAt": 0.0, "mtimeNs": 0, "value": None}
+_TOKEN_USAGE_CACHE_TTL = 30.0
 _cache_lock = RLock()
 _schema_lock = RLock()
 _schema_ready: set = set()
@@ -503,21 +505,6 @@ def _usage_iso(dt):
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def _parse_usage_created_at(value):
-    raw = str(value or "").strip()
-    if not raw:
-        return None
-    if raw.endswith("Z"):
-        raw = raw[:-1] + "+00:00"
-    try:
-        parsed = datetime.fromisoformat(raw)
-    except Exception:
-        return None
-    if parsed.tzinfo is None:
-        return parsed.astimezone()
-    return parsed.astimezone()
-
-
 def _read_token_usage():
     empty = {
         "totalTokens": 0,
@@ -529,6 +516,20 @@ def _read_token_usage():
     }
     if not USAGE_DB.is_file():
         return empty
+
+    try:
+        mtime_ns = USAGE_DB.stat().st_mtime_ns
+    except Exception:
+        mtime_ns = 0
+    now_monotonic = time.monotonic()
+    with _cache_lock:
+        cached_value = _token_usage_cache.get("value")
+        if (
+            cached_value is not None
+            and _token_usage_cache.get("mtimeNs") == mtime_ns
+            and now_monotonic - float(_token_usage_cache.get("updatedAt") or 0) < _TOKEN_USAGE_CACHE_TTL
+        ):
+            return cached_value
 
     now_local = datetime.now().astimezone()
     today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
@@ -543,6 +544,8 @@ def _read_token_usage():
     try:
         with sqlite3.connect(f"file:{USAGE_DB}?mode=ro", uri=True, timeout=1.0) as conn:
             conn.execute("PRAGMA query_only = ON")
+            if not _table_exists(conn, "usage_records"):
+                return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
             total_tokens = _safe_int(
                 conn.execute(
                     "SELECT COALESCE(SUM(total_tokens), 0) FROM usage_records"
@@ -554,22 +557,21 @@ def _read_token_usage():
                 (_usage_iso(today_start), _usage_iso(tomorrow_start)),
             ).fetchone()
             series_rows = conn.execute(
-                "SELECT created_at, total_tokens FROM usage_records "
-                "WHERE created_at >= ? AND created_at < ?",
+                "SELECT date(created_at, 'localtime') AS usage_day, "
+                "COALESCE(SUM(total_tokens), 0) AS token_count "
+                "FROM usage_records WHERE created_at >= ? AND created_at < ? "
+                "GROUP BY usage_day",
                 (_usage_iso(first_day), _usage_iso(tomorrow_start)),
             ).fetchall()
     except Exception:
         return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
 
-    for created_at, total in series_rows:
-        parsed = _parse_usage_created_at(created_at)
-        if parsed is None:
-            continue
-        key = parsed.date().isoformat()
+    for usage_day, total in series_rows:
+        key = str(usage_day or "")
         if key in series_by_date:
             series_by_date[key] += max(_safe_int(total), 0)
 
-    return {
+    result = {
         **empty,
         "totalTokens": max(total_tokens, 0),
         "todayTokens": max(_safe_int(today_row[0]), 0) if today_row else 0,
@@ -577,6 +579,9 @@ def _read_token_usage():
         "dailySeries": list(series_by_date.values()),
         "dailyLabels": labels,
     }
+    with _cache_lock:
+        _token_usage_cache.update({"updatedAt": now_monotonic, "mtimeNs": mtime_ns, "value": result})
+    return result
 
 
 def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0):
@@ -1139,7 +1144,9 @@ async def get_activity(ctx, request):
 
 
 async def get_task_center(ctx, request):
-    return await asyncio.to_thread(_get_task_center)
+    params = dict(request.query_params)
+    include_mock = _truthy(params.get("mockActivity")) or _truthy(params.get("mockTaskCenter"))
+    return await asyncio.to_thread(_get_task_center, include_mock)
 
 
 def _table_exists(conn, table_name):
@@ -1164,6 +1171,10 @@ def _task_center_empty():
             "workflowAvailable": WORKFLOW_DB.is_file(),
         },
     }
+
+
+def _truthy(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _task_trigger_value(trigger, key):
@@ -1443,7 +1454,7 @@ def _workflow_link_context(latest):
     return session_id, message_id
 
 
-def _task_center_workflow_rows(limit=12):
+def _task_center_workflow_rows(limit=12, include_mock=False):
     if not WORKFLOW_DB.is_file():
         return [], 0, 0
     try:
@@ -1478,7 +1489,8 @@ def _task_center_workflow_rows(limit=12):
                 **_workflow_config_name_map(conn),
                 **WORKFLOW_DISPLAY_NAMES,
             }
-            workflow_ids.update(SOC_PINNED_WORKFLOW_NAMES)
+            if include_mock:
+                workflow_ids.update(SOC_PINNED_WORKFLOW_NAMES)
             stats_columns = (
                 {
                     row[1]
@@ -1635,9 +1647,11 @@ def _task_center_workflow_rows(limit=12):
         return [], 0, 0
 
 
-def _get_task_center():
+def _get_task_center(include_mock=False):
     session_count, tasks, scheduled_execution_count, scheduled_today_execution_count = _task_center_task_rows()
-    workflows, workflow_execution_count, workflow_today_execution_count = _task_center_workflow_rows()
+    workflows, workflow_execution_count, workflow_today_execution_count = _task_center_workflow_rows(
+        include_mock=include_mock,
+    )
     return {
         **_task_center_empty(),
         "sessionCount": session_count,

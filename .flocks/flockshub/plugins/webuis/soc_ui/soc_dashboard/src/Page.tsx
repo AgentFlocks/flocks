@@ -97,6 +97,9 @@ const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
 const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
 const CUSTOM_COMMAND_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
 const SOC_MOCK_ACTIVITY_KEY = 'soc-dashboard-mock-activity-v1';
+const SOC_MOCK_TASK_CENTER_KEY = 'soc-dashboard-mock-task-center-v1';
+const SOC_MOCK_DASHBOARD_KEY = 'soc-dashboard-mock-v1';
+const SOC_MOCK_TRUE_VALUES = ['1', 'true', 'yes', 'on'];
 const TIME_RANGE_OPTIONS = [
   { value: '15m', label: '最近15分钟' },
   { value: '2h', label: '最近2小时' },
@@ -131,17 +134,23 @@ function readCustomCommandTitle() {
   }
 }
 
-function readMockActivityEnabled() {
+function isMockSwitchEnabled(value) {
+  return SOC_MOCK_TRUE_VALUES.includes(String(value || '').trim().toLowerCase());
+}
+
+function readMockDashboardEnabled() {
   if (typeof window === 'undefined') return false;
   try {
     const params = new URLSearchParams(window.location.search || '');
-    const queryValue = params.get('mockActivity');
-    if (queryValue !== null) {
-      return ['1', 'true', 'yes', 'on'].includes(queryValue.trim().toLowerCase());
+    for (const key of ['mockActivity', 'mockTaskCenter', 'mockDashboard']) {
+      const queryValue = params.get(key);
+      if (queryValue !== null) return isMockSwitchEnabled(queryValue);
     }
-    return ['1', 'true', 'yes', 'on'].includes(
-      (window.localStorage.getItem(SOC_MOCK_ACTIVITY_KEY) || '').trim().toLowerCase(),
-    );
+    return [
+      SOC_MOCK_ACTIVITY_KEY,
+      SOC_MOCK_TASK_CENTER_KEY,
+      SOC_MOCK_DASHBOARD_KEY,
+    ].some((key) => isMockSwitchEnabled(window.localStorage.getItem(key)));
   } catch {
     return false;
   }
@@ -362,6 +371,110 @@ function createTaskCenterState() {
     workflows: [],
     error: '',
   };
+}
+
+function createMockTaskCenterState() {
+  const now = Date.now();
+  const startedAt = now - 7 * 60 * 1000;
+  const nextRunAt = new Date(now + 18 * 60 * 1000).toISOString();
+  const lastRunAt = new Date(now - 11 * 60 * 1000).toISOString();
+  return {
+    ...createTaskCenterState(),
+    connection: 'online',
+    generatedAt: new Date(now).toISOString(),
+    sessionCount: 6,
+    scheduledExecutionCount: 18,
+    scheduledTodayExecutionCount: 5,
+    workflowExecutionCount: 42,
+    workflowTodayExecutionCount: 9,
+    scheduledTasks: [
+      {
+        id: 'mock-soc-scheduler-patrol',
+        name: 'SOC 告警自动巡检（Mock）',
+        mode: 'cron',
+        status: 'active',
+        executionMode: 'workflow',
+        workflowId: 'stream_alert_denoise',
+        executionCount: 12,
+        todayExecutionCount: 4,
+        successCount: 10,
+        successRate: 0.8333,
+        activeCount: 1,
+        lastStatus: 'running',
+        lastRunAt,
+        nextRunAt,
+        cron: '*/15 * * * *',
+        cronDescription: '每 15 分钟',
+      },
+      {
+        id: 'mock-soc-scheduler-triage',
+        name: '高危告警智能研判（Mock）',
+        mode: 'cron',
+        status: 'active',
+        executionMode: 'workflow',
+        workflowId: 'stream_alert_triage',
+        executionCount: 6,
+        todayExecutionCount: 1,
+        successCount: 5,
+        successRate: 0.8333,
+        activeCount: 0,
+        lastStatus: 'completed',
+        lastRunAt: new Date(now - 42 * 60 * 1000).toISOString(),
+        nextRunAt: new Date(now + 36 * 60 * 1000).toISOString(),
+        cron: '*/30 * * * *',
+        cronDescription: '每 30 分钟',
+      },
+    ],
+    workflows: [
+      {
+        id: 'stream_alert_denoise',
+        name: '告警降噪工作流（Mock）',
+        executionCount: 24,
+        todayExecutionCount: 6,
+        successCount: 21,
+        successRate: 0.875,
+        activeCount: 1,
+        lastStatus: 'running',
+        lastRunAt: startedAt,
+        latestExecutionHash: 'mock-denoise-run-001',
+        latestAlertName: '异常登录爆发（Mock）',
+        progressPercent: 0.58,
+        progressLabel: '第 4/7 步',
+        currentPhase: '聚类降噪',
+        sessionId: '',
+        messageId: '',
+      },
+      {
+        id: 'stream_alert_triage',
+        name: '告警研判工作流（Mock）',
+        executionCount: 18,
+        todayExecutionCount: 3,
+        successCount: 15,
+        successRate: 0.8333,
+        activeCount: 1,
+        lastStatus: 'running',
+        lastRunAt: now - 4 * 60 * 1000,
+        latestExecutionHash: 'mock-triage-run-002',
+        latestAlertName: '远程命令执行攻击（Mock）',
+        progressPercent: 0.67,
+        progressLabel: '第 2/3 步',
+        currentPhase: '证据汇总',
+        sessionId: '',
+        messageId: '',
+      },
+    ],
+    mock: true,
+  };
+}
+
+function taskCenterHasVisibleRows(taskCenter) {
+  return Boolean(
+    taskCenter?.scheduledTasks?.length
+    || taskCenter?.workflows?.length
+    || taskCenter?.sessionCount
+    || taskCenter?.scheduledExecutionCount
+    || taskCenter?.workflowExecutionCount
+  );
 }
 
 function activityDuration(event) {
@@ -2317,7 +2430,7 @@ export default function Page() {
   const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
   const [rightRailView, setRightRailView] = useState('aiTasks');
   const [customCommandTitle, setCustomCommandTitle] = useState(readCustomCommandTitle);
-  const [mockActivityEnabled, setMockActivityEnabled] = useState(readMockActivityEnabled);
+  const [mockDashboardEnabled, setMockDashboardEnabled] = useState(readMockDashboardEnabled);
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
@@ -2384,8 +2497,13 @@ export default function Page() {
     const handleStorage = (event) => {
       if (event.key === CUSTOM_COMMAND_TITLE_KEY) {
         setCustomCommandTitle((event.newValue || '').trim());
-      } else if (event.key === SOC_MOCK_ACTIVITY_KEY) {
-        setMockActivityEnabled(readMockActivityEnabled());
+      } else if (
+        event.key === null
+        || event.key === SOC_MOCK_ACTIVITY_KEY
+        || event.key === SOC_MOCK_TASK_CENTER_KEY
+        || event.key === SOC_MOCK_DASHBOARD_KEY
+      ) {
+        setMockDashboardEnabled(readMockDashboardEnabled());
       }
     };
     window.addEventListener(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, refreshTitle);
@@ -2462,7 +2580,8 @@ export default function Page() {
     const poll = async () => {
       if (stopped) return;
       try {
-        const response = await getApi().page.get('/task-center');
+        const params = mockDashboardEnabled ? { mockActivity: '1' } : {};
+        const response = await getApi().page.get('/task-center', { params });
         const payload = response.data || {};
         if (!stopped) {
           setTaskCenter({
@@ -2496,7 +2615,7 @@ export default function Page() {
       stopped = true;
       window.clearTimeout(timer);
     };
-  }, []);
+  }, [mockDashboardEnabled]);
 
   useEffect(() => {
     let stopped = false;
@@ -2668,11 +2787,19 @@ export default function Page() {
 
   const displayActivity = useMemo(
     () => (
-      !activityHasVisibleEvents(activity) && mockActivityEnabled
+      !activityHasVisibleEvents(activity) && mockDashboardEnabled
         ? createMockActivityState()
         : activity
     ),
-    [activity, mockActivityEnabled],
+    [activity, mockDashboardEnabled],
+  );
+  const displayTaskCenter = useMemo(
+    () => (
+      !taskCenterHasVisibleRows(taskCenter) && mockDashboardEnabled
+        ? createMockTaskCenterState()
+        : taskCenter
+    ),
+    [mockDashboardEnabled, taskCenter],
   );
   const displayActivityBusy = Boolean(
     displayActivity.denoise.current
@@ -2715,7 +2842,7 @@ export default function Page() {
         key: 'events',
         activity: displayActivity,
         timeFilter,
-        taskCenter,
+        taskCenter: displayTaskCenter,
         view: rightRailView,
         onViewChange: setRightRailView,
         collapsed: eventRailCollapsed,

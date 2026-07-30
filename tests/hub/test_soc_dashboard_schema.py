@@ -866,6 +866,81 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     assert denoise["progressLabel"] == "已完成"
 
 
+def test_soc_dashboard_task_center_hides_mock_pinned_workflows_by_default(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                started_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+    assert payload["workflows"] == []
+
+    mock_payload = handlers._get_task_center(include_mock=True)
+    assert [workflow["id"] for workflow in mock_payload["workflows"]] == [
+        "stream_alert_denoise",
+        "stream_alert_triage",
+    ]
+
+
+def test_soc_dashboard_token_usage_uses_grouped_cached_reads(tmp_path: Path, monkeypatch):
+    handlers = _load_dashboard_handlers()
+    usage_db = tmp_path / "flocks.db"
+    handlers.USAGE_DB = usage_db
+    handlers._token_usage_cache.update({"updatedAt": 0.0, "mtimeNs": 0, "value": None})
+
+    now = datetime.now().astimezone().replace(hour=10, minute=0, second=0, microsecond=0)
+    yesterday = now - timedelta(days=1)
+    with sqlite3.connect(usage_db) as conn:
+        conn.execute("CREATE TABLE usage_records (created_at TEXT NOT NULL, total_tokens INTEGER NOT NULL)")
+        conn.executemany(
+            "INSERT INTO usage_records VALUES (?, ?)",
+            [
+                (handlers._usage_iso(now), 10),
+                (handlers._usage_iso(now + timedelta(minutes=5)), 15),
+                (handlers._usage_iso(yesterday), 7),
+            ],
+        )
+        conn.commit()
+
+    first = handlers._read_token_usage()
+
+    assert first["totalTokens"] == 32
+    assert first["todayTokens"] == 25
+    assert first["todayRequests"] == 2
+    assert first["dailySeries"][-1] == 25
+    assert first["dailySeries"][-2] == 7
+
+    def fail_connect(*args, **kwargs):
+        raise AssertionError("token usage should be served from cache")
+
+    monkeypatch.setattr(handlers.sqlite3, "connect", fail_connect)
+    assert handlers._read_token_usage() == first
+
+
 def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp_path: Path):
     workflow_db = tmp_path / "workflow.db"
     today_at_1100 = datetime.now().astimezone().replace(
