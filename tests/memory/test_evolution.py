@@ -188,6 +188,7 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
         "# Inputs",
         "# Canonical destinations",
         "# Classification",
+        "# Memory section routing",
         "# Evidence and Memory rules",
         "# Skill decision tree",
         "# Integrated workflow",
@@ -205,6 +206,10 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
     assert "If it describes the user" in DREAM_SYSTEM_PROMPT
     assert "true only for the current project" in DREAM_SYSTEM_PROMPT
     assert "Project evidence belongs here by default" not in DREAM_SYSTEM_PROMPT
+    assert "Global `Environment and Tools`" in DREAM_SYSTEM_PROMPT
+    assert "Project `Project Context`" in DREAM_SYSTEM_PROMPT
+    assert "Project `Lessons and Corrections`" in DREAM_SYSTEM_PROMPT
+    assert "Project `References`" in DREAM_SYSTEM_PROMPT
     assert "NO_CHANGES" in DREAM_SYSTEM_PROMPT
 
 

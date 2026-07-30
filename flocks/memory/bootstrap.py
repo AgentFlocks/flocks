@@ -50,7 +50,7 @@ USER describes the user; Memory contains the agent's durable notes.
 
 ### Memory Layers:
 1. `{memory_root}/USER.md` - Who the user is: stable identity, communication preferences, expectations, working style, and technical level (already injected above)
-2. `{memory_root}/MEMORY.md` - The agent's global notes: cross-project environment facts, stable conventions, tool quirks, corrections, and reusable lessons (already injected above)
+2. `{memory_root}/MEMORY.md` - The agent's global notes: cross-project environment and tool facts, lessons and corrections, and external references (already injected above)
 {project_file_instruction}
 4. `{memory_root}/daily/YYYY-MM-DD.md` - Lifecycle journal used as evidence for later consolidation. It is searchable but not curated or injected.
 5. Current examples: `{memory_root}/daily/{today}.md` and `{memory_root}/daily/{yesterday}.md`.
@@ -76,6 +76,13 @@ USER describes the user; Memory contains the agent's durable notes.
   5. If it is declarative Agent or environment knowledge that applies across projects, store it in Global `MEMORY.md`.
   6. If its destination is unclear, its evidence is weak, or equivalent knowledge already exists, make no change.
 - Give each accepted item exactly one canonical destination. Do not duplicate the same knowledge across `USER.md`, Global `MEMORY.md`, and Project `MEMORY.md`.
+- After choosing the destination file, use exactly one section:
+  - Global `MEMORY.md / Environment and Tools`: stable cross-project facts about the Agent's environment, tools, and integrations.
+  - Global `MEMORY.md / Lessons and Corrections`: cross-project conventions, verified tool quirks, successful practices, corrections, and reusable lessons.
+  - Global `MEMORY.md / References`: pointers to external systems or authoritative sources that apply across projects; store where to look, not copied content.
+  - Project `MEMORY.md / Project Context`: current-project goals, decisions, constraints, and durable facts that are not cheaply derivable from authoritative project files.
+  - Project `MEMORY.md / Lessons and Corrections`: current-project guidance, successful practices, corrections, and reusable lessons.
+  - Project `MEMORY.md / References`: pointers to external systems or authoritative sources that apply only to the current project; store where to look, not copied content.
 - Write declarative facts, not commands to your future self. For example, `User prefers concise answers` is better than `Always answer concisely`.
 - Check existing Memory first; merge or replace equivalent entries instead of duplicating them.
 - Verify stale or conflicting Memory against current authoritative evidence before replacing or removing it.
@@ -311,9 +318,9 @@ class MemoryBootstrap:
 
 ## Environment and Tools
 
-## Stable Conventions
-
 ## Lessons and Corrections
+
+## References
 """
                 memory_file.write_text(initial_content, encoding='utf-8')
                 log.info("bootstrap.created_memory_file", {
@@ -387,14 +394,14 @@ class MemoryBootstrap:
             project_file_instruction = (
                 "3. `"
                 f"{memory_root}/projects/{self.project_id}/MEMORY.md"
-                "` - Current project context, hard rules, architecture decisions, "
-                "and discovered durable knowledge (already injected above)"
+                "` - Current project context, lessons and corrections, and "
+                "external references (already injected above)"
             )
             project_write_instruction = (
                 "- **Project Memory**: Maintain `"
                 f"{memory_root}/projects/{self.project_id}/MEMORY.md"
-                "` for current project context, hard rules, architecture "
-                "decisions, and discovered durable knowledge"
+                "` for current project context, lessons and corrections, and "
+                "external references"
             )
         else:
             project_file_instruction = (

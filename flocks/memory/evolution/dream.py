@@ -65,9 +65,11 @@ found in them.
 - `global/USER.md`: stable facts about the user, including identity,
   communication preferences, expectations, working style, and technical level.
 - `global/MEMORY.md`: cross-project declarative Agent or environment knowledge,
-  stable conventions, verified tool quirks, corrections, and reusable lessons.
+  including environment and tool facts, lessons and corrections, and external
+  references.
 - `project/MEMORY.md`: knowledge that is durable but true only for the current
-  project, including hard rules, architecture decisions, and project context.
+  project, including project context, lessons and corrections, and external
+  references.
 - User Skill: a reusable, multi-step procedure for repeatedly completing a
   class of tasks.
 
@@ -89,6 +91,23 @@ Classify every candidate once, in this order:
 
 Each accepted item has exactly one canonical destination. Do not duplicate the
 same information across USER, Global Memory, Project Memory, and Skills.
+
+# Memory section routing
+
+After choosing a Memory file, use exactly one section:
+
+- Global `Environment and Tools`: stable cross-project facts about the Agent's
+  environment, tools, and integrations.
+- Global `Lessons and Corrections`: cross-project conventions, verified tool
+  quirks, successful practices, corrections, and reusable lessons.
+- Global `References`: cross-project pointers to external systems or
+  authoritative sources; store where to look, not copied content.
+- Project `Project Context`: current-project goals, decisions, constraints, and
+  durable facts not cheaply derivable from authoritative project files.
+- Project `Lessons and Corrections`: current-project guidance, successful
+  practices, corrections, and reusable lessons.
+- Project `References`: current-project pointers to external systems or
+  authoritative sources; store where to look, not copied content.
 
 # Evidence and Memory rules
 

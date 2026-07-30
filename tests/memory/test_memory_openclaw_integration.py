@@ -113,10 +113,11 @@ class TestMemoryBootstrap:
     """Test MemoryBootstrap class"""
     
     @pytest.mark.asyncio
-    async def test_create_memory_structure(self):
+    async def test_create_memory_structure(self, tmp_path: Path):
         """Test memory structure creation"""
-        bootstrap = MemoryBootstrap()
-        await bootstrap.create_memory_structure()
+        with patch("flocks.config.Config.get_data_path", return_value=tmp_path):
+            bootstrap = MemoryBootstrap()
+            await bootstrap.create_memory_structure()
         
         assert bootstrap.memory_dir.exists()
         assert bootstrap.daily_dir.exists()
@@ -124,6 +125,12 @@ class TestMemoryBootstrap:
         # Check if MEMORY.md was created
         memory_file = bootstrap.memory_dir / "MEMORY.md"
         assert memory_file.exists()
+        assert memory_file.read_text(encoding="utf-8") == (
+            "# Global Memory\n\n"
+            "## Environment and Tools\n\n"
+            "## Lessons and Corrections\n\n"
+            "## References\n"
+        )
         user_file = bootstrap.memory_dir / "USER.md"
         assert user_file.exists()
     
@@ -248,6 +255,9 @@ class TestMemoryBootstrap:
         assert "exactly one canonical destination" in instructions
         assert "If it describes the user" in instructions
         assert "If it applies only to the current project" in instructions
+        assert "MEMORY.md / Environment and Tools" in instructions
+        assert "MEMORY.md / Lessons and Corrections" in instructions
+        assert "MEMORY.md / References" in instructions
 
     def test_default_flush_prompt_routes_to_one_memory_scope(self):
         """Default flush prompt distinguishes curated Memory destinations."""
@@ -258,6 +268,9 @@ class TestMemoryBootstrap:
         assert "Project `MEMORY.md`" in prompt
         assert "exactly one destination" in prompt
         assert "Dream self-improvement handles Skills" in prompt
+        assert "`Environment and Tools`" in prompt
+        assert "`Lessons and Corrections`" in prompt
+        assert "`References`" in prompt
         assert "Do not continue task work in this flush turn" in prompt
     
     @pytest.mark.asyncio

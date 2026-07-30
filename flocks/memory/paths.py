@@ -15,11 +15,9 @@ PROJECT_MEMORY_INITIAL_CONTENT = """# Project Memory
 
 ## Project Context
 
-## Rules
+## Lessons and Corrections
 
-## Architecture Decisions
-
-## Discovered Durable Knowledge
+## References
 """
 DAILY_AGENT_WRITE_ERROR = (
     "Daily Memory is maintained by the Session lifecycle. "

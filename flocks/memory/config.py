@@ -192,6 +192,12 @@ Classify each candidate in order:
 
 Store each accepted item in exactly one destination. Read the current file
 first; use `edit` for an existing file and `write` only when it is missing.
+Within Global `MEMORY.md`, use `Environment and Tools` for stable environment
+or tool facts, `Lessons and Corrections` for conventions and verified guidance,
+and `References` for cross-project external pointers. Within Project
+`MEMORY.md`, use `Project Context` for durable project facts, goals, decisions,
+and constraints, `Lessons and Corrections` for project-specific guidance and
+verified lessons, and `References` for project-specific external pointers.
 Never write or edit Daily Memory. Do not continue task work in this flush turn.
 """.strip(),
         description="User prompt for memory flush"
