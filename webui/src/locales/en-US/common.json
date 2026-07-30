@@ -285,18 +285,6 @@
     "disabled": "Disabled",
     "totalHandlers": "Total Handlers",
     "eventKeys": "Event Keys",
-    "autoSave": "Auto Save",
-    "autoSaveLabel": "Auto-save when creating new session",
-    "messageCount": "Message Count",
-    "messageCountLabel": "messages",
-    "useLlmSlug": "LLM Filename",
-    "useLlmSlugLabel": "Use LLM to generate filename",
-    "yes": "Yes",
-    "no": "No",
-    "slugTimeout": "Timeout",
-    "slugTimeoutLabel": "seconds",
-    "autoSaveEnabled": "Auto-save is enabled",
-    "autoSaveDesc": "When you create a new session (similar to /new command), the previous session's conversation will be automatically saved to the memory system.",
     "registeredHooks": "Registered Hooks",
     "handlers": "handlers"
   }

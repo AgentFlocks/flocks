@@ -720,7 +720,15 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("bash", "memory_search", "read"),
+                prompt_tool_names=(
+                    "bash",
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
                 memory_bootstrap_data=memory_bootstrap_data,
                 tool_catalog_prompt_factory=lambda: "tool catalog",
                 device_asset_prompt_factory=device_mock,
@@ -978,7 +986,7 @@ class TestBuildSystemPrompts:
         custom_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_includes_memory_guidance_when_memory_tools_loaded(self):
+    async def test_build_system_prompts_includes_filesystem_memory_guidance(self):
         session = _make_session("ses_prompts_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -1005,7 +1013,14 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("memory_search", "read"),
+                prompt_tool_names=(
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
                 memory_bootstrap_data=runner._memory_bootstrap_data,
             )
 
@@ -1040,7 +1055,7 @@ class TestBuildSystemPrompts:
         assert "PowerShell syntax" not in combined
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_skips_memory_guidance_without_memory_tools(self):
+    async def test_build_system_prompts_skips_memory_guidance_without_management_tools(self):
         session = _make_session("ses_prompts_no_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -1075,7 +1090,7 @@ class TestBuildSystemPrompts:
         assert "## MEMORY.md\n\nremembered context" in prompts
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_rebuilds_when_prompt_tool_names_change(self):
+    async def test_filesystem_memory_guidance_depends_on_tool_names(self):
         shared_cache = {}
         session = _make_session("ses_prompts_tool_names")
         runner = SessionRunner(
@@ -1104,7 +1119,14 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("memory_search", "read"),
+                prompt_tool_names=(
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
                 tool_revision=1,
                 memory_bootstrap_data=runner._memory_bootstrap_data,
                 static_cache=shared_cache,
