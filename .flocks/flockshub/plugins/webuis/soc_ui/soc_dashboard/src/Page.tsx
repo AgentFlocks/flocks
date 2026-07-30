@@ -166,6 +166,172 @@ function createActivityState() {
   };
 }
 
+function createMockActivityEvent(overrides) {
+  const now = new Date();
+  return {
+    eventId: overrides.eventId || `mock-${overrides.stage}-${overrides.alert?.id || Math.random().toString(36).slice(2)}`,
+    stage: overrides.stage,
+    status: overrides.status || 'running',
+    occurredAt: overrides.occurredAt || now.toISOString(),
+    triggerSource: overrides.triggerSource || 'mock',
+    playbackMode: overrides.playbackMode || 'normal',
+    playbackStartedAt: overrides.playbackStartedAt || Date.now() - 4200,
+    sampleCount: overrides.sampleCount || 1,
+    alert: {
+      id: overrides.alert?.id || `mock-alert-${overrides.stage}`,
+      threatName: overrides.alert?.threatName || '模拟告警',
+      sourceType: overrides.alert?.sourceType || 'mock',
+      srcIp: overrides.alert?.srcIp || '10.24.8.16',
+      dstIp: overrides.alert?.dstIp || '172.16.32.20',
+      requestUri: overrides.alert?.requestUri || '/api/admin/export',
+    },
+    result: {
+      isDuplicate: false,
+      clusterId: 'MOCK-03',
+      riskLevel: 'high',
+      verdictLabel: '待确认',
+      durationMs: 18000,
+      rawCount: 8,
+      normalizedCount: 8,
+      reducedCount: 3,
+      uniqueCount: 5,
+      filterRemovedCount: 2,
+      duplicateCount: 1,
+      reductionRate: 0.375,
+      ...(overrides.result || {}),
+    },
+    hiddenFromQueue: Boolean(overrides.hiddenFromQueue),
+  };
+}
+
+function createMockActivityState() {
+  const now = Date.now();
+  const denoiseCurrent = createMockActivityEvent({
+    stage: 'denoise',
+    eventId: 'mock-denoise-current',
+    playbackMode: 'burst',
+    playbackStartedAt: now - 3600,
+    sampleCount: 6,
+    alert: {
+      id: 'mock-alert-login-burst',
+      threatName: '异常登录爆发（Mock）',
+      sourceType: 'skyeye',
+      srcIp: '10.23.18.44',
+      dstIp: '172.16.8.21',
+      requestUri: '/login',
+    },
+    result: {
+      clusterId: 'MOCK-LOGIN-07',
+      rawCount: 18,
+      normalizedCount: 18,
+      reducedCount: 11,
+      uniqueCount: 7,
+      duplicateCount: 7,
+      filterRemovedCount: 0,
+      reductionRate: 0.6111,
+    },
+  });
+  const triageCurrent = createMockActivityEvent({
+    stage: 'triage',
+    eventId: 'mock-triage-current',
+    playbackStartedAt: now - 6200,
+    alert: {
+      id: 'mock-alert-rce',
+      threatName: '远程命令执行攻击（Mock）',
+      sourceType: 'tdp',
+      srcIp: '203.0.113.41',
+      dstIp: '10.12.4.18',
+      requestUri: '/cgi-bin/luci/;stok=/locale',
+    },
+    result: {
+      riskLevel: 'high',
+      verdictLabel: '待确认',
+      triageSource: 'llm',
+      durationMs: 22000,
+      threatSeverity: 'high',
+    },
+  });
+  const triageWaiting = createMockActivityEvent({
+    stage: 'triage',
+    status: 'queued',
+    eventId: 'mock-triage-waiting',
+    occurredAt: new Date(now - 18000).toISOString(),
+    playbackStartedAt: now - 18000,
+    alert: {
+      id: 'mock-alert-sql',
+      threatName: 'SQL 注入探测（Mock）',
+      sourceType: 'onesec',
+      srcIp: '198.51.100.12',
+      dstIp: '10.12.4.32',
+      requestUri: '/search?q=1%27',
+    },
+    result: {
+      riskLevel: 'medium',
+      verdictLabel: '待确认',
+      durationMs: 0,
+    },
+  });
+  const denoiseWaiting = createMockActivityEvent({
+    stage: 'denoise',
+    status: 'queued',
+    eventId: 'mock-denoise-waiting',
+    occurredAt: new Date(now - 26000).toISOString(),
+    playbackStartedAt: now - 26000,
+    sampleCount: 4,
+    alert: {
+      id: 'mock-alert-scan',
+      threatName: '端口扫描聚类（Mock）',
+      sourceType: 'qingteng',
+      srcIp: '192.0.2.88',
+      dstIp: '10.12.5.10',
+      requestUri: 'TCP/22,80,443',
+    },
+    result: {
+      clusterId: 'MOCK-SCAN-02',
+      rawCount: 12,
+      normalizedCount: 12,
+      reducedCount: 8,
+      uniqueCount: 4,
+      reductionRate: 0.6667,
+    },
+  });
+  return {
+    ...createActivityState(),
+    connection: 'online',
+    mode: 'burst',
+    denoise: { current: denoiseCurrent, queue: [denoiseWaiting], last: null },
+    triage: { current: triageCurrent, queue: [triageWaiting], last: null },
+    recent: [denoiseCurrent, triageCurrent, triageWaiting, denoiseWaiting],
+    batch: {
+      mode: 'burst',
+      windowMs: ACTIVITY_POLL_MS,
+      receivedCount: 22,
+      duplicateCount: 8,
+      uniqueCount: 14,
+      clusterCount: 5,
+      triageUpdatedCount: 3,
+      sampledCount: 10,
+      suppressedCount: 2,
+      ratePerSecond: 7.3,
+    },
+    batchUpdatedAt: now,
+    generatedAt: new Date(now).toISOString(),
+    mock: true,
+  };
+}
+
+function activityHasVisibleEvents(activity) {
+  return Boolean(
+    activity?.denoise?.current
+    || activity?.denoise?.last
+    || activity?.denoise?.queue?.length
+    || activity?.triage?.current
+    || activity?.triage?.last
+    || activity?.triage?.queue?.length
+    || activity?.recent?.length
+  );
+}
+
 function createTaskCenterState() {
   return {
     connection: 'initializing',
@@ -2126,7 +2292,7 @@ function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange
 }
 
 export default function Page() {
-  const { useCallback, useEffect, useRef, useState } = getReact();
+  const { useCallback, useEffect, useMemo, useRef, useState } = getReact();
   const [timeFilter, setTimeFilter] = useState(() => createRelativeTimeFilter());
   const [refreshKey, setRefreshKey] = useState('off');
   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
@@ -2480,17 +2646,21 @@ export default function Page() {
     return () => window.clearTimeout(id);
   }, [activity.batchUpdatedAt]);
 
-  const activityBusy = Boolean(
-    activity.denoise.current
-    || activity.triage.current
-    || activity.denoise.queue.length
-    || activity.triage.queue.length
-    || activity.batch?.receivedCount
-    || activity.batch?.triageUpdatedCount
+  const displayActivity = useMemo(
+    () => (activityHasVisibleEvents(activity) ? activity : createMockActivityState()),
+    [activity],
+  );
+  const displayActivityBusy = Boolean(
+    displayActivity.denoise.current
+    || displayActivity.triage.current
+    || displayActivity.denoise.queue.length
+    || displayActivity.triage.queue.length
+    || displayActivity.batch?.receivedCount
+    || displayActivity.batch?.triageUpdatedCount
   );
 
   return h('div', {
-    className: cx('adtd-root command-root', activityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
+    className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
     'data-animations': 'on',
     style: { '--event-rail-width': `${eventRailWidth}px` },
   }, [
@@ -2506,7 +2676,7 @@ export default function Page() {
       stats,
       loading,
       refresh,
-      activity,
+      activity: displayActivity,
     }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
     h('main', {
@@ -2514,12 +2684,12 @@ export default function Page() {
       key: 'main',
     }, [
       h('div', { className: 'command-main', key: 'workspace' }, [
-        h(CommandGraph, { key: 'graph', stats, activity }),
+        h(CommandGraph, { key: 'graph', stats, activity: displayActivity }),
         h(CommandMetrics, { key: 'metrics', stats }),
       ]),
       h(CommandEventRail, {
         key: 'events',
-        activity,
+        activity: displayActivity,
         timeFilter,
         taskCenter,
         view: rightRailView,
