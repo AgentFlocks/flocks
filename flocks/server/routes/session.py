@@ -4181,6 +4181,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         model_info: Optional[Dict[str, str]] = None,
         *,
         agent_override: Optional[str] = None,
+        ignored: Optional[bool] = None,
     ) -> str:
         now_ms = int(_time.time() * 1000)
         user_msg_id = event.message_id or Identifier.create("message")
@@ -4197,6 +4198,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 agent=message_agent,
                 executionMode=event.execution_mode,
                 **({"model": model_info} if model_info else {}),
+                ignored=ignored,
                 part_id=user_part_id,
             ),
             expected_generation=lifecycle_generation,
@@ -4219,6 +4221,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "sessionID": sessionID,
                 "type": "text",
                 "text": user_text,
+                **({"ignored": ignored} if ignored is not None else {}),
                 "time": {"start": now_ms},
             }
         })
@@ -4226,7 +4229,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
 
     async def _publish_direct_response(output_event, text: str) -> None:
         user_text = output_event.user_visible_text
-        parent_msg_id = await _create_user_message(user_text)
+        parent_msg_id = await _create_user_message(user_text, ignored=True)
         asst_now = int(_time.time() * 1000)
         asst_msg_id = Identifier.ascending("message")
         asst_part_id = Identifier.ascending("part")
@@ -4243,6 +4246,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 providerID="builtin",
                 agent=agent_name,
                 finish="stop",
+                ignored=True,
                 part_id=asst_part_id,
             ),
             expected_generation=lifecycle_generation,
@@ -4274,6 +4278,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "sessionID": sessionID,
                 "type": "text",
                 "text": text,
+                "ignored": True,
                 "time": {"start": asst_now, "end": asst_now},
             }
         })
@@ -4281,8 +4286,6 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             publish_event,
             sessionID,
             session=session,
-            provider_id="builtin",
-            model_id="command",
         )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
