@@ -12,10 +12,8 @@ from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
 
 from flocks.tool.catalog import get_always_load_tool_names
 from flocks.session.callable_state import (
-    add_session_callable_tools,
     get_session_callable_tools,
     initialize_session_callable_tools,
-    remove_session_callable_tools,
 )
 from flocks.tool.registry import ToolRegistry
 
@@ -89,39 +87,6 @@ async def list_session_callable_tool_infos(
             base_tools,
             always_load_tool_names=always_load_names,
         )
-
-    retired_memory_tools = {"memory_search", "memory_get", "memory_write"}
-    if callable_tool_names & retired_memory_tools:
-        callable_tool_names = await remove_session_callable_tools(
-            session_id,
-            retired_memory_tools,
-        )
-
-    try:
-        from flocks.memory.mission import MissionStore
-        from flocks.session.session import Session
-
-        session = await Session.get_by_id(session_id)
-        mission_active = False
-        if session and session.mission_id:
-            state = MissionStore(session.directory).load(session.mission_id)
-            mission_active = state["meta"]["status"] not in {"completed", "aborted"}
-        if mission_active and "mission_record" not in callable_tool_names:
-            callable_tool_names = await add_session_callable_tools(
-                session_id,
-                {"mission_record"},
-            )
-        elif not mission_active and "mission_record" in callable_tool_names:
-            callable_tool_names = await remove_session_callable_tools(
-                session_id,
-                {"mission_record"},
-            )
-    except (FileNotFoundError, OSError, ValueError):
-        if "mission_record" in callable_tool_names:
-            callable_tool_names = await remove_session_callable_tools(
-                session_id,
-                {"mission_record"},
-            )
 
     effective_callable_names = set(callable_tool_names) | always_load_names
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)

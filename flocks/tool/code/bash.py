@@ -383,7 +383,7 @@ async def bash_tool(
     2. Sandbox execution - inside a Docker container (when sandbox config is present)
     """
     normalized_command = command.replace("\\", "/")
-    if ".flocks/memory/missions" in normalized_command:
+    if ".flocks/missions" in normalized_command:
         mutation_markers = (
             ">",
             "rm ",

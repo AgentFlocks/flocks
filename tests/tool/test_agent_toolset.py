@@ -100,7 +100,7 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "grep",
         "im_send_message",
         "lsp",
-        "mission_record",
+        "memory_search",
         "question",
         "read",
         "run_workflow",

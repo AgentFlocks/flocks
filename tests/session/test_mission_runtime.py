@@ -1,4 +1,4 @@
-"""Session integration for Memory-State Missions."""
+"""Session integration for shared filesystem Missions."""
 
 from __future__ import annotations
 
@@ -6,12 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from flocks.memory.mission import MissionStore
-from flocks.session.callable_schema import list_session_callable_tool_infos
-from flocks.session.callable_state import (
-    get_session_callable_tools,
-    set_session_callable_tools,
-)
+from flocks.memory.state.mission import MissionStore
 from flocks.session.features.todo import TodoInfo
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session
@@ -28,7 +23,6 @@ async def test_complex_todo_creates_session_mission(tmp_path: Path) -> None:
     session = await Session.create(
         project_id="project-test",
         directory=str(workspace),
-        memory_enabled=True,
     )
     await Message.create(
         session_id=session.id,
@@ -51,7 +45,6 @@ async def test_complex_todo_creates_session_mission(tmp_path: Path) -> None:
     assert refreshed is not None
     assert refreshed.mission_id
     assert result and result["missionID"] == refreshed.mission_id
-    assert "mission_record" in await get_session_callable_tools(session.id)
     state = MissionStore(workspace).load(refreshed.mission_id)
     assert state["original_request"] == "Implement a durable feature."
 
@@ -63,7 +56,6 @@ async def test_simple_todo_does_not_create_mission(tmp_path: Path) -> None:
     session = await Session.create(
         project_id="project-simple",
         directory=str(workspace),
-        memory_enabled=True,
     )
     ctx = ToolContext(session_id=session.id, message_id="message-test")
 
@@ -79,7 +71,6 @@ async def test_simple_todo_does_not_create_mission(tmp_path: Path) -> None:
     assert refreshed is not None
     assert refreshed.mission_id is None
     assert result is None
-    assert "mission_record" not in await get_session_callable_tools(session.id)
 
 
 @pytest.mark.asyncio
@@ -89,7 +80,6 @@ async def test_mission_record_rejects_unbound_session(tmp_path: Path) -> None:
     session = await Session.create(
         project_id="project-unbound",
         directory=str(workspace),
-        memory_enabled=True,
     )
     ctx = ToolContext(session_id=session.id, message_id="message-test")
 
@@ -100,7 +90,7 @@ async def test_mission_record_rejects_unbound_session(tmp_path: Path) -> None:
     )
 
     assert result.success is False
-    assert "No Mission" in (result.error or "")
+    assert "mission_id is required" in (result.error or "")
 
 
 @pytest.mark.asyncio
@@ -110,7 +100,6 @@ async def test_generic_write_cannot_overwrite_mission_state(tmp_path: Path) -> N
     session = await Session.create(
         project_id="project-protected",
         directory=str(workspace),
-        memory_enabled=True,
     )
     ctx = ToolContext(session_id=session.id, message_id="message-test")
     await _sync_mission(
@@ -137,56 +126,54 @@ async def test_generic_write_cannot_overwrite_mission_state(tmp_path: Path) -> N
 
 
 @pytest.mark.asyncio
-async def test_write_cannot_replace_existing_project_memory(tmp_path: Path) -> None:
-    workspace = tmp_path / "project"
-    memory_dir = workspace / ".flocks" / "memory"
-    memory_dir.mkdir(parents=True)
-    memory_path = memory_dir / "MEMORY.md"
-    memory_path.write_text("stable fact", encoding="utf-8")
-    session = await Session.create(
-        project_id="project-memory-write",
-        directory=str(workspace),
-        memory_enabled=True,
-    )
-    ctx = ToolContext(session_id=session.id, message_id="message-test")
-
-    result = await write_tool(
-        ctx,
-        content="replacement",
-        filePath=str(memory_path),
-    )
-
-    assert result.success is False
-    assert "use edit" in (result.error or "").lower()
-    assert memory_path.read_text(encoding="utf-8") == "stable fact"
-
-
-@pytest.mark.asyncio
-async def test_restored_session_recovers_conditional_mission_tool(
+async def test_unbound_agent_records_to_explicit_shared_mission(
     tmp_path: Path,
 ) -> None:
     workspace = tmp_path / "project"
     workspace.mkdir()
-    session = await Session.create(
-        project_id="project-restored",
-        directory=str(workspace),
-        memory_enabled=True,
-    )
-    ctx = ToolContext(session_id=session.id, message_id="message-test")
-    await _sync_mission(
-        ctx,
-        [
-            TodoInfo(id="one", content="First task", status="pending"),
-            TodoInfo(id="two", content="Second task", status="pending"),
-            TodoInfo(id="verify", content="Verify result", status="pending"),
+    store = MissionStore(workspace)
+    store.create(
+        mission_id="shared-mission",
+        session_id="root-session",
+        original_request="Complete shared work.",
+        todos=[
+            {"id": "one", "content": "First task", "status": "pending"},
+            {"id": "two", "content": "Second task", "status": "pending"},
+            {"id": "verify", "content": "Verify result", "status": "pending"},
         ],
     )
-    await set_session_callable_tools(session.id, {"read"})
+    session = await Session.create(
+        project_id="project-worker",
+        directory=str(workspace),
+    )
+    ctx = ToolContext(session_id=session.id, message_id="message-test")
+    mission_before = store.mission_path("shared-mission").read_bytes()
 
-    result = await list_session_callable_tool_infos(
-        session.id,
-        declared_tool_names=["read"],
+    result = await mission_record_tool(
+        ctx,
+        mission_id="shared-mission",
+        kind="progress",
+        summary="Worker completed reconnaissance",
     )
 
-    assert "mission_record" in {tool.name for tool in result.tool_infos}
-    assert "mission_record" in await get_session_callable_tools(session.id)
+    assert result.success is True
+    progress = store._read_progress_entries("shared-mission")
+    assert progress[-1]["session_id"] == session.id
+    assert progress[-1]["summary"] == "Worker completed reconnaissance"
+    assert store.mission_path("shared-mission").read_bytes() == mission_before
+
+    checkpoint = await mission_record_tool(
+        ctx,
+        mission_id="shared-mission",
+        kind="checkpoint",
+        summary="Replace the main Agent state",
+    )
+    assert checkpoint.success is False
+    assert "Only the main Agent" in (checkpoint.error or "")
+    assert store.mission_path("shared-mission").read_bytes() == mission_before
+
+
+def test_mission_record_is_always_available_for_delegated_agents() -> None:
+    from flocks.tool.catalog import get_always_load_tool_names
+
+    assert "mission_record" in get_always_load_tool_names()

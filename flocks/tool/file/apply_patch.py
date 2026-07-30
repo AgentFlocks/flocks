@@ -316,7 +316,7 @@ async def apply_patch_tool(
             resolution = await resolve_tool_path(ctx, hunk.path)
             filepath = resolution.resolved_path
             move_resolution = await resolve_tool_path(ctx, hunk.move_path) if hunk.move_path else None
-            from flocks.memory.mission import agent_mission_mutation_error
+            from flocks.memory.state.mission import agent_mission_mutation_error
 
             paths_to_check = [filepath]
             if move_resolution is not None:

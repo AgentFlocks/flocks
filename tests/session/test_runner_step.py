@@ -1040,7 +1040,7 @@ class TestBuildSystemPrompts:
         assert "PowerShell syntax" not in combined
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_keeps_file_memory_guidance_without_memory_tools(self):
+    async def test_build_system_prompts_skips_memory_guidance_without_memory_tools(self):
         session = _make_session("ses_prompts_no_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -1071,7 +1071,7 @@ class TestBuildSystemPrompts:
                 memory_bootstrap_data=runner._memory_bootstrap_data,
             )
 
-        assert "memory guidance" in "\n\n".join(prompts)
+        assert "memory guidance" not in "\n\n".join(prompts)
         assert "## MEMORY.md\n\nremembered context" in prompts
 
     @pytest.mark.asyncio
@@ -1122,9 +1122,9 @@ class TestBuildSystemPrompts:
                 static_cache=shared_cache,
             )
 
-        assert prompts_with_memory == prompts_without_memory
+        assert prompts_with_memory != prompts_without_memory
         assert "memory guidance" in "\n\n".join(prompts_with_memory)
-        assert "memory guidance" in "\n\n".join(prompts_without_memory)
+        assert "memory guidance" not in "\n\n".join(prompts_without_memory)
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
         custom_mock.assert_awaited_once()

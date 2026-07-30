@@ -175,12 +175,11 @@ async def _sync_mission(
     todos: List[TodoInfo],
 ) -> Dict[str, Any] | None:
     """Create or update the Mission bound to this session."""
-    from flocks.memory.mission import MissionStore
-    from flocks.session.callable_state import add_session_callable_tools
+    from flocks.memory.state.mission import MissionStore
     from flocks.session.session import Session
 
     session = await Session.get_by_id(ctx.session_id)
-    if session is None or not session.memory_enabled:
+    if session is None:
         return None
 
     store = MissionStore(session.directory)
@@ -211,8 +210,6 @@ async def _sync_mission(
         )
         if updated is None:
             raise RuntimeError("Failed to bind the new Mission to the session")
-        await add_session_callable_tools(session.id, {"mission_record"})
-
     if not mission_id:
         return None
 

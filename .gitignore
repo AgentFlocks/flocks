@@ -134,4 +134,4 @@ changelog.md
 tests/integration_ssh_*.py
 .cursor
 .codex/
-.flocks/memory/
+.flocks/missions/

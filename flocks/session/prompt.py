@@ -29,6 +29,7 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
+MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory_get", "memory_search", "memory_write"})
 
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
@@ -916,8 +917,9 @@ class SessionPrompt:
         memory_bootstrap_data: Optional[Dict[str, Any]],
     ) -> Optional[str]:
         """Build memory tool guidance separately from the frozen memory snapshot."""
-        del prompt_tool_names
         if not memory_bootstrap_data:
+            return None
+        if not (set(prompt_tool_names) & MEMORY_GUIDANCE_TOOL_NAMES):
             return None
         instructions = memory_bootstrap_data.get("instructions", "")
         return cls._normalize_prompt_text(instructions)
@@ -934,32 +936,22 @@ class SessionPrompt:
             return []
 
         prompts: List[str] = []
-        memory_files = memory_bootstrap_data.get("memory_files")
-        if isinstance(memory_files, list):
-            for memory_file in memory_files:
-                if not isinstance(memory_file, dict) or not memory_file.get("inject"):
-                    continue
-                memory_content = memory_file.get("content", "")
-                if memory_content:
-                    label = memory_file.get("label") or memory_file.get("path")
-                    prompts.append(f"## {label}\n\n{memory_content}")
-        else:
-            main_memory = memory_bootstrap_data.get("main_memory")
-            if main_memory and main_memory.get("inject"):
-                memory_content = main_memory.get("content", "")
-                if memory_content:
-                    prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
+        main_memory = memory_bootstrap_data.get("main_memory")
+        if main_memory and main_memory.get("inject"):
+            memory_content = main_memory.get("content", "")
+            if memory_content:
+                prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
 
-        mission_context = memory_bootstrap_data.get("mission_context")
-        if mission_context and mission_context.get("inject"):
-            content = mission_context.get("content", "")
+        state_context = memory_bootstrap_data.get("state_context")
+        if state_context and state_context.get("inject"):
+            content = state_context.get("content", "")
             if content:
                 prompts.append(content)
 
         log.debug("prompt.memory_injected", {
             "session_id": session_id,
-            "memory_file_count": len(memory_files or []),
-            "has_mission": mission_context is not None,
+            "has_main": main_memory is not None,
+            "has_state": state_context is not None,
         })
         return prompts
 
@@ -1169,6 +1161,7 @@ class SessionPrompt:
                 name="memory_guidance",
                 cache_scope="session",
                 digest_inputs={
+                    "tool_names": normalized_tool_names,
                     "instructions": memory_guidance or "",
                 },
                 builder=lambda: memory_guidance or "",

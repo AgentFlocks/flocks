@@ -523,7 +523,7 @@ async def edit_tool(
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=filePath)
     filepath = resolution.resolved_path
-    from flocks.memory.mission import agent_mission_mutation_error
+    from flocks.memory.state.mission import agent_mission_mutation_error
 
     mission_error = await agent_mission_mutation_error(filepath, ctx.session_id)
     if mission_error:

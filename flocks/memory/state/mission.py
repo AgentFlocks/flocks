@@ -1,4 +1,4 @@
-"""Filesystem-backed Mission state for long-running sessions."""
+"""Filesystem-backed Mission state shared by long-running agent sessions."""
 
 from __future__ import annotations
 
@@ -141,8 +141,7 @@ class MissionStore:
 
     def __init__(self, workspace_dir: str | Path):
         self.workspace_dir = Path(workspace_dir).expanduser().resolve(strict=False)
-        self.memory_dir = self.workspace_dir / ".flocks" / "memory"
-        self.missions_dir = self.memory_dir / "missions"
+        self.missions_dir = self.workspace_dir / ".flocks" / "missions"
 
     def mission_dir(self, mission_id: str) -> Path:
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,127}", mission_id):
@@ -152,7 +151,7 @@ class MissionStore:
         if self.workspace_dir not in root.parents:
             raise ValueError("Mission root escapes the project workspace")
         if path != root and root not in path.parents:
-            raise ValueError("Mission path escapes the project memory directory")
+            raise ValueError("Mission path escapes the project State directory")
         return path
 
     def mission_path(self, mission_id: str) -> Path:
@@ -375,6 +374,7 @@ class MissionStore:
         status: Optional[str] = None,
         source_refs: Optional[Iterable[str]] = None,
         artifact_path: Optional[str] = None,
+        allow_mission_update: bool = True,
     ) -> Dict[str, Any]:
         """Apply one normalized Mission record."""
         if kind not in {"progress", "finding", "validation", "artifact", "checkpoint"}:
@@ -383,6 +383,14 @@ class MissionStore:
             state = self.load(mission_id)
             if state["meta"]["status"] in {"completed", "aborted"}:
                 raise ValueError("The Mission is closed and cannot accept new records")
+            if not allow_mission_update and kind == "checkpoint":
+                raise ValueError(
+                    "Only the main Agent can update Mission checkpoints"
+                )
+            if not allow_mission_update and task_id and status:
+                raise ValueError(
+                    "Only the main Agent can update Mission task status"
+                )
 
             refs = [str(ref).strip() for ref in (source_refs or []) if str(ref).strip()]
             stored_artifact: Optional[str] = None
@@ -420,13 +428,14 @@ class MissionStore:
                 validation_status = (status or "passed").lower()
                 if validation_status not in {"passed", "failed"}:
                     raise ValueError("Validation status must be passed or failed")
-                self._apply_validation(
-                    state,
-                    status=validation_status,
-                    evidence=refs,
-                    finding_id=finding_id,
-                    details=details or summary,
-                )
+                if allow_mission_update:
+                    self._apply_validation(
+                        state,
+                        status=validation_status,
+                        evidence=refs,
+                        finding_id=finding_id,
+                        details=details or summary,
+                    )
                 if finding_id:
                     self._record_finding_validation_unlocked(
                         mission_id,
@@ -448,11 +457,17 @@ class MissionStore:
                 state["current_state"] = details or summary
                 state["next_action"] = summary
 
-            if status == "failed":
+            if allow_mission_update and status == "failed":
                 attention = f"{task_id or finding_id or kind}: {details or summary}"
                 if attention not in state["attention"]:
                     state["attention"].append(attention)
-            elif status in {"cleared", "completed", "passed", "confirmed", "rejected"}:
+            elif allow_mission_update and status in {
+                "cleared",
+                "completed",
+                "passed",
+                "confirmed",
+                "rejected",
+            }:
                 resolved_prefixes = {
                     value
                     for value in (task_id, finding_id)
@@ -470,8 +485,9 @@ class MissionStore:
                     )
                 ]
 
-            self._sync_contract_from_tasks(state)
-            self._save_unlocked(state)
+            if allow_mission_update:
+                self._sync_contract_from_tasks(state)
+                self._save_unlocked(state)
             sequence = self._append_progress_unlocked(
                 mission_id,
                 {
@@ -512,7 +528,21 @@ class MissionStore:
         mission_text = self._render_mission(state)
         findings = self._load_findings(mission_id)[-3:]
         progress = self._read_progress_entries(mission_id)[-5:]
-        parts = ["## Mission Hot Context", mission_text]
+        parts = [
+            "## Shared Mission State",
+            f"- Mission ID: `{mission_id}`",
+            f"- State path: `{self.mission_dir(mission_id)}`",
+            (
+                "- `mission.md` is private to the main Agent. When delegating, "
+                "include only the Mission ID and the assigned task."
+            ),
+            (
+                "- Child agents share `progress.md`, `findings.md`, and "
+                "`artifacts/`, and record results with `mission_record`."
+            ),
+            "## Mission Hot Context",
+            mission_text,
+        ]
         if findings:
             parts.extend(
                 [
@@ -1052,7 +1082,6 @@ def mission_state_path_error(path: str | Path, workspace_dir: str | Path) -> Opt
     root = (
         Path(workspace_dir).expanduser().resolve(strict=False)
         / ".flocks"
-        / "memory"
         / "missions"
     ).resolve(strict=False)
     if target == root or root in target.parents:

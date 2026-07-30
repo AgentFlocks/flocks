@@ -1451,11 +1451,6 @@ class Config:
         """
         global_cfg = cls.get_global()
         return global_cfg.data_dir
-
-    @classmethod
-    def get_memory_path(cls) -> Path:
-        """Get the global filesystem Memory root."""
-        return _get_flocks_root() / "memory"
     
     @classmethod
     def get_config_path(cls) -> Path:
