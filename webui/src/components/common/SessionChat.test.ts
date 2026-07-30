@@ -453,6 +453,40 @@ describe('SessionChat message loading state', () => {
   });
 });
 
+describe('SessionChat focused message deep links', () => {
+  it('scrolls to and consumes a rendered focus target', async () => {
+    const onFocusMessageConsumed = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'target-message',
+          parts: [{ id: 'part-1', type: 'text', text: 'target' }],
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      focusMessageId: 'target-message',
+      onFocusMessageConsumed,
+    }));
+
+    await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe('ChatToolPart file operation titles', () => {
   it('shows only the filename in the header while preserving the full path in details', () => {
     const fullPath = '/Users/example/.flocks/workspace/outputs/2026-07-24/gold_price_retrieval_plan.md';

@@ -161,6 +161,10 @@ export interface SessionChatProps {
   initialDisplayText?: string | null;
   /** Called immediately after initialMessage has been consumed (sent) */
   onInitialMessageConsumed?: () => void;
+  /** Scroll to this existing message after messages load. */
+  focusMessageId?: string | null;
+  /** Called after focusMessageId is consumed. */
+  onFocusMessageConsumed?: () => void;
   /** Agent name to include in prompt_async requests */
   agentName?: string;
   /** Model override to include in prompt_async requests */
@@ -1529,6 +1533,8 @@ export default function SessionChat({
   onCreateAndSend,
   onCreateNewSession,
   onInitialMessageConsumed,
+  focusMessageId,
+  onFocusMessageConsumed,
   supportsVision,
   toolbarSlot,
   composerAddMenuSlot,
@@ -1695,6 +1701,7 @@ export default function SessionChat({
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContentRef = useRef<HTMLDivElement>(null);
   const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const focusedMessageRef = useRef('');
   const isAtBottomRef = useRef(true);
   const scrollToBottomRafRef = useRef<number | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
@@ -1823,6 +1830,28 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+
+  useEffect(() => {
+    const targetId = String(focusMessageId || '').trim();
+    if (!targetId || focusedMessageRef.current === targetId) return;
+    if (loading) return;
+    const target = messagesContentRef.current?.querySelector<HTMLElement>(
+      `[data-message-id="${CSS.escape(targetId)}"]`,
+    );
+    if (!target) {
+      focusedMessageRef.current = targetId;
+      onFocusMessageConsumed?.();
+      return;
+    }
+    focusedMessageRef.current = targetId;
+    target.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    target.classList.add('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    window.setTimeout(() => {
+      target.classList.remove('ring-2', 'ring-sky-400', 'ring-offset-2', 'ring-offset-white', 'dark:ring-offset-zinc-950');
+    }, 1800);
+    onFocusMessageConsumed?.();
+  }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
+
   const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
   const contextUsageBreakdown = useMemo(
     () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
@@ -4198,33 +4227,34 @@ function ChatMessageTimelineInner({
   return (
     <>
       {items.map(({ message, isActive }) => (
-        <ChatMessageBubble
-          key={message.id}
-          message={message}
-          isActive={isActive}
-          pendingQuestions={pendingQuestions}
-          onQuestionAnswer={onQuestionAnswer}
-          onQuestionReject={onQuestionReject}
-          showActions={showActions}
-          showTimestamp={showTimestamp}
-          collapseIntermediateSteps={collapseIntermediateSteps}
-          processGroupsDefaultOpen={processGroupsDefaultOpen}
-          processGroupsOpenWhileActive={processGroupsOpenWhileActive}
-          processGroupOpenState={processGroupOpenState}
-          onProcessGroupOpenChange={onProcessGroupOpenChange}
-          compact={compact}
-          onCopy={onCopy}
-          editingMessageId={editingMessageId}
-          editingText={editingText}
-          actionsDisabled={actionsDisabled}
-          actionMessageId={actionMessageId}
-          onEditStart={onEditStart}
-          onEditChange={onEditChange}
-          onEditCancel={onEditCancel}
-          onEditSave={onEditSave}
-          onEditSend={onEditSend}
-          onRegenerate={onRegenerate}
-        />
+        <div key={message.id} data-message-id={message.id} className="rounded-md transition-shadow duration-300">
+          <ChatMessageBubble
+            message={message}
+            isActive={isActive}
+            pendingQuestions={pendingQuestions}
+            onQuestionAnswer={onQuestionAnswer}
+            onQuestionReject={onQuestionReject}
+            showActions={showActions}
+            showTimestamp={showTimestamp}
+            collapseIntermediateSteps={collapseIntermediateSteps}
+            processGroupsDefaultOpen={processGroupsDefaultOpen}
+            processGroupsOpenWhileActive={processGroupsOpenWhileActive}
+            processGroupOpenState={processGroupOpenState}
+            onProcessGroupOpenChange={onProcessGroupOpenChange}
+            compact={compact}
+            onCopy={onCopy}
+            editingMessageId={editingMessageId}
+            editingText={editingText}
+            actionsDisabled={actionsDisabled}
+            actionMessageId={actionMessageId}
+            onEditStart={onEditStart}
+            onEditChange={onEditChange}
+            onEditCancel={onEditCancel}
+            onEditSave={onEditSave}
+            onEditSend={onEditSend}
+            onRegenerate={onRegenerate}
+          />
+        </div>
       ))}
     </>
   );

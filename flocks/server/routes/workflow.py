@@ -1136,6 +1136,14 @@ async def _run_workflow_execution_task(
         "currentStepIndex": 0,
         "stepCount": 0,
     }
+    if req.session_id or req.message_id:
+        execution_summary.update(
+            {
+                "sessionId": req.session_id,
+                "messageId": req.message_id,
+                "agent": req.agent,
+            }
+        )
 
     def _write_progress(update_fields: Dict[str, Any]) -> None:
         try:
@@ -1737,6 +1745,16 @@ async def run_workflow_endpoint(workflow_id: str, req: WorkflowRunRequest):
             workflow_id,
             input_params=req.inputs or {},
         )
+        if req.session_id or req.message_id:
+            exec_data.update(
+                {
+                    "sessionId": req.session_id,
+                    "messageId": req.message_id,
+                    "agent": req.agent,
+                    "updatedAt": int(time.time() * 1000),
+                }
+            )
+            await WorkflowStore.upsert_execution(compact_execution_summary(exec_data))
         exec_id = str(exec_data["id"])
 
         cancel_event = threading.Event()
