@@ -296,14 +296,13 @@ def inject_dynamic_prompts(
     available_agents: list,
     tools: list,
     skills: list,
-    categories: list,
     workflows: Optional[list] = None,
 ) -> None:
     """
     Inject dynamic prompts for all agents that have a ``prompt_builder``.
 
     Dynamically imports each agent's prompt_builder module and calls its
-    ``inject(agent_info, available_agents, tools, skills, categories, workflows)``
+    ``inject(agent_info, available_agents, tools, skills, workflows)``
     function.  The inject function is expected to set ``agent_info.prompt``
     directly.
 
@@ -316,7 +315,7 @@ def inject_dynamic_prompts(
             module_path, func_name = agent.prompt_builder.rsplit(":", 1)
             module = importlib.import_module(module_path)
             inject_fn = getattr(module, func_name)
-            inject_fn(agent, available_agents, tools, skills, categories, workflows or [])
+            inject_fn(agent, available_agents, tools, skills, workflows or [])
             log.debug("agent.factory.prompt_injected", {"name": name})
         except Exception as e:
             log.error("agent.factory.prompt_inject_error", {

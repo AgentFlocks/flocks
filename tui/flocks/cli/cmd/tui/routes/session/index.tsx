@@ -1945,11 +1945,11 @@ function DelegateTask(props: ToolProps<any>) {
   const delegateMetadata = props.metadata as Record<string, any>
 
   const agentName = createMemo(() => {
-    const raw = delegateInput.subagent_type || delegateInput.category || "unknown"
+    const raw = delegateInput.subagent_type || "unknown"
     return Locale.titlecase(raw)
   })
 
-  const color = createMemo(() => local.agent.color(delegateInput.subagent_type || delegateInput.category || "unknown"))
+  const color = createMemo(() => local.agent.color(delegateInput.subagent_type || "unknown"))
   const isBackground = createMemo(() => !!delegateInput.run_in_background)
   const sessionId = createMemo(() => delegateMetadata.sessionId as string | undefined)
   const steps = createMemo(() => delegateMetadata.steps as Array<{ tool: string; title: string; status: string }> | undefined)

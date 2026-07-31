@@ -34,6 +34,10 @@ def test_global_config():
     assert config.server_port == 8000
 
 
+def test_delegate_categories_are_not_part_of_config_schema():
+    assert "categories" not in ConfigInfo.model_fields
+
+
 @pytest.mark.asyncio
 async def test_config_loading():
     """Test configuration loading"""

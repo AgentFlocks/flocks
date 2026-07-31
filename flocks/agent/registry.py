@@ -4,7 +4,7 @@ Agent Registry — simplified 4-step loader.
 Replaces the old flocks.agent.core.registry module (kept as a shim).
 
 Loading order:
-  ① Collect context: tools, skills, categories
+  ① Collect context: tools and skills
   ② scan_and_load() — built-in YAML agents + plugin YAML agents
   ③ Python plugin agents via PluginLoader + cfg.agent user overrides
   ④ inject_dynamic_prompts() — phase-2 dynamic prompt injection
@@ -34,7 +34,6 @@ from flocks.agent.agent import (
     AgentModel,
     AgentPromptMetadata,
     AvailableAgent,
-    AvailableCategory,
     AvailableSkill,
     AvailableWorkflow,
     DelegationTrigger,
@@ -242,13 +241,12 @@ class Agent:
         """
         4-step agent loading:
 
-        ① Context  — tools, skills, categories
+        ① Context  — tools and skills
         ② YAML     — scan_and_load() from built-in + plugin directories
         ③ Plugins  — PluginLoader Python modules + cfg.agent overrides
         ④ Prompts  — inject_dynamic_prompts() for phase-2 dynamic agents
         """
         # Lazy imports to avoid circular dependencies
-        from flocks.tool.delegate_task_constants import CATEGORY_DESCRIPTIONS, DEFAULT_CATEGORIES
         from flocks.tool.registry import ToolRegistry
 
         cfg = await Config.get()
@@ -264,19 +262,6 @@ class Agent:
             AvailableSkill(name=s.name, description=s.description, location=s.source or "project")
             for s in skills
         ]
-        category_configs = {**DEFAULT_CATEGORIES, **(cfg.categories or {})}
-        available_categories = [
-            AvailableCategory(
-                name=name,
-                description=(
-                    cfg.categories.get(name).description
-                    if cfg.categories and cfg.categories.get(name)
-                    else CATEGORY_DESCRIPTIONS.get(name, name)
-                ),
-            )
-            for name in category_configs.keys()
-        ]
-
         # Discover available workflows (best-effort; failure must not block agent load)
         available_workflows: List[AvailableWorkflow] = []
         try:
@@ -430,7 +415,6 @@ class Agent:
             available_agents,
             categorized_tools,
             available_skills,
-            available_categories,
             available_workflows,
         )
 

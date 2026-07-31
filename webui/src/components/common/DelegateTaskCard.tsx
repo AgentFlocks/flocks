@@ -36,8 +36,7 @@ export function shouldRenderDelegateTaskCard(part: MessagePart): boolean {
   //    happens to contain a `<task_metadata>` block.
   if (!part.tool || part.tool === 'unknown') {
     const hasDelegateInput =
-      (typeof input.subagent_type === 'string' && input.subagent_type.trim()) ||
-      (typeof input.category === 'string' && input.category.trim());
+      typeof input.subagent_type === 'string' && input.subagent_type.trim();
     if (!hasDelegateInput) {
       return false;
     }
@@ -94,7 +93,7 @@ function extractSessionId(
 
 export function extractDelegateInfo(state: Partial<ToolState>, subTaskLabel: string): DelegateInfo {
   const input = state.input || {};
-  const agentRaw = input.subagent_type || input.category || 'unknown';
+  const agentRaw = input.subagent_type || 'unknown';
   const agentName = typeof agentRaw === 'string'
     ? agentRaw.charAt(0).toUpperCase() + agentRaw.slice(1)
     : String(agentRaw);

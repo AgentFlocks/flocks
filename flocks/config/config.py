@@ -149,19 +149,6 @@ class AgentConfig(BaseModel):
         return self
 
 
-# ==================== Category Configuration ====================
-
-class CategoryConfig(BaseModel):
-    """Delegate-task category configuration"""
-    model_config = {"extra": "allow", "populate_by_name": True}
-
-    model: Optional[str] = None
-    variant: Optional[str] = None
-    prompt_append: Optional[str] = Field(None, alias="promptAppend")
-    description: Optional[str] = None
-    is_unstable_agent: Optional[bool] = Field(None, alias="isUnstableAgent")
-
-
 # ==================== Command Configuration ====================
 
 class CommandConfig(BaseModel):
@@ -665,7 +652,6 @@ class ConfigInfo(BaseModel):
     mode: Optional[Dict[str, AgentConfig]] = Field(None, description="@deprecated Use 'agent'")
     agent: Optional[Dict[str, AgentConfig]] = None
     provider: Optional[Dict[str, ProviderConfig]] = None
-    categories: Optional[Dict[str, CategoryConfig]] = None
     mcp: Optional[Dict[str, Union[McpConfig, Dict[str, Any]]]] = None
     formatter: Optional[Union[Literal[False], Dict[str, Any]]] = None
     lsp: Optional[Union[Literal[False], Dict[str, Any]]] = None

@@ -82,7 +82,7 @@ describe('shouldRenderDelegateTaskCard', () => {
     expect(shouldRenderDelegateTaskCard(part)).toBe(true);
   });
 
-  it('uses persisted child session metadata as a delegate fallback', () => {
+  it('does not use category as a delegate fallback', () => {
     const part = {
       id: 'part-legacy',
       type: 'tool',
@@ -100,7 +100,7 @@ describe('shouldRenderDelegateTaskCard', () => {
       },
     } as MessagePart;
 
-    expect(shouldRenderDelegateTaskCard(part)).toBe(true);
+    expect(shouldRenderDelegateTaskCard(part)).toBe(false);
   });
 
   it('does not treat run_workflow with leaked child session metadata as a delegate task', () => {
