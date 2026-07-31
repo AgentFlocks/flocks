@@ -2074,6 +2074,8 @@ function taskCenterStatusLabel(status) {
   if (['running', 'queued', 'pending'].includes(value)) return '执行中';
   if (['completed', 'success'].includes(value)) return '成功';
   if (['failed', 'error', 'timeout'].includes(value)) return '失败';
+  if (['disabled', 'stopped'].includes(value)) return '已关闭';
+  if (value === 'stale') return '已停止';
   if (value === 'cancelled') return '取消';
   return '待执行';
 }
@@ -5279,6 +5281,9 @@ const CSS = `
 .task-center-status.failed,
 .task-center-status.error,
 .task-center-status.timeout { color: #ff9a76; background: rgba(133,57,33,.42); }
+.task-center-status.disabled,
+.task-center-status.stopped,
+.task-center-status.stale { color: #9aa7a3; background: rgba(73,86,95,.42); }
 .task-center-item-sub {
   min-width: 0;
   overflow: hidden;
