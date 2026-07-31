@@ -154,6 +154,36 @@ def inject(agent_info, available_agents, tools, skills, workflows=None):
         finally:
             sys.path.pop(0)
 
+    def test_legacy_builder_receives_empty_categories_and_workflows(self, tmp_path):
+        """Legacy inject() signatures keep workflows in the correct argument."""
+        builder_code = """
+def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+    workflow_names = [workflow.name for workflow in (workflows or [])]
+    agent_info.prompt = repr((categories, workflow_names))
+"""
+        builder_path = tmp_path / "legacy_builder.py"
+        builder_path.write_text(textwrap.dedent(builder_code), encoding="utf-8")
+
+        import sys
+        sys.path.insert(0, str(tmp_path.parent))
+        try:
+            agent = AgentInfo(
+                name="legacy_agent",
+                mode="subagent",
+                native=False,
+                prompt_builder=f"{tmp_path.name}.legacy_builder:inject",
+            )
+            inject_dynamic_prompts(
+                {"legacy_agent": agent},
+                [],
+                [],
+                [],
+                _simple_workflows(),
+            )
+            assert agent.prompt == "([], ['ndr_triage', 'global_scan'])"
+        finally:
+            sys.path.pop(0)
+
     def test_inject_sets_prompt_on_agent(self, tmp_path):
         """inject() is expected to set agent_info.prompt."""
         builder_code = """

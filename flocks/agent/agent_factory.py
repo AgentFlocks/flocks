@@ -23,6 +23,7 @@ declared in agent.yaml.
 from __future__ import annotations
 
 import importlib
+import inspect
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -315,7 +316,10 @@ def inject_dynamic_prompts(
             module_path, func_name = agent.prompt_builder.rsplit(":", 1)
             module = importlib.import_module(module_path)
             inject_fn = getattr(module, func_name)
-            inject_fn(agent, available_agents, tools, skills, workflows or [])
+            inject_args = [agent, available_agents, tools, skills]
+            if "categories" in inspect.signature(inject_fn).parameters:
+                inject_args.append([])
+            inject_fn(*inject_args, workflows or [])
             log.debug("agent.factory.prompt_injected", {"name": name})
         except Exception as e:
             log.error("agent.factory.prompt_inject_error", {
