@@ -68,7 +68,7 @@ const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
 const RECENT_SEARCH_SESSION_LIMIT = 5;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
-const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
+const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'pentest', 'goal'];
 type AgentSourceFilter = 'all' | 'builtin' | 'custom';
 
 function ExecutionModeIcon({
@@ -79,6 +79,7 @@ function ExecutionModeIcon({
   className?: string;
 }) {
   if (mode === 'plan') return <ClipboardList className={className} />;
+  if (mode === 'pentest') return <Shield className={className} />;
   if (mode === 'goal') return <Target className={className} />;
   return <Hammer className={className} />;
 }

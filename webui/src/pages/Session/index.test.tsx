@@ -183,8 +183,8 @@ vi.mock('@/components/common/SessionChat', () => ({
     initialDisplayText?: string | null;
     focusMessageId?: string | null;
     model?: { providerID: string; modelID: string } | null;
-    executionMode?: 'build' | 'plan' | 'goal';
-    onExecutionModeAccepted?: (mode: 'build' | 'plan' | 'goal') => void;
+    executionMode?: 'build' | 'plan' | 'pentest' | 'goal';
+    onExecutionModeAccepted?: (mode: 'build' | 'plan' | 'pentest' | 'goal') => void;
     supportsVision?: boolean;
     contextWindowTokens?: number | null;
     hideInput?: boolean;
@@ -202,7 +202,7 @@ vi.mock('@/components/common/SessionChat', () => ({
       agentOverride?: string,
       modelOverride?: unknown,
       options?: { displayText?: string },
-      executionModeOverride?: 'build' | 'plan' | 'goal',
+      executionModeOverride?: 'build' | 'plan' | 'pentest' | 'goal',
     ) => Promise<unknown> | unknown;
     onSSEEvent?: (event: { type: string; properties?: Record<string, unknown> }) => void;
   }) {
@@ -485,6 +485,20 @@ describe('SessionPage session actions menu', () => {
     expect(localStorage.getItem('flocks:session-execution-mode:session-1')).toBe('plan');
   });
 
+  it('persists Pentest per session', async () => {
+    const user = userEvent.setup();
+    renderSessionPage('/sessions?session=session-1');
+
+    const modeButton = await screen.findByRole('button', { name: 'executionMode.title' });
+    await user.click(modeButton);
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.pentest.label/,
+    }));
+
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'pentest');
+    expect(localStorage.getItem('flocks:session-execution-mode:session-1')).toBe('pentest');
+  });
+
   it('restores a persisted session execution mode', async () => {
     localStorage.setItem('flocks:session-execution-mode:session-1', 'plan');
     renderSessionPage('/sessions?session=session-1');
@@ -543,6 +557,26 @@ describe('SessionPage session actions menu', () => {
       );
     });
     expect(localStorage.getItem('flocks:session-execution-mode:session-2')).toBe('plan');
+    expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
+  });
+
+  it('sends and persists Pentest when the first message creates a session', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await user.click(await screen.findByRole('button', { name: 'executionMode.title' }));
+    await user.click(screen.getByRole('menuitemradio', {
+      name: /executionMode.options.pentest.label/,
+    }));
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.objectContaining({ executionMode: 'pentest' }),
+      );
+    });
+    expect(localStorage.getItem('flocks:session-execution-mode:session-2')).toBe('pentest');
     expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
   });
 

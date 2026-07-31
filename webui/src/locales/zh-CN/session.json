@@ -106,6 +106,10 @@
         "label": "Plan",
         "description": "调研需求并输出可实施计划"
       },
+      "pentest": {
+        "label": "Pentest",
+        "description": "编排白盒安全审计并验证漏洞结论"
+      },
       "goal": {
         "label": "Goal",
         "description": "启动持久目标，然后返回 Build"

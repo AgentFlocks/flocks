@@ -73,6 +73,7 @@ from flocks.session.utils.file_extractor import (
 )
 from flocks.session.execution_mode import (
     SessionExecutionMode,
+    coerce_execution_mode,
     execution_mode_prompt,
     is_tool_allowed,
     runtime_execution_mode,
@@ -1327,9 +1328,10 @@ class SessionRunner:
     ) -> StepResult:
         """Process a single step in the loop with retry logic."""
         self._attempt_state = LlmAttemptState()
-        turn_execution_mode = runtime_execution_mode(
+        selected_execution_mode = coerce_execution_mode(
             getattr(last_user, "executionMode", None)
         )
+        turn_execution_mode = runtime_execution_mode(selected_execution_mode)
         self._turn_execution_mode = turn_execution_mode
         from flocks.project.instance import Instance
 
@@ -1474,7 +1476,7 @@ class SessionRunner:
             provider_id=self.provider_id,
             model_id=self.model_id,
             execution_mode_prompt=execution_mode_prompt(
-                turn_execution_mode,
+                selected_execution_mode,
                 session=self.session,
                 plan_file=self._turn_plan_file,
             ),

@@ -32,15 +32,20 @@ from flocks.tool.registry import (
 from flocks.tool.file.write import write_tool
 
 
-def test_prompt_request_defaults_to_build_and_accepts_plan() -> None:
+def test_prompt_request_defaults_to_build_and_accepts_plan_and_pentest() -> None:
     default_request = PromptRequest(parts=[{"type": "text", "text": "hello"}])
     plan_request = PromptRequest.model_validate({
         "parts": [{"type": "text", "text": "hello"}],
         "executionMode": "plan",
     })
+    pentest_request = PromptRequest.model_validate({
+        "parts": [{"type": "text", "text": "audit this repository"}],
+        "executionMode": "pentest",
+    })
 
     assert default_request.execution_mode == SessionExecutionMode.BUILD
     assert plan_request.execution_mode == SessionExecutionMode.PLAN
+    assert pentest_request.execution_mode == SessionExecutionMode.PENTEST
 
 
 def test_prompt_request_rejects_removed_ask_mode() -> None:
@@ -59,6 +64,23 @@ def test_goal_transport_uses_build_permissions_and_slash_dispatch() -> None:
         parts,
         SessionExecutionMode.GOAL,
     ) == "/goal finish the feature"
+
+
+def test_pentest_uses_build_permissions_and_orchestration_prompt() -> None:
+    prompt = execution_mode_prompt(SessionExecutionMode.PENTEST)
+    normalized_prompt = " ".join(prompt.split())
+
+    assert runtime_execution_mode("pentest") == SessionExecutionMode.BUILD
+    assert is_tool_allowed(SessionExecutionMode.PENTEST, "bash")
+    assert is_tool_allowed(SessionExecutionMode.PENTEST, "delegate_task")
+    assert not is_tool_allowed(SessionExecutionMode.PENTEST, "plan_exit")
+    assert 'skill_load(name="agent-coordinate-protocol")' in prompt
+    assert 'load_skills=["agent-coordinate-protocol", "pentest-recon"]' in prompt
+    assert 'load_skills=["agent-coordinate-protocol", "pentest-analysis"]' in prompt
+    assert 'load_skills=["agent-coordinate-protocol", "pentest-verify"]' in prompt
+    assert "Docker is attempted only by Verify workers" in normalized_prompt
+    assert "Do not preflight Docker" in normalized_prompt
+    assert "Only `CONFIRMED`" in prompt
 
 
 def test_goal_requires_text_only_objective() -> None:
@@ -231,6 +253,24 @@ async def test_prompt_queue_preserves_execution_mode() -> None:
     queued = await InteractionQueue.list(session_id)
     assert item.executionMode == SessionExecutionMode.PLAN
     assert queued[0].executionMode == SessionExecutionMode.PLAN
+
+    await InteractionQueue.clear(session_id)
+
+
+@pytest.mark.asyncio
+async def test_prompt_queue_preserves_pentest_execution_mode() -> None:
+    session_id = "pentest-execution-mode-queue"
+    await InteractionQueue.clear(session_id)
+
+    item = await InteractionQueue.enqueue(
+        session_id,
+        parts=[{"type": "text", "text": "audit this repository"}],
+        execution_mode=SessionExecutionMode.PENTEST,
+    )
+
+    queued = await InteractionQueue.list(session_id)
+    assert item.executionMode == SessionExecutionMode.PENTEST
+    assert queued[0].executionMode == SessionExecutionMode.PENTEST
 
     await InteractionQueue.clear(session_id)
 

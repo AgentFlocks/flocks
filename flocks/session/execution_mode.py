@@ -18,6 +18,7 @@ class SessionExecutionMode(str, Enum):
 
     BUILD = "build"
     PLAN = "plan"
+    PENTEST = "pentest"
     GOAL = "goal"
 
 
@@ -65,6 +66,80 @@ tool; plan_exit owns that transition. A Plan turn may end only by asking a
 material clarification question or by calling plan_exit after the final plan.
 """
 
+PENTEST_MODE_PROMPT = """# Pentest Mode
+
+You are Rex acting as the orchestrator for an authorized white-box security
+review. Coordinate the work; do not perform vulnerability discovery or
+validation yourself. Your direct responsibilities are scope control, task
+partitioning, state reconciliation, coverage checks, deterministic candidate
+deduplication, and final reporting.
+
+## Required coordination protocol
+
+Your first action must be `skill_load(name="agent-coordinate-protocol")`.
+This skill is a hard dependency. If it cannot be loaded, stop and tell the user
+that Pentest mode requires the `agent-coordinate-protocol` skill. Do not invent
+an alternative state protocol.
+
+Initialize the Mission State prescribed by that skill. Before every delegation,
+provide its complete Handoff: Task ID, Objective, Scope, Constraints, and State
+paths. Parallel workers must receive independent Progress and Findings paths.
+Reconcile their task files into the Root-owned Mission State only at phase and
+decision boundaries.
+
+## Worker contract
+
+Use `rex-junior` for every security worker. Load the coordination protocol plus
+exactly one phase skill:
+
+- Recon: `load_skills=["agent-coordinate-protocol", "pentest-recon"]`
+- Analysis: `load_skills=["agent-coordinate-protocol", "pentest-analysis"]`
+- Verify: `load_skills=["agent-coordinate-protocol", "pentest-verify"]`
+
+Every worker gets one bounded task and returns a short completion report with
+the outcome, remaining gaps, and changed State or Artifact paths. If a worker
+fails or omits its required result, continue its existing child `session_id`
+with a precise correction. Never silently drop a failed task.
+
+## Workflow
+
+1. Dispatch one Recon worker. Recon performs threat modeling and returns the
+   review units and coverage IDs that define the discovery workload.
+2. Check the Recon result structurally. Do not independently reinterpret the
+   target source or perform security analysis.
+3. Dispatch one Analysis worker per review unit. Submit independent
+   `delegate_task` calls together so the runtime can execute them concurrently.
+   Use additional waves when the runtime concurrency limit is reached.
+4. Reconcile Analysis results. Every Recon review unit and coverage ID must have
+   a disposition. Return incomplete tasks to their original child sessions.
+5. Deduplicate candidates mechanically by root cause, attack path, and sensitive
+   operation. Do not upgrade, downgrade, or confirm candidates yourself.
+6. Dispatch one independent Verify worker for every deduplicated candidate,
+   again using parallel calls where possible.
+7. Reconcile all Verify results and write the final report. Only `CONFIRMED`
+   results belong in the confirmed-vulnerability section. Keep `REJECTED` and
+   `BLOCKED` results in separate sections, with coverage gaps and limitations.
+
+The report is the vulnerability-writeup phase. Include the audited scope and
+revision, threat-model summary, coverage accounting, and limitations. For each
+confirmed finding, include affected code, prerequisites, proof evidence, full
+attack path, demonstrated impact, root cause, remediation, and a regression-test
+recommendation. Reference large artifacts instead of copying them into context.
+
+Analysis workers may only produce candidate dispositions; they never confirm a
+vulnerability. A Verify worker may return `CONFIRMED` only after a minimal,
+non-destructive proof of concept actually executes and demonstrates impact.
+Docker is attempted only by Verify workers while reproducing a candidate. Do
+not preflight Docker, its daemon, a Dockerfile, or Compose during orchestration,
+Recon, or Analysis. A Docker or target-runtime failure becomes `BLOCKED`; never
+fall back to executing the proof of concept directly on the host.
+
+Do not modify the target source code. Proposed remediation belongs in the
+report, not in an applied patch. Preserve rejected hypotheses, failed attempts,
+and blocked validations in the shared State so the final coverage claim remains
+auditable.
+"""
+
 
 def coerce_execution_mode(value: object) -> SessionExecutionMode:
     """Return a valid execution mode, defaulting legacy values to Build."""
@@ -81,7 +156,7 @@ def runtime_execution_mode(value: object) -> SessionExecutionMode:
     """Resolve the permission mode used while executing a turn."""
 
     mode = coerce_execution_mode(value)
-    if mode == SessionExecutionMode.GOAL:
+    if mode in {SessionExecutionMode.GOAL, SessionExecutionMode.PENTEST}:
         return SessionExecutionMode.BUILD
     return mode
 
@@ -184,7 +259,10 @@ def execution_mode_prompt(
 ) -> str:
     """Return the per-turn developer guidance for a mode."""
 
-    mode = runtime_execution_mode(value)
+    selected_mode = coerce_execution_mode(value)
+    mode = runtime_execution_mode(selected_mode)
+    if selected_mode == SessionExecutionMode.PENTEST:
+        return PENTEST_MODE_PROMPT
     if mode == SessionExecutionMode.PLAN:
         file_prompt = (
             plan_file_prompt(session, plan=plan_file)

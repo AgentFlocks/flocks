@@ -454,6 +454,7 @@ class TestSessionRoutesUseDispatcher:
         )
         request = session_routes.PromptRequest(
             parts=[{"type": "text", "text": "/bug investigate"}],
+            executionMode="pentest",
         )
 
         resp = await session_routes.send_session_message_async(session_id, request)
@@ -462,6 +463,7 @@ class TestSessionRoutesUseDispatcher:
         dispatch_mock.assert_awaited_once()
         event = dispatch_mock.await_args.args[2]
         assert event.text == "/bug investigate"
+        assert event.execution_mode.value == "pentest"
 
     @pytest.mark.asyncio
     async def test_command_route_routes_through_dispatcher(self, monkeypatch):
@@ -556,7 +558,10 @@ class TestPromptQueueRoutes:
         monkeypatch.setattr("flocks.session.message.Message.create", message_create)
         monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
 
-        request = session_routes.PromptRequest(parts=[{"type": "text", "text": "second question"}])
+        request = session_routes.PromptRequest(
+            parts=[{"type": "text", "text": "second question"}],
+            executionMode="pentest",
+        )
 
         resp = await session_routes.send_session_message_async(session_id, request)
 
@@ -565,6 +570,7 @@ class TestPromptQueueRoutes:
         items = await InteractionQueue.list(session_id)
         assert len(items) == 1
         assert items[0].parts[0]["text"] == "second question"
+        assert items[0].executionMode.value == "pentest"
         message_create.assert_not_called()
 
     @pytest.mark.asyncio

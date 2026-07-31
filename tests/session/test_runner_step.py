@@ -2719,6 +2719,55 @@ async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(mo
 
 
 @pytest.mark.asyncio
+async def test_process_step_injects_pentest_prompt_with_build_runtime(monkeypatch):
+    runner = _make_runner("ses_runner_pentest_prompt")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_pentest_prompt",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "anthropic", "modelID": "claude-sonnet"},
+        executionMode="pentest",
+    )
+
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_pentest_prompt")
+    build_system_prompts = AsyncMock(return_value=[])
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", build_system_prompts)
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="audit")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="audit"))
+    monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner,
+        "_call_llm",
+        AsyncMock(return_value=StepResult(action="stop", content="done")),
+    )
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "done"
+    assert runner._turn_execution_mode.value == "build"
+    prompt = build_system_prompts.await_args.kwargs["execution_mode_prompt"]
+    assert 'skill_load(name="agent-coordinate-protocol")' in prompt
+
+
+@pytest.mark.asyncio
 async def test_process_step_records_usage_after_success(monkeypatch):
     runner = _make_runner("ses_runner_usage_success")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())

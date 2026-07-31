@@ -26,6 +26,12 @@ describe('sessionExecutionMode storage', () => {
     expect(readSessionExecutionMode('session-1')).toBe('plan');
   });
 
+  it('persists Pentest independently by session', () => {
+    writeSessionExecutionMode('session-1', 'pentest');
+
+    expect(readSessionExecutionMode('session-1')).toBe('pentest');
+  });
+
   it('promotes the draft mode to a newly created session', () => {
     writeSessionExecutionMode(null, 'plan');
     promoteDraftExecutionMode('session-new', 'plan');
