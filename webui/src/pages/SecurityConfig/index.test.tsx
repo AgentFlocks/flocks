@@ -61,11 +61,6 @@ describe('SecurityConfigPage', () => {
       filesystem: {
         excludedTools: [],
         policyVersion: 'filesystem-v1',
-        decisionMatrix: {
-          readonly: { read: 'allow' },
-          'require-confirm': { read: 'allow' },
-          'auto-allow-all': { read: 'allow' },
-        },
         runtimeOverrides: { 'exe-mode': { plugins: 'deny_mutation' } },
         hardDenies: { unknown_region: true },
         sharedPermissionMode: { supported: ['readonly', 'require-confirm', 'auto-allow-all'], default: 'readonly' },
@@ -85,11 +80,23 @@ describe('SecurityConfigPage', () => {
 
     const openButton = await screen.findByRole('button', { name: '查看详情' });
     await user.click(openButton);
-    expect(screen.getByRole('dialog', { name: '文件管控策略矩阵' })).toBeInTheDocument();
+    const dialog = screen.getByRole('dialog', { name: '文件管控配置详情' });
+    expect(dialog).toBeInTheDocument();
+    expect(dialog).toHaveClass('md:w-2/3', 'md:min-w-[720px]', 'md:max-w-[1200px]');
+    expect(screen.getByText('仅审计')).toBeInTheDocument();
+    expect(screen.getByText(/Session permission mode.*Runtime mode.*路径区域规则/)).toBeInTheDocument();
+    expect(screen.getByText('exe-mode')).toBeInTheDocument();
+    expect(screen.getByText('plugins')).toBeInTheDocument();
+    expect(screen.getByText('deny_mutation')).toBeInTheDocument();
+    expect(screen.getByText('纳管')).toBeInTheDocument();
+    expect(screen.getByText('不纳管')).toBeInTheDocument();
+    expect(screen.getByText(/memory_search/)).toBeInTheDocument();
+    expect(document.body.style.overflow).toBe('hidden');
 
     await user.keyboard('{Escape}');
     await waitFor(() => {
-      expect(screen.queryByRole('dialog', { name: '文件管控策略矩阵' })).not.toBeInTheDocument();
+      expect(screen.queryByRole('dialog', { name: '文件管控配置详情' })).not.toBeInTheDocument();
     });
+    expect(document.body.style.overflow).toBe('');
   });
 });

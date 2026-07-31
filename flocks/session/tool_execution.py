@@ -44,6 +44,8 @@ def _filesystem_action_payload(
     profile: Mapping[str, Any],
     tool_context_extra: Mapping[str, Any],
 ) -> dict[str, Any] | None:
+    if tool_context_extra.get("agent_execution_session") is not True:
+        return None
     operation = _FILESYSTEM_TOOL_OPERATION_BY_NAME.get(str(tool_name or "").strip().lower())
     if operation is None:
         return None
@@ -77,7 +79,6 @@ def _filesystem_action_payload(
         project_revision = int(project_revision_raw) if project_revision_raw is not None else None
     except Exception:
         project_revision = None
-    code_roots = [workspace_dir]
     execution_context = (
         dict(tool_context_extra.get("execution_context"))
         if isinstance(tool_context_extra.get("execution_context"), Mapping)
@@ -118,7 +119,6 @@ def _filesystem_action_payload(
         "workspace_root": workspace_root,
         "output_root": output_root,
         "project_root": project_root,
-        "code_roots": code_roots,
         "flocks_root": flocks_root,
         "plugins_root": plugins_root,
     }

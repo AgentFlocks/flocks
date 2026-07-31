@@ -852,6 +852,7 @@ class StreamProcessor:
 
                     tool_extra = {
                         **sandbox_meta["extra"],
+                        "agent_execution_session": True,
                         "execution_mode": self._execution_mode,
                         "workspace_dir": self._workspace_dir,
                         "model": {

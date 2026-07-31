@@ -683,6 +683,7 @@ export default function SessionPage() {
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
   const [sessionRuntimeMode, setSessionRuntimeMode] = useState<RuntimeMode | null>(null);
+  const [sessionExecutionRevision, setSessionExecutionRevision] = useState<number | null>(null);
   const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>('dev-mode');
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
@@ -1431,16 +1432,19 @@ export default function SessionPage() {
     if (!proPolicyEnabled || !selectedSessionId) {
       setSessionPermissionMode(null);
       setSessionRuntimeMode(null);
+      setSessionExecutionRevision(null);
       return;
     }
     void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
       .then((result) => {
         setSessionPermissionMode(result.permissionMode);
         setSessionRuntimeMode(result.runtimeMode);
+        setSessionExecutionRevision(result.revision);
       })
       .catch(() => {
         setSessionPermissionMode(null);
         setSessionRuntimeMode(null);
+        setSessionExecutionRevision(null);
       });
   }, [proPolicyEnabled, selectedSessionId]);
 
@@ -1453,15 +1457,16 @@ export default function SessionPage() {
     try {
       const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
         permissionMode,
-        runtimeMode: sessionRuntimeMode ?? 'dev-mode',
+        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
       });
       setSessionPermissionMode(updated.permissionMode);
       setSessionRuntimeMode(updated.runtimeMode);
+      setSessionExecutionRevision(updated.revision);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('chat.error', 'Error'), message);
     }
-  }, [proPolicyEnabled, selectedSessionId, sessionRuntimeMode, t, toast]);
+  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
 
   const handleRuntimeModeChange = useCallback(async (runtimeMode: RuntimeMode) => {
     if (!proPolicyEnabled) return;
@@ -1472,15 +1477,16 @@ export default function SessionPage() {
     try {
       const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
         runtimeMode,
-        permissionMode: sessionPermissionMode ?? 'require-confirm',
+        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
       });
       setSessionPermissionMode(updated.permissionMode);
       setSessionRuntimeMode(updated.runtimeMode);
+      setSessionExecutionRevision(updated.revision);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('chat.error', 'Error'), message);
     }
-  }, [proPolicyEnabled, selectedSessionId, sessionPermissionMode, t, toast]);
+  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
 
   const permissionModeLabels = useMemo<Record<PermissionMode, string>>(
     () => ({
@@ -1792,6 +1798,7 @@ export default function SessionPage() {
           });
           setSessionPermissionMode(updated.permissionMode);
           setSessionRuntimeMode(updated.runtimeMode);
+          setSessionExecutionRevision(updated.revision);
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : String(error);
           toast.error(t('chat.error', 'Error'), message);
@@ -3545,7 +3552,7 @@ export default function SessionPage() {
                     type="button"
                     onClick={() => setShowPermissionModeOptions((open) => !open)}
                     className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                    title={t('permissionMode.title')}
+                    title={t('permissionMode.executionControlTitle')}
                   >
                     <Shield className="h-3 w-3 shrink-0" />
                     <span className="max-w-[116px] truncate font-medium">

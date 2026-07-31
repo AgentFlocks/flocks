@@ -591,7 +591,10 @@ class Tool:
                 tool_context_extra=tool_context_extra,
                 execution_domain="execution_runtime",
             )
-            if self.info.category == ToolCategory.FILE:
+            filesystem_action = dict(
+                (payload.get("tool_context_extra") or {}).get("filesystem_action") or {}
+            )
+            if filesystem_action:
                 from flocks.hooks.pipeline import HookPipeline
 
                 async def _run_action_effect():
@@ -603,9 +606,7 @@ class Tool:
                 filesystem_payload = {
                     **payload,
                     "operation": "filesystem.execute",
-                    "filesystem_action": dict(
-                        (payload.get("tool_context_extra") or {}).get("filesystem_action") or {}
-                    ),
+                    "filesystem_action": filesystem_action,
                 }
                 result = await execute_with_hooks(
                     filesystem_payload,
