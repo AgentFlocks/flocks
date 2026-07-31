@@ -11,12 +11,17 @@ import pytest
 from flocks.memory.state.context import MissionContextProvider
 from flocks.memory.state.mission import (
     MISSION_STATE_GUIDANCE,
+    SUBAGENT_STATE_GUIDANCE,
     mission_dir,
     mission_path,
     render_hot_context,
+    render_shared_updates,
     render_state_snapshot,
+    render_subagent_handoff,
 )
 from flocks.session.goal import GoalManager
+from flocks.session.message import ToolPart, ToolStateCompleted
+from flocks.session.session_loop import LoopContext, SessionLoop
 
 
 def test_state_path_is_deterministic_per_session(tmp_path: Path) -> None:
@@ -70,9 +75,20 @@ def test_filesystem_state_is_rendered_without_parsing(tmp_path: Path) -> None:
     assert MISSION_STATE_GUIDANCE not in snapshot
     assert MISSION_STATE_GUIDANCE in context
     assert "`mission.md` is owned by the main Agent" in context
-    assert "must not read or edit `mission.md`" in context
-    assert "Before finishing its delegated task" in context
+    assert "delegating work, or claiming the Goal is complete" in context
     assert "Prefer precise edits or" in context
+
+    shared_updates = render_shared_updates(tmp_path, "ses-shared")
+    assert "Ship the feature." not in shared_updates
+    assert "Worker A inspected the API." in shared_updates
+    assert "Candidate authorization issue." in shared_updates
+    assert "response.txt" in shared_updates
+
+    handoff = render_subagent_handoff(tmp_path, "ses-shared")
+    assert SUBAGENT_STATE_GUIDANCE.splitlines()[0] in handoff
+    assert "must not read or edit `mission.md`" in handoff
+    assert "Completion Report" in handoff
+    assert "Ship the feature." not in handoff
 
 
 @pytest.mark.asyncio
@@ -106,3 +122,87 @@ async def test_context_provider_loads_only_for_active_mission(
     assert context.guidance == MISSION_STATE_GUIDANCE
     assert "Mission State Snapshot" in context.snapshot
     assert MISSION_STATE_GUIDANCE not in context.snapshot
+
+    guidance_only = await MissionContextProvider.load(
+        workspace_dir=tmp_path,
+        session_id=session_id,
+        include_snapshot=False,
+    )
+    assert guidance_only is not None
+    assert guidance_only.guidance == MISSION_STATE_GUIDANCE
+    assert guidance_only.snapshot is None
+
+    shared_context = await MissionContextProvider.load(
+        workspace_dir=tmp_path,
+        session_id=session_id,
+        snapshot_reason="subagent_completed",
+    )
+    assert shared_context is not None
+    assert "Delegated State Updates" in shared_context.snapshot
+    assert "Ship it." not in shared_context.snapshot
+
+
+def test_finished_delegation_requests_shared_state_refresh() -> None:
+    part = ToolPart(
+        sessionID="ses-parent",
+        messageID="msg-parent",
+        callID="call-delegate",
+        tool="delegate_task",
+        state=ToolStateCompleted(
+            input={"prompt": "Inspect the API"},
+            output="done",
+            title="Inspect the API",
+            metadata={},
+            time={"start": 1, "end": 2},
+        ),
+    )
+    ctx = LoopContext(
+        session=SimpleNamespace(id="ses-parent", directory="/tmp/project"),
+        provider_id="anthropic",
+        model_id="claude",
+        agent_name="rex",
+    )
+
+    assert SessionLoop._has_finished_delegation([part]) is True
+
+    SessionLoop._request_mission_snapshot(ctx, "subagent_completed")
+    assert ctx.mission_snapshot_pending is True
+    assert ctx.mission_snapshot_reason == "session_restore"
+
+    SessionLoop._consume_mission_snapshot(ctx)
+    SessionLoop._request_mission_snapshot(ctx, "subagent_completed")
+    assert ctx.mission_snapshot_pending is True
+    assert ctx.mission_snapshot_reason == "subagent_completed"
+
+
+@pytest.mark.asyncio
+async def test_newly_created_mission_gets_one_activation_snapshot(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    ctx = LoopContext(
+        session=SimpleNamespace(id="ses-parent", directory="/tmp/project"),
+        provider_id="anthropic",
+        model_id="claude",
+        agent_name="rex",
+        mission_snapshot_pending=False,
+    )
+    guidance_only = SimpleNamespace(
+        path="/tmp/project/.flocks/missions/ses-parent/mission.md",
+        guidance="guidance",
+        snapshot=None,
+    )
+    activated = SimpleNamespace(
+        path=guidance_only.path,
+        guidance="guidance",
+        snapshot="snapshot",
+    )
+    load = AsyncMock(side_effect=[guidance_only, activated])
+    monkeypatch.setattr(MissionContextProvider, "load", load)
+
+    await SessionLoop._refresh_mission_context(ctx)
+
+    assert ctx.mission_context is activated
+    assert ctx.mission_snapshot_pending is True
+    assert ctx.mission_snapshot_reason == "mission_activated"
+    assert load.await_args_list[0].kwargs["include_snapshot"] is False
+    assert load.await_args_list[1].kwargs["include_snapshot"] is True

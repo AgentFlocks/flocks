@@ -1,8 +1,11 @@
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from flocks.memory.state.mission import mission_dir
+from flocks.tool.agent.delegate_task import _find_mission_state_handoff
 from flocks.tool.registry import ToolContext, ToolRegistry
 
 
@@ -64,6 +67,107 @@ class TestDelegateTaskTolerance:
         denied_permissions = {rule.permission for rule in permissions if rule.action == "deny"}
         assert "delegate_task" not in denied_permissions
         assert "task" not in denied_permissions
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_adds_child_safe_mission_state_handoff(
+        self,
+        tmp_path: Path,
+    ):
+        ctx = _make_ctx()
+        state_dir = mission_dir(tmp_path, ctx.session_id)
+        state_dir.mkdir(parents=True)
+        (state_dir / "mission.md").write_text(
+            "# Mission\n\nSECRET ROOT PLAN\n",
+            encoding="utf-8",
+        )
+        parent_session = SimpleNamespace(
+            id=ctx.session_id,
+            project_id="proj",
+            directory=str(tmp_path),
+            parent_id=None,
+            provider=None,
+            model=None,
+        )
+        child_session = SimpleNamespace(id="ses-child")
+        create_message = AsyncMock()
+
+        with (
+            patch(
+                "flocks.tool.agent.delegate_task._find_completed_delegate",
+                AsyncMock(return_value=None),
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.Config.get",
+                AsyncMock(return_value=SimpleNamespace(categories=None)),
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.is_delegatable",
+                return_value=True,
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.Session.get_by_id",
+                AsyncMock(return_value=parent_session),
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.Session.create",
+                AsyncMock(return_value=child_session),
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.Message.create",
+                create_message,
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                    )
+                ),
+            ),
+        ):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=ctx,
+                subagent_type="asset-survey",
+                prompt="Inspect the API",
+            )
+
+        assert result.success is True
+        child_prompt = create_message.await_args.kwargs["content"]
+        assert "Inspect the API" in child_prompt
+        assert f"Shared State directory: `{state_dir}`" in child_prompt
+        assert "must not read or edit `mission.md`" in child_prompt
+        assert "Completion Report" in child_prompt
+        assert "SECRET ROOT PLAN" not in child_prompt
+
+    @pytest.mark.asyncio
+    async def test_nested_delegate_finds_root_mission_state(
+        self,
+        tmp_path: Path,
+    ):
+        root = SimpleNamespace(
+            id="ses-root",
+            directory=str(tmp_path),
+            parent_id=None,
+        )
+        child = SimpleNamespace(
+            id="ses-child",
+            directory=str(tmp_path),
+            parent_id=root.id,
+        )
+        state_dir = mission_dir(tmp_path, root.id)
+        state_dir.mkdir(parents=True)
+        (state_dir / "mission.md").write_text("# Mission\n", encoding="utf-8")
+
+        with patch(
+            "flocks.tool.agent.delegate_task.Session.get_by_id",
+            AsyncMock(return_value=root),
+        ):
+            handoff = await _find_mission_state_handoff(child)
+
+        assert f"Shared State directory: `{state_dir}`" in handoff
 
     @pytest.mark.asyncio
     async def test_delegate_task_category_model_uses_runtime_override_without_pinning(self):

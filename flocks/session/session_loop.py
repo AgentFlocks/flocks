@@ -48,6 +48,7 @@ from flocks.session.goal import GoalManager
 from flocks.memory.state.context import (
     MissionContextProvider,
     MissionPromptContext,
+    MissionSnapshotReason,
 )
 
 
@@ -58,6 +59,12 @@ MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
+MISSION_SNAPSHOT_REASON_PRIORITY = {
+    "subagent_completed": 10,
+    "mission_activated": 20,
+    "session_restore": 30,
+    "compaction": 30,
+}
 
 
 @dataclass(frozen=True)
@@ -95,8 +102,13 @@ class LoopContext:
     _current_step_task: Optional[asyncio.Task] = field(default=None, repr=False)
     # Memory bootstrap data loaded once on step 1; passed to each SessionRunner
     memory_bootstrap_data: Optional[Dict[str, Any]] = field(default=None, repr=False)
-    # Mission Guidance and mutable State Snapshot refreshed before each model call.
+    # Stable Mission Guidance plus an event-driven, one-call State Snapshot.
     mission_context: Optional[MissionPromptContext] = field(default=None, repr=False)
+    mission_snapshot_pending: bool = field(default=True, repr=False)
+    mission_snapshot_reason: MissionSnapshotReason = field(
+        default="session_restore",
+        repr=False,
+    )
     # Reusable runner artifacts that stay stable across steps in the same loop.
     runner_static_cache: Dict[str, Any] = field(default_factory=dict, repr=False)
     # Overflow compaction attempt counter (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS)
@@ -507,6 +519,60 @@ class SessionLoop:
             ctx.last_compaction_step is not None
             and (ctx.step - ctx.last_compaction_step) <= POST_COMPACTION_COOLDOWN_STEPS
         )
+
+    @classmethod
+    def _request_mission_snapshot(
+        cls,
+        ctx: LoopContext,
+        reason: MissionSnapshotReason,
+    ) -> None:
+        """Request a State Snapshot without downgrading a stronger pending event."""
+        current_priority = MISSION_SNAPSHOT_REASON_PRIORITY.get(
+            ctx.mission_snapshot_reason,
+            0,
+        )
+        requested_priority = MISSION_SNAPSHOT_REASON_PRIORITY[reason]
+        if not ctx.mission_snapshot_pending or requested_priority >= current_priority:
+            ctx.mission_snapshot_reason = reason
+        ctx.mission_snapshot_pending = True
+
+    @staticmethod
+    def _has_finished_delegation(parts: List[Any]) -> bool:
+        """Return whether the latest assistant turn finished delegated work."""
+        for part in parts:
+            if getattr(part, "type", None) != "tool":
+                continue
+            if getattr(part, "tool", None) not in {"delegate_task", "task"}:
+                continue
+            state = getattr(part, "state", None)
+            if getattr(state, "status", None) in {"completed", "error"}:
+                return True
+        return False
+
+    @classmethod
+    async def _refresh_mission_context(cls, ctx: LoopContext) -> None:
+        """Refresh Guidance cheaply and read State only for pending events."""
+        was_active = ctx.mission_context is not None
+        context = await MissionContextProvider.load(
+            workspace_dir=ctx.session.directory,
+            session_id=ctx.session.id,
+            include_snapshot=ctx.mission_snapshot_pending,
+            snapshot_reason=ctx.mission_snapshot_reason,
+        )
+        if context is not None and not was_active and not ctx.mission_snapshot_pending:
+            cls._request_mission_snapshot(ctx, "mission_activated")
+            context = await MissionContextProvider.load(
+                workspace_dir=ctx.session.directory,
+                session_id=ctx.session.id,
+                include_snapshot=True,
+                snapshot_reason="mission_activated",
+            )
+        ctx.mission_context = context
+
+    @staticmethod
+    def _consume_mission_snapshot(ctx: LoopContext) -> None:
+        """Consume a pending Snapshot after one logical model step."""
+        ctx.mission_snapshot_pending = False
 
     @classmethod
     async def _detect_queued_user_message(
@@ -1487,6 +1553,8 @@ class SessionLoop:
                 if last_assistant
                 else []
             )
+            if cls._has_finished_delegation(last_assistant_parts):
+                cls._request_mission_snapshot(ctx, "subagent_completed")
 
             # Check exit conditions (matching TUI lines 295-302)
             if cls._should_exit(last_user, last_assistant, last_assistant_parts):
@@ -1519,18 +1587,6 @@ class SessionLoop:
                     })
                 except Exception as e:
                     log.error("loop.memory_bootstrap_error", {"error": str(e)})
-
-            try:
-                ctx.mission_context = await MissionContextProvider.load(
-                    workspace_dir=ctx.session.directory,
-                    session_id=ctx.session.id,
-                )
-            except (FileNotFoundError, OSError, ValueError) as exc:
-                ctx.mission_context = None
-                log.warn(
-                    "loop.mission_context_error",
-                    {"session_id": ctx.session.id, "error": str(exc)},
-                )
 
             # Early title generation: fire concurrently with the first LLM call so
             # the title is ready (or nearly so) by the time the response completes.
@@ -1641,6 +1697,8 @@ class SessionLoop:
                                 "session_id": ctx.session.id,
                                 "step": ctx.step,
                             })
+                        else:
+                            cls._request_mission_snapshot(ctx, "compaction")
 
                         # Continue after compaction (whether compacted or skipped)
                         continue
@@ -2005,6 +2063,7 @@ class SessionLoop:
                             else:
                                 # compaction_result == "continue": real success
                                 ctx.last_compaction_step = ctx.step
+                                cls._request_mission_snapshot(ctx, "compaction")
                                 set_context_state(
                                     ctx.session.id,
                                     compaction_performed=True,
@@ -2027,6 +2086,18 @@ class SessionLoop:
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
             
+            # Mission files are read only when a model call will actually run.
+            # Pending compaction/subtask handling above may continue the loop
+            # without invoking a model, so refreshing earlier would duplicate I/O.
+            try:
+                await cls._refresh_mission_context(ctx)
+            except (FileNotFoundError, OSError, ValueError) as exc:
+                ctx.mission_context = None
+                log.warn(
+                    "loop.mission_context_error",
+                    {"session_id": ctx.session.id, "error": str(exc)},
+                )
+
             # Process single step — wrap in a Task so abort() can cancel it immediately
             # rather than waiting for the current tool call to finish.
             step_task = asyncio.create_task(
@@ -2041,6 +2112,7 @@ class SessionLoop:
             step_started_at = asyncio.get_event_loop().time()
             try:
                 step_result = await step_task
+                cls._consume_mission_snapshot(ctx)
             except asyncio.CancelledError:
                 log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
                 break

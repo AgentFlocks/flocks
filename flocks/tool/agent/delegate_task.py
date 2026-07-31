@@ -37,6 +37,38 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.delegate_task")
 
 
+async def _find_mission_state_handoff(session: Any) -> str:
+    """Find the nearest ancestor Mission and render a child-safe handoff."""
+    from flocks.memory.state.mission import render_subagent_handoff
+
+    current = session
+    visited: set[str] = set()
+    while current is not None:
+        current_id = str(getattr(current, "id", "") or "")
+        if not current_id or current_id in visited:
+            return ""
+        visited.add(current_id)
+
+        workspace = getattr(current, "directory", None)
+        if workspace:
+            handoff = render_subagent_handoff(workspace, current_id)
+            if handoff:
+                return handoff
+
+        parent_id = getattr(current, "parent_id", None)
+        if not parent_id:
+            return ""
+        current = await Session.get_by_id(parent_id)
+    return ""
+
+
+def _append_mission_state_handoff(prompt: str, handoff: str) -> str:
+    """Append a child-safe shared State contract when a Mission is active."""
+    if not handoff:
+        return prompt
+    return f"{prompt.rstrip()}\n\n{handoff}"
+
+
 async def _run_subagent_with_hooks(
     *,
     ctx: ToolContext,
@@ -530,10 +562,14 @@ async def delegate_task_tool(
         session = await Session.get_by_id(session_id)
         if not session:
             return ToolResult(success=False, error=f"Session {session_id} not found")
+        continued_prompt = _append_mission_state_handoff(
+            prompt,
+            await _find_mission_state_handoff(session),
+        )
         await Message.create(
             session_id=session.id,
             role=MessageRole.USER,
-            content=prompt,
+            content=continued_prompt,
             agent=session.agent or ctx.agent,
         )
         from flocks.session.session_loop import LoopCallbacks
@@ -543,7 +579,7 @@ async def delegate_task_tool(
             child_session_id=session.id,
             child_agent=session.agent or ctx.agent,
             workspace=getattr(session, "directory", None) or "",
-            prompt=prompt,
+            prompt=continued_prompt,
             description=description,
             resumed=True,
             callbacks=LoopCallbacks(
@@ -606,6 +642,10 @@ async def delegate_task_tool(
     parent_session = await Session.get_by_id(ctx.session_id)
     if not parent_session:
         return ToolResult(success=False, error="Parent session not found")
+    full_prompt = _append_mission_state_handoff(
+        full_prompt,
+        await _find_mission_state_handoff(parent_session),
+    )
 
     from flocks.project.instance import Instance
 

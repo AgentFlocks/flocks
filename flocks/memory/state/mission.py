@@ -10,7 +10,7 @@ MISSION_CONTEXT_LIMIT = 16_000
 SHARED_CONTEXT_LIMIT = 8_000
 ARTIFACT_INDEX_LIMIT = 4_000
 
-MISSION_STATE_GUIDANCE = """### Usage guidance
+MISSION_STATE_GUIDANCE = """### Mission State usage
 
 Mission State is durable shared working state, not a transcript.
 
@@ -29,18 +29,36 @@ Mission State is durable shared working state, not a transcript.
   `artifacts/INDEX.md` with the path, summary, source, and related task or
   finding.
 
-The main Agent should re-read State before major planning decisions. When
-delegating, include the assigned task, State directory, and the child update
-requirements below in the delegation description.
-A delegated Agent must not read or edit `mission.md`. It may read shared
-progress and findings. Before finishing its delegated task, it must append its
-work and outcome to `progress.md`, update `findings.md` when it made a useful
-discovery, and store large or durable outputs under `artifacts/`. The main
-Agent reconciles those results into `mission.md`.
+Before changing the plan, delegating work, or claiming the Goal is complete,
+the main Agent must use filesystem tools to re-read `mission.md` and the
+relevant recent sections of `progress.md` and `findings.md`. After delegated
+work returns, reconcile useful results and task status into `mission.md`.
 
 Before editing a shared file, read its latest contents. Prefer precise edits or
 append-only entries, never overwrite another Agent's work, and link to artifacts
 instead of copying large outputs into State files.
+""".strip()
+
+SUBAGENT_STATE_GUIDANCE = """### Shared Mission State
+
+Your assigned task is described above.
+
+Shared State directory: `{state_dir}`
+
+You must not read or edit `mission.md`. You may read `progress.md` and
+`findings.md` when they help with your local task.
+
+Before finishing:
+
+- append your work, outcome, and Agent identity to `progress.md`;
+- update `findings.md` when you made a useful discovery, including evidence;
+- store large or durable outputs under `artifacts/` and update
+  `artifacts/INDEX.md`;
+- include a short Completion Report in your final response with the outcome
+  and the State files or artifacts you changed.
+
+Read a shared file immediately before editing it. Prefer precise edits or
+append-only entries and do not overwrite another Agent's work.
 """.strip()
 
 
@@ -72,8 +90,8 @@ def _read_bounded(path: Path, limit: int, *, tail: bool = False) -> str:
     return (content[:limit] + "\n…").strip()
 
 
-def render_state_snapshot(workspace_dir: str | Path, session_id: str) -> str:
-    """Render bounded dynamic State without parsing or mutating its files."""
+def render_resume_snapshot(workspace_dir: str | Path, session_id: str) -> str:
+    """Render bounded root State for Session or compaction recovery."""
     state_dir = mission_dir(workspace_dir, session_id)
     mission = _read_bounded(
         state_dir / "mission.md",
@@ -113,9 +131,62 @@ def render_state_snapshot(workspace_dir: str | Path, session_id: str) -> str:
     return "\n\n".join(parts)
 
 
+def render_shared_updates(workspace_dir: str | Path, session_id: str) -> str:
+    """Render shared State summaries after delegated work completes."""
+    state_dir = mission_dir(workspace_dir, session_id)
+    if not (state_dir / "mission.md").is_file():
+        return ""
+
+    progress = _read_bounded(
+        state_dir / "progress.md",
+        SHARED_CONTEXT_LIMIT,
+        tail=True,
+    )
+    findings = _read_bounded(
+        state_dir / "findings.md",
+        SHARED_CONTEXT_LIMIT,
+        tail=True,
+    )
+    artifacts = _read_bounded(
+        state_dir / "artifacts" / "INDEX.md",
+        ARTIFACT_INDEX_LIMIT,
+        tail=True,
+    )
+
+    parts = [
+        "## Delegated State Updates",
+        f"- State directory: `{state_dir}`",
+    ]
+    if findings:
+        parts.extend(["### Findings", findings])
+    if progress:
+        parts.extend(["### Progress", progress])
+    if artifacts:
+        parts.extend(["### Artifact Index", artifacts])
+    if len(parts) == 2:
+        parts.append("No shared State updates have been recorded yet.")
+    return "\n\n".join(parts)
+
+
+def render_subagent_handoff(
+    workspace_dir: str | Path,
+    owner_session_id: str,
+) -> str:
+    """Render shared paths and update requirements for a delegated Agent."""
+    state_dir = mission_dir(workspace_dir, owner_session_id)
+    if not (state_dir / "mission.md").is_file():
+        return ""
+    return SUBAGENT_STATE_GUIDANCE.format(state_dir=state_dir)
+
+
+def render_state_snapshot(workspace_dir: str | Path, session_id: str) -> str:
+    """Compatibility alias for the root recovery Snapshot."""
+    return render_resume_snapshot(workspace_dir, session_id)
+
+
 def render_hot_context(workspace_dir: str | Path, session_id: str) -> str:
     """Render Guidance and the current State Snapshot for compatibility."""
-    snapshot = render_state_snapshot(workspace_dir, session_id)
+    snapshot = render_resume_snapshot(workspace_dir, session_id)
     if not snapshot:
         return ""
     return "\n\n".join([MISSION_STATE_GUIDANCE, snapshot])

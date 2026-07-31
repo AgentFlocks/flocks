@@ -766,6 +766,10 @@ class TestBuildSystemPrompts:
             guidance=mission_v1.guidance,
             snapshot="mission snapshot v2",
         )
+        mission_guidance_only = MissionPromptContext(
+            path=mission_v1.path,
+            guidance=mission_v1.guidance,
+        )
 
         with (
             patch(
@@ -805,12 +809,25 @@ class TestBuildSystemPrompts:
                 mission_context=mission_v2,
                 static_cache=shared_cache,
             )
+            prompts3 = await SessionPrompt.build_system_prompts(
+                session_id=session.id,
+                session_directory=session.directory,
+                agent_name=agent.name,
+                agent_prompt=agent.prompt,
+                provider_id=runner.provider_id,
+                model_id=runner.model_id,
+                mission_context=mission_guidance_only,
+                static_cache=shared_cache,
+            )
 
         assert "mission guidance" in prompts1
         assert "mission guidance" in prompts2
+        assert "mission guidance" in prompts3
         assert "mission snapshot v1" in prompts1
         assert "mission snapshot v1" not in prompts2
         assert "mission snapshot v2" in prompts2
+        assert "mission snapshot v1" not in prompts3
+        assert "mission snapshot v2" not in prompts3
         assert prompts2.index("mission guidance") < prompts2.index("mission snapshot v2")
         env_mock.assert_called_once()
         runtime_mock.assert_called_once()
