@@ -1531,6 +1531,27 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
 
 
 @pytest.mark.asyncio
+async def test_to_chat_messages_excludes_ignored_assistant_text():
+    session = await Session.create(
+        project_id="test_runner_ignored_command_output",
+        directory="/tmp/runner-ignored-command-output",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Available Tools\n" + ("x" * 400),
+        providerID="builtin",
+        modelID="command",
+        ignored=True,
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert chat_messages == []
+
+
+@pytest.mark.asyncio
 async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
     session = await Session.create(
         project_id="test_runner_reasoning_replay",

@@ -1403,6 +1403,7 @@ class Message:
             # Pop TextPart-specific fields before message creation — they
             # belong on TextPart, not on UserMessageInfo/AssistantMessageInfo.
             _synthetic = kwargs.pop("synthetic", None)
+            _ignored = kwargs.pop("ignored", None)
             _part_metadata = kwargs.pop("part_metadata", None)
             
             # Create appropriate message type based on role
@@ -1454,6 +1455,8 @@ class Message:
             _part_extras = {}
             if _synthetic is not None:
                 _part_extras["synthetic"] = _synthetic
+            if _ignored is not None:
+                _part_extras["ignored"] = _ignored
             if _part_metadata is not None:
                 _part_extras["metadata"] = _part_metadata
             part = TextPart(
