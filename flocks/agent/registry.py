@@ -75,9 +75,11 @@ def _set_agents_ref(agents: Dict[str, AgentInfo]) -> None:
 # ---------------------------------------------------------------------------
 
 def is_delegatable(agent_name: str) -> bool:
-    if _agents_ref and agent_name in _agents_ref:
-        return bool(_agents_ref[agent_name].delegatable)
-    return True  # unknown → safe default
+    resolved = AGENT_ALIASES.get(agent_name, agent_name)
+    if not _agents_ref:
+        return False
+    agent = _agents_ref.get(resolved)
+    return bool(agent and agent.delegatable and not agent.hidden)
 
 
 def get_agent_mode(agent_name: str) -> Optional[str]:
@@ -94,7 +96,7 @@ def is_hidden(agent_name: str) -> bool:
 
 def list_delegatable_agents() -> List[str]:
     if _agents_ref:
-        return [n for n, a in _agents_ref.items() if a.delegatable]
+        return [n for n, a in _agents_ref.items() if a.delegatable and not a.hidden]
     return []
 
 

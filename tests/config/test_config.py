@@ -5,6 +5,7 @@ Tests for configuration module
 import pytest
 import json
 from pathlib import Path
+from unittest.mock import patch
 
 from flocks.config.config import Config, GlobalConfig, ConfigInfo, PermissionAction, PermissionConfig
 
@@ -36,6 +37,22 @@ def test_global_config():
 
 def test_delegate_categories_are_not_part_of_config_schema():
     assert "categories" not in ConfigInfo.model_fields
+
+
+def test_removed_delegate_categories_are_not_silently_preserved():
+    with patch("flocks.utils.log.Log.create") as create_log:
+        config = ConfigInfo.model_validate(
+            {
+                "categories": {
+                    "quick": {
+                        "model": "anthropic/claude-haiku-4-5",
+                    }
+                }
+            }
+        )
+
+    assert "categories" not in config.model_dump(exclude_none=True)
+    create_log.return_value.warn.assert_called_once()
 
 
 @pytest.mark.asyncio

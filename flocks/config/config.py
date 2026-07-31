@@ -728,6 +728,28 @@ class ConfigInfo(BaseModel):
         description="Console portal base URL used by OSS console account login redirect.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def remove_legacy_delegate_categories(cls, data):
+        """Drop the removed categories config instead of preserving it as an extra."""
+        if not isinstance(data, dict) or "categories" not in data:
+            return data
+
+        cleaned = dict(data)
+        cleaned.pop("categories", None)
+        from flocks.utils.log import Log
+
+        Log.create(service="config").warn(
+            "config.categories_removed",
+            {
+                "message": (
+                    "The categories configuration is no longer supported; "
+                    "select a delegatable agent with subagent_type."
+                )
+            },
+        )
+        return cleaned
+
     @model_validator(mode='after')
     def post_process(self):
         """Post-processing like TypeScript"""

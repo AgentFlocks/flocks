@@ -157,9 +157,9 @@ def inject(agent_info, available_agents, tools, skills, workflows=None):
     def test_legacy_builder_receives_empty_categories_and_workflows(self, tmp_path):
         """Legacy inject() signatures keep workflows in the correct argument."""
         builder_code = """
-def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+def inject(agent_info, available_agents, tools, skills, category_context, workflows=None):
     workflow_names = [workflow.name for workflow in (workflows or [])]
-    agent_info.prompt = repr((categories, workflow_names))
+    agent_info.prompt = repr((category_context, workflow_names))
 """
         builder_path = tmp_path / "legacy_builder.py"
         builder_path.write_text(textwrap.dedent(builder_code), encoding="utf-8")
@@ -175,6 +175,37 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
             )
             inject_dynamic_prompts(
                 {"legacy_agent": agent},
+                [],
+                [],
+                [],
+                _simple_workflows(),
+            )
+            assert agent.prompt == "([], ['ndr_triage', 'global_scan'])"
+        finally:
+            sys.path.pop(0)
+
+    def test_legacy_variadic_builder_receives_both_compatibility_arguments(self, tmp_path):
+        """Variadic legacy builders receive categories before workflows."""
+        builder_code = """
+def inject(agent_info, available_agents, tools, skills, *args):
+    categories, workflows = args
+    workflow_names = [workflow.name for workflow in workflows]
+    agent_info.prompt = repr((categories, workflow_names))
+"""
+        builder_path = tmp_path / "legacy_variadic_builder.py"
+        builder_path.write_text(textwrap.dedent(builder_code), encoding="utf-8")
+
+        import sys
+        sys.path.insert(0, str(tmp_path.parent))
+        try:
+            agent = AgentInfo(
+                name="legacy_variadic_agent",
+                mode="subagent",
+                native=False,
+                prompt_builder=f"{tmp_path.name}.legacy_variadic_builder:inject",
+            )
+            inject_dynamic_prompts(
+                {"legacy_variadic_agent": agent},
                 [],
                 [],
                 [],

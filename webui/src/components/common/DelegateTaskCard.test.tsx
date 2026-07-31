@@ -1,7 +1,10 @@
 import { fireEvent, render, screen } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 
-import DelegateTaskCard, { shouldRenderDelegateTaskCard } from './DelegateTaskCard';
+import DelegateTaskCard, {
+  extractDelegateInfo,
+  shouldRenderDelegateTaskCard,
+} from './DelegateTaskCard';
 import type { MessagePart } from '../../types';
 
 vi.mock('react-i18next', () => ({
@@ -82,7 +85,7 @@ describe('shouldRenderDelegateTaskCard', () => {
     expect(shouldRenderDelegateTaskCard(part)).toBe(true);
   });
 
-  it('does not use category as a delegate fallback', () => {
+  it('keeps category fallback for persisted legacy delegate records', () => {
     const part = {
       id: 'part-legacy',
       type: 'tool',
@@ -100,7 +103,7 @@ describe('shouldRenderDelegateTaskCard', () => {
       },
     } as MessagePart;
 
-    expect(shouldRenderDelegateTaskCard(part)).toBe(false);
+    expect(shouldRenderDelegateTaskCard(part)).toBe(true);
   });
 
   it('does not treat run_workflow with leaked child session metadata as a delegate task', () => {
@@ -122,6 +125,23 @@ describe('shouldRenderDelegateTaskCard', () => {
     } as MessagePart;
 
     expect(shouldRenderDelegateTaskCard(part)).toBe(false);
+  });
+});
+
+describe('extractDelegateInfo', () => {
+  it('uses the legacy category as the historical agent label', () => {
+    const info = extractDelegateInfo(
+      {
+        status: 'completed',
+        input: {
+          category: 'quick',
+          description: 'Legacy task',
+        },
+      },
+      'Sub-task',
+    );
+
+    expect(info.agentName).toBe('Quick');
   });
 });
 

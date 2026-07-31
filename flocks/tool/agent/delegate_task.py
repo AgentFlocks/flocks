@@ -376,6 +376,12 @@ SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues 
             required=False,
         ),
         ToolParameter(
+            name="command",
+            type=ParameterType.STRING,
+            description="Deprecated command name retained for caller compatibility",
+            required=False,
+        ),
+        ToolParameter(
             name="model",
             type=ParameterType.STRING,
             description="Optional model override (provider/model or model)",
@@ -395,6 +401,7 @@ async def delegate_task_tool(
     run_in_background: bool = False,
     subagent_type: Optional[str] = None,
     session_id: Optional[str] = None,
+    command: Optional[str] = None,
     model: Optional[str] = None,
 ) -> ToolResult:
     if run_in_background:

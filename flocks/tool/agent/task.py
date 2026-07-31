@@ -68,6 +68,12 @@ sibling tool calls in one assistant turn for parallel work.
             required=False,
         ),
         ToolParameter(
+            name="command",
+            type=ParameterType.STRING,
+            description="Deprecated command name retained for caller compatibility",
+            required=False,
+        ),
+        ToolParameter(
             name="model",
             type=ParameterType.STRING,
             description="Optional model override (provider/model or model)",
@@ -83,6 +89,7 @@ async def task_tool(
     load_skills: Optional[list] = None,
     run_in_background: bool = False,
     session_id: Optional[str] = None,
+    command: Optional[str] = None,
     model: Optional[str] = None,
 ) -> ToolResult:
     """Forward legacy task calls to delegate_task."""
@@ -94,5 +101,6 @@ async def task_tool(
         run_in_background=run_in_background,
         subagent_type=subagent_type,
         session_id=session_id,
+        command=command,
         model=model,
     )

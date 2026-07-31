@@ -30,7 +30,8 @@ class TestDelegateTaskTolerance:
         assert "load_skills" not in schema.required
         assert "description" not in schema.required
         assert "run_in_background" not in schema.properties
-        assert "command" not in schema.properties
+        assert "command" in schema.properties
+        assert "command" not in schema.required
         assert "tasks" not in schema.properties
 
     @pytest.mark.asyncio
@@ -127,6 +128,20 @@ class TestDelegateTaskTolerance:
         assert "unknown parameters: category" in (result.error or "")
 
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
+    async def test_delegate_tools_accept_deprecated_command_parameter(self, tool_name):
+        result = await ToolRegistry.execute(
+            tool_name,
+            ctx=_make_ctx(),
+            command="legacy-tracking-command",
+            prompt="Summarize the diff",
+        )
+
+        assert result.success is False
+        assert "unknown parameters: command" not in (result.error or "")
+        assert "subagent_type or session_id" in (result.error or "")
+
+    @pytest.mark.asyncio
     async def test_delegate_task_requires_subagent_for_new_task(self):
         result = await ToolRegistry.execute(
             "delegate_task",
@@ -149,6 +164,28 @@ class TestDelegateTaskTolerance:
 
         assert result.success is False
         assert 'Agent "restricted-agent" cannot be delegated to' in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_rejects_unknown_subagent(self, monkeypatch):
+        from flocks.agent import registry
+        from flocks.agent.agent import AgentInfo
+
+        known_agent = AgentInfo(
+            name="known-agent",
+            mode="subagent",
+            delegatable=True,
+        )
+        monkeypatch.setattr(registry, "_agents_ref", {"known-agent": known_agent})
+
+        result = await ToolRegistry.execute(
+            "delegate_task",
+            ctx=_make_ctx(),
+            subagent_type="explroe",
+            prompt="Summarize the diff",
+        )
+
+        assert result.success is False
+        assert 'Agent "explroe" cannot be delegated to' in (result.error or "")
 
     @pytest.mark.asyncio
     async def test_delegate_task_rejects_background_execution(self):

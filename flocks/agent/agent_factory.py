@@ -316,8 +316,27 @@ def inject_dynamic_prompts(
             module_path, func_name = agent.prompt_builder.rsplit(":", 1)
             module = importlib.import_module(module_path)
             inject_fn = getattr(module, func_name)
+            signature = inspect.signature(inject_fn)
+            positional_parameters = [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            has_variadic_arguments = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                for parameter in signature.parameters.values()
+            )
+            uses_legacy_signature = (
+                len(positional_parameters) >= 6
+                or (has_variadic_arguments and len(positional_parameters) <= 4)
+            )
+
             inject_args = [agent, available_agents, tools, skills]
-            if "categories" in inspect.signature(inject_fn).parameters:
+            if uses_legacy_signature:
                 inject_args.append([])
             inject_fn(*inject_args, workflows or [])
             log.debug("agent.factory.prompt_injected", {"name": name})
