@@ -575,13 +575,6 @@ async def edit_tool(
         if newString is None:
             return ToolResult(success=False, error="newString is required when oldString is empty", title=title)
         diff = trim_diff(generate_diff(filepath, "", newString))
-        await ctx.ask(
-            permission="edit",
-            patterns=[resolution.permission_pattern],
-            always=["*"],
-            metadata={"filepath": filepath, "diff": diff},
-        )
-
         parent_dir = os.path.dirname(filepath)
         if parent_dir and not os.path.exists(parent_dir):
             os.makedirs(parent_dir, exist_ok=True)
@@ -653,13 +646,6 @@ async def edit_tool(
 
     content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
     diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
-
-    await ctx.ask(
-        permission="edit",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={"filepath": filepath, "diff": diff},
-    )
 
     try:
         with open(filepath, "w", encoding="utf-8", newline="") as file_handle:

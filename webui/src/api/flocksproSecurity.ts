@@ -10,6 +10,7 @@ export interface SecurityOverview {
       command: RolloutMode;
       ingress: IngressRolloutMode;
       visibility: RolloutMode;
+      filesystem: RolloutMode;
     };
     source: string;
   };
@@ -22,6 +23,19 @@ export interface SecurityOverview {
   audit: {
     webhookConfigured: boolean;
   };
+  filesystem: {
+    excludedTools: string[];
+    policyVersion: string;
+    decisionMatrix: Record<string, Record<string, string>>;
+    runtimeOverrides: Record<string, Record<string, string>>;
+    hardDenies: Record<string, boolean>;
+    sharedPermissionMode: {
+      supported: string[];
+      default: string;
+    };
+    permissionDefaults: Record<string, string>;
+    runtimeDefaults: Record<string, string>;
+  };
 }
 
 export const flocksproSecurityApi = {
@@ -32,6 +46,7 @@ export const flocksproSecurityApi = {
     command: RolloutMode;
     ingress: IngressRolloutMode;
     visibility: RolloutMode;
+    filesystem: RolloutMode;
   }): Promise<{
     effective: SecurityOverview['rollout']['effective'];
     source: string;

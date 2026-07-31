@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Link } from 'react-router-dom';
 import {
@@ -12,6 +12,7 @@ import {
   Shield,
   ShieldAlert,
   Terminal,
+  X,
   type LucideIcon,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
@@ -110,6 +111,16 @@ function ModeSegmented({
   );
 }
 
+function RulePill({ value }: { value: string }) {
+  const normalized = String(value || '').toLowerCase();
+  const classes = normalized.includes('deny')
+    ? 'bg-rose-100 text-rose-700 dark:bg-rose-900/30 dark:text-rose-300'
+    : normalized.includes('ask')
+      ? 'bg-amber-100 text-amber-700 dark:bg-amber-900/30 dark:text-amber-300'
+      : 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/30 dark:text-emerald-300';
+  return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${classes}`}>{value}</span>;
+}
+
 export default function SecurityConfigPage() {
   const { t } = useTranslation('flockspro');
   const toast = useToast();
@@ -121,7 +132,11 @@ export default function SecurityConfigPage() {
     command: RolloutMode;
     ingress: IngressRolloutMode;
     visibility: RolloutMode;
+    filesystem: RolloutMode;
   } | null>(null);
+  const [filesystemDrawerOpen, setFilesystemDrawerOpen] = useState(false);
+  const filesystemDrawerTriggerRef = useRef<HTMLButtonElement | null>(null);
+  const filesystemDrawerCloseRef = useRef<HTMLButtonElement | null>(null);
 
   const loadAll = async () => {
     setLoading(true);
@@ -139,6 +154,29 @@ export default function SecurityConfigPage() {
   useEffect(() => {
     void loadAll();
   }, []);
+
+  useEffect(() => {
+    if (!filesystemDrawerOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setFilesystemDrawerOpen(false);
+      }
+    };
+    window.addEventListener('keydown', onKeyDown);
+    const timer = window.setTimeout(() => {
+      filesystemDrawerCloseRef.current?.focus();
+    }, 0);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown);
+      window.clearTimeout(timer);
+    };
+  }, [filesystemDrawerOpen]);
+
+  useEffect(() => {
+    if (filesystemDrawerOpen) return;
+    filesystemDrawerTriggerRef.current?.focus();
+  }, [filesystemDrawerOpen]);
 
   const rolloutDirty = useMemo(() => {
     if (!overview || !rolloutDraft) return false;
@@ -258,6 +296,20 @@ export default function SecurityConfigPage() {
                     ]}
                   />
                 </ConfigRow>
+                <ConfigRow
+                  icon={Shield}
+                  title={t('security.labels.filesystemRollout', '文件管控')}
+                  description={t('security.hints.filesystemRollout', '控制文件工具策略以审计模式或强制模式运行')}
+                >
+                  <ModeSegmented
+                    value={rolloutDraft.filesystem}
+                    onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, filesystem: value as RolloutMode } : prev))}
+                    options={[
+                      { label: t('security.modes.shadow'), value: 'shadow' },
+                      { label: t('security.modes.enforce'), value: 'enforce' },
+                    ]}
+                  />
+                </ConfigRow>
 
               </div>
             )}
@@ -302,6 +354,177 @@ export default function SecurityConfigPage() {
               </div>
             </div>
           </Card>
+
+          <Card
+            title={t('security.sections.filesystemPolicy', '文件管控策略矩阵')}
+            description={t('security.sections.filesystemPolicyDescription', '展示后端权威返回的文件权限决策矩阵、Runtime 覆盖和硬拒绝项。')}
+            action={(
+              <button
+                ref={filesystemDrawerTriggerRef}
+                type="button"
+                onClick={() => setFilesystemDrawerOpen(true)}
+                className="inline-flex h-9 items-center rounded-md border border-zinc-200 px-3 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+              >
+                {t('security.actions.viewFilesystemDetails', '查看详情')}
+              </button>
+            )}
+          >
+            <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-3">
+              <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                <div className="text-zinc-500 dark:text-zinc-400">{t('security.labels.filesystemPolicyVersion', '策略版本')}</div>
+                <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{overview.filesystem.policyVersion}</div>
+              </div>
+              <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                <div className="text-zinc-500 dark:text-zinc-400">{t('security.labels.filesystemSharedModeDefault', '共享权限默认')}</div>
+                <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{overview.filesystem.sharedPermissionMode.default}</div>
+              </div>
+              <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
+                <div className="text-zinc-500 dark:text-zinc-400">{t('security.labels.filesystemHardDenyCount', '硬拒绝规则数')}</div>
+                <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">
+                  {Object.values(overview.filesystem.hardDenies).filter((enabled) => Boolean(enabled)).length}
+                </div>
+              </div>
+            </div>
+          </Card>
+
+          {filesystemDrawerOpen && (
+            <div className="fixed inset-0 z-50">
+              <button
+                type="button"
+                aria-label={t('security.actions.closeFilesystemDetails', '关闭详情')}
+                className="absolute inset-0 bg-black/40"
+                onClick={() => setFilesystemDrawerOpen(false)}
+              />
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-label={t('security.sections.filesystemPolicy', '文件管控策略矩阵')}
+                className="absolute right-0 top-0 h-full w-full max-w-[66vw] min-w-[320px] overflow-y-auto border-l border-zinc-200 bg-white p-5 shadow-2xl dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+                      {t('security.sections.filesystemPolicy', '文件管控策略矩阵')}
+                    </h2>
+                    <p className="mt-1 text-sm text-zinc-500 dark:text-zinc-400">
+                      {t('security.sections.filesystemPolicyDescription', '展示后端权威返回的文件权限决策矩阵、Runtime 覆盖和硬拒绝项。')}
+                    </p>
+                  </div>
+                  <button
+                    ref={filesystemDrawerCloseRef}
+                    type="button"
+                    onClick={() => setFilesystemDrawerOpen(false)}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    aria-label={t('security.actions.closeFilesystemDetails', '关闭详情')}
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                    <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
+                      {t('security.labels.filesystemSharedPermissionMode', '共享权限模式')}
+                    </div>
+                    <div className="mb-2 text-zinc-600 dark:text-zinc-300">
+                      default: <RulePill value={overview.filesystem.sharedPermissionMode.default} />
+                    </div>
+                    <div className="flex flex-wrap gap-2">
+                      {overview.filesystem.sharedPermissionMode.supported.map((mode) => (
+                        <RulePill key={mode} value={mode} />
+                      ))}
+                    </div>
+                  </div>
+                  <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+                    <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                      <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
+                        {t('security.labels.filesystemPermissionDefaults', 'Permission 默认值')}
+                      </div>
+                      {Object.entries(overview.filesystem.permissionDefaults).map(([entry, mode]) => (
+                        <div key={`permission-${entry}`} className="flex items-center justify-between border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">
+                          <span className="text-zinc-600 dark:text-zinc-300">{entry}</span>
+                          <RulePill value={mode} />
+                        </div>
+                      ))}
+                    </div>
+                    <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                      <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
+                        {t('security.labels.filesystemRuntimeDefaults', 'Runtime 默认值')}
+                      </div>
+                      {Object.entries(overview.filesystem.runtimeDefaults).map(([entry, mode]) => (
+                        <div key={`runtime-${entry}`} className="flex items-center justify-between border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">
+                          <span className="text-zinc-600 dark:text-zinc-300">{entry}</span>
+                          <RulePill value={mode} />
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                      {t('security.labels.filesystemDecisionMatrix', 'Permission mode 决策矩阵')}
+                    </div>
+                    <div className="max-h-72 overflow-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                      <table className="min-w-full text-xs">
+                        <thead className="bg-zinc-50 dark:bg-zinc-800/60">
+                          <tr>
+                            <th className="px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300">Operation</th>
+                            <th className="px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300">readonly</th>
+                            <th className="px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300">require-confirm</th>
+                            <th className="px-3 py-2 text-left font-semibold text-zinc-700 dark:text-zinc-300">auto-allow-all</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {Object.keys(overview.filesystem.decisionMatrix.readonly || {}).map((operation) => (
+                            <tr key={operation} className="border-t border-zinc-100 dark:border-zinc-800">
+                              <td className="px-3 py-2 font-medium text-zinc-800 dark:text-zinc-100">{operation}</td>
+                              <td className="px-3 py-2"><RulePill value={overview.filesystem.decisionMatrix.readonly?.[operation] || '-'} /></td>
+                              <td className="px-3 py-2"><RulePill value={overview.filesystem.decisionMatrix['require-confirm']?.[operation] || '-'} /></td>
+                              <td className="px-3 py-2"><RulePill value={overview.filesystem.decisionMatrix['auto-allow-all']?.[operation] || '-'} /></td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                      {t('security.labels.filesystemRuntimeOverrides', 'Runtime mode 覆盖矩阵')}
+                    </div>
+                    <div className="max-h-56 overflow-auto rounded-lg border border-zinc-200 p-2 text-xs dark:border-zinc-700">
+                      {Object.entries(overview.filesystem.runtimeOverrides).map(([mode, regionMap]) => (
+                        <div key={mode} className="mb-2 rounded border border-zinc-100 p-2 dark:border-zinc-800">
+                          <div className="mb-1 text-[11px] font-semibold text-zinc-700 dark:text-zinc-300">{mode}</div>
+                          {Object.entries(regionMap).map(([region, rule]) => (
+                            <div key={`${mode}-${region}`} className="flex items-center justify-between py-0.5">
+                              <span className="text-zinc-600 dark:text-zinc-300">{region}</span>
+                              <RulePill value={rule} />
+                            </div>
+                          ))}
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                      {t('security.labels.filesystemHardDenies', '文件硬拒绝项')}
+                    </div>
+                    <div className="max-h-40 overflow-auto rounded-lg border border-zinc-200 p-2 text-xs dark:border-zinc-700">
+                      {Object.entries(overview.filesystem.hardDenies)
+                        .filter(([, enabled]) => Boolean(enabled))
+                        .map(([rule]) => (
+                          <div key={rule} className="border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">
+                            {rule}
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
         </>
       )}
     </div>

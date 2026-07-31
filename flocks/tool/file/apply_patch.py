@@ -424,14 +424,6 @@ async def apply_patch_tool(
                 ),
             )
     
-    # Request permission
-    await ctx.ask(
-        permission="edit",
-        patterns=[c["permissionPattern"] for c in file_changes],
-        always=["*"],
-        metadata={"diff": total_diff}
-    )
-    
     # Apply changes
     changed_files = []
     

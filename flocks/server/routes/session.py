@@ -1060,7 +1060,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     from flocks.session.execution_profile import PROFILE_METADATA_KEY
 
     session_execution_profile = {
-        "entry": "interactive",
+        "entry": "webui",
         "source": "webui.session.create",
     }
 
@@ -1102,7 +1102,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 "type": "session.execution_profile.updated",
                 "properties": {
                     "session_id": session.id,
-                    "entry": "interactive",
+                    "entry": "webui",
                     "session_execution_profile": session_execution_profile,
                 },
             }

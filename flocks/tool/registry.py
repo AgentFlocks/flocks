@@ -591,11 +591,33 @@ class Tool:
                 tool_context_extra=tool_context_extra,
                 execution_domain="execution_runtime",
             )
+            if self.info.category == ToolCategory.FILE:
+                from flocks.hooks.pipeline import HookPipeline
 
-            result = await execute_with_hooks(
-                payload,
-                lambda: self.handler(ctx, **coerced_kwargs),
-            )
+                async def _run_action_effect():
+                    return await execute_with_hooks(
+                        payload,
+                        lambda: self.handler(ctx, **coerced_kwargs),
+                    )
+
+                filesystem_payload = {
+                    **payload,
+                    "operation": "filesystem.execute",
+                    "filesystem_action": dict(
+                        (payload.get("tool_context_extra") or {}).get("filesystem_action") or {}
+                    ),
+                }
+                result = await execute_with_hooks(
+                    filesystem_payload,
+                    _run_action_effect,
+                    before=HookPipeline.run_filesystem_before,
+                    after=HookPipeline.run_filesystem_after,
+                )
+            else:
+                result = await execute_with_hooks(
+                    payload,
+                    lambda: self.handler(ctx, **coerced_kwargs),
+                )
 
             # Auto-truncate output unless the tool already handled it
             if result.success and not result.truncated:
@@ -1674,7 +1696,21 @@ class ToolRegistry:
 
         _tool_groups = [
             # file/ — filesystem operations
-            ("flocks.tool.file", ["read", "write", "edit", "apply_patch", "glob", "doc_parser"]),
+            (
+                "flocks.tool.file",
+                [
+                    "read",
+                    "write",
+                    "edit",
+                    "apply_patch",
+                    "glob",
+                    "doc_parser",
+                    "delete",
+                    "move",
+                    "copy",
+                    "mkdir",
+                ],
+            ),
             # code/ — code analysis + terminal
             ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
             # web/ — internet access
