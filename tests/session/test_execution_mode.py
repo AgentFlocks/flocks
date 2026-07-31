@@ -89,8 +89,10 @@ def test_pentest_uses_build_permissions_and_orchestration_prompt() -> None:
     assert 'load_skills=["pentest-verify"]' in prompt
     assert "Do not load or perform `pentest-analysis` yourself" in prompt
     assert "Attack Surface Model" in prompt
-    assert "more than four Analysis or Verify workers" in normalized_prompt
-    assert "waves of at most four" in normalized_prompt
+    assert "more than four workers" in normalized_prompt
+    assert "20 review units require five waves" in normalized_prompt
+    assert "Analysis queue is empty" in normalized_prompt
+    assert "Verify queue is empty" in normalized_prompt
     assert "Docker is attempted only by Verify workers" in normalized_prompt
     assert "Do not preflight Docker" in normalized_prompt
     assert "Only `CONFIRMED`" in prompt

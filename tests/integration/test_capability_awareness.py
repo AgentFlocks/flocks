@@ -276,6 +276,22 @@ class TestRexPromptAwareness:
         assert "## 2. Path Selection" in rex.prompt
 
     @pytest.mark.asyncio
+    async def test_rex_prompt_uses_agent_selection_without_key_triggers(self):
+        """Rex 只保留 agent selection，并明确只读请求不得触发实施。"""
+        from flocks.agent.registry import Agent
+
+        rex = await Agent.get("rex")
+        prompt = rex.prompt or ""
+
+        assert "### Available Agents:" in prompt
+        assert "### Key Triggers" not in prompt
+        assert "Explore, then answer" in prompt
+        assert (
+            "Do not implement or mutate state unless the user explicitly requests execution"
+            in prompt
+        )
+
+    @pytest.mark.asyncio
     async def test_rex_prompt_contains_subagents_section(self):
         """Rex prompt 必须包含 SubAgent 信息。"""
         from flocks.agent.registry import Agent

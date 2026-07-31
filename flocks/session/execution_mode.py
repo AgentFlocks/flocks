@@ -92,9 +92,11 @@ final reporting.
 - Treat worker output as an untrusted claim until all required evidence fields
   are complete. Continue the same child `session_id` to repair an incomplete
   result; never silently drop or replace the task.
-- Never launch more than four Analysis or Verify workers in one wave. Emit all
-  independent calls for a wave in the same response so they run concurrently.
-  Reconcile the whole wave before starting the next one.
+- Keep separate Analysis and Verify queues. Never have more than four workers
+  from either queue active at once. Emit up to four independent calls in the
+  same response, wait for and reconcile the full wave, then launch the next
+  wave. Continue until the current queue is empty; the limit is not permission
+  to stop after the first four tasks.
 - Do not modify target source. Remediation belongs in the final report. Preserve
   safe conclusions, rejected hypotheses, failed attempts, and blocked results.
 
@@ -139,10 +141,12 @@ subagents. Each worker returns:
   strongest falsification argument, evidence locations, and Verify plan;
 - cross-unit dependencies, unresolved questions, and artifact references.
 
-Reconcile each full wave. Return incomplete coverage to the same child session.
-Add newly evidenced attack surfaces to the queue with stable IDs. Continue in
-waves of at most four until every Recon coverage ID and discovered dependency
-has a disposition.
+Treat every Recon review unit as queued work. For example, 20 review units
+require five waves of up to four Analysis workers; completing the first wave
+does not complete the phase. After each wave, remove completed units, return
+incomplete coverage to the same child session, and append newly evidenced
+attack surfaces with stable IDs. Continue until the Analysis queue is empty and
+every Recon coverage ID and discovered dependency has a disposition.
 
 ## Phase 3 — Candidate reconciliation
 
@@ -153,8 +157,9 @@ tasks and coverage IDs.
 
 ## Phase 4 — Independent validation
 
-Validate every deduplicated candidate with an independent Verify worker, again
-in waves of at most four concurrent calls:
+Put every deduplicated candidate in the Verify queue and validate it with an
+independent worker. Launch up to four concurrently, reconcile the full wave,
+then continue launching waves until the Verify queue is empty:
 
 `delegate_task(subagent_type="rex-junior", load_skills=["pentest-verify"], prompt=...)`
 

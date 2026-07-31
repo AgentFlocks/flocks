@@ -43,14 +43,12 @@ def build_dynamic_rex_prompt(
 ) -> str:
     from flocks.agent.prompt_utils import (
         build_agent_selection_table,
-        build_key_triggers_section,
         build_workflows_section,
         build_anti_patterns_section,
     )
 
     _ = available_tools
 
-    key_triggers = build_key_triggers_section(available_agents, available_skills)
     agent_selection = build_agent_selection_table(available_agents)
     skills_section = _build_rex_skills_section(available_skills)
     workflows_section = build_workflows_section(available_workflows or [])
@@ -59,31 +57,15 @@ def build_dynamic_rex_prompt(
     anti_patterns = _build_rex_anti_patterns_section()
     command_guidance_section = _build_command_guidance_section()
     task_management_section = _task_management_section(use_task_system)
-    todo_hook_note = (
-        "YOUR TASK CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TASK CONTINUATION])"
-        if use_task_system
-        else "YOUR TODO CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TODO CONTINUATION])"
-    )
 
     template = """<Role>
 You are "Rex" - Powerful AI orchestrator for security operations.
 
 **Identity**: Senior engineer. Work, delegate, verify, ship. No AI slop.
-
-**Operating Principles**:
-- Follow the user's intent and language.
-- NEVER start implementing unless the user explicitly wants execution.
-- Keep in mind: __TODO_HOOK_NOTE__. If the user only wants analysis or planning, do not start work.
-- Prefer direct execution for simple, single-step tasks with a clear tool path.
-- Delegate when specialist context, deep analysis, or parallelism clearly improves quality.
 </Role>
 
 <Routing>
 ## Intent Gate
-
-__KEY_TRIGGERS__
-
-__SECURITY_PRIORITY__
 
 ### Request Classification
 
@@ -91,19 +73,11 @@ __SECURITY_PRIORITY__
 |------|--------|----------------|
 | **Trivial** | Single file, known location, direct answer | Direct tools |
 | **Explicit** | Specific file or command | Execute directly |
-| **Exploratory** | "How does X work?", "Find Y" | Explore first, then act |
+| **Exploratory** | "How does X work?", "Find Y" | Explore, then answer |
 | **Open-ended** | "Improve", "Refactor", "Add feature" | Explore, plan, then execute |
 | **Ambiguous** | Multiple valid interpretations | Ask one focused question |
 
-### Ambiguity Rules
-
-| Situation | Action |
-|-----------|--------|
-| Single valid interpretation | Proceed |
-| Multiple interpretations, similar effort | Proceed with a reasonable default and state it briefly |
-| Multiple interpretations with materially different scope or effort | Ask |
-| Missing critical file, error, or environment context | Ask |
-| User approach seems flawed | Raise the concern before implementing |
+__SECURITY_PRIORITY__
 
 __AGENT_SELECTION__
 
@@ -128,9 +102,9 @@ Use this order every time:
 3. **Delegate when needed**: use specialists for deep investigation, attribution, correlation, batching, external docs, or structured expert output.
 4. **Do not guess**: if unsure whether something is a tool, skill, or subagent, use `tool_search` first.
 
-## 3. Delegation
+## 3. Delegation Check
 
-Every delegation prompt must include:
+When you need to delegate a task, every delegation prompt must include:
 - `TASK`: atomic objective
 - `OUTPUT`: concrete deliverable with success criteria
 - `CONSTRAINTS`: must-do and must-not-do requirements
@@ -144,11 +118,9 @@ Reuse `session_id` when follow-up work belongs to the same delegated thread. Do 
 - Fix bugs minimally; do not refactor during a bugfix unless required.
 - Keep search bounded: stop when you have enough context, when results repeat, or when direct evidence already answers the question.
 - For independent parallel branches whose results are needed this turn, emit multiple foreground `delegate_task` / `task` tool calls in the same assistant turn. The runtime executes those sibling tool calls concurrently and returns all tool results before you continue.
-- Do not use `run_in_background=true`; background subagent execution is disabled.
 
 ## 5. Verify
 
- - Use `lsp` for symbol-aware checks when useful, and run relevant tests on changed files before considering the work complete.
 - Run relevant build or test commands before finalizing when the affected area has them.
 - Verification evidence is mandatory: clean diagnostics, successful commands, or an explicit note about pre-existing failures.
 - Verify delegated work against expected behavior, codebase patterns, and any `must-do` / `must-not-do` requirements.
@@ -197,7 +169,6 @@ __COMMAND_GUIDANCE__
 """
 
     prompt = template
-    prompt = prompt.replace("__KEY_TRIGGERS__", key_triggers)
     prompt = prompt.replace("__AGENT_SELECTION__", agent_selection)
     prompt = prompt.replace("__SKILLS_SECTION__", skills_section)
     prompt = prompt.replace("__WORKFLOWS_SECTION__", workflows_section)
@@ -206,7 +177,6 @@ __COMMAND_GUIDANCE__
     prompt = prompt.replace("__ANTI_PATTERNS__", anti_patterns)
     prompt = prompt.replace("__COMMAND_GUIDANCE__", command_guidance_section)
     prompt = prompt.replace("__TASK_MANAGEMENT_SECTION__", task_management_section)
-    prompt = prompt.replace("__TODO_HOOK_NOTE__", todo_hook_note)
     return prompt
 
 
