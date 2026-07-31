@@ -16,14 +16,30 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from flocks.agent.agent import AvailableAgent, AvailableCategory, AvailableSkill, AvailableTool, AvailableWorkflow
+from flocks.agent.agent import AvailableAgent, AvailableSkill, AvailableTool, AvailableWorkflow
 from flocks.agent.prompt_utils import (
     _format_tools_for_prompt,
     build_agent_selection_table,
+    build_skills_delegation_guide,
     build_tool_selection_table,
     build_workflows_section,
     categorize_tools,
 )
+
+
+def test_skills_delegation_guide_uses_subagent_routing():
+    output = build_skills_delegation_guide([
+        AvailableSkill(
+            name="security-review",
+            description="Review security-sensitive changes.",
+            location="/tmp/SKILL.md",
+        )
+    ])
+
+    assert 'subagent_type="[selected-agent]"' in output
+    assert "security-review" in output
+    assert "category=" not in output
+    assert "Available Categories" not in output
 
 
 # ---------------------------------------------------------------------------

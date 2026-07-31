@@ -13,7 +13,6 @@ if TYPE_CHECKING:
         AvailableAgent,
         AvailableTool,
         AvailableSkill,
-        AvailableCategory,
         AvailableWorkflow,
     )
 
@@ -23,7 +22,6 @@ def inject(
     available_agents: List["AvailableAgent"],
     tools: List["AvailableTool"],
     skills: List["AvailableSkill"],
-    categories: List["AvailableCategory"],
     workflows: Optional[List["AvailableWorkflow"]] = None,
 ) -> None:
     """Build and inject Rex's dynamic system prompt."""
@@ -31,7 +29,6 @@ def inject(
         available_agents=available_agents,
         available_tools=tools,
         available_skills=skills,
-        available_categories=categories,
         available_workflows=workflows or [],
         use_task_system=False,
     )
@@ -41,7 +38,6 @@ def build_dynamic_rex_prompt(
     available_agents: List["AvailableAgent"],
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
-    available_categories: List["AvailableCategory"],
     available_workflows: Optional[List["AvailableWorkflow"]] = None,
     use_task_system: bool = False,
 ) -> str:
@@ -52,7 +48,7 @@ def build_dynamic_rex_prompt(
         build_anti_patterns_section,
     )
 
-    _ = available_tools, available_categories
+    _ = available_tools
 
     key_triggers = build_key_triggers_section(available_agents, available_skills)
     agent_selection = build_agent_selection_table(available_agents)
@@ -130,7 +126,7 @@ Use this order every time:
 1. **Direct tools first**: if there is a short tool path, execute directly.
 2. **Security exception**: for one IOC that only needs basic TI facts, prefer direct lookup.
 3. **Delegate when needed**: use specialists for deep investigation, attribution, correlation, batching, external docs, or structured expert output.
-4. **Do not guess**: if unsure whether something is a tool, skill, category, or subagent, use `tool_search` first.
+4. **Do not guess**: if unsure whether something is a tool, skill, or subagent, use `tool_search` first.
 
 ## 3. Delegation
 

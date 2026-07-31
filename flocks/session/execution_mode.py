@@ -111,7 +111,6 @@ def tool_call_denial_reason(
         subagent_type = str(arguments.get("subagent_type") or "").strip().lower()
         if (
             subagent_type in PLAN_DELEGATABLE_AGENT_NAMES
-            and not arguments.get("category")
             and not arguments.get("session_id")
         ):
             return None

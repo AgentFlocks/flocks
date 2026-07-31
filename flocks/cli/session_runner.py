@@ -654,7 +654,7 @@ class CLISessionRunner:
             self._flush_content()
         
         if tool_name in DELEGATE_TOOLS:
-            agent = arguments.get("subagent_type") or arguments.get("category") or "unknown"
+            agent = arguments.get("subagent_type") or "unknown"
             desc = arguments.get("description", "子任务")
             bg = " [dim](后台)[/dim]" if arguments.get("run_in_background") else ""
             self.console.print(

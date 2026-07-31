@@ -14,7 +14,6 @@ if TYPE_CHECKING:
         AvailableAgent,
         AvailableTool,
         AvailableSkill,
-        AvailableCategory,
     )
 
 
@@ -23,7 +22,6 @@ def inject(
     available_agents: List["AvailableAgent"],
     tools: List["AvailableTool"],
     skills: List["AvailableSkill"],
-    categories: List["AvailableCategory"],
     workflows: Optional[list] = None,
 ) -> None:
     """Build and inject Hephaestus's dynamic system prompt."""
@@ -31,7 +29,6 @@ def inject(
         available_agents=available_agents,
         available_tools=tools,
         available_skills=skills,
-        available_categories=categories,
         use_task_system=False,
     )
 
@@ -40,7 +37,6 @@ def build_hephaestus_prompt(
     available_agents: List["AvailableAgent"],
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
-    available_categories: List["AvailableCategory"],
     use_task_system: bool = False,
 ) -> str:
     from flocks.agent.prompt_utils import (
@@ -49,7 +45,7 @@ def build_hephaestus_prompt(
         build_tool_selection_table,
         build_explore_section,
         build_librarian_section,
-        build_category_skills_delegation_guide,
+        build_skills_delegation_guide,
         build_delegation_table,
         build_oracle_section,
         build_hard_blocks_section,
@@ -61,7 +57,7 @@ def build_hephaestus_prompt(
     agent_selection = build_agent_selection_table(available_agents)
     explore_section = build_explore_section(available_agents)
     librarian_section = build_librarian_section(available_agents)
-    category_skills_guide = build_category_skills_delegation_guide(available_categories, available_skills)
+    skills_guide = build_skills_delegation_guide(available_skills)
     delegation_table = build_delegation_table(available_agents)
     oracle_section = build_oracle_section(available_agents)
     hard_blocks = build_hard_blocks_section()
@@ -158,9 +154,7 @@ Agent: *runs gh pr list, gh pr view, searches recent commits*
 
 **Delegation Check (MANDATORY before acting directly):**
 1. Is there a specialized agent that perfectly matches this request?
-2. If not, is there a `delegate_task` category that best describes this task? What skills are available to equip the agent with?
-   - If delegating by `category=...`, evaluate relevant skills and pass them via `load_skills=[...]`.
-   - If delegating by `subagent_type=...`, `load_skills` may be omitted unless a specific skill is clearly needed.
+2. If so, delegate with `subagent_type=...` and evaluate which skills should be passed via `load_skills=[...]`.
 3. Can I do it myself for the best result, FOR SURE?
 
 **Default Bias: DELEGATE for complex tasks. Work yourself ONLY when trivial.**
@@ -197,7 +191,7 @@ Launch 3+ tool calls in your first action. Never sequential unless output depend
 
 ## Phase 2 - Implementation
 
-__CATEGORY_SKILLS_GUIDE__
+__SKILLS_GUIDE__
 
 __DELEGATION_TABLE__
 
@@ -241,7 +235,7 @@ Before final response:
     prompt = prompt.replace("__AGENT_SELECTION__", agent_selection)
     prompt = prompt.replace("__EXPLORE_SECTION__", explore_section)
     prompt = prompt.replace("__LIBRARIAN_SECTION__", librarian_section)
-    prompt = prompt.replace("__CATEGORY_SKILLS_GUIDE__", category_skills_guide)
+    prompt = prompt.replace("__SKILLS_GUIDE__", skills_guide)
     prompt = prompt.replace("__DELEGATION_TABLE__", delegation_table)
     prompt = prompt.replace("__HARD_BLOCKS__", hard_blocks)
     prompt = prompt.replace("__ANTI_PATTERNS__", anti_patterns)
