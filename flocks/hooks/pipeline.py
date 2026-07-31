@@ -43,6 +43,8 @@ class HookStage:
     INGRESS_AFTER = "ingress.after"
     ACTION_BEFORE = "action.before"
     ACTION_AFTER = "action.after"
+    FILESYSTEM_BEFORE = "filesystem.before"
+    FILESYSTEM_AFTER = "filesystem.after"
     CAPABILITY_FILTER = "capability.filter"
     SESSION_CHILD_BEFORE = "session.child.before"
     SESSION_CHILD_AFTER = "session.child.after"
@@ -68,6 +70,8 @@ _DEFAULT_STAGE_TIMEOUTS: Dict[str, float] = {
     HookStage.INGRESS_AFTER: 5.0,
     HookStage.ACTION_BEFORE: 5.0,
     HookStage.ACTION_AFTER: 5.0,
+    HookStage.FILESYSTEM_BEFORE: 5.0,
+    HookStage.FILESYSTEM_AFTER: 5.0,
     HookStage.CAPABILITY_FILTER: 5.0,
     HookStage.SESSION_CHILD_BEFORE: 5.0,
     HookStage.SESSION_CHILD_AFTER: 5.0,
@@ -131,6 +135,12 @@ class HookBase:
         return None
 
     async def action_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def filesystem_before(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
+        return None
+
+    async def filesystem_after(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
         return None
 
     async def capability_filter(self, ctx: HookContext) -> None:  # pragma: no cover - default no-op
@@ -397,6 +407,22 @@ class HookPipeline:
         return await cls._run_stage(HookStage.ACTION_AFTER, input_data, output_data)
 
     @classmethod
+    async def run_filesystem_before(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.FILESYSTEM_BEFORE, input_data, output_data)
+
+    @classmethod
+    async def run_filesystem_after(
+        cls,
+        input_data: Dict[str, Any],
+        output_data: Optional[Dict[str, Any]] = None,
+    ) -> HookContext:
+        return await cls._run_stage(HookStage.FILESYSTEM_AFTER, input_data, output_data)
+
+    @classmethod
     async def run_capability_filter(
         cls,
         input_data: Dict[str, Any],
@@ -642,6 +668,8 @@ class HookPipeline:
             HookStage.INGRESS_AFTER: "ingress_after",
             HookStage.ACTION_BEFORE: "action_before",
             HookStage.ACTION_AFTER: "action_after",
+            HookStage.FILESYSTEM_BEFORE: "filesystem_before",
+            HookStage.FILESYSTEM_AFTER: "filesystem_after",
             HookStage.CAPABILITY_FILTER: "capability_filter",
             HookStage.SESSION_CHILD_BEFORE: "session_child_before",
             HookStage.SESSION_CHILD_AFTER: "session_child_after",

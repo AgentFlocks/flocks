@@ -672,6 +672,23 @@ async def delegate_task_tool(
             parent_profile_snapshot = dict(profile)
     except Exception:
         pass
+    if parent_profile_snapshot:
+        try:
+            from flocks.session.execution_profile import upsert_session_execution_profile
+
+            inherited_patch: dict[str, Any] = {}
+            if parent_profile_snapshot.get("permission_mode"):
+                inherited_patch["permission_mode"] = parent_profile_snapshot.get("permission_mode")
+            if parent_profile_snapshot.get("runtime_mode"):
+                inherited_patch["runtime_mode"] = parent_profile_snapshot.get("runtime_mode")
+            if inherited_patch:
+                await upsert_session_execution_profile(
+                    created.id,
+                    patch=inherited_patch,
+                    source="delegate_task.inherit_parent_profile",
+                )
+        except Exception:
+            pass
     child_payload = {
         "operation": "session.child.run",
         "parent_session_id": parent_session.id,

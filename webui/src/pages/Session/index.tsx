@@ -22,7 +22,7 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
-import { flocksproPolicyApi, type PermissionMode } from '@/api/flocksproPolicy';
+import { flocksproPolicyApi, type PermissionMode, type RuntimeMode } from '@/api/flocksproPolicy';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
@@ -624,6 +624,8 @@ export default function SessionPage() {
   const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
+  const [sessionRuntimeMode, setSessionRuntimeMode] = useState<RuntimeMode | null>(null);
+  const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>('dev-mode');
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [relativeTimeClock, setRelativeTimeClock] = useState(0);
@@ -1358,11 +1360,18 @@ export default function SessionPage() {
   useEffect(() => {
     if (!proPolicyEnabled || !selectedSessionId) {
       setSessionPermissionMode(null);
+      setSessionRuntimeMode(null);
       return;
     }
-    void flocksproPolicyApi.getSession(selectedSessionId)
-      .then((result) => setSessionPermissionMode(result.permissionMode))
-      .catch(() => setSessionPermissionMode(null));
+    void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
+      .then((result) => {
+        setSessionPermissionMode(result.permissionMode);
+        setSessionRuntimeMode(result.runtimeMode);
+      })
+      .catch(() => {
+        setSessionPermissionMode(null);
+        setSessionRuntimeMode(null);
+      });
   }, [proPolicyEnabled, selectedSessionId]);
 
   const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
@@ -1372,13 +1381,36 @@ export default function SessionPage() {
       return;
     }
     try {
-      await flocksproPolicyApi.setSession(selectedSessionId, permissionMode);
-      setSessionPermissionMode(permissionMode);
+      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
+        permissionMode,
+        runtimeMode: sessionRuntimeMode ?? 'dev-mode',
+      });
+      setSessionPermissionMode(updated.permissionMode);
+      setSessionRuntimeMode(updated.runtimeMode);
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('chat.error', 'Error'), message);
     }
-  }, [proPolicyEnabled, selectedSessionId, t, toast]);
+  }, [proPolicyEnabled, selectedSessionId, sessionRuntimeMode, t, toast]);
+
+  const handleRuntimeModeChange = useCallback(async (runtimeMode: RuntimeMode) => {
+    if (!proPolicyEnabled) return;
+    if (!selectedSessionId) {
+      setDraftRuntimeMode(runtimeMode);
+      return;
+    }
+    try {
+      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
+        runtimeMode,
+        permissionMode: sessionPermissionMode ?? 'require-confirm',
+      });
+      setSessionPermissionMode(updated.permissionMode);
+      setSessionRuntimeMode(updated.runtimeMode);
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('chat.error', 'Error'), message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, sessionPermissionMode, t, toast]);
 
   const permissionModeLabels = useMemo<Record<PermissionMode, string>>(
     () => ({
@@ -1409,9 +1441,34 @@ export default function SessionPage() {
     ]),
     [permissionModeLabels, t],
   );
+  const runtimeModeLabels = useMemo<Record<RuntimeMode, string>>(
+    () => ({
+      'dev-mode': t('permissionMode.runtimeDev', '开发模式'),
+      'exe-mode': t('permissionMode.runtimeExe', '执行模式'),
+    }),
+    [t],
+  );
+  const runtimeModeOptions = useMemo(
+    () => ([
+      {
+        value: 'dev-mode' as const,
+        label: runtimeModeLabels['dev-mode'],
+        description: t('permissionMode.runtimeDevDesc', 'Plugins 与代码目录按当前会话权限模式处理'),
+      },
+      {
+        value: 'exe-mode' as const,
+        label: runtimeModeLabels['exe-mode'],
+        description: t('permissionMode.runtimeExeDesc', 'Plugins 与代码目录固定 readonly'),
+      },
+    ]),
+    [runtimeModeLabels, t],
+  );
   const currentPermissionMode = selectedSessionId
     ? (sessionPermissionMode ?? 'require-confirm')
     : draftPermissionMode;
+  const currentRuntimeMode = selectedSessionId
+    ? (sessionRuntimeMode ?? 'dev-mode')
+    : draftRuntimeMode;
 
   useEffect(() => {
     if (selectedSession?.model_auto) {
@@ -1625,8 +1682,12 @@ export default function SessionPage() {
 
       if (proPolicyEnabled) {
         try {
-          await flocksproPolicyApi.setSession(newSessionId, draftPermissionMode);
-          setSessionPermissionMode(draftPermissionMode);
+          const updated = await flocksproPolicyApi.setSessionExecutionSettings(newSessionId, {
+            permissionMode: draftPermissionMode,
+            runtimeMode: draftRuntimeMode,
+          });
+          setSessionPermissionMode(updated.permissionMode);
+          setSessionRuntimeMode(updated.runtimeMode);
         } catch (error: unknown) {
           const message = error instanceof Error ? error.message : String(error);
           toast.error(t('chat.error', 'Error'), message);
@@ -1684,6 +1745,7 @@ export default function SessionPage() {
     selectedModelAuto,
     selectedProjectIDForCreate,
     draftPermissionMode,
+    draftRuntimeMode,
     proPolicyEnabled,
     toast,
     t,
@@ -3280,6 +3342,9 @@ export default function SessionPage() {
                     <span className="max-w-[116px] truncate font-medium">
                       {permissionModeLabels[currentPermissionMode]}
                     </span>
+                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      {runtimeModeLabels[currentRuntimeMode]}
+                    </span>
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
@@ -3313,6 +3378,33 @@ export default function SessionPage() {
                             </div>
                           </button>
                         ))}
+                        <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                          <div className="px-2.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.runtimeTitle', 'Runtime mode')}
+                          </div>
+                          <div className="mt-1 space-y-1">
+                            {runtimeModeOptions.map(({ value: mode, label, description }) => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => {
+                                  void handleRuntimeModeChange(mode);
+                                  setShowPermissionModeOptions(false);
+                                }}
+                                className={`w-full rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
+                                  currentRuntimeMode === mode
+                                    ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
+                                    : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                }`}
+                              >
+                                <div className="text-sm font-medium">{label}</div>
+                                <div className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                                  {description}
+                                </div>
+                              </button>
+                            ))}
+                          </div>
+                        </div>
                       </div>
                     </div>
                   )}

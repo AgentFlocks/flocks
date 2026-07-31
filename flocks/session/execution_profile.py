@@ -15,6 +15,9 @@ if TYPE_CHECKING:
 PROFILE_METADATA_KEY = "sessionExecutionProfile"
 PROFILE_VERSION = "v1"
 
+_PERMISSION_MODES = {"readonly", "require-confirm", "auto-allow-all"}
+_RUNTIME_MODES = {"dev-mode", "exe-mode"}
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -31,6 +34,42 @@ def _as_list(value: Any) -> list[str]:
     return out
 
 
+def _normalize_entry(value: Any) -> str:
+    return str(value or "interactive").strip().lower() or "interactive"
+
+
+def _default_permission_mode(entry: str) -> str:
+    normalized = _normalize_entry(entry)
+    if normalized in {"workflow", "api", "schedule", "task"}:
+        return "auto-allow-all"
+    if normalized == "channel":
+        return "readonly"
+    if normalized in {"webui", "cli", "tui", "interactive", "delegate"}:
+        return "require-confirm"
+    return "auto-allow-all"
+
+
+def _default_runtime_mode(entry: str) -> str:
+    normalized = _normalize_entry(entry)
+    if normalized in {"webui", "cli", "tui", "interactive"}:
+        return "dev-mode"
+    return "exe-mode"
+
+
+def _normalize_permission_mode(value: Any, *, entry: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in _PERMISSION_MODES:
+        return mode
+    return _default_permission_mode(entry)
+
+
+def _normalize_runtime_mode(value: Any, *, entry: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in _RUNTIME_MODES:
+        return mode
+    return _default_runtime_mode(entry)
+
+
 def default_execution_profile(
     *,
     session: "SessionInfo",
@@ -41,6 +80,7 @@ def default_execution_profile(
     actor_department: str | None = None,
     source: str = "session.create",
 ) -> dict[str, Any]:
+    normalized_entry = _normalize_entry(entry)
     visible = _as_list(visible_agents)
     default_agent_name = str(default_agent or "").strip() or str(session.agent or "").strip()
     if visible and default_agent_name and default_agent_name not in visible:
@@ -49,9 +89,12 @@ def default_execution_profile(
         "version": PROFILE_VERSION,
         "session_id": str(session.id),
         "project_id": str(session.project_id),
-        "entry": str(entry or "interactive"),
+        "owner_username": str(getattr(session, "owner_username", "") or "").strip() or None,
+        "entry": normalized_entry,
         "visible_agents": visible,
         "default_agent": default_agent_name,
+        "permission_mode": _default_permission_mode(normalized_entry),
+        "runtime_mode": _default_runtime_mode(normalized_entry),
         "actor_role": str(actor_role or "").strip() or None,
         "actor_department": str(actor_department or "").strip() or None,
         "revision": 1,
@@ -73,13 +116,22 @@ def profile_from_session(session: "SessionInfo") -> dict[str, Any]:
     profile.setdefault("version", PROFILE_VERSION)
     profile["session_id"] = str(session.id)
     profile["project_id"] = str(session.project_id)
+    profile["owner_username"] = str(getattr(session, "owner_username", "") or "").strip() or None
     profile["visible_agents"] = _as_list(profile.get("visible_agents"))
     profile["default_agent"] = str(
         profile.get("default_agent") or session.agent or ""
     ).strip()
     if profile["visible_agents"] and profile["default_agent"] not in profile["visible_agents"]:
         profile["default_agent"] = profile["visible_agents"][0]
-    profile["entry"] = str(profile.get("entry") or "interactive")
+    profile["entry"] = _normalize_entry(profile.get("entry"))
+    profile["permission_mode"] = _normalize_permission_mode(
+        profile.get("permission_mode"),
+        entry=profile["entry"],
+    )
+    profile["runtime_mode"] = _normalize_runtime_mode(
+        profile.get("runtime_mode"),
+        entry=profile["entry"],
+    )
     profile["revision"] = int(profile.get("revision") or 1)
     profile["source"] = str(profile.get("source") or "session.create")
     profile.setdefault("updated_at", _now_iso())
@@ -101,9 +153,18 @@ def merge_profile(
     ).strip()
     if merged["visible_agents"] and merged["default_agent"] not in merged["visible_agents"]:
         merged["default_agent"] = merged["visible_agents"][0]
-    merged["entry"] = str(merged.get("entry") or "interactive")
+    merged["entry"] = _normalize_entry(merged.get("entry"))
+    merged["permission_mode"] = _normalize_permission_mode(
+        merged.get("permission_mode"),
+        entry=merged["entry"],
+    )
+    merged["runtime_mode"] = _normalize_runtime_mode(
+        merged.get("runtime_mode"),
+        entry=merged["entry"],
+    )
     merged["session_id"] = str(session.id)
     merged["project_id"] = str(session.project_id)
+    merged["owner_username"] = str(getattr(session, "owner_username", "") or "").strip() or None
     merged["version"] = PROFILE_VERSION
     merged["revision"] = int(current.get("revision") or 1) + 1
     merged["source"] = str(source or "session.profile.update")
