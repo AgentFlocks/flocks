@@ -50,6 +50,15 @@ WORKFLOW_DISPLAY_NAMES = {
     "tdp_alert_triage": "TDP 告警研判工作流",
     "sec_alert_unified_ops": "统一告警运营工作流",
 }
+WORKFLOW_RUNNING_STATUSES = {"running", "queued", "pending"}
+WORKFLOW_SUCCESS_STATUSES = {"success", "completed"}
+WORKFLOW_TRIGGER_CONFIG_KINDS = {
+    "workflow_kafka_config",
+    "workflow_poller_config",
+    "workflow_syslog_config",
+}
+WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS = 7200
+WORKFLOW_MIN_ACTIVE_TIMEOUT_SECONDS = 60
 UUID_RE = re.compile(
     r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
     re.IGNORECASE,
@@ -1392,6 +1401,70 @@ def _workflow_config_name_map(conn):
     return names
 
 
+def _truthy_config_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return text in {"1", "true", "yes", "on", "enabled"}
+
+
+def _workflow_trigger_state(conn, workflow_id):
+    state = {
+        "hasConfig": False,
+        "enabled": True,
+        "timeoutSeconds": WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS,
+    }
+    if not _table_exists(conn, "workflow_configs"):
+        return state
+
+    placeholders = ",".join("?" for _ in WORKFLOW_TRIGGER_CONFIG_KINDS)
+    rows = conn.execute(
+        "SELECT kind, config FROM workflow_configs WHERE workflow_id = ? "
+        f"AND (kind IN ({placeholders}) OR kind LIKE ? OR kind LIKE ? OR kind LIKE ?)",
+        (
+            workflow_id,
+            *WORKFLOW_TRIGGER_CONFIG_KINDS,
+            "workflow_kafka_config/%",
+            "workflow_poller_config/%",
+            "workflow_syslog_config/%",
+        ),
+    ).fetchall()
+    if not rows:
+        return state
+
+    enabled = False
+    timeout_seconds = WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS
+    for row in rows:
+        config = _safe_json_object(row["config"] if isinstance(row, sqlite3.Row) else row[1])
+        if "enabled" not in config or _truthy_config_value(config.get("enabled")):
+            enabled = True
+        timeout_seconds = max(
+            timeout_seconds,
+            _safe_int(config.get("timeoutSeconds") or config.get("timeout_seconds")),
+        )
+    state["hasConfig"] = True
+    state["enabled"] = enabled
+    state["timeoutSeconds"] = max(timeout_seconds, WORKFLOW_MIN_ACTIVE_TIMEOUT_SECONDS)
+    return state
+
+
+def _workflow_effective_status(latest, active_count, trigger_state):
+    if not latest:
+        return ""
+    status = str(latest["status"] or "").lower()
+    if status not in WORKFLOW_RUNNING_STATUSES:
+        return status
+    if active_count > 0:
+        return status
+    if trigger_state.get("hasConfig") and not trigger_state.get("enabled"):
+        return "disabled"
+    return "stale"
+
+
 def _workflow_execution_column_expr(columns, column_name, fallback):
     return column_name if column_name in columns else f"{fallback} AS {column_name}"
 
@@ -1478,7 +1551,11 @@ def _workflow_progress(status, current_step_index, completed_steps, total_steps)
     normalized = str(status or "").lower()
     current = max(_safe_int(current_step_index), _safe_int(completed_steps), 0)
     total = max(_safe_int(total_steps), current, 1)
-    if normalized in {"success", "completed"}:
+    if normalized == "disabled":
+        return 0, "已关闭"
+    if normalized == "stale":
+        return 0, "已停止"
+    if normalized in WORKFLOW_SUCCESS_STATUSES:
         return 1, "已完成"
     if normalized in {"error", "failed", "timeout"}:
         percent = _ratio(current or total, total)
@@ -1486,7 +1563,7 @@ def _workflow_progress(status, current_step_index, completed_steps, total_steps)
     if normalized == "cancelled":
         percent = _ratio(current or total, total)
         return percent, f"已取消 {current or total}/{total} 步"
-    if normalized in {"running", "queued", "pending"}:
+    if normalized in WORKFLOW_RUNNING_STATUSES:
         visible_current = current if current > 0 else 1
         return max(_ratio(visible_current, total), 0.03), f"第 {visible_current}/{total} 步"
     return 0, "待执行"
@@ -1573,6 +1650,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
             finished_at_expr = "finished_at" if "finished_at" in execution_columns else "NULL"
             updated_at_expr = "updated_at" if "updated_at" in execution_columns else "NULL"
             execution_time_expr = f"COALESCE({finished_at_expr}, {updated_at_expr}, started_at, 0)"
+            active_time_expr = f"COALESCE({updated_at_expr}, started_at, 0)"
             latest_select = ", ".join(
                 [
                     "id",
@@ -1590,10 +1668,12 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                 ]
             )
             workflows = []
+            now_ms = int(time.time() * 1000)
             for workflow_id in workflow_ids:
                 workflow_name = names.get(workflow_id, workflow_id)
                 if UUID_RE.match(str(workflow_id)) and workflow_name == workflow_id:
                     continue
+                trigger_state = _workflow_trigger_state(conn, workflow_id)
                 stats = None
                 if _table_exists(conn, "workflow_stats"):
                     stats = conn.execute(
@@ -1606,8 +1686,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                 if _table_exists(conn, "workflow_executions"):
                     exec_summary = conn.execute(
                         "SELECT COUNT(*) AS execution_count, "
-                        "SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS success_count, "
-                        "SUM(CASE WHEN status IN ('running', 'queued', 'pending') THEN 1 ELSE 0 END) AS active_count, "
+                        "SUM(CASE WHEN status IN ('success', 'completed') THEN 1 ELSE 0 END) AS success_count, "
                         f"SUM(CASE WHEN {execution_time_expr} >= ? "
                         f"AND {execution_time_expr} < ? THEN 1 ELSE 0 END) "
                         "AS today_execution_count "
@@ -1620,6 +1699,39 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                         f"ORDER BY {execution_time_expr} DESC LIMIT 1",
                         (workflow_id,),
                     ).fetchone()
+                active_count = 0
+                if _table_exists(conn, "workflow_executions"):
+                    if trigger_state["hasConfig"] and trigger_state["enabled"]:
+                        active_since_ms = now_ms - trigger_state["timeoutSeconds"] * 1000
+                        active_summary = conn.execute(
+                            "SELECT COUNT(*) AS active_count "
+                            "FROM workflow_executions WHERE workflow_id = ? "
+                            "AND status IN ('running', 'queued', 'pending') "
+                            f"AND {active_time_expr} >= ?",
+                            (workflow_id, active_since_ms),
+                        ).fetchone()
+                    elif not trigger_state["hasConfig"] and "updated_at" in execution_columns:
+                        active_since_ms = now_ms - WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS * 1000
+                        active_summary = conn.execute(
+                            "SELECT COUNT(*) AS active_count "
+                            "FROM workflow_executions WHERE workflow_id = ? "
+                            "AND status IN ('running', 'queued', 'pending') "
+                            f"AND {active_time_expr} >= ?",
+                            (workflow_id, active_since_ms),
+                        ).fetchone()
+                    elif not trigger_state["hasConfig"]:
+                        active_summary = conn.execute(
+                            "SELECT COUNT(*) AS active_count "
+                            "FROM workflow_executions WHERE workflow_id = ? "
+                            "AND status IN ('running', 'queued', 'pending')",
+                            (workflow_id,),
+                        ).fetchone()
+                    else:
+                        active_summary = None
+                    active_count = max(
+                        _safe_int(active_summary["active_count"] if active_summary else 0),
+                        0,
+                    )
                 execution_count = max(
                     _safe_int(stats["call_count"] if stats else 0),
                     _safe_int(exec_summary["execution_count"] if exec_summary else 0),
@@ -1628,7 +1740,6 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                     _safe_int(stats["success_count"] if stats else 0),
                     _safe_int(exec_summary["success_count"] if exec_summary else 0),
                 )
-                active_count = max(_safe_int(exec_summary["active_count"] if exec_summary else 0), 0)
                 today_execution_count = max(
                     _safe_int(exec_summary["today_execution_count"] if exec_summary else 0),
                     0,
@@ -1647,6 +1758,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                 current_phase = ""
                 session_id = ""
                 message_id = ""
+                effective_status = _workflow_effective_status(latest, active_count, trigger_state)
                 if latest:
                     workflow_total_steps = max(workflow_total_steps, _safe_int(latest["step_count"]))
                     latest_alert_name = _workflow_latest_alert_name(
@@ -1655,7 +1767,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                         latest["input_params"],
                     )
                     progress_percent, progress_label = _workflow_progress(
-                        latest["status"],
+                        effective_status,
                         latest["current_step_index"],
                         latest["step_count"],
                         workflow_total_steps,
@@ -1671,7 +1783,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                         "successCount": success_count,
                         "successRate": _ratio(success_count, execution_count),
                         "activeCount": active_count,
-                        "lastStatus": latest["status"] if latest else "",
+                        "lastStatus": effective_status,
                         "lastRunAt": last_run_at,
                         "latestExecutionHash": str(latest["id"] if latest else ""),
                         "latestAlertName": latest_alert_name,

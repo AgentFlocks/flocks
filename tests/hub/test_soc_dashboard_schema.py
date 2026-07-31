@@ -967,6 +967,13 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
                     json.dumps({"workflow": {"id": "stream_alert_denoise", "name": "流式告警降噪"}}),
                     1784775600000,
                 ),
+                (
+                    "stream_alert_triage",
+                    "workflow_poller_config",
+                    1,
+                    json.dumps({"enabled": True, "timeoutSeconds": 604800}),
+                    yesterday_ms + 6000,
+                ),
             ],
         )
         conn.commit()
@@ -1162,6 +1169,253 @@ def test_soc_dashboard_task_center_supports_legacy_workflow_execution_schema(tmp
     assert denoise["lastRunAt"] == today_ms
 
 
+def test_soc_dashboard_task_center_ignores_disabled_trigger_workflow_runs(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    now_ms = int(datetime.now().astimezone().timestamp() * 1000)
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step_index INTEGER,
+                step_count INTEGER,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_configs (
+                workflow_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER,
+                config TEXT NOT NULL,
+                updated_at INTEGER,
+                PRIMARY KEY (workflow_id, kind)
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
+            ("stream_alert_triage", 1, 0, 0, now_ms),
+        )
+        conn.execute(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (
+                "wf-disabled-running",
+                "stream_alert_triage",
+                "running",
+                2,
+                4,
+                now_ms - 60_000,
+                now_ms - 60_000,
+            ),
+        )
+        conn.execute(
+            "INSERT INTO workflow_configs VALUES (?, ?, ?, ?, ?)",
+            (
+                "stream_alert_triage",
+                "workflow_poller_config",
+                1,
+                json.dumps({"enabled": False, "timeoutSeconds": 7200}),
+                now_ms,
+            ),
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+
+    triage = next(
+        workflow for workflow in payload["workflows"] if workflow["id"] == "stream_alert_triage"
+    )
+    assert triage["executionCount"] == 1
+    assert triage["activeCount"] == 0
+    assert triage["lastStatus"] == "disabled"
+    assert triage["progressLabel"] == "已关闭"
+    assert triage["progressPercent"] == 0
+
+
+def test_soc_dashboard_task_center_uses_trigger_runtime_window_for_active_workflows(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    now_ms = int(datetime.now().astimezone().timestamp() * 1000)
+    old_ms = now_ms - 3 * 60 * 60 * 1000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step_index INTEGER,
+                step_count INTEGER,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_configs (
+                workflow_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER,
+                config TEXT NOT NULL,
+                updated_at INTEGER,
+                PRIMARY KEY (workflow_id, kind)
+            )
+            """
+        )
+        conn.executemany(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
+            [
+                ("stream_alert_denoise", 1, 0, 0, now_ms),
+                ("stream_alert_triage", 1, 0, 0, old_ms),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            [
+                (
+                    "wf-recent-running",
+                    "stream_alert_denoise",
+                    "running",
+                    1,
+                    4,
+                    now_ms - 30_000,
+                    now_ms - 30_000,
+                ),
+                (
+                    "wf-stale-running",
+                    "stream_alert_triage",
+                    "running",
+                    3,
+                    4,
+                    old_ms,
+                    old_ms,
+                ),
+            ],
+        )
+        conn.executemany(
+            "INSERT INTO workflow_configs VALUES (?, ?, ?, ?, ?)",
+            [
+                (
+                    "stream_alert_denoise",
+                    "workflow_poller_config",
+                    1,
+                    json.dumps({"enabled": True, "timeoutSeconds": 7200}),
+                    now_ms,
+                ),
+                (
+                    "stream_alert_triage",
+                    "workflow_poller_config",
+                    1,
+                    json.dumps({"enabled": True, "timeoutSeconds": 7200}),
+                    old_ms,
+                ),
+            ],
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+
+    denoise = next(
+        workflow for workflow in payload["workflows"] if workflow["id"] == "stream_alert_denoise"
+    )
+    triage = next(
+        workflow for workflow in payload["workflows"] if workflow["id"] == "stream_alert_triage"
+    )
+    assert denoise["activeCount"] == 1
+    assert denoise["lastStatus"] == "running"
+    assert denoise["progressLabel"].startswith("第 ")
+    assert triage["activeCount"] == 0
+    assert triage["lastStatus"] == "stale"
+    assert triage["progressLabel"] == "已停止"
+
+
+def test_soc_dashboard_task_center_marks_stale_running_without_trigger_config(tmp_path: Path):
+    workflow_db = tmp_path / "workflow.db"
+    now_ms = int(datetime.now().astimezone().timestamp() * 1000)
+    old_ms = now_ms - 3 * 60 * 60 * 1000
+    with sqlite3.connect(workflow_db) as conn:
+        conn.execute(
+            """
+            CREATE TABLE workflow_stats (
+                workflow_id TEXT PRIMARY KEY,
+                call_count INTEGER NOT NULL,
+                success_count INTEGER NOT NULL,
+                error_count INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            """
+            CREATE TABLE workflow_executions (
+                id TEXT PRIMARY KEY,
+                workflow_id TEXT NOT NULL,
+                status TEXT NOT NULL,
+                current_step_index INTEGER,
+                step_count INTEGER,
+                started_at INTEGER NOT NULL,
+                updated_at INTEGER
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
+            ("custom_workflow", 1, 0, 0, old_ms),
+        )
+        conn.execute(
+            "INSERT INTO workflow_executions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            ("wf-stale-manual", "custom_workflow", "running", 1, 2, old_ms, old_ms),
+        )
+        conn.commit()
+
+    handlers = _load_dashboard_handlers()
+    handlers.TASK_DB = tmp_path / "missing-tasks.db"
+    handlers.WORKFLOW_DB = workflow_db
+
+    payload = handlers._get_task_center()
+
+    workflow = next(item for item in payload["workflows"] if item["id"] == "custom_workflow")
+    assert workflow["activeCount"] == 0
+    assert workflow["lastStatus"] == "stale"
+    assert workflow["progressLabel"] == "已停止"
+
+
 def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
     now = datetime.now().astimezone().replace(microsecond=0)
     older = now - timedelta(hours=3)
@@ -1285,6 +1539,18 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE workflow_configs (
+                workflow_id TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                version INTEGER,
+                config TEXT NOT NULL,
+                updated_at INTEGER,
+                PRIMARY KEY (workflow_id, kind)
+            )
+            """
+        )
         conn.executemany(
             "INSERT INTO workflow_stats VALUES (?, ?, ?, ?, ?)",
             [
@@ -1300,6 +1566,16 @@ def test_soc_dashboard_task_center_orders_dynamic_rows(tmp_path: Path):
                 ("run-recent", "wf-recent", "success", recent_ms, recent_ms + 1000, recent_ms + 1000),
                 ("run-popular", "wf-popular", "success", older_ms, older_ms + 1000, older_ms + 1000),
             ],
+        )
+        conn.execute(
+            "INSERT INTO workflow_configs VALUES (?, ?, ?, ?, ?)",
+            (
+                "wf-active",
+                "workflow_poller_config",
+                1,
+                json.dumps({"enabled": True, "timeoutSeconds": 14400}),
+                older_ms,
+            ),
         )
         conn.commit()
 
