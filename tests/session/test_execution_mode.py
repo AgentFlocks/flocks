@@ -34,14 +34,18 @@ from flocks.tool.file.write import write_tool
 
 def test_prompt_request_defaults_to_build_and_accepts_plan_and_pentest() -> None:
     default_request = PromptRequest(parts=[{"type": "text", "text": "hello"}])
-    plan_request = PromptRequest.model_validate({
-        "parts": [{"type": "text", "text": "hello"}],
-        "executionMode": "plan",
-    })
-    pentest_request = PromptRequest.model_validate({
-        "parts": [{"type": "text", "text": "audit this repository"}],
-        "executionMode": "pentest",
-    })
+    plan_request = PromptRequest.model_validate(
+        {
+            "parts": [{"type": "text", "text": "hello"}],
+            "executionMode": "plan",
+        }
+    )
+    pentest_request = PromptRequest.model_validate(
+        {
+            "parts": [{"type": "text", "text": "audit this repository"}],
+            "executionMode": "pentest",
+        }
+    )
 
     assert default_request.execution_mode == SessionExecutionMode.BUILD
     assert plan_request.execution_mode == SessionExecutionMode.PLAN
@@ -50,20 +54,25 @@ def test_prompt_request_defaults_to_build_and_accepts_plan_and_pentest() -> None
 
 def test_prompt_request_rejects_removed_ask_mode() -> None:
     with pytest.raises(ValidationError):
-        PromptRequest.model_validate({
-            "parts": [{"type": "text", "text": "hello"}],
-            "executionMode": "ask",
-        })
+        PromptRequest.model_validate(
+            {
+                "parts": [{"type": "text", "text": "hello"}],
+                "executionMode": "ask",
+            }
+        )
 
 
 def test_goal_transport_uses_build_permissions_and_slash_dispatch() -> None:
     parts = [{"type": "text", "text": "  finish the feature  "}]
 
     assert runtime_execution_mode("goal") == SessionExecutionMode.BUILD
-    assert _event_text_for_execution_mode(
-        parts,
-        SessionExecutionMode.GOAL,
-    ) == "/goal finish the feature"
+    assert (
+        _event_text_for_execution_mode(
+            parts,
+            SessionExecutionMode.GOAL,
+        )
+        == "/goal finish the feature"
+    )
 
 
 def test_pentest_uses_build_permissions_and_orchestration_prompt() -> None:
@@ -74,27 +83,35 @@ def test_pentest_uses_build_permissions_and_orchestration_prompt() -> None:
     assert is_tool_allowed(SessionExecutionMode.PENTEST, "bash")
     assert is_tool_allowed(SessionExecutionMode.PENTEST, "delegate_task")
     assert not is_tool_allowed(SessionExecutionMode.PENTEST, "plan_exit")
-    assert 'skill_load(name="agent-coordinate-protocol")' in prompt
-    assert 'load_skills=["agent-coordinate-protocol", "pentest-recon"]' in prompt
-    assert 'load_skills=["agent-coordinate-protocol", "pentest-analysis"]' in prompt
-    assert 'load_skills=["agent-coordinate-protocol", "pentest-verify"]' in prompt
+    assert "agent-coordinate-protocol" not in prompt
+    assert 'load_skills=["pentest-recon"]' in prompt
+    assert 'load_skills=["pentest-analysis"]' in prompt
+    assert 'load_skills=["pentest-verify"]' in prompt
+    assert "Do not load or perform `pentest-analysis` yourself" in prompt
+    assert "Attack Surface Model" in prompt
+    assert "more than four Analysis or Verify workers" in normalized_prompt
+    assert "waves of at most four" in normalized_prompt
     assert "Docker is attempted only by Verify workers" in normalized_prompt
     assert "Do not preflight Docker" in normalized_prompt
     assert "Only `CONFIRMED`" in prompt
 
 
 def test_goal_requires_text_only_objective() -> None:
-    empty = PromptRequest.model_validate({
-        "parts": [],
-        "executionMode": "goal",
-    })
-    attachment = PromptRequest.model_validate({
-        "parts": [
-            {"type": "text", "text": "inspect this"},
-            {"type": "file", "url": "file:///tmp/report.txt"},
-        ],
-        "executionMode": "goal",
-    })
+    empty = PromptRequest.model_validate(
+        {
+            "parts": [],
+            "executionMode": "goal",
+        }
+    )
+    attachment = PromptRequest.model_validate(
+        {
+            "parts": [
+                {"type": "text", "text": "inspect this"},
+                {"type": "file", "url": "file:///tmp/report.txt"},
+            ],
+            "executionMode": "goal",
+        }
+    )
 
     with pytest.raises(HTTPException, match="non-empty text objective"):
         _validate_execution_mode_request(empty)
@@ -129,12 +146,15 @@ def test_plan_delegation_only_allows_explore_and_librarian(tool_name) -> None:
     ctx = ToolContext(session_id="session-1", message_id="message-1")
 
     for subagent_type in ("explore", "librarian"):
-        assert tool_call_denial_reason(
-            SessionExecutionMode.PLAN,
-            tool_name,
-            {"subagent_type": subagent_type},
-            ctx,
-        ) is None
+        assert (
+            tool_call_denial_reason(
+                SessionExecutionMode.PLAN,
+                tool_name,
+                {"subagent_type": subagent_type},
+                ctx,
+            )
+            is None
+        )
 
     for arguments in (
         {"subagent_type": "general"},
@@ -159,10 +179,12 @@ def test_plan_file_is_stable_and_session_scoped(tmp_path) -> None:
         directory=str(tmp_path),
         time=SessionTime(created=1234, updated=1234),
     )
-    second = first.model_copy(update={
-        "slug": "second-plan",
-        "time": SessionTime(created=5678, updated=5678),
-    })
+    second = first.model_copy(
+        update={
+            "slug": "second-plan",
+            "time": SessionTime(created=5678, updated=5678),
+        }
+    )
 
     first_plan = session_plan_file(first)
     second_plan = session_plan_file(second)
@@ -482,9 +504,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "get",
         classmethod(
             lambda _cls, name: (
-                SimpleNamespace(info=SimpleNamespace(name="plan_exit", enabled=True))
-                if name == "plan_exit"
-                else None
+                SimpleNamespace(info=SimpleNamespace(name="plan_exit", enabled=True)) if name == "plan_exit" else None
             )
         ),
     )

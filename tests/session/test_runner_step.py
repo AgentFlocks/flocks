@@ -43,6 +43,7 @@ from flocks.tool.registry import ToolCategory, ToolInfo
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _make_session(session_id="ses_runner_test"):
     return SessionInfo.model_construct(
         id=session_id,
@@ -76,6 +77,7 @@ def _make_callable_schema_result(*tool_names):
 # ToolCall dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestToolCallDataclass:
     def test_basic_creation(self):
         tc = ToolCall(id="call_001", name="bash", arguments={"command": "ls"})
@@ -91,6 +93,7 @@ class TestToolCallDataclass:
 # ---------------------------------------------------------------------------
 # StepResult dataclass
 # ---------------------------------------------------------------------------
+
 
 class TestStepResult:
     def test_stop_action(self):
@@ -170,6 +173,7 @@ class TestToolLoopGuard:
 # RunnerCallbacks dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestRunnerCallbacks:
     def test_all_defaults_none(self):
         cb = RunnerCallbacks()
@@ -196,6 +200,7 @@ class TestRunnerCallbacks:
 # ---------------------------------------------------------------------------
 # _agent_declares_tool()
 # ---------------------------------------------------------------------------
+
 
 class TestAgentDeclaresTool:
     def test_agent_with_explicit_tools_allows_declared_tools(self):
@@ -225,6 +230,7 @@ class TestAgentDeclaresTool:
 # ---------------------------------------------------------------------------
 # _exception_to_error_dict()
 # ---------------------------------------------------------------------------
+
 
 class TestExceptionToErrorDict:
     def test_basic_exception(self):
@@ -263,10 +269,7 @@ class TestExceptionToErrorDict:
 
     def test_incomplete_chunked_read_exception_is_retryable_connection_error(self):
         runner = _make_runner()
-        exc = Exception(
-            "peer closed connection without sending complete message body "
-            "(incomplete chunked read)"
-        )
+        exc = Exception("peer closed connection without sending complete message body (incomplete chunked read)")
         result = runner._exception_to_error_dict(exc)
         assert result["name"] == "APIError"
         assert result["data"]["isRetryable"] is True
@@ -360,6 +363,7 @@ class TestExceptionToErrorDict:
 # _build_callable_tool_schema(): excluded tools filter
 # ---------------------------------------------------------------------------
 
+
 class TestBuildTools:
     @pytest.mark.asyncio
     async def test_excludes_invalid_tool(self):
@@ -409,14 +413,17 @@ class TestBuildTools:
             provider_version=None,
         )
 
-        with patch.object(
-            runner,
-            "_list_callable_tool_infos_for_turn",
-            new=AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
-        ), patch.object(
-            runner,
-            "_publish_turn_tools_event",
-            new=AsyncMock(),
+        with (
+            patch.object(
+                runner,
+                "_list_callable_tool_infos_for_turn",
+                new=AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
+            ),
+            patch.object(
+                runner,
+                "_publish_turn_tools_event",
+                new=AsyncMock(),
+            ),
         ):
             tools_first = await runner._build_callable_tool_schema(agent)
             tools_second = await runner._build_callable_tool_schema(agent)
@@ -520,10 +527,12 @@ class TestBuildTools:
             enabled=True,
         )
 
-        selector_mock = AsyncMock(side_effect=[
-            ([tool_v1], {"enabledToolCount": 3}),
-            ([tool_v2], {"enabledToolCount": 3}),
-        ])
+        selector_mock = AsyncMock(
+            side_effect=[
+                ([tool_v1], {"enabledToolCount": 3}),
+                ([tool_v2], {"enabledToolCount": 3}),
+            ]
+        )
         with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
             tools1 = await runner._build_callable_tool_schema(agent, [])
             tools2 = await runner._build_callable_tool_schema(agent, [])
@@ -535,13 +544,15 @@ class TestBuildTools:
     def test_prompt_tool_names_from_schema_uses_loaded_tool_names(self):
         runner = _make_runner()
 
-        prompt_tool_names = runner._get_prompt_tool_names_from_schema([
-            {"type": "function", "function": {"name": "memory_search"}},
-            {"type": "function", "function": {"name": "bash"}},
-            {"type": "function", "function": {"name": "bash"}},
-            {"type": "function", "function": {}},
-            {"type": "other"},
-        ])
+        prompt_tool_names = runner._get_prompt_tool_names_from_schema(
+            [
+                {"type": "function", "function": {"name": "memory_search"}},
+                {"type": "function", "function": {"name": "bash"}},
+                {"type": "function", "function": {"name": "bash"}},
+                {"type": "function", "function": {}},
+                {"type": "other"},
+            ]
+        )
 
         assert prompt_tool_names == ("bash", "memory_search")
 
@@ -587,10 +598,12 @@ class TestBuildTools:
         with patch.object(
             SessionRunner,
             "_list_callable_tool_infos_for_turn",
-            AsyncMock(return_value=(
-                [selected_tool],
-                {"enabledToolCount": 3},
-            )),
+            AsyncMock(
+                return_value=(
+                    [selected_tool],
+                    {"enabledToolCount": 3},
+                )
+            ),
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
@@ -611,16 +624,20 @@ class TestBuildTools:
             enabled=True,
         )
 
-        with patch.object(
-            SessionRunner,
-            "_list_callable_tool_infos_for_turn",
-            AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
-        ), patch(
-            "flocks.skill.skill.Skill.list_enabled",
-            AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
-        ), patch(
-            "flocks.tool.skill.skill_load.build_description",
-            return_value="Refreshed skill description",
+        with (
+            patch.object(
+                SessionRunner,
+                "_list_callable_tool_infos_for_turn",
+                AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
+            ),
+            patch(
+                "flocks.skill.skill.Skill.list_enabled",
+                AsyncMock(return_value=[SimpleNamespace(name="agent-builder")]),
+            ),
+            patch(
+                "flocks.tool.skill.skill_load.build_description",
+                return_value="Refreshed skill description",
+            ),
         ):
             tools = await runner._build_callable_tool_schema(agent, [])
 
@@ -645,10 +662,12 @@ class TestBuildSystemPrompts:
         channel_mock = AsyncMock(return_value="channel prompt")
         device_mock = AsyncMock(return_value="device prompt")
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -708,11 +727,13 @@ class TestBuildSystemPrompts:
         channel_mock = AsyncMock(return_value="channel prompt")
         device_mock = AsyncMock(return_value="device prompt")
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch.object(SessionPrompt, "_build_tool_guidance_prompt", return_value="tool protocol"),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -761,10 +782,12 @@ class TestBuildSystemPrompts:
 
         catalog_prompts = iter(["tool catalog v1", "tool catalog v2"])
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -825,10 +848,12 @@ class TestBuildSystemPrompts:
         channel_mock = AsyncMock(return_value="channel prompt")
         device_mock = AsyncMock(return_value="device prompt")
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -884,10 +909,12 @@ class TestBuildSystemPrompts:
         channel_mock = AsyncMock(return_value="channel prompt")
         device_prompts = iter(["device prompt v1", "device prompt v2"])
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -942,10 +969,12 @@ class TestBuildSystemPrompts:
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts1 = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -994,10 +1023,12 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -1021,10 +1052,12 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -1056,10 +1089,12 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", return_value=["env prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", return_value=["runtime prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -1093,10 +1128,12 @@ class TestBuildSystemPrompts:
         runtime_mock = MagicMock(return_value=["runtime prompt"])
         custom_mock = AsyncMock(return_value=["custom prompt"])
 
-        with patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]), \
-             patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock), \
-             patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock), \
-             patch("flocks.session.prompt.SystemPrompt.custom", custom_mock):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.provider", return_value=["provider prompt"]),
+            patch("flocks.session.prompt.SystemPrompt.environment_stable", env_mock),
+            patch("flocks.session.prompt.SystemPrompt.runtime_metadata", runtime_mock),
+            patch("flocks.session.prompt.SystemPrompt.custom", custom_mock),
+        ):
             prompts_with_memory = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -1134,24 +1171,31 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="rex")
         agent.mode = "primary"
 
-        with patch(
-            "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
-            return_value=[ToolInfo(
-                name="plugin_memory",
-                description="Access project memory",
-                category=ToolCategory.CUSTOM,
-                native=False,
-                enabled=True,
-            )],
-        ), patch(
-            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
-            return_value=["read", "bash"],
-        ), patch(
-            "flocks.session.runner.get_always_load_tool_names",
-            return_value={"question", "tool_search"},
-        ), patch(
-            "flocks.command.direct.format_tools_catalog_summary",
-            return_value="Available Tools (grouped by category):\n\n**custom**\n- plugin_memory: Access project memory",
+        with (
+            patch(
+                "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
+                return_value=[
+                    ToolInfo(
+                        name="plugin_memory",
+                        description="Access project memory",
+                        category=ToolCategory.CUSTOM,
+                        native=False,
+                        enabled=True,
+                    )
+                ],
+            ),
+            patch(
+                "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+                return_value=["read", "bash"],
+            ),
+            patch(
+                "flocks.session.runner.get_always_load_tool_names",
+                return_value={"question", "tool_search"},
+            ),
+            patch(
+                "flocks.command.direct.format_tools_catalog_summary",
+                return_value="Available Tools (grouped by category):\n\n**custom**\n- plugin_memory: Access project memory",
+            ),
         ):
             prompt = runner._build_tool_catalog_prompt(agent)
 
@@ -1177,23 +1221,40 @@ class TestBuildSystemPrompts:
         agent.mode = "primary"
         catalog_tools = [
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
-            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
-            ToolInfo(name="plugin_memory", description="Access project memory", category=ToolCategory.CUSTOM, native=False, enabled=True),
+            ToolInfo(
+                name="question",
+                description="Ask user a question",
+                category=ToolCategory.SYSTEM,
+                native=True,
+                enabled=True,
+            ),
+            ToolInfo(
+                name="plugin_memory",
+                description="Access project memory",
+                category=ToolCategory.CUSTOM,
+                native=False,
+                enabled=True,
+            ),
         ]
 
-        with patch(
-            "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
-            return_value=catalog_tools,
-        ), patch(
-            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
-            return_value=["bash", "read"],
-        ), patch(
-            "flocks.session.runner.get_always_load_tool_names",
-            return_value={"question", "tool_search"},
-        ), patch(
-            "flocks.command.direct.format_tools_catalog_summary",
-            side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
-        ) as formatter_mock:
+        with (
+            patch(
+                "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
+                return_value=catalog_tools,
+            ),
+            patch(
+                "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+                return_value=["bash", "read"],
+            ),
+            patch(
+                "flocks.session.runner.get_always_load_tool_names",
+                return_value={"question", "tool_search"},
+            ),
+            patch(
+                "flocks.command.direct.format_tools_catalog_summary",
+                side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
+            ) as formatter_mock,
+        ):
             prompt = runner._build_tool_catalog_prompt(agent)
 
         assert prompt is not None
@@ -1225,19 +1286,24 @@ class TestBuildSystemPrompts:
             ),
         ]
 
-        with patch(
-            "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
-            return_value=catalog_tools,
-        ), patch(
-            "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
-            return_value=["bash", "read"],
-        ), patch(
-            "flocks.session.runner.get_always_load_tool_names",
-            return_value={"question", "tool_search"},
-        ), patch(
-            "flocks.command.direct.format_tools_catalog_summary",
-            side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
-        ) as formatter_mock:
+        with (
+            patch(
+                "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
+                return_value=catalog_tools,
+            ),
+            patch(
+                "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
+                return_value=["bash", "read"],
+            ),
+            patch(
+                "flocks.session.runner.get_always_load_tool_names",
+                return_value={"question", "tool_search"},
+            ),
+            patch(
+                "flocks.command.direct.format_tools_catalog_summary",
+                side_effect=lambda tools, **_: "\n".join(tool.name for tool in tools),
+            ) as formatter_mock,
+        ):
             prompt = runner._build_tool_catalog_prompt(agent)
 
         assert prompt is not None
@@ -1280,8 +1346,12 @@ class TestBuildSystemPrompts:
         agent.tools = ["read"]
         tool_infos = [
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
-            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
-            ToolInfo(name="websearch", description="Search web", category=ToolCategory.BROWSER, native=True, enabled=True),
+            ToolInfo(
+                name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True
+            ),
+            ToolInfo(
+                name="websearch", description="Search web", category=ToolCategory.BROWSER, native=True, enabled=True
+            ),
         ]
 
         with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
@@ -1295,9 +1365,19 @@ class TestBuildSystemPrompts:
         agent.mode = "subagent"
         agent.tools = ["read"]
         tool_infos = [
-            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
-            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
-            ToolInfo(name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(
+                name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True
+            ),
+            ToolInfo(
+                name="question",
+                description="Ask user a question",
+                category=ToolCategory.SYSTEM,
+                native=True,
+                enabled=True,
+            ),
+            ToolInfo(
+                name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True
+            ),
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
         ]
 
@@ -1311,9 +1391,19 @@ class TestBuildSystemPrompts:
         agent = _make_agent(name="plan", tools=None)
         agent.mode = "subagent"
         tool_infos = [
-            ToolInfo(name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True),
-            ToolInfo(name="question", description="Ask user a question", category=ToolCategory.SYSTEM, native=True, enabled=True),
-            ToolInfo(name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True),
+            ToolInfo(
+                name="read", description="Read file contents", category=ToolCategory.FILE, native=True, enabled=True
+            ),
+            ToolInfo(
+                name="question",
+                description="Ask user a question",
+                category=ToolCategory.SYSTEM,
+                native=True,
+                enabled=True,
+            ),
+            ToolInfo(
+                name="tool_search", description="Search tools", category=ToolCategory.SYSTEM, native=True, enabled=True
+            ),
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
         ]
 
@@ -1389,8 +1479,10 @@ class TestMiniMaxTextToolMode:
             model_id="minimax:MiniMax-M2.5",
         )
 
-        with patch("flocks.session.prompt.SystemPrompt.environment", AsyncMock(return_value=["env prompt"])), \
-             patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])):
+        with (
+            patch("flocks.session.prompt.SystemPrompt.environment", AsyncMock(return_value=["env prompt"])),
+            patch("flocks.session.prompt.SystemPrompt.custom", AsyncMock(return_value=["custom prompt"])),
+        ):
             prompts = await SessionPrompt.build_system_prompts(
                 session_id=session.id,
                 session_directory=session.directory,
@@ -1415,24 +1507,26 @@ class TestMiniMaxTextToolMode:
             provider_id="custom-threatbook-internal",
             model_id="minimax:MiniMax-M2.5",
         )
-        prompt = runner._build_text_tool_call_catalog_prompt([
-            {
-                "type": "function",
-                "function": {
-                    "name": "onesec_ops",
-                    "description": "Grouped OneSEC ops tool",
-                    "parameters": {
-                        "type": "object",
-                        "properties": {
-                            "action": {"type": "string", "description": "OPS action"},
-                            "cur_page": {"type": "integer", "description": "Page number"},
-                            "page_size": {"type": "integer", "description": "Page size"},
+        prompt = runner._build_text_tool_call_catalog_prompt(
+            [
+                {
+                    "type": "function",
+                    "function": {
+                        "name": "onesec_ops",
+                        "description": "Grouped OneSEC ops tool",
+                        "parameters": {
+                            "type": "object",
+                            "properties": {
+                                "action": {"type": "string", "description": "OPS action"},
+                                "cur_page": {"type": "integer", "description": "Page number"},
+                                "page_size": {"type": "integer", "description": "Page size"},
+                            },
+                            "required": ["action"],
                         },
-                        "required": ["action"],
                     },
-                },
-            }
-        ])
+                }
+            ]
+        )
         assert "onesec_ops" in prompt
         assert "authoritative callable schema" in prompt
         assert "Parameter names must match exactly" in prompt
@@ -1685,9 +1779,7 @@ async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monk
     monkeypatch.setattr(
         runner_mod.Provider,
         "get_model",
-        lambda _model_id: SimpleNamespace(
-            capabilities=SimpleNamespace(interleaved=None)
-        ),
+        lambda _model_id: SimpleNamespace(capabilities=SimpleNamespace(interleaved=None)),
     )
 
     await Message.add_part(
@@ -1747,9 +1839,7 @@ async def test_to_chat_messages_restores_signed_anthropic_thinking_blocks(monkey
     monkeypatch.setattr(
         runner_mod.Provider,
         "resolve_model",
-        lambda provider_id, model_id: SimpleNamespace(
-            capabilities=SimpleNamespace(interleaved=None)
-        ),
+        lambda provider_id, model_id: SimpleNamespace(capabilities=SimpleNamespace(interleaved=None)),
     )
 
     await Message.add_part(
@@ -1813,9 +1903,7 @@ async def test_to_chat_messages_restores_unsigned_anthropic_thinking_blocks(monk
     monkeypatch.setattr(
         runner_mod.Provider,
         "resolve_model",
-        lambda provider_id, model_id: SimpleNamespace(
-            capabilities=SimpleNamespace(interleaved=None)
-        ),
+        lambda provider_id, model_id: SimpleNamespace(capabilities=SimpleNamespace(interleaved=None)),
     )
 
     await Message.add_part(
@@ -1877,9 +1965,7 @@ async def test_runner_history_round_trip_formats_anthropic_payload(monkeypatch):
     monkeypatch.setattr(
         runner_mod.Provider,
         "resolve_model",
-        lambda provider_id, model_id: SimpleNamespace(
-            capabilities=SimpleNamespace(interleaved=None)
-        ),
+        lambda provider_id, model_id: SimpleNamespace(capabilities=SimpleNamespace(interleaved=None)),
     )
 
     await Message.add_part(
@@ -2058,12 +2144,14 @@ def test_get_queued_user_message_ids_only_marks_newly_queued_turns():
     runner = _make_runner("ses_runner_queued_users")
     runner._step = 3
 
-    queued_user_ids = runner._get_queued_user_message_ids([
-        SimpleNamespace(id="msg_100", role="assistant", finish="stop"),
-        SimpleNamespace(id="msg_200", role="user"),
-        SimpleNamespace(id="msg_300", role="user"),
-        SimpleNamespace(id="msg_400", role="user"),
-    ])
+    queued_user_ids = runner._get_queued_user_message_ids(
+        [
+            SimpleNamespace(id="msg_100", role="assistant", finish="stop"),
+            SimpleNamespace(id="msg_200", role="user"),
+            SimpleNamespace(id="msg_300", role="user"),
+            SimpleNamespace(id="msg_400", role="user"),
+        ]
+    )
 
     assert queued_user_ids == {"msg_300", "msg_400"}
 
@@ -2139,14 +2227,16 @@ async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypat
     monkeypatch.setattr(
         runner_mod.Message,
         "parts",
-        AsyncMock(return_value=[
-            ReasoningPart(
-                sessionID=runner.session.id,
-                messageID="msg_aborted_reasoning_only",
-                text="This should not leak into replay history.",
-                time=PartTime(start=1),
-            )
-        ]),
+        AsyncMock(
+            return_value=[
+                ReasoningPart(
+                    sessionID=runner.session.id,
+                    messageID="msg_aborted_reasoning_only",
+                    text="This should not leak into replay history.",
+                    time=PartTime(start=1),
+                )
+            ]
+        ),
     )
     monkeypatch.setattr(runner_mod.Message, "get_parts_revision", lambda *_args: 1)
 
@@ -2356,13 +2446,9 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     assert final_update["error"]["data"]["message"] == "Connection error."
     assert final_update["error"]["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
 
-    retry_logs = [
-        call for call in warn_log.call_args_list
-        if call.args and call.args[0] == "runner.step.retry"
-    ]
+    retry_logs = [call for call in warn_log.call_args_list if call.args and call.args[0] == "runner.step.retry"]
     max_retry_logs = [
-        call for call in error_log.call_args_list
-        if call.args and call.args[0] == "runner.step.max_retries_exceeded"
+        call for call in error_log.call_args_list if call.args and call.args[0] == "runner.step.max_retries_exceeded"
     ]
     assert len(retry_logs) == 3
     assert len(max_retry_logs) == 1
@@ -2541,8 +2627,7 @@ async def test_process_step_persists_visible_error_when_provider_missing(monkeyp
     messages_with_parts = await Message.list_with_parts(runner.session.id)
     assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
     visible_text_parts = [
-        part for part in assistant.parts
-        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+        part for part in assistant.parts if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
     ]
 
     assert result.action == "stop"
@@ -2595,8 +2680,7 @@ async def test_process_step_persists_visible_error_when_provider_not_configured(
     messages_with_parts = await Message.list_with_parts(runner.session.id)
     assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
     visible_text_parts = [
-        part for part in assistant.parts
-        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+        part for part in assistant.parts if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
     ]
 
     assert result.action == "stop"
@@ -2661,8 +2745,7 @@ async def test_process_step_persists_visible_error_when_model_returns_empty_stre
     assert assistant.info.error["name"] == "EmptyResponseError"
     assert "returned an empty response" in visible_text
     assert any(
-        event_name == "message.part.updated"
-        and "returned an empty response" in _payload["part"]["text"]
+        event_name == "message.part.updated" and "returned an empty response" in _payload["part"]["text"]
         for event_name, _payload in events
     )
 
@@ -2764,7 +2847,9 @@ async def test_process_step_injects_pentest_prompt_with_build_runtime(monkeypatc
     assert result.content == "done"
     assert runner._turn_execution_mode.value == "build"
     prompt = build_system_prompts.await_args.kwargs["execution_mode_prompt"]
-    assert 'skill_load(name="agent-coordinate-protocol")' in prompt
+    assert "agent-coordinate-protocol" not in prompt
+    assert "Attack Surface Model" in prompt
+    assert 'load_skills=["pentest-analysis"]' in prompt
 
 
 @pytest.mark.asyncio
@@ -3099,13 +3184,19 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
             tool_calls=[ToolCall(id="c-loop", name="echo_tool", arguments={"text": "loop"})],
         )
 
-    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=SimpleNamespace(
-        name="rex",
-        steps=None,
-        mode="primary",
-        prompt="",
-        tools=["echo_tool"],
-    )))
+    monkeypatch.setattr(
+        runner_mod.Agent,
+        "get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="rex",
+                steps=None,
+                mode="primary",
+                prompt="",
+                tools=["echo_tool"],
+            )
+        ),
+    )
     monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
     monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
@@ -3127,9 +3218,15 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
     for idx in range(1, 4):
         runner = SessionRunner(session=_make_session("ses_runner_tool_loop_guard"), static_cache=shared_cache)
         runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
-        monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[
-            {"type": "function", "function": {"name": "echo_tool", "description": "", "parameters": {}}}
-        ]))
+        monkeypatch.setattr(
+            runner,
+            "_build_callable_tool_schema",
+            AsyncMock(
+                return_value=[
+                    {"type": "function", "function": {"name": "echo_tool", "description": "", "parameters": {}}}
+                ]
+            ),
+        )
         monkeypatch.setattr(
             runner,
             "_to_chat_messages",
@@ -3217,12 +3314,14 @@ async def test_to_chat_messages_expands_workflow_node_ref_marker(monkeypatch):
     monkeypatch.setattr(
         runner_mod.Message,
         "parts",
-        AsyncMock(return_value=[
-            SimpleNamespace(
-                type="text",
-                text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
-            ),
-        ]),
+        AsyncMock(
+            return_value=[
+                SimpleNamespace(
+                    type="text",
+                    text="@@node:query_fofa|python\n只修改这个节点的代码并保留其他节点不变",
+                ),
+            ]
+        ),
     )
 
     chat_messages = await runner._to_chat_messages([user_message], [])
