@@ -113,14 +113,20 @@
     }
   },
   "permissionMode": {
-    "title": "Permission Mode",
-    "menuHint": "Choose the command execution control mode",
-    "readonly": "Block command execution",
-    "readonlyDesc": "Blocks execution of any command",
-    "requireConfirm": "Require confirmation",
-    "requireConfirmDesc": "Low-risk commands run directly",
+    "title": "Session execution controls",
+    "menuHint": "Permission mode controls Bash and file tools; Runtime mode limits Plugin writes",
+    "readonly": "Read only",
+    "readonlyDesc": "Blocks Bash execution and file changes while allowing policy-scoped file reads",
+    "requireConfirm": "Confirm by policy",
+    "requireConfirmDesc": "Confirms Bash by risk and allows or confirms file writes by Workspace, Project, and path region",
     "autoAllowAll": "Auto allow",
-    "autoAllowAllDesc": "Runs commands without confirmation"
+    "autoAllowAllDesc": "Automatically allows confirmable Bash and file actions without overriding Runtime mode, External, or system denies",
+    "executionControlTitle": "Session execution controls: Bash/file permissions and development/execution mode",
+    "runtimeTitle": "Runtime mode",
+    "runtimeDev": "Development mode",
+    "runtimeDevDesc": "Plugins use the current Session permission mode",
+    "runtimeExe": "Execution mode",
+    "runtimeExeDesc": "Plugins are readonly; Project and personal Output are unchanged"
   },
   "agentPicker": {
     "title": "Choose Chat Agent",

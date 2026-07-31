@@ -82,13 +82,23 @@ def default_execution_profile(
 ) -> dict[str, Any]:
     normalized_entry = _normalize_entry(entry)
     visible = _as_list(visible_agents)
-    default_agent_name = str(default_agent or "").strip() or str(session.agent or "").strip()
+    default_agent_name = str(default_agent or "").strip() or str(
+        getattr(session, "agent", "") or ""
+    ).strip()
     if visible and default_agent_name and default_agent_name not in visible:
         default_agent_name = visible[0]
+    project_root = str(getattr(session, "directory", "") or "").strip()
     return {
         "version": PROFILE_VERSION,
         "session_id": str(session.id),
         "project_id": str(session.project_id),
+        "workspace_dir": project_root,
+        "project_root": project_root,
+        "project_revision": getattr(
+            getattr(session, "time", None),
+            "updated",
+            None,
+        ),
         "owner_username": str(getattr(session, "owner_username", "") or "").strip() or None,
         "entry": normalized_entry,
         "visible_agents": visible,
@@ -116,10 +126,18 @@ def profile_from_session(session: "SessionInfo") -> dict[str, Any]:
     profile.setdefault("version", PROFILE_VERSION)
     profile["session_id"] = str(session.id)
     profile["project_id"] = str(session.project_id)
+    project_root = str(getattr(session, "directory", "") or "").strip()
+    profile["workspace_dir"] = project_root
+    profile["project_root"] = project_root
+    profile["project_revision"] = getattr(
+        getattr(session, "time", None),
+        "updated",
+        None,
+    )
     profile["owner_username"] = str(getattr(session, "owner_username", "") or "").strip() or None
     profile["visible_agents"] = _as_list(profile.get("visible_agents"))
     profile["default_agent"] = str(
-        profile.get("default_agent") or session.agent or ""
+        profile.get("default_agent") or getattr(session, "agent", "") or ""
     ).strip()
     if profile["visible_agents"] and profile["default_agent"] not in profile["visible_agents"]:
         profile["default_agent"] = profile["visible_agents"][0]
@@ -149,7 +167,7 @@ def merge_profile(
     merged.update(dict(patch))
     merged["visible_agents"] = _as_list(merged.get("visible_agents"))
     merged["default_agent"] = str(
-        merged.get("default_agent") or session.agent or ""
+        merged.get("default_agent") or getattr(session, "agent", "") or ""
     ).strip()
     if merged["visible_agents"] and merged["default_agent"] not in merged["visible_agents"]:
         merged["default_agent"] = merged["visible_agents"][0]
@@ -164,6 +182,14 @@ def merge_profile(
     )
     merged["session_id"] = str(session.id)
     merged["project_id"] = str(session.project_id)
+    project_root = str(getattr(session, "directory", "") or "").strip()
+    merged["workspace_dir"] = project_root
+    merged["project_root"] = project_root
+    merged["project_revision"] = getattr(
+        getattr(session, "time", None),
+        "updated",
+        None,
+    )
     merged["owner_username"] = str(getattr(session, "owner_username", "") or "").strip() or None
     merged["version"] = PROFILE_VERSION
     merged["revision"] = int(current.get("revision") or 1) + 1
@@ -202,7 +228,7 @@ async def upsert_session_execution_profile(
     if session is None:
         return None
     merged_profile = merge_profile(session, patch=patch, source=source)
-    metadata = with_profile_metadata(session.metadata, merged_profile)
+    metadata = with_profile_metadata(getattr(session, "metadata", None), merged_profile)
     updated = await Session.update(
         session.project_id,
         session.id,

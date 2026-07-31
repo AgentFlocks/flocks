@@ -113,14 +113,20 @@
     }
   },
   "permissionMode": {
-    "title": "权限模式",
-    "menuHint": "选择命令执行管控模式",
-    "readonly": "禁止命令执行",
-    "readonlyDesc": "阻止执行任何命令",
-    "requireConfirm": "每次确认",
-    "requireConfirmDesc": "低风险命令可直接执行",
+    "title": "Session 执行控制",
+    "menuHint": "Permission mode 同时控制 Bash 与文件工具；Runtime mode 控制 Plugins 写权限上限",
+    "readonly": "只读",
+    "readonlyDesc": "禁止 Bash 命令执行和文件变更；允许策略范围内的文件读取",
+    "requireConfirm": "按策略确认",
+    "requireConfirmDesc": "Bash 按风险确认；文件写入按 Workspace、Project 和路径区域规则允许或确认",
     "autoAllowAll": "自动允许",
-    "autoAllowAllDesc": "不再弹出命令确认"
+    "autoAllowAllDesc": "自动通过可确认的 Bash 与文件操作，但不能覆盖 Runtime mode、External 和系统拒绝规则",
+    "executionControlTitle": "Session 执行控制：设置 Bash/文件权限和开发/执行模式",
+    "runtimeTitle": "Runtime mode",
+    "runtimeDev": "开发模式",
+    "runtimeDevDesc": "Plugins 继续使用当前 Session permission mode",
+    "runtimeExe": "执行模式",
+    "runtimeExeDesc": "Plugins 固定 readonly；Project 和个人 Output 不受影响"
   },
   "agentPicker": {
     "title": "选择对话 Agent",
