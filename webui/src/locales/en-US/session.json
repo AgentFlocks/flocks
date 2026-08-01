@@ -117,18 +117,19 @@
   "permissionMode": {
     "title": "Session execution controls",
     "menuHint": "Permission mode controls Bash and file tools; Runtime mode limits Plugin writes",
-    "readonly": "Read only",
+    "readonly": "readonly",
     "readonlyDesc": "Blocks Bash execution and file changes while allowing policy-scoped file reads",
-    "requireConfirm": "Confirm by policy",
-    "requireConfirmDesc": "Confirms Bash by risk and allows or confirms file writes by Workspace, Project, and path region",
-    "autoAllowAll": "Auto allow",
-    "autoAllowAllDesc": "Automatically allows confirmable Bash and file actions without overriding Runtime mode, External, or system denies",
+    "requireConfirm": "require-confirm",
+    "requireConfirmDesc": "Manually confirm high-risk command execution and file operations",
+    "autoAllowAll": "auto-allow-all",
+    "autoAllowAllDesc": "Automatically allows command execution and file operations; hard-deny blacklist rules remain blocked",
     "executionControlTitle": "Session execution controls: Bash/file permissions and development/execution mode",
     "runtimeTitle": "Runtime mode",
-    "runtimeDev": "Development mode",
-    "runtimeDevDesc": "Plugins use the current Session permission mode",
-    "runtimeExe": "Execution mode",
-    "runtimeExeDesc": "Plugins are readonly; Project and personal Output are unchanged"
+    "runtimeDev": "Development",
+    "runtimeDevDesc": "Develop and modify Agents, Skills, Workflows, Tools, and more under ~/.flocks/plugins",
+    "runtimeExe": "Execution",
+    "runtimeExeDesc": "Prevents changes to ~/.flocks/plugins; Project directories and workspace Output are unaffected",
+    "viewDetails": "View details"
   },
   "agentPicker": {
     "title": "Choose Chat Agent",

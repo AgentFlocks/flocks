@@ -26,7 +26,19 @@ export interface SecurityOverview {
   filesystem: {
     excludedTools: string[];
     policyVersion: string;
-    runtimeOverrides: Record<string, Record<string, string>>;
+    decisionMatrix: Array<{
+      region: string;
+      operation: string;
+      readonly: string;
+      requireConfirm: string;
+      autoAllowAll: string;
+    }>;
+    runtimeOverrides: Array<{
+      region: string;
+      operation: string;
+      devMode: string;
+      exeMode: string;
+    }>;
     hardDenies: Record<string, boolean>;
     sharedPermissionMode: {
       supported: string[];
