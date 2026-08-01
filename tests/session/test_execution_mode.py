@@ -89,21 +89,45 @@ def test_pentest_uses_build_permissions_and_orchestration_prompt() -> None:
     assert 'load_skills=["pentest-verify"]' in prompt
     assert "Do not load or perform `pentest-analysis` yourself" in prompt
     assert "Attack Surface Model" in prompt
+    assert "deterministic production inventory" in prompt
+    assert "stable `INV-*` IDs" in normalized_prompt
+    assert "inventory receipt" in prompt
+    assert "supporting `INV-*` evidence" in prompt
+    assert "`SIGNAL-*` risk signals" in prompt
+    assert "must not be used to omit a mandatory Analysis profile" in normalized_prompt
+    assert "`AN-<RU>-DATA`" in prompt
+    assert "`AN-<RU>-ACCESS`" in prompt
+    assert "`AN-<RU>-LOGIC`" in prompt
+    assert "AN-GLOBAL-SINK" not in prompt
+    assert "owned `AC-*` coverage cells" in prompt
+    assert "stable `HYP-*` records created only during Analysis" in normalized_prompt
+    assert "Do not dispatch per-candidate or per-hypothesis" in prompt
     assert "Treat a Pentest run as a resumable scan" in prompt
     assert "Durable scan state and handoff" not in prompt
     assert "Durable run state and handoff" in prompt
     assert "outside the target repository" in normalized_prompt
     assert "scan-state.json" not in prompt
-    assert "run-state.json" in prompt
-    assert "findings.jsonl" in prompt
+    assert "run-state.json" not in prompt
+    assert "findings.jsonl" not in prompt
+    assert "run-state.md" in prompt
+    assert "findings.md" in prompt
+    assert "structured Markdown" in prompt
+    assert "one row per task, worker, attempt, or artifact" in normalized_prompt
+    assert "## <timestamp> — <candidate_id> — <transition>" in prompt
     assert "recon/attack-surface.json" in prompt
     assert "analysis/<task_id>.json" in prompt
     assert "verify/<candidate_id>.json" in prompt
+    assert "report.md" not in prompt
+    assert "report.html" in prompt
+    assert "self-contained UTF-8 HTML" in prompt
+    assert "Vulnerability impact" in prompt
+    assert "Reproduction steps" in prompt
+    assert "Proof of concept (PoC)" in prompt
     assert "QUEUED -> RUNNING -> COMPLETED" in prompt
     assert "PROPOSED -> DEDUPLICATED -> VERIFYING" in prompt
     assert "do not claim database-backed persistence" in normalized_prompt
     assert "more than four workers" in normalized_prompt
-    assert "20 review units require five waves" in normalized_prompt
+    assert "two production review units create six mandatory profile tasks" in normalized_prompt
     assert "Analysis queue is empty" in normalized_prompt
     assert "Verify queue is empty" in normalized_prompt
     assert "Docker is attempted only by Verify workers" in normalized_prompt

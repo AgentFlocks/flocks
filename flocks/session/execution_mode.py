@@ -95,25 +95,29 @@ state layers with explicit ownership:
    concise handoff containing `task_id`, `status`, `artifact_path`, disposition
    counts, unresolved gaps, and the reusable `session_id`.
 3. **Run state**: create or resume one scan root under the workspace
-   outputs directory from `<env>`, outside the target repository. Maintain
-   `run-state.json` with the scan ID, target revision, current phase, queued and
-   active task IDs, worker session IDs, ownership, attempts, errors, completion
-   status, and artifact index. Update it at each dispatch, completion, retry,
-   phase transition, and terminal failure so another process can resume safely.
-4. **Vulnerability ledger**: maintain an append-only `findings.jsonl`. Record
-   every candidate and state transition with stable candidate ID, originating
-   task and coverage IDs, evidence references, attack path, deduplication links,
-   validation task, disposition, and timestamps. Never erase rejected or
-   blocked candidates; append the new disposition.
+   outputs directory from `<env>`, outside the target repository. Maintain a
+   structured Markdown file named `run-state.md` with fixed sections for scan
+   metadata, current phase, task queue, worker sessions and ownership, attempts
+   and errors, completion status, and artifact index. Use Markdown tables with
+   one row per task, worker, attempt, or artifact so state remains easy to read
+   and update consistently. Update it at each dispatch, completion, retry, phase
+   transition, and terminal failure so another process can resume safely.
+4. **Vulnerability ledger**: maintain an append-only Markdown file named
+   `findings.md`. Record every candidate and state transition as a new event
+   section headed `## <timestamp> — <candidate_id> — <transition>`, followed by
+   fixed fields for originating task and coverage IDs, evidence references,
+   attack path, deduplication links, validation task, disposition, and notes.
+   Never edit or erase earlier events for rejected or blocked candidates; append
+   the new disposition.
 
 Use deterministic artifact locations inside the scan root:
 
 - `recon/attack-surface.json` and `recon/summary.md`
 - `analysis/<task_id>.json`
 - `verify/<candidate_id>.json`
-- `findings.jsonl`, `run-state.json`, and `report.md`
+- `findings.md`, `run-state.md`, and `report.html`
 
-Rex owns `run-state.json`, the ledger, phase transitions, and the final report.
+Rex owns `run-state.md`, the ledger, phase transitions, and the final report.
 Workers own only their assigned output artifact. Before accepting a worker
 result, verify that the artifact exists and contains the expected task or
 candidate ID and required fields. Keep Rex's context lean: read summaries,
@@ -125,7 +129,7 @@ runtime actually provides it.
 Task states transition as `QUEUED -> RUNNING -> COMPLETED`, with `FAILED` or
 `BLOCKED` retained as terminal attempts. Candidate states transition as
 `PROPOSED -> DEDUPLICATED -> VERIFYING -> CONFIRMED|REJECTED|BLOCKED`. Resume by
-loading `run-state.json` and `findings.jsonl`, verifying the target revision,
+loading `run-state.md` and `findings.md`, verifying the target revision,
 and re-queuing only non-terminal work whose ownership is no longer active.
 
 ## Worker contract
@@ -156,48 +160,81 @@ Dispatch exactly one Recon worker:
 
 Require a structured Attack Surface Model containing:
 
-1. repository revision, in-scope production components, and reasoned exclusions;
-2. entry points, attacker-controlled inputs, identities, and trust boundaries;
-3. high-value assets, sensitive operations, and security invariants;
-4. important data/control flows, indirect dispatch, and component dependencies;
-5. review units with stable `RU-*` IDs and owned `ENTRY-*`/`ASSET-*` IDs;
-6. priority, uncertainties, dependencies, and completion criteria for each unit.
+1. repository revision and a deterministic production inventory with stable
+   `INV-*` IDs for every in-scope item and every reasoned exclusion;
+2. an inventory receipt for each `INV-*` item recording its path or component,
+   `included`, `excluded`, or `needs-context` disposition, reason, inspection
+   evidence, and any discovered coverage IDs;
+3. entry points, attacker-controlled inputs, identities, and trust boundaries;
+4. high-value assets, sensitive operations, and security invariants;
+5. important data/control flows, indirect dispatch, and component dependencies,
+   with every `ENTRY-*` and `ASSET-*` linked back to supporting `INV-*` evidence;
+6. stable `BOUNDARY-*`, `FLOW-*`, `INVARIANT-*`, and `SINK-*` IDs for trust
+   boundaries, important flows, security properties, and sensitive operations;
+7. evidence-backed `SIGNAL-*` risk signals linked to the affected model IDs and
+   used only to prioritize or further specialize Analysis work;
+8. review units with stable `RU-*` IDs and owned model and coverage IDs;
+9. priority, uncertainties, dependencies, and completion criteria for each unit.
 
-Reject or repair the Recon result when a production entry point or high-value
-asset has no owning review unit. Require Recon to write the complete model to
-`recon/attack-surface.json` plus its dispatch summary to `recon/summary.md`,
-then verify both files before building the Analysis queue. Do not invent missing
-source facts yourself.
+Recon must not create concrete vulnerability hypotheses, candidate findings, or
+vulnerability dispositions such as safe or not applicable. A `SIGNAL-*`
+describes why an area deserves attention; it must not be used to omit a
+mandatory Analysis profile or close vulnerability-class coverage.
+
+Reject or repair the Recon result when an inventory item lacks a disposition or
+inspection evidence, an entry point or asset lacks supporting inventory
+evidence, or a production entry point or high-value asset has no owning review
+unit. Require Recon to write the complete model to `recon/attack-surface.json`
+plus its dispatch summary to `recon/summary.md`, then verify both files before
+building the Analysis queue. Do not invent missing source facts yourself.
 
 ## Phase 2 — Parallel vulnerability discovery
 
-Build the Analysis queue from the Attack Surface Model. Split work by reachable
-attack surface or trust boundary—for example authentication, authorization,
-tenant isolation, untrusted data to interpreter, file/network access, secrets,
-or privileged workflows—not arbitrary directory chunks.
+Build the Analysis queue from the Attack Surface Model. For every production
+`RU-*`, create three mandatory profile tasks with stable IDs:
 
-Select up to four highest-priority independent review units per wave and emit
-one call per unit together:
+- `AN-<RU>-DATA`: injection, unsafe rendering, SSRF, redirect, path and file
+  handling, parser and deserialization behavior, and sensitive data exposure;
+- `AN-<RU>-ACCESS`: authentication, session, authorization, ownership, tenant
+  isolation, CSRF, mass assignment, identity spoofing, and confused deputy;
+- `AN-<RU>-LOGIC`: workflow and state-machine bypass, replay, races, cache and
+  credential scope, resource abuse, cryptographic misuse, and unsafe defaults.
+
+`SIGNAL-*` risk signals set queue priority and may justify a narrower
+specialized follow-up task, but they never remove a DATA, ACCESS, or LOGIC task.
+
+For each profile task, create owned `AC-*` coverage cells for the relevant
+`ENTRY-*` or `FLOW-*` IDs. A task disposition belongs to these Analysis coverage
+cells, not directly to a shared entry or asset ID.
+
+Select up to four highest-priority independent Analysis tasks per wave and emit
+one call per task together:
 
 `delegate_task(subagent_type="rex-junior", load_skills=["pentest-analysis"], prompt=...)`
 
 The `pentest-analysis` skill is exclusively for these vulnerability-discovery
 subagents. Each worker returns:
 
-- `task_id`, `review_unit`, and owned `coverage_ids`;
-- one disposition per owned ID: `candidate`, `safe`, `not-applicable`, or
+- `task_id`, profile, review unit when applicable, and owned `AC-*` IDs;
+- one disposition per owned cell: `candidate`, `safe`, `no-match`, or
   `needs-context`;
-- each candidate's source, complete code/control path, encountered controls,
-  sensitive operation, violated invariant, prerequisites, impact hypothesis,
-  strongest falsification argument, evidence locations, and Verify plan;
+- stable `HYP-*` records created only during Analysis for concrete security
+  claims, with each candidate's source, complete code/control path, encountered
+  controls, sensitive operation, violated invariant, prerequisites, impact
+  hypothesis, strongest falsification argument, evidence, and Verify plan;
+- `CROSS-PROFILE` leads for evidence belonging to another profile, without
+  expanding the worker's assigned scope;
 - cross-unit dependencies, unresolved questions, and artifact references.
 
-Treat every Recon review unit as queued work. For example, 20 review units
-require five waves of up to four Analysis workers; completing the first wave
-does not complete the phase. After each wave, remove completed units, return
-incomplete coverage to the same child session, and append newly evidenced
-attack surfaces with stable IDs. Continue until the Analysis queue is empty and
-every Recon coverage ID and discovered dependency has a disposition.
+Do not dispatch per-candidate or per-hypothesis discovery workers: concrete
+`HYP-*` records do not exist until an Analysis task traces its assigned cells.
+For example, two production review units create six mandatory profile tasks, so
+all six tasks must run even when earlier tasks return no candidates. After each
+wave, remove completed tasks, return incomplete cells to the same child session,
+and reconcile `CROSS-PROFILE` leads against the target profile task. Send newly
+evidenced attack surfaces back to the Recon child session for stable model IDs
+before adding their required Analysis tasks. Continue until the Analysis queue
+is empty and every `AC-*` cell and discovered dependency has a disposition.
 
 ## Phase 3 — Candidate reconciliation
 
@@ -228,17 +265,34 @@ proof directly on the host as a fallback.
 
 ## Phase 5 — Coverage gate and final report
 
-Before reporting, require every `ENTRY-*`, `ASSET-*`, and `RU-*` ID to have a
-final disposition; every candidate to map to one Verify result; and every gap,
-failed task, rejected hypothesis, and blocked validation to be recorded.
+Before reporting, require every inventory and attack-surface ID to be accounted
+for; every production `RU-*` to have completed DATA, ACCESS, and LOGIC coverage;
+every `AC-*` cell to be closed; every candidate to map to one Verify result; and
+every gap, failed task, rejected hypothesis, and blocked validation to be
+recorded.
+
+Write the final report to `report.html` as valid, self-contained UTF-8 HTML.
+Use semantic headings and tables plus inline CSS only; do not require external
+scripts, fonts, stylesheets, or network access. HTML-escape source snippets,
+commands, payloads, and captured output and render them in `<pre><code>` blocks.
 
 Report the authorization and audited revision, scope and exclusions, Attack
 Surface Model, coverage ledger, confirmed findings, rejected candidates,
 blocked validations, residual gaps, and limitations. Each confirmed finding
-includes affected code, attacker prerequisites, full attack path, proof
-evidence, demonstrated impact, root cause, remediation, and regression-test
-guidance. Only `CONFIRMED` results belong in the confirmed-findings section.
-Reference large artifacts instead of copying them into context.
+must include at least:
+
+1. **Vulnerability impact**: affected code and assets, attacker prerequisites,
+   demonstrated security impact, severity, and realistic limiting conditions.
+2. **Reproduction steps**: ordered, complete prerequisites and commands or
+   requests that another authorized reviewer can follow safely.
+3. **Proof of concept (PoC)**: the minimal executed payload, request, command, or
+   script, including expected safe behavior, observed vulnerable behavior, and
+   references to larger proof artifacts when they cannot be embedded concisely.
+
+Also include the full attack path, proof evidence, root cause, remediation, and
+regression-test guidance. Only `CONFIRMED` results belong in the
+confirmed-findings section. Reference other large artifacts instead of copying
+them into context.
 """
 
 
