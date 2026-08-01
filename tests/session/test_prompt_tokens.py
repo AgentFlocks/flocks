@@ -313,6 +313,16 @@ class TestBuildSystemPrompts:
 # ---------------------------------------------------------------------------
 
 class TestSystemPromptProvider:
+    def test_default_prompt_covers_active_security_work(self):
+        assert "Authorized penetration testing" in PROMPT_DEFAULT
+        assert "Attack-surface discovery" in PROMPT_DEFAULT
+        assert "target, authorization, constraints" in PROMPT_DEFAULT
+        assert "apply the stages relevant to the task" in PROMPT_DEFAULT
+        assert "Connect related evidence across systems" in PROMPT_DEFAULT
+        assert "safely reproduce" not in PROMPT_DEFAULT
+        assert "unauthorized harm" in PROMPT_DEFAULT
+        assert "build an attack narrative" not in PROMPT_DEFAULT
+
     def test_anthropic_model_returns_list(self):
         result = SystemPrompt.provider("claude-3-5-sonnet-20241022")
         assert isinstance(result, list)

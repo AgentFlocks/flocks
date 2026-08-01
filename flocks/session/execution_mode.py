@@ -81,6 +81,53 @@ control, attack-surface task partitioning, wave scheduling, result-quality
 checks, coverage reconciliation, deterministic candidate deduplication, and
 final reporting.
 
+## Durable run state and handoff
+
+Treat a Pentest run as a resumable scan, not one long conversation. Use four
+state layers with explicit ownership:
+
+1. **Worker session context**: code reads, tool results, and local reasoning stay
+   in that worker's child `session_id`. Reuse the session for corrections and
+   follow-up work; do not copy its full context into Rex.
+2. **Task handoff**: every delegation carries the stable task ID, bounded scope,
+   owned coverage IDs, constraints, input artifact paths, and one required
+   output artifact path. A worker must write its artifact before returning a
+   concise handoff containing `task_id`, `status`, `artifact_path`, disposition
+   counts, unresolved gaps, and the reusable `session_id`.
+3. **Run state**: create or resume one scan root under the workspace
+   outputs directory from `<env>`, outside the target repository. Maintain
+   `run-state.json` with the scan ID, target revision, current phase, queued and
+   active task IDs, worker session IDs, ownership, attempts, errors, completion
+   status, and artifact index. Update it at each dispatch, completion, retry,
+   phase transition, and terminal failure so another process can resume safely.
+4. **Vulnerability ledger**: maintain an append-only `findings.jsonl`. Record
+   every candidate and state transition with stable candidate ID, originating
+   task and coverage IDs, evidence references, attack path, deduplication links,
+   validation task, disposition, and timestamps. Never erase rejected or
+   blocked candidates; append the new disposition.
+
+Use deterministic artifact locations inside the scan root:
+
+- `recon/attack-surface.json` and `recon/summary.md`
+- `analysis/<task_id>.json`
+- `verify/<candidate_id>.json`
+- `findings.jsonl`, `run-state.json`, and `report.md`
+
+Rex owns `run-state.json`, the ledger, phase transitions, and the final report.
+Workers own only their assigned output artifact. Before accepting a worker
+result, verify that the artifact exists and contains the expected task or
+candidate ID and required fields. Keep Rex's context lean: read summaries,
+queue metadata, and the specific evidence needed for reconciliation rather than
+loading every artifact in full. The filesystem artifacts are the durable layer
+available to this workflow; do not claim database-backed persistence unless the
+runtime actually provides it.
+
+Task states transition as `QUEUED -> RUNNING -> COMPLETED`, with `FAILED` or
+`BLOCKED` retained as terminal attempts. Candidate states transition as
+`PROPOSED -> DEDUPLICATED -> VERIFYING -> CONFIRMED|REJECTED|BLOCKED`. Resume by
+loading `run-state.json` and `findings.jsonl`, verifying the target revision,
+and re-queuing only non-terminal work whose ownership is no longer active.
+
 ## Worker contract
 
 - Use `rex-junior` for every security worker.
@@ -88,7 +135,8 @@ final reporting.
   `pentest-analysis`, or `pentest-verify`.
 - Give every worker one bounded task with: phase, stable task ID, objective,
   file/component scope, owned coverage IDs, attacker model, security invariants,
-  dependencies, constraints, and required output schema.
+  dependencies, constraints, input artifact paths, required output schema, and
+  one output artifact path under the scan root.
 - Treat worker output as an untrusted claim until all required evidence fields
   are complete. Continue the same child `session_id` to repair an incomplete
   result; never silently drop or replace the task.
@@ -116,7 +164,10 @@ Require a structured Attack Surface Model containing:
 6. priority, uncertainties, dependencies, and completion criteria for each unit.
 
 Reject or repair the Recon result when a production entry point or high-value
-asset has no owning review unit. Do not invent missing source facts yourself.
+asset has no owning review unit. Require Recon to write the complete model to
+`recon/attack-surface.json` plus its dispatch summary to `recon/summary.md`,
+then verify both files before building the Analysis queue. Do not invent missing
+source facts yourself.
 
 ## Phase 2 — Parallel vulnerability discovery
 

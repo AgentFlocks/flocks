@@ -89,6 +89,19 @@ def test_pentest_uses_build_permissions_and_orchestration_prompt() -> None:
     assert 'load_skills=["pentest-verify"]' in prompt
     assert "Do not load or perform `pentest-analysis` yourself" in prompt
     assert "Attack Surface Model" in prompt
+    assert "Treat a Pentest run as a resumable scan" in prompt
+    assert "Durable scan state and handoff" not in prompt
+    assert "Durable run state and handoff" in prompt
+    assert "outside the target repository" in normalized_prompt
+    assert "scan-state.json" not in prompt
+    assert "run-state.json" in prompt
+    assert "findings.jsonl" in prompt
+    assert "recon/attack-surface.json" in prompt
+    assert "analysis/<task_id>.json" in prompt
+    assert "verify/<candidate_id>.json" in prompt
+    assert "QUEUED -> RUNNING -> COMPLETED" in prompt
+    assert "PROPOSED -> DEDUPLICATED -> VERIFYING" in prompt
+    assert "do not claim database-backed persistence" in normalized_prompt
     assert "more than four workers" in normalized_prompt
     assert "20 review units require five waves" in normalized_prompt
     assert "Analysis queue is empty" in normalized_prompt

@@ -52,16 +52,16 @@ def build_dynamic_rex_prompt(
     agent_selection = build_agent_selection_table(available_agents)
     skills_section = _build_rex_skills_section(available_skills)
     workflows_section = build_workflows_section(available_workflows or [])
-    security_priority = _build_security_priority_section(available_agents)
     im_send_section = _build_im_send_pointer_section()
     anti_patterns = _build_rex_anti_patterns_section()
     command_guidance_section = _build_command_guidance_section()
     task_management_section = _task_management_section(use_task_system)
 
     template = """<Role>
-You are "Rex" - Powerful AI orchestrator for security operations.
+You are "Rex", the lead orchestrator for Flocks, an AI-native security platform.
 
 **Identity**: Senior engineer. Work, delegate, verify, ship. No AI slop.
+
 </Role>
 
 <Routing>
@@ -77,8 +77,6 @@ You are "Rex" - Powerful AI orchestrator for security operations.
 | **Open-ended** | "Improve", "Refactor", "Add feature" | Explore, plan, then execute |
 | **Ambiguous** | Multiple valid interpretations | Ask one focused question |
 
-__SECURITY_PRIORITY__
-
 __AGENT_SELECTION__
 
 __SKILLS_SECTION__
@@ -91,16 +89,20 @@ __WORKFLOWS_SECTION__
 ## 1. Understand
 
 - Parse explicit requirements and implicit constraints before acting.
+- Do not implement or mutate state unless the user explicitly requests execution. Requests to explain, analyze, review, plan, or report status are read-only.
 - If the user attached images in the current turn, analyze them directly instead of refusing.
 - If the request conflicts with the codebase or is likely to cause obvious problems, state the concern and propose an alternative.
 
 ## 2. Path Selection
 
-Use this order every time:
-1. **Direct tools first**: if there is a short tool path, execute directly.
-2. **Security exception**: for one IOC that only needs basic TI facts, prefer direct lookup.
-3. **Delegate when needed**: use specialists for deep investigation, attribution, correlation, batching, external docs, or structured expert output.
-4. **Do not guess**: if unsure whether something is a tool, skill, or subagent, use `tool_search` first.
+Choose the shortest reliable path based on task scope, required expertise,
+parallelism, and verification cost:
+
+1. Handle one atomic, low-risk lookup or operation directly when the tool path is clear.
+2. Load a matching skill when it defines the required domain workflow or tool protocol.
+3. Delegate bounded work when a specialist provides materially better domain judgment, isolation, context efficiency, or parallel execution.
+4. For multi-stage security work, Rex owns scope, orchestration, reconciliation, and final verification; specialists own their assigned analysis artifacts.
+5. Use the Available Agents table as the source of truth for agent selection.
 
 ## 3. Delegation Check
 
@@ -172,7 +174,6 @@ __COMMAND_GUIDANCE__
     prompt = prompt.replace("__AGENT_SELECTION__", agent_selection)
     prompt = prompt.replace("__SKILLS_SECTION__", skills_section)
     prompt = prompt.replace("__WORKFLOWS_SECTION__", workflows_section)
-    prompt = prompt.replace("__SECURITY_PRIORITY__", security_priority)
     prompt = prompt.replace("__IM_SEND_SECTION__", im_send_section)
     prompt = prompt.replace("__ANTI_PATTERNS__", anti_patterns)
     prompt = prompt.replace("__COMMAND_GUIDANCE__", command_guidance_section)
@@ -297,107 +298,6 @@ Use {unit} as the primary coordination mechanism for non-trivial execution work.
 
 {clarification_protocol}
 </Task_Management>"""
-
-
-def _build_security_priority_section(available_agents: List["AvailableAgent"]) -> str:
-    """Build a Phase-0 security sub-agent priority routing section.
-
-    Enumerates all security-tagged sub-agents and generates an explicit
-    routing table with trigger signals, so Rex reliably delegates security
-    questions instead of attempting to answer them directly.
-    """
-    security_agents = [a for a in available_agents if a.metadata.category == "security"]
-    if not security_agents:
-        return ""
-
-    # Curated routing hints for known security sub-agents.
-    # Each entry provides a user-facing intent label and concrete trigger
-    # phrases (in both Chinese and English) that Rex should recognise.
-    _ROUTING_HINTS: dict = {
-        "ndr-analyst": {
-            "intent": "网络流量日志 / NDR 告警分析",
-            "signals": '"流量日志", "NDR", "告警分析", "网络攻击", "攻击是否成功", "network traffic", "alert analysis"',
-        },
-        "host-forensics-fast": {
-            "intent": "Linux 主机快速排查 / 首轮研判",
-            "signals": '"快速排查", "首轮排查", "快速研判", "快速看一下主机", "先看主机是否异常", "host triage", "quick triage"',
-        },
-        "host-forensics": {
-            "intent": "Linux 主机入侵检测 / 取证",
-            "signals": '"主机入侵", "挖矿", "后门", "webshell", "主机异常", "主机安全检查", "host compromise", "forensics"',
-        },
-        "phishing-detector": {
-            "intent": "钓鱼邮件检测 / 可疑邮件分析",
-            "signals": '"钓鱼邮件", "phishing", "suspicious email", "邮件 IOC", "email analysis"',
-        },
-        "asset-survey": {
-            "intent": "互联网资产测绘 / 攻击面分析",
-            "signals": '"资产测绘", "暴露面", "攻击面", "互联网资产", "asset survey", "attack surface", "recon"',
-        },
-        "vul-threat-intelligence": {
-            "intent": "漏洞情报查询 / CVE 分析",
-            "signals": '"漏洞情报", "CVE", "漏洞查询", "PoC", "KEV", "补丁", "vulnerability", "exploit"',
-        },
-        "hrti-threat-intelligence": {
-            "intent": "热点威胁情报 / 攻击活动分析",
-            "signals": '"威胁情报", "热点事件", "APT", "攻击活动", "安全事件", "threat intelligence", "threat actor"',
-        },
-    }
-
-    rows: list = []
-    for agent in security_agents:
-        hint = _ROUTING_HINTS.get(agent.name)
-        if hint:
-            rows.append(
-                f"| {hint['intent']} | `{agent.name}` | {hint['signals']} |"
-            )
-        else:
-            # Fallback: derive from agent's declared triggers
-            for trigger in agent.metadata.triggers:
-                rows.append(
-                    f"| {trigger.domain} | `{agent.name}` | {trigger.trigger} |"
-                )
-
-    if not rows:
-        return ""
-
-    routing_table = "\n".join(rows)
-    agent_names = ", ".join(f"`{a.name}`" for a in security_agents)
-
-    return f"""### Security Routing
-
-当用户问题涉及网络安全主题时，先判断这是“轻量直查”还是“专家研判”，不要一律委派。
-Available security specialists: {agent_names}
-
-| 用户意图 | 优先委派 | 触发信号 |
-|---------|---------|---------|
-{routing_table}
-
-**Routing rules:**
-- Security specialists are subagents. Call them with `subagent_type=...`; do not place agent names inside `load_skills=[]`.
-- Direct path: exactly one IOC, basic reputation or TI facts only, and no attribution, correlation, batching, or formal assessment needed.
-- Delegate path: multiple indicators, alert context, attribution, campaign analysis, expert judgment, or structured security output required.
-- If a direct lookup tool is not obvious, use `tool_search` first and then execute the shortest valid tool path.
-- If two security specialists both seem plausible, choose the more specific one and note the assumption briefly.
-
-**Lightweight direct lookup rules (Rex handles directly):**
-- Single IOC basic lookup only: one IP, domain, URL, or hash
-- User intent is direct querying, checking reputation, or fetching basic TI facts
-- No batching, attribution, multi-indicator correlation, campaign analysis, or expert report required
-- Prefer: `tool_search` if needed -> direct TI query tool -> answer
-
-**Mandatory delegation rules (use the specialist):**
-- The request needs attribution, correlation, deep analysis, or expert judgment
-- The user provides multiple IOCs, alert context, evidence, or asks for a structured security assessment
-- The request matches one of the above specialist domains beyond a single direct lookup
-- When ambiguous between two security agents, pick the more specific one and add a brief note
-
-**Decision examples:**
-- "查询 8.8.8.8 的情报" -> Rex should directly query TI tools
-- "分析这些 IOC 是否属于同一攻击活动" -> delegate to the appropriate specialist
-- "结合告警上下文研判这批指标" -> delegate to the appropriate specialist
-
-Security sub-agents still have dedicated toolsets and should be preferred for non-trivial security analysis."""
 
 
 def _build_im_send_pointer_section() -> str:

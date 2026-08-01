@@ -325,12 +325,23 @@ class TestRexPromptAwareness:
         assert "Execute this exact sequence" not in prompt
         assert "IM Session Resolution for schedule_task_create" not in prompt
 
-    @pytest.mark.asyncio
-    async def test_rex_prompt_contains_workflow_section(self):
-        """Rex prompt 应包含 workflow section。"""
-        from flocks.agent.registry import Agent
-        rex = await Agent.get("rex")
-        prompt = rex.prompt or ""
+    def test_rex_prompt_contains_workflow_section(self):
+        """存在可用 workflow 时，Rex prompt 应包含 workflow section。"""
+        from flocks.agent.agents.rex.prompt_builder import build_dynamic_rex_prompt
+
+        prompt = build_dynamic_rex_prompt(
+            available_agents=[],
+            available_tools=[],
+            available_skills=[],
+            available_workflows=[
+                AvailableWorkflow(
+                    name="test-workflow",
+                    description="Test workflow",
+                    path="/tmp/test/workflow.json",
+                    source="project",
+                )
+            ],
+        )
         assert "### Available Workflows" in prompt
         assert "run_workflow" in prompt
 
@@ -358,21 +369,23 @@ class TestRexPromptAwareness:
         rex = await Agent.get("rex")
         prompt = rex.prompt or ""
         assert "### Available Agents:" in prompt
-        assert "Default flow" in prompt
+        assert "source of truth for agent selection" in prompt
         assert "### Delegation Table:" not in prompt
 
-    @pytest.mark.asyncio
-    async def test_rex_prompt_prefers_direct_ioc_lookup_before_delegation(self):
-        """单 IOC 情报查询应保留“先直查、再委派”的稳定语义。"""
-        from flocks.agent.registry import Agent
-        rex = await Agent.get("rex")
-        prompt = rex.prompt or ""
-        assert "### Security Routing" in prompt
-        assert "Direct path: exactly one IOC" in prompt
-        assert "Delegate path: multiple indicators" in prompt
-        assert "**Lightweight direct lookup rules (Rex handles directly):**" in prompt
-        assert '"查询 8.8.8.8 的情报" -> Rex should directly query TI tools' in prompt
-        assert "`tool_search` first" in prompt
+    def test_rex_prompt_uses_one_direct_and_delegated_routing_policy(self):
+        """统一路由应同时描述直接执行和专家委派。"""
+        from flocks.agent.agents.rex.prompt_builder import build_dynamic_rex_prompt
+
+        prompt = build_dynamic_rex_prompt(
+            available_agents=[],
+            available_tools=[],
+            available_skills=[],
+            available_workflows=[],
+        )
+        assert "### Security Routing" not in prompt
+        assert "one atomic, low-risk lookup or operation directly" in prompt
+        assert "Delegate bounded work when a specialist" in prompt
+        assert "Available Agents table as the source of truth" in prompt
 
 
 # ===========================================================================
