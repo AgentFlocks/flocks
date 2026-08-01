@@ -206,11 +206,12 @@
     "loading": "Loading security configuration...",
     "actions": {
       "viewAudit": "View Audit Logs",
-      "saveRollout": "Save Rollout"
+      "saveRollout": "Save Rollout",
+      "viewDetails": "View details"
     },
     "sections": {
       "rollout": "Rollout Modes",
-      "rolloutDescription": "These four switches control different stages of the security path and can be enabled independently for staged rollout. When rollout env vars are unset, all modes default to enforce. Changes take effect immediately after saving.",
+      "rolloutDescription": "Unified controls for tool policy, command execution, identity ingress, and tool visibility. Audit-only records decisions without blocking; enforcement confirms, denies, or hides by policy. Changes take effect immediately after saving.",
       "permissionBaseline": "Permission Baseline",
       "permissionBaselineDescription": "Default permission modes for sessions created from different entry points. Fixed by the system and not editable here.",
       "baseline": "System Baseline",
@@ -224,13 +225,22 @@
       "channelDefaultMode": "Channel-created sessions",
       "uiDefaultMode": "UI-created sessions",
       "hardDeny": "Commands always denied by the system",
-      "readonlyCeiling": "Tools hidden in readonly mode"
+      "readonlyCeiling": "Tools hidden in readonly mode",
+      "pathRegion": "Path region",
+      "operation": "Operation",
+      "developmentMode": "Development mode (dev-mode)",
+      "executionMode": "Execution mode (exe-mode)",
+      "filesystemRollout": "Filesystem controls",
+      "filesystemHardDenies": "Filesystem hard-deny rules",
+      "filesystemManagedScope": "In scope",
+      "filesystemExcludedScope": "Out of scope"
     },
     "hints": {
       "policyRollout": "Controls whether general policy decisions (file I/O, workflow actions, high-risk tools, etc.) actually block requests. Audit only: evaluate and audit without blocking. Enforce: deny/confirm decisions stop execution.",
       "commandRollout": "Controls shell/command tools only (bash, shell, cmd, PowerShell, SSH commands, etc.). Can be enabled separately from policy enforcement—for example, enforce commands first while leaving other tools in audit-only mode.",
       "ingressRollout": "Controls whether Channel, HTTP, and workflow entry points require a valid identity. Off: skip ingress identity checks. Audit only: resolve identity but do not block. Enforce: reject entry when no valid identity is available.",
-      "visibilityRollout": "Controls which tools the AI can use under the current security policy. For example, in readonly mode, the agent cannot see hidden tools. Audit only: still show all tools, and only record which ones would be hidden. Enforce: actually hide those tools."
+      "visibilityRollout": "Controls which tools the AI can use under the current security policy. For example, in readonly mode, the agent cannot see hidden tools. Audit only: still show all tools, and only record which ones would be hidden. Enforce: actually hide those tools.",
+      "filesystemRollout": "Controls whether file tools run in audit-only or enforcement mode."
     },
     "modes": {
       "disabled": "Off",

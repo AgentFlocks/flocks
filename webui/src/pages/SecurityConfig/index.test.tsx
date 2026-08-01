@@ -61,6 +61,15 @@ describe('SecurityConfigPage', () => {
       filesystem: {
         excludedTools: [],
         policyVersion: 'filesystem-v1',
+        decisionMatrix: [
+          {
+            region: 'workspace_general',
+            operation: 'mutation',
+            readonly: 'deny',
+            requireConfirm: 'ask/confirm',
+            autoAllowAll: 'allow',
+          },
+        ],
         runtimeOverrides: { 'exe-mode': { plugins: 'deny_mutation' } },
         hardDenies: { unknown_region: true },
         sharedPermissionMode: { supported: ['readonly', 'require-confirm', 'auto-allow-all'], default: 'readonly' },
@@ -78,16 +87,23 @@ describe('SecurityConfigPage', () => {
       </MemoryRouter>,
     );
 
-    const openButton = await screen.findByRole('button', { name: '查看详情' });
+    const openButton = await screen.findByRole('button', { name: '查看文件管控详情' });
     await user.click(openButton);
     const dialog = screen.getByRole('dialog', { name: '文件管控配置详情' });
     expect(dialog).toBeInTheDocument();
     expect(dialog).toHaveClass('md:w-2/3', 'md:min-w-[720px]', 'md:max-w-[1200px]');
     expect(screen.getByText('仅审计')).toBeInTheDocument();
     expect(screen.getByText(/Session permission mode.*Runtime mode.*路径区域规则/)).toBeInTheDocument();
-    expect(screen.getByText('exe-mode')).toBeInTheDocument();
-    expect(screen.getByText('plugins')).toBeInTheDocument();
-    expect(screen.getByText('deny_mutation')).toBeInTheDocument();
+    expect(screen.getAllByText('从 WebUI 创建的 Session').length).toBeGreaterThan(0);
+    expect(screen.getByText('开发模式（dev-mode）')).toBeInTheDocument();
+    expect(screen.getByText('执行模式（exe-mode）')).toBeInTheDocument();
+    expect(screen.getAllByText('~/.flocks/plugins').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('读取 / 列表 / 搜索').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('变更（写入 / 创建 / 编辑 / 删除 / 移动 / 复制）').length).toBeGreaterThan(0);
+    expect(screen.getByText('Permission mode 决策矩阵')).toBeInTheDocument();
+    expect(screen.getByText('~/.flocks/workspace（不含当前用户 Output / 当前 Project）')).toBeInTheDocument();
+    expect(screen.getAllByText('变更（写入 / 创建 / 编辑 / 删除 / 移动 / 复制）').length).toBeGreaterThan(0);
+    expect(screen.getByText('ask/confirm')).toBeInTheDocument();
     expect(screen.getByText('纳管')).toBeInTheDocument();
     expect(screen.getByText('不纳管')).toBeInTheDocument();
     expect(screen.getByText(/memory_search/)).toBeInTheDocument();

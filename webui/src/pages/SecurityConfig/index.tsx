@@ -6,8 +6,6 @@ import {
   EyeOff,
   KeyRound,
   Loader2,
-  Monitor,
-  Radio,
   Save,
   Shield,
   ShieldAlert,
@@ -121,8 +119,103 @@ function RulePill({ value }: { value: string }) {
   return <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${classes}`}>{value}</span>;
 }
 
+const filesystemRegionLabels: Record<string, string> = {
+  owner_output: '~/.flocks/workspace/outputs/<当前用户>',
+  workspace_general: '~/.flocks/workspace（不含当前用户 Output / 当前 Project）',
+  plugins: '~/.flocks/plugins',
+  flocks_internal: '~/.flocks（不含 workspace / plugins）',
+  current_project: '当前 Project（project root）',
+  external: 'External（上述范围之外）',
+  unknown: 'Unknown（路径无法可靠解析）',
+};
+
+const filesystemOperationLabels: Record<string, string> = {
+  read: '读取 / 列表 / 搜索',
+  mutation: '变更（写入 / 创建 / 编辑 / 删除 / 移动 / 复制）',
+};
+
+const filesystemRegionLabelsEn: Record<string, string> = {
+  owner_output: '~/.flocks/workspace/outputs/<current user>',
+  workspace_general: '~/.flocks/workspace (excluding current-user Output / current Project)',
+  plugins: '~/.flocks/plugins',
+  flocks_internal: '~/.flocks (excluding workspace / plugins)',
+  current_project: 'Current Project (project root)',
+  external: 'External (outside the ranges above)',
+  unknown: 'Unknown (path cannot be resolved reliably)',
+};
+
+const filesystemOperationLabelsEn: Record<string, string> = {
+  read: 'Read / list / search',
+  mutation: 'Mutate (write / create / edit / delete / move / copy)',
+};
+
+const sessionEntryLabels: Record<string, string> = {
+  channel: '来自 Channel 的 Session',
+  interactive: '交互式入口创建的 Session（CLI / TUI 等）',
+  webui: '从 WebUI 创建的 Session',
+  delegate: '子 Agent / 委派 Session',
+  workflow: 'Workflow Agent 节点 Session',
+  api: '通过 API 创建的 Session',
+  schedule: '定时任务创建的 Session',
+  task: '任务创建的 Session',
+  unknown: '未识别来源的 Session',
+};
+
+const sessionEntryLabelsEn: Record<string, string> = {
+  channel: 'Channel-created Session',
+  interactive: 'Interactive Session (CLI / TUI, etc.)',
+  webui: 'WebUI-created Session',
+  delegate: 'Subagent / delegated Session',
+  workflow: 'Workflow Agent node Session',
+  api: 'API-created Session',
+  schedule: 'Scheduled Session',
+  task: 'Task-created Session',
+  unknown: 'Session from an unknown entry point',
+};
+
+const hardDenyRuleLabels: Record<string, string> = {
+  'baseline:hard_deny:bash': 'baseline:hard_deny:dangerous_system_command',
+};
+
+type RuntimeOverride = SecurityOverview['filesystem']['runtimeOverrides'][number];
+
+function normalizeRuntimeOverrides(
+  overrides: unknown,
+): RuntimeOverride[] {
+  if (Array.isArray(overrides)) return overrides as RuntimeOverride[];
+
+  // Compatibility with older Pro processes:
+  // { "exe-mode": { plugins: "deny_mutation" } }.
+  if (
+    overrides
+    && typeof overrides === 'object'
+    && 'exe-mode' in overrides
+    && typeof overrides['exe-mode'] === 'object'
+    && overrides['exe-mode'] !== null
+    && 'plugins' in overrides['exe-mode']
+  ) {
+    return [
+      {
+        region: 'plugins',
+        operation: 'read',
+        devMode: 'allow',
+        exeMode: 'allow',
+      },
+      {
+        region: 'plugins',
+        operation: 'mutation',
+        devMode: 'allow',
+        exeMode: 'deny',
+      },
+    ];
+  }
+  return [];
+}
+
 export default function SecurityConfigPage() {
-  const { t } = useTranslation('flockspro');
+  const { t, i18n } = useTranslation('flockspro');
+  const isEnglish = i18n.resolvedLanguage?.startsWith('en') ?? false;
+  const localizedText = (zh: string, en: string) => (isEnglish ? en : zh);
   const toast = useToast();
   const [loading, setLoading] = useState(true);
   const [savingRollout, setSavingRollout] = useState(false);
@@ -137,6 +230,8 @@ export default function SecurityConfigPage() {
   const [filesystemDrawerOpen, setFilesystemDrawerOpen] = useState(false);
   const filesystemDrawerTriggerRef = useRef<HTMLButtonElement | null>(null);
   const filesystemDrawerCloseRef = useRef<HTMLButtonElement | null>(null);
+  const [controlDrawerOpen, setControlDrawerOpen] = useState(false);
+  const [visibilityDrawerOpen, setVisibilityDrawerOpen] = useState(false);
 
   const loadAll = async () => {
     setLoading(true);
@@ -185,6 +280,10 @@ export default function SecurityConfigPage() {
     if (!overview || !rolloutDraft) return false;
     return JSON.stringify(rolloutDraft) !== JSON.stringify(overview.rollout.effective);
   }, [overview, rolloutDraft]);
+  const runtimeOverrides = useMemo(
+    () => (overview ? normalizeRuntimeOverrides(overview.filesystem.runtimeOverrides) : []),
+    [overview],
+  );
 
   const saveRollout = async () => {
     if (!rolloutDraft) return;
@@ -244,150 +343,62 @@ export default function SecurityConfigPage() {
               <div>
                 <ConfigRow
                   icon={ShieldAlert}
-                  title={t('security.labels.policyRollout')}
-                  description={t('security.hints.policyRollout')}
+                  title={localizedText('工具管控与命令管控', 'Tool and command controls')}
+                  description={localizedText('统一控制工具策略、命令执行、身份入口和工具可见性：仅审计时记录决策但不阻断；启用管控时按策略执行确认或拒绝。', 'Unified controls for tool policy, command execution, identity ingress, and tool visibility. Audit-only records decisions; enforcement confirms or denies by policy.')}
                 >
-                  <ModeSegmented
-                    value={rolloutDraft.policy}
-                    onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, policy: value as RolloutMode } : prev))}
-                    options={[
-                      { label: t('security.modes.shadow'), value: 'shadow' },
-                      { label: t('security.modes.enforce'), value: 'enforce' },
-                    ]}
-                  />
-                </ConfigRow>
-                <ConfigRow
-                  icon={Terminal}
-                  title={t('security.labels.commandRollout')}
-                  description={t('security.hints.commandRollout')}
-                >
-                  <ModeSegmented
-                    value={rolloutDraft.command}
-                    onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, command: value as RolloutMode } : prev))}
-                    options={[
-                      { label: t('security.modes.shadow'), value: 'shadow' },
-                      { label: t('security.modes.enforce'), value: 'enforce' },
-                    ]}
-                  />
-                </ConfigRow>
-                <ConfigRow
-                  icon={KeyRound}
-                  title={t('security.labels.ingressRollout')}
-                  description={t('security.hints.ingressRollout')}
-                >
-                  <ModeSegmented
-                    value={rolloutDraft.ingress}
-                    onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, ingress: value as IngressRolloutMode } : prev))}
-                    options={[
-                      { label: t('security.modes.disabled'), value: 'disabled' },
-                      { label: t('security.modes.shadow'), value: 'shadow' },
-                      { label: t('security.modes.enforce'), value: 'enforce' },
-                    ]}
-                  />
-                </ConfigRow>
-                <ConfigRow
-                  icon={EyeOff}
-                  title={t('security.labels.visibilityRollout')}
-                  description={t('security.hints.visibilityRollout')}
-                >
-                  <ModeSegmented
-                    value={rolloutDraft.visibility}
-                    onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, visibility: value as RolloutMode } : prev))}
-                    options={[
-                      { label: t('security.modes.shadow'), value: 'shadow' },
-                      { label: t('security.modes.enforce'), value: 'enforce' },
-                    ]}
-                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      aria-label="查看工具与命令管控详情"
+                      onClick={() => setControlDrawerOpen(true)}
+                      className="inline-flex h-8 items-center rounded-md border border-zinc-200 px-2.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                    >
+                      {t('security.actions.viewDetails', '查看详情')}
+                    </button>
+                    <ModeSegmented
+                      value={rolloutDraft.policy}
+                      onChange={(value) => setRolloutDraft((prev) => (prev ? {
+                        ...prev,
+                        policy: value as RolloutMode,
+                        command: value as RolloutMode,
+                        ingress: value as IngressRolloutMode,
+                        visibility: value as RolloutMode,
+                      } : prev))}
+                      options={[
+                        { label: t('security.modes.shadow'), value: 'shadow' },
+                        { label: t('security.modes.enforce'), value: 'enforce' },
+                      ]}
+                    />
+                  </div>
                 </ConfigRow>
                 <ConfigRow
                   icon={Shield}
                   title={t('security.labels.filesystemRollout', '文件管控')}
                   description={t('security.hints.filesystemRollout', '控制文件工具策略以审计模式或强制模式运行')}
                 >
-                  <ModeSegmented
-                    value={rolloutDraft.filesystem}
-                    onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, filesystem: value as RolloutMode } : prev))}
-                    options={[
-                      { label: t('security.modes.shadow'), value: 'shadow' },
-                      { label: t('security.modes.enforce'), value: 'enforce' },
-                    ]}
-                  />
+                  <div className="flex items-center gap-2">
+                    <button
+                      ref={filesystemDrawerTriggerRef}
+                      type="button"
+                      aria-label="查看文件管控详情"
+                      onClick={() => setFilesystemDrawerOpen(true)}
+                      className="inline-flex h-8 items-center rounded-md border border-zinc-200 px-2.5 text-xs font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+                    >
+                      {t('security.actions.viewDetails', '查看详情')}
+                    </button>
+                    <ModeSegmented
+                      value={rolloutDraft.filesystem}
+                      onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, filesystem: value as RolloutMode } : prev))}
+                      options={[
+                        { label: t('security.modes.shadow'), value: 'shadow' },
+                        { label: t('security.modes.enforce'), value: 'enforce' },
+                      ]}
+                    />
+                  </div>
                 </ConfigRow>
 
               </div>
             )}
-          </Card>
-
-          <Card title={t('security.sections.permissionBaseline')} description={t('security.sections.permissionBaselineDescription')}>
-            <div className="flex flex-wrap items-center gap-x-6 gap-y-2 text-sm">
-              <div className="inline-flex items-center gap-2">
-                <Radio className="h-4 w-4 text-zinc-400" />
-                <span className="text-zinc-700 dark:text-zinc-200">{t('security.labels.channelDefaultMode')}</span>
-                <code className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-semibold text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100">
-                  readonly
-                </code>
-              </div>
-              <div className="inline-flex items-center gap-2">
-                <Monitor className="h-4 w-4 text-zinc-400" />
-                <span className="text-zinc-700 dark:text-zinc-200">{t('security.labels.uiDefaultMode')}</span>
-                <code className="rounded-md bg-zinc-100 px-2 py-0.5 text-xs font-semibold text-zinc-800 dark:bg-zinc-800 dark:text-zinc-100">
-                  require-confirm
-                </code>
-              </div>
-            </div>
-          </Card>
-
-          <Card title={t('security.sections.baseline')} description={t('security.sections.baselineDescription')}>
-            <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{t('security.labels.hardDeny')}</h3>
-                <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-zinc-200 p-2 text-xs dark:border-zinc-700">
-                  {overview.hardDeny.systemRuleIds.map((item) => (
-                    <div key={item} className="border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">{item}</div>
-                  ))}
-                </div>
-              </div>
-              <div>
-                <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">{t('security.labels.readonlyCeiling')}</h3>
-                <div className="mt-2 max-h-56 overflow-auto rounded-lg border border-zinc-200 p-2 text-xs dark:border-zinc-700">
-                  {overview.readonlyCeiling.denyPatterns.map((item) => (
-                    <div key={item} className="border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">{item}</div>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </Card>
-
-          <Card
-            title={t('security.sections.filesystemPolicy', '文件管控策略')}
-            description={t('security.sections.filesystemPolicyDescription', '展示后端权威返回的 Runtime 覆盖、硬拒绝项与共享权限基线。')}
-            action={(
-              <button
-                ref={filesystemDrawerTriggerRef}
-                type="button"
-                onClick={() => setFilesystemDrawerOpen(true)}
-                className="inline-flex h-9 items-center rounded-md border border-zinc-200 px-3 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 hover:text-zinc-900 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
-              >
-                {t('security.actions.viewFilesystemDetails', '查看详情')}
-              </button>
-            )}
-          >
-            <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-3">
-              <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-                <div className="text-zinc-500 dark:text-zinc-400">{t('security.labels.filesystemPolicyVersion', '策略版本')}</div>
-                <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{overview.filesystem.policyVersion}</div>
-              </div>
-              <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-                <div className="text-zinc-500 dark:text-zinc-400">{t('security.labels.filesystemSharedModeDefault', '共享权限默认')}</div>
-                <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">{overview.filesystem.sharedPermissionMode.default}</div>
-              </div>
-              <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-                <div className="text-zinc-500 dark:text-zinc-400">{t('security.labels.filesystemHardDenyCount', '硬拒绝规则数')}</div>
-                <div className="mt-1 font-semibold text-zinc-800 dark:text-zinc-100">
-                  {Object.values(overview.filesystem.hardDenies).filter((enabled) => Boolean(enabled)).length}
-                </div>
-              </div>
-            </div>
           </Card>
 
           {filesystemDrawerOpen && (
@@ -432,38 +443,25 @@ export default function SecurityConfigPage() {
                       {t('security.hints.filesystemFormula', '最终文件决策 = Session permission mode ∩ Runtime mode ∩ 路径区域规则 ∩ hard deny / fail-closed')}
                     </p>
                   </div>
-                  <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
-                    <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
-                      {t('security.labels.filesystemSharedPermissionMode', '共享权限模式')}
-                    </div>
-                    <div className="mb-2 text-zinc-600 dark:text-zinc-300">
-                      default: <RulePill value={overview.filesystem.sharedPermissionMode.default} />
-                    </div>
-                    <div className="flex flex-wrap gap-2">
-                      {overview.filesystem.sharedPermissionMode.supported.map((mode) => (
-                        <RulePill key={mode} value={mode} />
-                      ))}
-                    </div>
-                  </div>
                   <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
                     <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
                       <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
-                        {t('security.labels.filesystemPermissionDefaults', 'Permission 默认值')}
+                        {t('security.labels.filesystemPermissionDefaults', localizedText('按 Session 来源的 Permission 默认值', 'Default Permission mode by Session source'))}
                       </div>
                       {Object.entries(overview.filesystem.permissionDefaults).map(([entry, mode]) => (
                         <div key={`permission-${entry}`} className="flex items-center justify-between border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">
-                          <span className="text-zinc-600 dark:text-zinc-300">{entry}</span>
+                          <span className="text-zinc-600 dark:text-zinc-300">{(isEnglish ? sessionEntryLabelsEn : sessionEntryLabels)[entry] ?? entry}</span>
                           <RulePill value={mode} />
                         </div>
                       ))}
                     </div>
                     <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
                       <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
-                        {t('security.labels.filesystemRuntimeDefaults', 'Runtime 默认值')}
+                        {t('security.labels.filesystemRuntimeDefaults', localizedText('按 Session 来源的 Runtime 默认值', 'Default Runtime mode by Session source'))}
                       </div>
                       {Object.entries(overview.filesystem.runtimeDefaults).map(([entry, mode]) => (
                         <div key={`runtime-${entry}`} className="flex items-center justify-between border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">
-                          <span className="text-zinc-600 dark:text-zinc-300">{entry}</span>
+                          <span className="text-zinc-600 dark:text-zinc-300">{(isEnglish ? sessionEntryLabelsEn : sessionEntryLabels)[entry] ?? entry}</span>
                           <RulePill value={mode} />
                         </div>
                       ))}
@@ -472,26 +470,77 @@ export default function SecurityConfigPage() {
 
                   <div>
                     <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                      {t('security.labels.filesystemRuntimeOverrides', 'Runtime mode 覆盖矩阵')}
+                      {t('security.labels.filesystemDecisionMatrix', localizedText('Permission mode 决策矩阵', 'Permission mode decision matrix'))}
                     </div>
-                    <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
-                      {Object.entries(overview.filesystem.runtimeOverrides).map(([mode, overrides]) => (
-                        <div key={mode} className="border-b border-zinc-100 py-2 last:border-b-0 dark:border-zinc-800">
-                          <div className="mb-1 font-semibold text-zinc-800 dark:text-zinc-100">{mode}</div>
-                          {Object.entries(overrides).map(([region, decision]) => (
-                            <div key={`${mode}-${region}`} className="flex items-center justify-between py-1">
-                              <span className="text-zinc-600 dark:text-zinc-300">{region}</span>
-                              <RulePill value={decision} />
-                            </div>
+                    <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                      <table className="w-full min-w-[700px] text-left text-xs">
+                        <thead className="bg-zinc-50 text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-300">
+                          <tr>
+                            <th scope="col" className="px-3 py-2 font-semibold">{t('security.labels.pathRegion', '路径区域')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">{t('security.labels.operation', '操作')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">readonly</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">require-confirm</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">auto-allow-all</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {overview.filesystem.decisionMatrix.map((row) => (
+                            <tr key={`${row.region}-${row.operation}`} className="border-t border-zinc-100 dark:border-zinc-800">
+                              <td className="px-3 py-2 text-zinc-700 dark:text-zinc-200">
+                                {(isEnglish ? filesystemRegionLabelsEn : filesystemRegionLabels)[row.region] ?? row.region}
+                              </td>
+                              <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                                {(isEnglish ? filesystemOperationLabelsEn : filesystemOperationLabels)[row.operation] ?? row.operation}
+                              </td>
+                              <td className="px-3 py-2"><RulePill value={row.readonly} /></td>
+                              <td className="px-3 py-2"><RulePill value={row.requireConfirm} /></td>
+                              <td className="px-3 py-2"><RulePill value={row.autoAllowAll} /></td>
+                            </tr>
                           ))}
-                        </div>
-                      ))}
+                        </tbody>
+                      </table>
                     </div>
                   </div>
 
                   <div>
                     <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
-                      {t('security.labels.filesystemHardDenies', '文件硬拒绝项')}
+                      {t('security.labels.filesystemRuntimeOverrides', localizedText('Runtime mode 覆盖矩阵', 'Runtime mode override matrix'))}
+                    </div>
+                    <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                      <table className="w-full min-w-[560px] text-left text-xs">
+                        <thead className="bg-zinc-50 text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-300">
+                          <tr>
+                            <th scope="col" className="px-3 py-2 font-semibold">{t('security.labels.pathRegion', '路径区域')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">{t('security.labels.operation', '操作')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">{t('security.labels.developmentMode', '开发模式（dev-mode）')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">{t('security.labels.executionMode', '执行模式（exe-mode）')}</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {runtimeOverrides.map((row) => (
+                            <tr key={`${row.region}-${row.operation}`} className="border-t border-zinc-100 dark:border-zinc-800">
+                              <td className="px-3 py-2 text-zinc-700 dark:text-zinc-200">
+                                {(isEnglish ? filesystemRegionLabelsEn : filesystemRegionLabels)[row.region] ?? row.region}
+                              </td>
+                              <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">
+                                {(isEnglish ? filesystemOperationLabelsEn : filesystemOperationLabels)[row.operation] ?? row.operation}
+                              </td>
+                              <td className="px-3 py-2">
+                                <RulePill value={row.devMode} />
+                              </td>
+                              <td className="px-3 py-2">
+                                <RulePill value={row.exeMode} />
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">
+                      {t('security.labels.filesystemHardDenies', localizedText('文件硬拒绝项', 'Filesystem hard-deny rules'))}
                     </div>
                     <div className="max-h-40 overflow-auto rounded-lg border border-zinc-200 p-2 text-xs dark:border-zinc-700">
                       {Object.entries(overview.filesystem.hardDenies)
@@ -506,21 +555,175 @@ export default function SecurityConfigPage() {
                   <div className="grid grid-cols-1 gap-3 text-xs md:grid-cols-2">
                     <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
                       <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
-                        {t('security.labels.filesystemManagedScope', '纳管')}
+                        {t('security.labels.filesystemManagedScope', localizedText('纳管', 'In scope'))}
                       </div>
                       <p className="leading-5 text-zinc-600 dark:text-zinc-300">
-                        WebUI、CLI、TUI、Channel、API、Schedule、Task 的 Agent Session；子 Agent；Workflow Agent 节点；文件读取、写入、编辑、删除、移动和复制。
+                        {localizedText(
+                          'WebUI、CLI、TUI、Channel、API、Schedule、Task 的 Agent Session；子 Agent；Workflow Agent 节点；文件读取、写入、编辑、删除、移动和复制。',
+                          'Agent Sessions from WebUI, CLI, TUI, Channel, API, Schedule, and Task; subagents; Workflow Agent nodes; file reads, writes, edits, deletes, moves, and copies.',
+                        )}
                       </p>
                     </div>
                     <div className="rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
                       <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">
-                        {t('security.labels.filesystemExcludedScope', '不纳管')}
+                        {t('security.labels.filesystemExcludedScope', localizedText('不纳管', 'Out of scope'))}
                       </div>
                       <p className="leading-5 text-zinc-600 dark:text-zinc-300">
-                        Workflow 普通代码和脚本节点；Workflow Runner 和系统后台任务；memory_search、memory_get、memory_write；Bash、Python、Node、PTY、MCP 执行过程中的文件访问。
+                        {localizedText(
+                          'Workflow 普通代码和脚本节点；Workflow Runner 和系统后台任务；memory_search、memory_get、memory_write；Bash、Python、Node、PTY、MCP 执行过程中的文件访问。',
+                          'Workflow code and script nodes; Workflow Runner and system background tasks; memory_search, memory_get, memory_write; file access performed by Bash, Python, Node, PTY, or MCP.',
+                        )}
                       </p>
                     </div>
                   </div>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {controlDrawerOpen && (
+            <div className="fixed inset-0 z-50">
+              <button
+                type="button"
+                aria-label="关闭工具与命令管控详情"
+                className="absolute inset-0 bg-black/40"
+                onClick={() => setControlDrawerOpen(false)}
+              />
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-label="工具与命令管控详情"
+                className="absolute right-0 top-0 h-full w-full overflow-y-auto border-l border-zinc-200 bg-white p-5 shadow-2xl md:w-2/3 md:min-w-[720px] md:max-w-[1000px] dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{localizedText('工具与命令管控详情', 'Tool and command controls')}</h2>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      {localizedText('统一覆盖工具策略、命令执行、身份入口与工具可见性。仅审计只记录决策；启用管控才实际确认、拒绝或隐藏工具。', 'Covers tool policy, command execution, identity ingress, and tool visibility. Audit-only records decisions; enforcement confirms, denies, or hides tools.')}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setControlDrawerOpen(false)}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    aria-label="关闭工具与命令管控详情"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="space-y-4">
+                  <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs leading-5 text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
+                    <p><strong>readonly:</strong> {localizedText('阻断命令执行与文件变更，仅允许策略范围内读取。', 'Blocks command execution and file mutations; allows policy-scoped reads only.')}</p>
+                    <p><strong>require-confirm:</strong> {localizedText('低风险操作按策略允许，高风险操作要求确认。', 'Allows low-risk actions by policy and requires confirmation for high-risk actions.')}</p>
+                    <p><strong>auto-allow-all:</strong> {localizedText('自动通过可确认操作，但不能绕过 Runtime 上限、External 与 hard-deny。', 'Automatically allows confirmable actions, but cannot override Runtime ceilings, External, or hard-deny.')}</p>
+                    <p className="mt-2"><strong>{localizedText('风险说明：', 'Risk notes:')}</strong> {localizedText('低风险通常可直接执行；高风险需要确认；hard-deny 是不可由任何模式放宽的系统拒绝规则。', 'Low risk normally runs directly; high risk requires confirmation; hard-deny rules cannot be relaxed by any mode.')}</p>
+                  </div>
+                  <div>
+                    <div className="mb-2 text-xs font-semibold text-zinc-700 dark:text-zinc-300">{localizedText('命令风险与 Permission mode 决策矩阵', 'Command risk and Permission mode decision matrix')}</div>
+                    <div className="overflow-x-auto rounded-lg border border-zinc-200 dark:border-zinc-700">
+                      <table className="w-full min-w-[680px] text-left text-xs">
+                        <thead className="bg-zinc-50 text-zinc-600 dark:bg-zinc-800/50 dark:text-zinc-300">
+                          <tr>
+                            <th scope="col" className="px-3 py-2 font-semibold">{localizedText('风险级别', 'Risk level')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">{localizedText('说明', 'Description')}</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">readonly</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">require-confirm</th>
+                            <th scope="col" className="px-3 py-2 font-semibold">auto-allow-all</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          <tr className="border-t border-zinc-100 dark:border-zinc-800">
+                            <td className="px-3 py-2 font-medium">{localizedText('低风险', 'Low risk')}</td>
+                            <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">{localizedText('只读或安全的常规命令', 'Read-only or safe routine commands')}</td>
+                            <td className="px-3 py-2"><RulePill value="deny" /></td>
+                            <td className="px-3 py-2"><RulePill value="allow" /></td>
+                            <td className="px-3 py-2"><RulePill value="allow" /></td>
+                          </tr>
+                          <tr className="border-t border-zinc-100 dark:border-zinc-800">
+                            <td className="px-3 py-2 font-medium">{localizedText('高风险', 'High risk')}</td>
+                            <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">{localizedText('可能产生副作用的命令', 'Commands that may cause side effects')}</td>
+                            <td className="px-3 py-2"><RulePill value="deny" /></td>
+                            <td className="px-3 py-2"><RulePill value="ask/confirm" /></td>
+                            <td className="px-3 py-2"><RulePill value="allow" /></td>
+                          </tr>
+                          <tr className="border-t border-zinc-100 dark:border-zinc-800">
+                            <td className="px-3 py-2 font-medium">hard-deny</td>
+                            <td className="px-3 py-2 text-zinc-600 dark:text-zinc-300">{localizedText('系统禁止的不可恢复或越权操作', 'Irreversible or unauthorized operations prohibited by the system')}</td>
+                            <td className="px-3 py-2"><RulePill value="deny" /></td>
+                            <td className="px-3 py-2"><RulePill value="deny" /></td>
+                            <td className="px-3 py-2"><RulePill value="deny" /></td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
+                    <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">
+                      {localizedText('高风险命令在 Channel、Schedule、Workflow 等非交互入口无法确认时，会直接拒绝；生产环境与解析不确定的命令会进一步收紧。', 'High-risk commands are denied when non-interactive entries such as Channel, Schedule, or Workflow cannot confirm them. Production and unparseable commands are further restricted.')}
+                    </p>
+                  </div>
+                  <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                    <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">{localizedText('按 Session 来源的默认 Permission mode', 'Default Permission mode by Session source')}</div>
+                  {Object.entries(overview.filesystem.permissionDefaults).map(([entry, mode]) => (
+                    <div key={`permission-detail-${entry}`} className="flex items-center justify-between border-b border-zinc-100 py-2 last:border-b-0 dark:border-zinc-800">
+                      <span className="text-zinc-600 dark:text-zinc-300">{(isEnglish ? sessionEntryLabelsEn : sessionEntryLabels)[entry] ?? entry}</span>
+                      <RulePill value={mode} />
+                    </div>
+                  ))}
+                  </div>
+                  <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                    <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">{localizedText('hard-deny 规则清单', 'hard-deny rule list')}</div>
+                    {overview.hardDeny.systemRuleIds.map((rule) => (
+                      <div key={rule} className="border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">
+                        {hardDenyRuleLabels[rule] ?? rule}
+                      </div>
+                    ))}
+                  </div>
+                  <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                    <div className="mb-2 font-semibold text-zinc-800 dark:text-zinc-100">{localizedText('readonly 模式下不可见不可执行的工具', 'Tools hidden and unavailable in readonly mode')}</div>
+                    <div className="max-h-[500px] overflow-y-auto">
+                      {overview.readonlyCeiling.denyPatterns.map((item) => (
+                        <div key={item} className="border-b border-zinc-100 py-1 last:border-b-0 dark:border-zinc-800">{item}</div>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {visibilityDrawerOpen && (
+            <div className="fixed inset-0 z-50">
+              <button
+                type="button"
+                aria-label="关闭工具可见性详情"
+                className="absolute inset-0 bg-black/40"
+                onClick={() => setVisibilityDrawerOpen(false)}
+              />
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-label="工具可见性配置详情"
+                className="absolute right-0 top-0 h-full w-full overflow-y-auto border-l border-zinc-200 bg-white p-5 shadow-2xl md:w-2/3 md:min-w-[720px] md:max-w-[1000px] dark:border-zinc-700 dark:bg-zinc-900"
+              >
+                <div className="mb-4 flex items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">工具可见性配置详情</h2>
+                    <p className="mt-1 text-xs text-zinc-500 dark:text-zinc-400">
+                      readonly 模式下，以下工具对 Agent 不可见。
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setVisibilityDrawerOpen(false)}
+                    className="inline-flex h-8 w-8 items-center justify-center rounded-md border border-zinc-200 text-zinc-600 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800"
+                    aria-label="关闭工具可见性详情"
+                  >
+                    <X className="h-4 w-4" />
+                  </button>
+                </div>
+                <div className="rounded-lg border border-zinc-200 p-3 text-xs dark:border-zinc-700">
+                  {overview.readonlyCeiling.denyPatterns.map((item) => (
+                    <div key={item} className="border-b border-zinc-100 py-2 last:border-b-0 dark:border-zinc-800">{item}</div>
+                  ))}
                 </div>
               </section>
             </div>

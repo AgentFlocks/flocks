@@ -90,9 +90,9 @@
     "visibleAgentsNoOptions": "No agents available",
     "permissionMode": "Permission Mode",
     "permissionModeHint": "Default permission mode for this channel session; it can also be changed from the Session page.",
-    "permissionModeReadonly": "Block command execution",
-    "permissionModeRequireConfirm": "Require confirmation",
-    "permissionModeAutoConfirmAll": "Auto allow"
+    "permissionModeReadonly": "readonly",
+    "permissionModeRequireConfirm": "require-confirm",
+    "permissionModeAutoConfirmAll": "auto-allow-all"
   },
   "empty": {
     "title": "No Channels",

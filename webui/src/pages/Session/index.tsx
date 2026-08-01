@@ -3355,57 +3355,64 @@ export default function SessionPage() {
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
-                    <div className="absolute right-0 bottom-full z-50 mb-2 w-72 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                      <div className="border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
-                        <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">
-                          {t('permissionMode.title')}
-                        </div>
-                        <div className="truncate text-[10px] text-zinc-400 dark:text-zinc-500">
-                          {t('permissionMode.menuHint')}
-                        </div>
-                      </div>
+                    <div className="absolute bottom-full left-0 z-50 mb-2 w-[520px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
                       <div className="space-y-1 p-1.5">
-                        {permissionModeOptions.map(({ value: mode, label, description }) => (
+                        <div className="flex items-center justify-between px-2.5">
+                          <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.runtimeTitle', 'Runtime mode')}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowPermissionModeOptions(false);
+                              navigate('/settings/security-config');
+                            }}
+                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            {t('permissionMode.viewDetails')}
+                          </button>
+                        </div>
+                        {runtimeModeOptions.map(({ value: mode, label, description }) => (
                           <button
                             key={mode}
                             type="button"
                             onClick={() => {
-                              void handlePermissionModeChange(mode);
+                              void handleRuntimeModeChange(mode);
                               setShowPermissionModeOptions(false);
                             }}
-                            className={`w-full rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
-                              currentPermissionMode === mode
+                            className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                              currentRuntimeMode === mode
                                 ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
                                 : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                             }`}
                           >
-                            <div className="text-sm font-medium">{label}</div>
-                            <div className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                            <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
+                            <div className="min-w-0 flex-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                               {description}
                             </div>
                           </button>
                         ))}
                         <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
                           <div className="px-2.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.runtimeTitle', 'Runtime mode')}
+                            {t('permissionMode.title')}
                           </div>
                           <div className="mt-1 space-y-1">
-                            {runtimeModeOptions.map(({ value: mode, label, description }) => (
+                            {permissionModeOptions.map(({ value: mode, label, description }) => (
                               <button
                                 key={mode}
                                 type="button"
                                 onClick={() => {
-                                  void handleRuntimeModeChange(mode);
+                                  void handlePermissionModeChange(mode);
                                   setShowPermissionModeOptions(false);
                                 }}
-                                className={`w-full rounded-lg px-2.5 py-2 text-left text-sm transition-colors ${
-                                  currentRuntimeMode === mode
+                                className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                                  currentPermissionMode === mode
                                     ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
                                     : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                                 }`}
                               >
-                                <div className="text-sm font-medium">{label}</div>
-                                <div className="mt-0.5 text-[11px] text-zinc-500 dark:text-zinc-400">
+                                <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
+                                <div className="min-w-0 flex-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
                                   {description}
                                 </div>
                               </button>

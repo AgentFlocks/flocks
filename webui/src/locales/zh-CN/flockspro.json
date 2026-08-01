@@ -210,7 +210,7 @@
     },
     "sections": {
       "rollout": "运行模式",
-      "rolloutDescription": "四个开关分别控制安全链路的不同阶段，可独立开启以便分阶段上线。未配置环境变量时默认全部为启用管控；保存后立即生效。",
+      "rolloutDescription": "统一设置工具策略、命令执行、身份入口和工具可见性的管控状态。仅审计时记录决策但不阻断；启用管控时按策略执行确认、拒绝或隐藏。保存后立即生效。",
       "permissionBaseline": "执行权限基线",
       "permissionBaselineDescription": "不同入口创建会话时的默认权限模式，由系统固定，不可在此页修改。",
       "baseline": "系统安全基线",
