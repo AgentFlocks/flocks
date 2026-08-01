@@ -49,7 +49,17 @@ def _filesystem_action_payload(
     operation = _FILESYSTEM_TOOL_OPERATION_BY_NAME.get(str(tool_name or "").strip().lower())
     if operation is None:
         return None
-    workspace_dir = str((profile.get("workspace_dir") or os.getcwd())).strip() or os.getcwd()
+    sandbox = tool_context_extra.get("sandbox")
+    sandbox_workspace_dir = (
+        str(sandbox.get("workspace_dir") or "").strip()
+        if isinstance(sandbox, Mapping)
+        else ""
+    )
+    workspace_dir = (
+        sandbox_workspace_dir
+        or str((profile.get("workspace_dir") or os.getcwd())).strip()
+        or os.getcwd()
+    )
     permission_mode = str(profile.get("permission_mode") or "readonly").strip().lower()
     runtime_mode = str(profile.get("runtime_mode") or "exe-mode").strip().lower()
     source_path = _first_present(
