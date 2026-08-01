@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
 
 from pydantic import BaseModel, Field
 
@@ -598,10 +598,22 @@ class Tool:
                 from flocks.hooks.pipeline import HookPipeline
 
                 async def _run_action_effect():
-                    return await execute_with_hooks(
-                        payload,
-                        lambda: self.handler(ctx, **coerced_kwargs),
-                    )
+                    execution_context = current_execution_context()
+                    path_binding = execution_context.get("filesystem_path_binding")
+                    had_binding = "filesystem_path_binding" in ctx.extra
+                    previous_binding = ctx.extra.get("filesystem_path_binding")
+                    if isinstance(path_binding, Mapping):
+                        ctx.extra["filesystem_path_binding"] = dict(path_binding)
+                    try:
+                        return await execute_with_hooks(
+                            payload,
+                            lambda: self.handler(ctx, **coerced_kwargs),
+                        )
+                    finally:
+                        if had_binding:
+                            ctx.extra["filesystem_path_binding"] = previous_binding
+                        else:
+                            ctx.extra.pop("filesystem_path_binding", None)
 
                 filesystem_payload = {
                     **payload,
