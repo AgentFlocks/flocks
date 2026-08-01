@@ -65,7 +65,7 @@ def test_agent_tool_context_uses_trusted_project_root() -> None:
     assert action["agent_execution_session"] is True
 
 
-def test_apply_patch_does_not_expand_batch_actions() -> None:
+def test_apply_patch_extracts_single_action() -> None:
     action = _filesystem_action_payload(
         session_id="session-1",
         message_id="message-1",
@@ -76,11 +76,6 @@ def test_apply_patch_does_not_expand_batch_actions() -> None:
                 "*** Begin Patch\n"
                 "*** Add File: added.txt\n"
                 "+new\n"
-                "*** Update File: old.txt -> moved.txt\n"
-                "@@\n"
-                "-old\n"
-                "+new\n"
-                "*** Delete File: deleted.txt\n"
                 "*** End Patch\n"
             )
         },
@@ -95,5 +90,38 @@ def test_apply_patch_does_not_expand_batch_actions() -> None:
     )
 
     assert action is not None
-    assert "batch_actions" not in action
     assert action["target_path"] is None
+    apply_patch_action = action.get("apply_patch_action")
+    assert isinstance(apply_patch_action, dict)
+    assert apply_patch_action["operation"] == "write"
+    assert apply_patch_action["target_path"] == "/projects/current/added.txt"
+
+
+def test_apply_patch_multi_file_results_in_missing_action() -> None:
+    action = _filesystem_action_payload(
+        session_id="session-1",
+        message_id="message-1",
+        agent="rex",
+        tool_name="apply_patch",
+        tool_input={
+            "patchText": (
+                "*** Begin Patch\n"
+                "*** Add File: one.txt\n"
+                "+one\n"
+                "*** Add File: two.txt\n"
+                "+two\n"
+                "*** End Patch\n"
+            )
+        },
+        profile={
+            "workspace_dir": "/projects/current",
+            "project_root": "/projects/current",
+            "project_id": "project-1",
+            "permission_mode": "require-confirm",
+            "runtime_mode": "dev-mode",
+        },
+        tool_context_extra={"agent_execution_session": True},
+    )
+
+    assert action is not None
+    assert action.get("apply_patch_action") is None

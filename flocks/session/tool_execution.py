@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from typing import Any, Mapping
 
 from flocks.session.execution_profile import get_session_execution_profile
@@ -21,6 +22,72 @@ _FILESYSTEM_TOOL_OPERATION_BY_NAME: dict[str, str] = {
     "copy": "copy",
     "mkdir": "mkdir",
 }
+
+
+def _normalize_operation_path(path: str | None, *, cwd: str) -> str | None:
+    text = str(path or "").strip()
+    if not text:
+        return None
+    expanded = os.path.expanduser(text)
+    if os.path.isabs(expanded):
+        return os.path.realpath(expanded)
+    return os.path.realpath(os.path.join(cwd, expanded))
+
+
+def _extract_apply_patch_action(
+    *,
+    patch_text: str,
+    cwd: str,
+) -> dict[str, str | None] | None:
+    action: dict[str, str | None] | None = None
+    update_pattern = re.compile(r"^\*\*\* Update File:\s*(.+)$")
+    add_pattern = re.compile(r"^\*\*\* Add File:\s*(.+)$")
+    delete_pattern = re.compile(r"^\*\*\* Delete File:\s*(.+)$")
+    for raw_line in patch_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        update_match = update_pattern.match(line)
+        if update_match:
+            if action is not None:
+                return None
+            payload = update_match.group(1).strip()
+            if " -> " in payload:
+                source_raw, target_raw = [part.strip() for part in payload.split(" -> ", 1)]
+                action = {
+                    "operation": "move",
+                    "source_path": _normalize_operation_path(source_raw, cwd=cwd),
+                    "target_path": _normalize_operation_path(target_raw, cwd=cwd),
+                }
+            else:
+                action = {
+                    "operation": "edit",
+                    "source_path": None,
+                    "target_path": _normalize_operation_path(payload, cwd=cwd),
+                }
+            continue
+        add_match = add_pattern.match(line)
+        if add_match:
+            if action is not None:
+                return None
+            target_raw = add_match.group(1).strip()
+            action = {
+                "operation": "write",
+                "source_path": None,
+                "target_path": _normalize_operation_path(target_raw, cwd=cwd),
+            }
+            continue
+        delete_match = delete_pattern.match(line)
+        if delete_match:
+            if action is not None:
+                return None
+            target_raw = delete_match.group(1).strip()
+            action = {
+                "operation": "delete",
+                "source_path": None,
+                "target_path": _normalize_operation_path(target_raw, cwd=cwd),
+            }
+    return action
 
 
 def _first_present(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
@@ -72,7 +139,9 @@ def _filesystem_action_payload(
     )
     if operation in {"read", "search", "write", "edit", "apply_patch", "delete", "mkdir"} and target_path is None:
         target_path = _first_present(tool_input, ("filePath", "path", "dirPath"))
-    workspace_root = str(WorkspaceManager.get_instance().get_workspace_dir())
+    source_path = _normalize_operation_path(source_path, cwd=workspace_dir)
+    target_path = _normalize_operation_path(target_path, cwd=workspace_dir)
+    workspace_root = workspace_dir
     owner_username = _first_present(profile, ("owner_username",))
     output_root = str(
         WorkspaceManager.get_instance().get_default_outputs_dir(
@@ -82,13 +151,14 @@ def _filesystem_action_payload(
     )
     flocks_root = os.path.expanduser(os.getenv("FLOCKS_ROOT", "~/.flocks"))
     plugins_root = os.path.join(flocks_root, "plugins")
-    project_root = str(profile.get("project_root") or workspace_dir)
+    project_root = str(profile.get("project_root") or "").strip() or None
     project_id = _first_present(profile, ("project_id",))
     project_revision_raw = profile.get("project_revision")
-    try:
-        project_revision = int(project_revision_raw) if project_revision_raw is not None else None
-    except Exception:
-        project_revision = None
+    project_revision = None
+    if project_revision_raw is not None:
+        text_revision = str(project_revision_raw).strip()
+        if text_revision:
+            project_revision = text_revision
     execution_context = (
         dict(tool_context_extra.get("execution_context"))
         if isinstance(tool_context_extra.get("execution_context"), Mapping)
@@ -96,7 +166,7 @@ def _filesystem_action_payload(
     )
     trace_id = _first_present(execution_context, ("trace_id", "traceId")) or message_id
     execution_id = _first_present(execution_context, ("execution_id", "executionId")) or message_id
-    return {
+    payload: dict[str, Any] = {
         "trace_id": trace_id,
         "execution_id": execution_id,
         "session_id": session_id,
@@ -116,7 +186,7 @@ def _filesystem_action_payload(
         },
         "project": {
             "id": project_id,
-            "root": project_root or None,
+            "root": project_root,
             "revision": project_revision,
         },
         "subject": {
@@ -132,6 +202,13 @@ def _filesystem_action_payload(
         "flocks_root": flocks_root,
         "plugins_root": plugins_root,
     }
+    if operation == "apply_patch":
+        patch_text = str(tool_input.get("patchText") or tool_input.get("patch_text") or "")
+        payload["apply_patch_action"] = _extract_apply_patch_action(
+            patch_text=patch_text,
+            cwd=workspace_dir,
+        )
+    return payload
 
 
 async def build_session_tool_execution_payload(
