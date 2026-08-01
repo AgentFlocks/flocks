@@ -950,7 +950,12 @@ function ProviderDetail({
     const results = batchResultsRef.current;
     const succeeded = enabledModels.filter(m => results[m.id]?.status === 'success');
     const failed = enabledModels.filter(m => results[m.id]?.status === 'failed');
-    toast.info(t('form.batchTestDone'), t('form.batchTestSummary', { success: succeeded.length, failed: failed.length }));
+    const summary = t('form.batchTestSummary', { success: succeeded.length, failed: failed.length });
+    if (failed.length === 0) {
+      toast.success(t('form.batchTestDone'), summary);
+    } else {
+      toast.error(t('form.batchTestDone'), summary);
+    }
 
     if (onConnectionStatusChange) {
       onConnectionStatusChange(succeeded.length > 0 ? 'connected' : 'failed');
