@@ -19,6 +19,10 @@ export interface Session {
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  /** Messaging channel bound to this session, when it originated from IM. */
+  channelID?: string;
+  /** Conversation type reported by the messaging channel binding. */
+  channelChatType?: 'direct' | 'group' | 'channel';
   status?: 'active' | 'archived';
   provider?: string;
   model?: string;

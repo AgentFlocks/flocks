@@ -272,10 +272,33 @@ export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text
   return text;
 }
 
+const NON_TERMINAL_PERIOD_TOKENS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'no', 'fig',
+]);
+const CONTEXTUAL_PERIOD_TOKENS = new Set([
+  'etc', 'inc', 'ltd',
+]);
+
+function isNonTerminalPeriod(line: string, index: number): boolean {
+  const before = line.slice(0, index).trimEnd();
+  const after = line.slice(index + 1).trimStart();
+  if (after && /(?:^|[:：]\s*)(?:\d+|[A-Za-z])$/.test(before)) return true;
+  const token = before.match(/(?:^|\s)([A-Za-z.]+)$/)?.[1].toLowerCase();
+  if (!token) return false;
+  if (NON_TERMINAL_PERIOD_TOKENS.has(token) || /^(?:[a-z]\.)+[a-z]$/.test(token)) {
+    return true;
+  }
+  return CONTEXTUAL_PERIOD_TOKENS.has(token) && /^[a-z\d]/.test(after);
+}
+
 export function getThinkingFirstSentence(text: string): string {
   const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
-  const sentenceEnd = firstLine.search(/[。！？!?]|\.(?=\s|$)/);
-  return sentenceEnd >= 0 ? firstLine.slice(0, sentenceEnd + 1) : firstLine;
+  for (const match of firstLine.matchAll(/[。！？!?]|\.(?=\s|$)/g)) {
+    const sentenceEnd = match.index;
+    if (match[0] === '.' && isNonTerminalPeriod(firstLine, sentenceEnd)) continue;
+    return firstLine.slice(0, sentenceEnd + 1);
+  }
+  return firstLine;
 }
 
 const StreamingReasoningText = memo(function StreamingReasoningText({
@@ -3993,10 +4016,10 @@ export default function SessionChat({
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
                       aria-expanded={showComposerAddMenu}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'border-zinc-300 bg-white text-zinc-900 shadow-[0_2px_8px_rgba(22,27,34,0.08)] dark:border-white/[0.14] dark:bg-white/[0.09] dark:text-white'
-                          : 'border-transparent text-zinc-500 hover:border-zinc-200 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:border-white/[0.10] dark:hover:bg-white/[0.07] dark:hover:text-white'
+                          ? 'bg-zinc-100 text-zinc-900 dark:bg-white/[0.09] dark:text-white'
+                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
                       }`}
                     >
                       <Plus className="h-[17px] w-[17px]" strokeWidth={2} />

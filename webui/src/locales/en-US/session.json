@@ -83,6 +83,8 @@
   },
   "workflowSession": "Workflow Session",
   "configSession": "Config Session",
+  "channelDirectChat": "Direct chat",
+  "channelGroupChat": "Group chat",
   "showHistory": "Show conversation history",
   "hideHistory": "Hide conversation history",
   "realTimeOk": "Real-time connection active",

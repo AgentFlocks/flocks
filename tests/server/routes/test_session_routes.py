@@ -405,6 +405,8 @@ class TestSessionCRUD:
             "title",
             "time",
             "category",
+            "channelID",
+            "channelChatType",
             "status",
             "parentID",
             "provider",
@@ -422,6 +424,68 @@ class TestSessionCRUD:
         assert "ownerUsername" in row
         assert "goal" not in row
         assert "summary" not in row
+
+    @pytest.mark.asyncio
+    async def test_manager_list_includes_channel_metadata_and_legacy_title(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post("/api/session", json={"title": "[Wecom] room-1"})
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        list_bindings_mock = AsyncMock(return_value=[SimpleNamespace(
+            session_id=session_id,
+            channel_id="wecom",
+            chat_id="room-1",
+            chat_type="group",
+        )])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == session_id)
+        assert row["channelID"] == "wecom"
+        assert row["channelChatType"] == "group"
+        assert row["title"] == "[Wecom] 你是谁"
+        assert session_id in list_bindings_mock.await_args.kwargs["session_ids"]
+
+    @pytest.mark.asyncio
+    async def test_channel_binding_lookup_batches_large_session_lists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+        from flocks.server.routes.session import _latest_channel_bindings
+
+        list_bindings_mock = AsyncMock(return_value=[])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        await _latest_channel_bindings([f"ses-{index}" for index in range(1001)])
+
+        assert list_bindings_mock.await_count == 3
+        assert all(
+            len(call.kwargs["session_ids"]) <= 500
+            for call in list_bindings_mock.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_archive_hides_session_preserves_history_and_restores_tree(self, client: AsyncClient):

@@ -1515,9 +1515,12 @@ describe('SessionChat composer controls', () => {
       ),
     }));
 
-    await user.click(screen.getByRole('button', { name: '添加' }));
+    const addButton = screen.getByRole('button', { name: '添加' });
+    await user.click(addButton);
 
     expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(addButton).not.toHaveClass('border');
+    expect(addButton.className).not.toContain('shadow-');
     const filesMenuItem = screen.getByRole('menuitem', { name: '文件和图片' });
     const filesIconContainer = filesMenuItem.querySelector('svg')?.parentElement;
     expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
@@ -1658,6 +1661,18 @@ describe('getThinkingFirstSentence', () => {
     expect(getThinkingFirstSentence('先检查上下文。再读取文件。')).toBe('先检查上下文。');
     expect(getThinkingFirstSentence('Inspect the context.\nThen read the file.')).toBe('Inspect the context.');
     expect(getThinkingFirstSentence('\n用户问了两个问题：\n1. 第一个问题')).toBe('用户问了两个问题：');
+    expect(getThinkingFirstSentence('1. Inspect the context before changing code.')).toBe(
+      '1. Inspect the context before changing code.',
+    );
+    expect(getThinkingFirstSentence('用户问了两个问题： 1. 查询 IP 情报。 2. 查询金价。')).toBe(
+      '用户问了两个问题： 1. 查询 IP 情报。',
+    );
+    expect(getThinkingFirstSentence('Dr. Smith checks the context. Then edits.')).toBe(
+      'Dr. Smith checks the context.',
+    );
+    expect(getThinkingFirstSentence('Check inputs, etc. Then continue.')).toBe(
+      'Check inputs, etc.',
+    );
   });
 });
 

@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query, Request
@@ -17,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from flocks.auth.context import AuthUser, get_current_auth_user, reset_current_auth_user, set_current_auth_user
+from flocks.channel.base import ChatType
 from flocks.server.routes._timing import log_route_timing
 from flocks.audit import emit_audit_event
 from flocks.license import assert_license_active
@@ -50,6 +52,7 @@ log = Log.create(service="session-routes")
 # Default agent name constant
 DEFAULT_AGENT = "rex"
 DEFAULT_MESSAGE_PAGE_LIMIT = 50
+_CHANNEL_BINDING_QUERY_BATCH_SIZE = 500
 _CONTEXT_USAGE_CACHE_TTL_SECONDS = 5.0
 _context_usage_cache: Dict[Tuple[str, int], Tuple[float, ContextUsageSnapshot]] = {}
 _context_usage_inflight: Dict[Tuple[str, int], asyncio.Task[ContextUsageSnapshot]] = {}
@@ -280,6 +283,8 @@ class SessionListItem(BaseModel):
     title: str
     time: SessionTime
     category: str = "user"
+    channelID: Optional[str] = None
+    channelChatType: Optional[ChatType] = None
     status: str = "active"
     parentID: Optional[str] = None
     provider: Optional[str] = None
@@ -291,6 +296,13 @@ class SessionListItem(BaseModel):
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
+
+
+@dataclass(frozen=True)
+class _ChannelSessionBinding:
+    channel_id: str
+    chat_id: str
+    chat_type: ChatType
 
 
 def _session_to_response(
@@ -350,6 +362,8 @@ def _session_to_list_item(
     effective_project_id: Optional[str] = None,
     shared_project_ids: Optional[set[str]] = None,
     project_name: Optional[str] = None,
+    channel_binding: Optional[_ChannelSessionBinding] = None,
+    title_override: Optional[str] = None,
 ) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
@@ -366,7 +380,7 @@ def _session_to_list_item(
         projectName=project_name,
         effectiveProjectID=effective_project_id,
         directory=session.directory,
-        title=session.title,
+        title=title_override if title_override is not None else session.title,
         time=SessionTime(
             created=session.time.created,
             updated=session.time.updated,
@@ -374,6 +388,8 @@ def _session_to_list_item(
             archived=session.time.archived,
         ),
         category=session.category,
+        channelID=channel_binding.channel_id if channel_binding else None,
+        channelChatType=channel_binding.chat_type if channel_binding else None,
         status=session.status,
         parentID=session.parent_id,
         provider=session.provider,
@@ -386,6 +402,114 @@ def _session_to_list_item(
         canDelete=SessionPolicy.can_delete(session, current_user),
         isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
+
+
+async def _latest_channel_bindings(
+    session_ids: List[str],
+) -> Dict[str, _ChannelSessionBinding]:
+    """Return the most recently active channel metadata for each session."""
+    if not session_ids:
+        return {}
+    try:
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        service = SessionBindingService()
+        unique_session_ids = list(dict.fromkeys(session_ids))
+        channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+        for start in range(0, len(unique_session_ids), _CHANNEL_BINDING_QUERY_BATCH_SIZE):
+            batch = unique_session_ids[start:start + _CHANNEL_BINDING_QUERY_BATCH_SIZE]
+            for binding in await service.list_bindings(session_ids=batch):
+                if binding.session_id in channel_bindings:
+                    continue
+                try:
+                    chat_type = ChatType(binding.chat_type)
+                except (TypeError, ValueError):
+                    log.warn("session.list.unknown_channel_chat_type", {
+                        "session_id": binding.session_id,
+                        "chat_type": str(binding.chat_type),
+                    })
+                    continue
+                channel_bindings[binding.session_id] = _ChannelSessionBinding(
+                    channel_id=binding.channel_id,
+                    chat_id=binding.chat_id,
+                    chat_type=chat_type,
+                )
+        return channel_bindings
+    except Exception as exc:
+        log.warn("session.list.channel_bindings_error", {"error": str(exc)})
+        return {}
+
+
+def _has_legacy_channel_title(
+    session: SessionModel,
+    binding: _ChannelSessionBinding,
+) -> bool:
+    """Return whether a stored title is an exact legacy channel fallback."""
+    prefix = f"[{binding.channel_id.capitalize()}]"
+    if binding.chat_type == ChatType.DIRECT:
+        expected = f"{prefix} DM — {binding.chat_id}"
+    else:
+        expected = f"{prefix} {binding.chat_id}"
+    return session.title.strip().casefold() == expected.casefold()
+
+
+async def _first_user_channel_title(session_id: str) -> Optional[str]:
+    """Read the first valid user-authored text stored for a channel session."""
+    from flocks.channel.inbound.session_binding import extract_channel_title_text
+    from flocks.session.message import Message
+
+    messages = await Message.list(session_id, include_archived=True)
+    for message in messages:
+        if message.role != "user":
+            continue
+        with_parts = await Message.get_with_parts_lazy(session_id, message.id)
+        if not with_parts:
+            continue
+        raw_text = "\n".join(
+            part.text
+            for part in with_parts.parts
+            if part.type == "text"
+            and not getattr(part, "synthetic", False)
+            and getattr(part, "text", "")
+        )
+        title_text = extract_channel_title_text(raw_text)
+        if title_text:
+            return title_text
+    return None
+
+
+async def _legacy_channel_title_overrides(
+    sessions: List[SessionModel],
+    channel_bindings: Dict[str, _ChannelSessionBinding],
+) -> Dict[str, str]:
+    """Derive display titles for legacy fallback names without mutating storage."""
+    from flocks.channel.inbound.session_binding import format_channel_title
+
+    candidates = []
+    for session in sessions:
+        binding = channel_bindings.get(session.id)
+        if binding and _has_legacy_channel_title(session, binding):
+            candidates.append(session)
+
+    async def resolve(session: SessionModel) -> tuple[str, Optional[str]]:
+        try:
+            title_text = await _first_user_channel_title(session.id)
+            binding = channel_bindings[session.id]
+            title = (
+                format_channel_title(binding.channel_id, title_text)
+                if title_text
+                else None
+            )
+            return session.id, title
+        except Exception as exc:
+            log.warn("session.list.channel_title_override_error", {
+                "session_id": session.id,
+                "error": str(exc),
+            })
+            return session.id, None
+
+    resolved = await asyncio.gather(*(resolve(session) for session in candidates))
+    return {session_id: title for session_id, title in resolved if title is not None}
 
 
 async def _session_to_response_with_goal(
@@ -723,12 +847,19 @@ async def list_sessions(
             break
 
     if view == "list":
+        channel_bindings = await _latest_channel_bindings([session.id for session in filtered])
+        channel_title_overrides = await _legacy_channel_title_overrides(
+            filtered,
+            channel_bindings,
+        )
         response = [
             _session_to_list_item(
                 s,
-                effective_project_ids[s.id],
-                shared_project_ids,
-                project_names.get(s.project_id),
+                effective_project_id=effective_project_ids[s.id],
+                shared_project_ids=shared_project_ids,
+                project_name=project_names.get(s.project_id),
+                channel_binding=channel_bindings.get(s.id),
+                title_override=channel_title_overrides.get(s.id),
             )
             for s in filtered
         ]

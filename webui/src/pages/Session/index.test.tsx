@@ -1007,6 +1007,54 @@ describe('SessionPage session actions menu', () => {
     expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-lg', 'border-transparent');
   });
 
+  it('hides the channel title prefix until the session is renamed', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        title: '[Wecom] 你能干什么事情',
+        channelID: 'wecom',
+        channelChatType: 'direct',
+      }, {
+        ...session,
+        id: 'session-2',
+        title: '[Wecom] 群聊问题',
+        channelID: 'wecom',
+        channelChatType: 'group',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    const displayTitle = await screen.findByText('你能干什么事情');
+    const sessionRow = displayTitle.closest('div.group');
+    expect(sessionRow).not.toBeNull();
+    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'wecom' }))
+      .toHaveAttribute('src', '/channel-wecom.png');
+    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'channelDirectChat' }))
+      .toHaveAttribute('data-channel-chat-type', 'direct');
+    expect(screen.queryByText('[Wecom] 你能干什么事情')).not.toBeInTheDocument();
+
+    const groupTitle = screen.getByText('群聊问题');
+    const groupRow = groupTitle.closest('div.group');
+    expect(groupRow).not.toBeNull();
+    expect(within(groupRow as HTMLElement).getByRole('img', { name: 'channelGroupChat' }))
+      .toHaveAttribute('data-channel-chat-type', 'group');
+
+    await user.click(within(sessionRow as HTMLElement).getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'rename' }));
+
+    expect(screen.getByRole('textbox', { name: 'rename' }))
+      .toHaveValue('[Wecom] 你能干什么事情');
+  });
+
   it('groups legacy sessions by the effective project returned by the backend', async () => {
     client.get.mockResolvedValue({
       data: [{
