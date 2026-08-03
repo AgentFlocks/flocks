@@ -109,10 +109,14 @@ class ACPServer:
         
         # Initialize built-in hooks
         try:
-            from flocks.hooks.builtin import register_builtin_hooks
-
-            register_builtin_hooks()
-            log.info("acp.hooks.registered")
+            from flocks.config import Config
+            config = await Config.get()
+            
+            # Register built-in hooks if memory is enabled
+            if config.memory.enabled:
+                from flocks.hooks.builtin import register_builtin_hooks
+                register_builtin_hooks()
+                log.info("acp.hooks.registered")
         except Exception as e:
             # Hook registration failure should not stop server startup
             log.warn("acp.hooks.register_failed", {"error": str(e)})

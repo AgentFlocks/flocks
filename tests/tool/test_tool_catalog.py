@@ -52,8 +52,6 @@ def test_catalog_marks_tool_search_as_always_load() -> None:
 
 def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
     assert "read_file" not in TOOL_TAGS
-    assert "memory_get" not in TOOL_TAGS
-    assert "memory_write" not in TOOL_TAGS
     assert "memory" not in TOOL_TAGS
     assert "model_config" not in TOOL_TAGS
     assert "slash_command" not in TOOL_TAGS
@@ -63,6 +61,8 @@ def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
         "lsp",
         "todo",
         "memory_search",
+        "memory_get",
+        "memory_write",
         "list_providers",
         "add_provider",
         "add_model",

@@ -570,52 +570,24 @@ async def reveal_item(body: RevealRequest):
     return {"path": body.path, "opened": True, "target": target_type, "mode": mode}
 
 
-# ─── memory files ──────────────────────────────────────────────────────────
-
-_MEMORY_ROOT_ORDER = {
-    "USER.md": 0,
-    "MEMORY.md": 1,
-    "projects": 2,
-    "daily": 3,
-}
-
-
-def _memory_child_sort_key(path: Path) -> tuple[int, str]:
-    """Sort directories before files, then use a stable case-insensitive name."""
-    return (0 if path.is_dir() else 1, path.name.casefold())
-
-
-def _build_memory_node_sync(path: Path, memory_dir: Path) -> WorkspaceNode:
-    """Build one recursive node for the Memory tree."""
-    node = _node_from_path(path, memory_dir)
-    if node.type == "directory":
-        children = (
-            child
-            for child in path.iterdir()
-            if not child.is_symlink()
-        )
-        node.children = [
-            _build_memory_node_sync(child, memory_dir)
-            for child in sorted(children, key=_memory_child_sort_key)
-        ]
-    return node
-
+# ─── memory view (read-only) ────────────────────────────────────────────────
 
 def _list_memory_sync(memory_dir: Path) -> List[WorkspaceNode]:
-    """Build the USER/global/daily/project Memory hierarchy."""
-    children = (
-        child
-        for child in memory_dir.iterdir()
-        if not child.is_symlink()
-    )
-    ordered = sorted(
-        children,
-        key=lambda child: (
-            _MEMORY_ROOT_ORDER.get(child.name, len(_MEMORY_ROOT_ORDER)),
-            child.name.casefold(),
-        ),
-    )
-    return [_build_memory_node_sync(child, memory_dir) for child in ordered]
+    """Blocking directory scan — call via asyncio.to_thread in async context."""
+    nodes: List[WorkspaceNode] = []
+    for item in sorted(memory_dir.rglob("*")):
+        if item.is_file():
+            rel = str(item.relative_to(memory_dir))
+            st = item.stat()
+            nodes.append(WorkspaceNode(
+                name=item.name,
+                path=rel,
+                type="file",
+                size=st.st_size,
+                modified_at=st.st_mtime,
+                is_text_file=WorkspaceManager.is_text_file(item),
+            ))
+    return nodes
 
 
 @router.get("/memory/list", response_model=List[WorkspaceNode], summary="List memory files")
@@ -661,22 +633,6 @@ async def read_memory_file(
         "size": target.stat().st_size,
         "preview_limit_bytes": max_read_bytes,
     }
-
-
-@router.put("/memory/file", summary="Write memory file content")
-async def write_memory_file(body: FileWriteRequest):
-    mgr = _get_manager()
-    try:
-        target = mgr.resolve_memory_path(body.path)
-    except ValueError as e:
-        raise HTTPException(status_code=400, detail=str(e))
-    target.parent.mkdir(parents=True, exist_ok=True)
-    try:
-        target.write_text(body.content, encoding="utf-8")
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-    log.info("workspace.memory_file.written", {"path": body.path, "size": len(body.content)})
-    return {"path": body.path, "written": True}
 
 
 @router.get("/memory/preview", summary="Preview single memory file inline")

@@ -17,6 +17,12 @@ export interface HookStats {
 
 export interface HookStatus {
   enabled: boolean;
+  session_memory: {
+    enabled: boolean;
+    message_count: number;
+    use_llm_slug: boolean;
+    slug_timeout: number;
+  };
   stats: HookStats;
   error?: string;
 }

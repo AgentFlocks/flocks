@@ -8,8 +8,7 @@ from typing import Optional, List, Dict, Any, Set
 from pathlib import Path
 import asyncio
 
-from flocks.memory import MemoryManager, MemorySearchResult, MemorySource
-from flocks.memory.config import resolve_memory_config
+from flocks.memory import MemoryManager, MemoryConfig, MemorySearchResult, MemorySource
 from flocks.config import Config
 from flocks.utils.log import Log
 
@@ -64,9 +63,16 @@ class SessionMemory:
             
             try:
                 config = await Config.get()
-                if getattr(config, "memory", None) is None:
+                memory_config_dict = config.memory if hasattr(config, 'memory') and config.memory else None
+                
+                if not memory_config_dict:
                     log.info("session.memory.no_config", {"session_id": self.session_id})
-                memory_config = resolve_memory_config(config)
+                    memory_config = MemoryConfig(enabled=True)
+                else:
+                    if isinstance(memory_config_dict, dict):
+                        memory_config = MemoryConfig(**memory_config_dict)
+                    else:
+                        memory_config = memory_config_dict
                 
                 self._manager = MemoryManager.get_instance(
                     project_id=self.project_id,

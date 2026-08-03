@@ -9,7 +9,6 @@ import os
 import unicodedata
 from dataclasses import dataclass
 from difflib import unified_diff
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from flocks.tool.registry import (
@@ -520,25 +519,10 @@ async def edit_tool(
         return ToolResult(success=False, error="filePath is required")
 
     try:
-        resolution = await resolve_tool_path(
-            ctx,
-            filePath,
-            allow_host_memory=True,
-        )
+        resolution = await resolve_tool_path(ctx, filePath)
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=filePath)
     filepath = resolution.resolved_path
-
-    from flocks.config import Config
-    from flocks.memory.paths import DAILY_AGENT_WRITE_ERROR, is_daily_memory_path
-
-    memory_root = Config.get_data_path() / "memory"
-    if is_daily_memory_path(memory_root, Path(filepath)):
-        return ToolResult(
-            success=False,
-            error=DAILY_AGENT_WRITE_ERROR,
-            title=resolution.display_path,
-        )
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     if isinstance(sandbox, dict) and sandbox.get("workspace_access") == "ro":

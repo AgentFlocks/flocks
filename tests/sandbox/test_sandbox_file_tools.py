@@ -4,24 +4,16 @@ Sandbox-aware file tool tests.
 
 import os
 import tempfile
-from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 
 from flocks.tool.registry import ToolContext, ToolRegistry
 
 
-def _sandbox_ctx(
-    workspace_dir: str,
-    workspace_access: str = "none",
-    *,
-    agent: str = "rex",
-) -> ToolContext:
+def _sandbox_ctx(workspace_dir: str, workspace_access: str = "none") -> ToolContext:
     return ToolContext(
         session_id="sandbox-file-tools",
         message_id="sandbox-file-tools-msg",
-        agent=agent,
         extra={
             "sandbox": {
                 "workspace_dir": workspace_dir,
@@ -59,91 +51,6 @@ async def test_read_tool_reads_inside_sandbox() -> None:
         )
         assert result.success
         assert "sandbox" in (result.output or "")
-
-
-@pytest.mark.asyncio
-async def test_file_tools_allow_only_host_memory_root_in_sandbox(
-    tmp_path: Path,
-) -> None:
-    sandbox_dir = tmp_path / "sandbox"
-    data_dir = tmp_path / "data"
-    sandbox_dir.mkdir()
-    memory_file = data_dir / "memory" / "MEMORY.md"
-    memory_file.parent.mkdir(parents=True)
-    memory_file.write_text("# Global Memory\n\nold fact\n", encoding="utf-8")
-    ctx = _sandbox_ctx(
-        str(sandbox_dir),
-        workspace_access="rw",
-        agent="self-improve",
-    )
-
-    with patch("flocks.config.Config.get_data_path", return_value=data_dir):
-        read_result = await ToolRegistry.execute(
-            "read",
-            ctx=ctx,
-            filePath=str(memory_file),
-        )
-        glob_result = await ToolRegistry.execute(
-            "glob",
-            ctx=ctx,
-            pattern="**/*.md",
-            path=str(data_dir / "memory"),
-        )
-        grep_result = await ToolRegistry.execute(
-            "grep",
-            ctx=ctx,
-            pattern="old fact",
-            path=str(data_dir / "memory"),
-        )
-        edit_result = await ToolRegistry.execute(
-            "edit",
-            ctx=ctx,
-            filePath=str(memory_file),
-            oldString="old fact",
-            newString="new fact",
-        )
-
-    assert read_result.success
-    assert glob_result.success
-    assert grep_result.success
-    assert edit_result.success
-    assert memory_file.read_text(encoding="utf-8") == (
-        "# Global Memory\n\nnew fact\n"
-    )
-
-
-@pytest.mark.asyncio
-async def test_sandbox_agent_cannot_write_or_edit_daily_memory(
-    tmp_path: Path,
-) -> None:
-    sandbox_dir = tmp_path / "sandbox"
-    data_dir = tmp_path / "data"
-    sandbox_dir.mkdir()
-    daily_file = data_dir / "memory" / "daily" / "2026-07-29.md"
-    daily_file.parent.mkdir(parents=True)
-    daily_file.write_text("lifecycle entry\n", encoding="utf-8")
-    ctx = _sandbox_ctx(str(sandbox_dir), workspace_access="rw")
-
-    with patch("flocks.config.Config.get_data_path", return_value=data_dir):
-        write_result = await ToolRegistry.execute(
-            "write",
-            ctx=ctx,
-            filePath=str(daily_file),
-            content="replacement\n",
-        )
-        edit_result = await ToolRegistry.execute(
-            "edit",
-            ctx=ctx,
-            filePath=str(daily_file),
-            oldString="lifecycle entry",
-            newString="replacement",
-        )
-
-    assert not write_result.success
-    assert not edit_result.success
-    assert "Session lifecycle" in (write_result.error or "")
-    assert "Session lifecycle" in (edit_result.error or "")
-    assert daily_file.read_text(encoding="utf-8") == "lifecycle entry\n"
 
 
 @pytest.mark.asyncio
