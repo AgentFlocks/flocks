@@ -237,6 +237,32 @@ describe('ChatModelPicker', () => {
 });
 
 describe('useChatModelOptions', () => {
+  it('includes cache-read pricing in model options', async () => {
+    listDefinitionsMock.mockResolvedValue({
+      data: {
+        models: [{
+          ...makeModelDefinition(),
+          pricing: {
+            input: 1,
+            output: 2,
+            cache_read: 0.2,
+            unit: 1000000,
+            currency: 'CNY',
+          },
+        }],
+      },
+    });
+    getResolvedMock.mockResolvedValue({
+      data: { provider_id: 'provider-1', model_id: 'model-1' },
+    });
+
+    const { result } = renderHook(() => useChatModelOptions());
+
+    await waitFor(() => {
+      expect(result.current.options[0]?.pricingLabel).toBe('¥1/¥2/¥0.2/M');
+    });
+  });
+
   it('keeps Auto opt-in and clears it when a concrete model is selected', async () => {
     listDefinitionsMock.mockResolvedValue({
       data: { models: [makeModelDefinition()] },

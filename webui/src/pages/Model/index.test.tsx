@@ -432,7 +432,7 @@ describe('ModelPage default model selector', () => {
         modalities: { input: ['text', 'image'], output: ['text'] },
       },
       limits: { context_window: 200000, max_output_tokens: 8192 },
-      pricing: { input: 1.25, output: 5, unit: 1000000, currency: 'USD' },
+      pricing: { input: 1.25, output: 5, cache_read: 0.25, unit: 1000000, currency: 'USD' },
     },
   ];
 
@@ -482,6 +482,7 @@ describe('ModelPage default model selector', () => {
     expect(tooltip).toHaveTextContent(/200(?:K|,?000)/);
     expect(tooltip).toHaveTextContent(/1\.25/);
     expect(tooltip).toHaveTextContent(/\b5(?:\.0+)?\b/);
+    expect(tooltip).toHaveTextContent('$1.25/$5/$0.25/M');
     expect(tooltip).toHaveTextContent(/USD|\$/);
   });
 });

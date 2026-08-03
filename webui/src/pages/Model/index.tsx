@@ -24,6 +24,7 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
+import { formatPricingPerMillion } from '@/utils/modelPricing';
 import {
   formatTokenMillions,
   getConvertedTotalCost,
@@ -957,7 +958,6 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
     : null;
 
   const pricing = model.pricing;
-  const currencySymbol = pricing?.currency === 'CNY' ? '¥' : '$';
 
   return (
     <div className={`rounded border px-2.5 py-1.5 transition-colors ${
@@ -1002,7 +1002,7 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
           </span>
           {contextK && <span className="text-[11px] text-gray-500 shrink-0">{contextK}</span>}
           {pricing && pricing.input > 0 && (
-            <span className="text-[11px] text-gray-500 shrink-0">{currencySymbol}{pricing.input}/{pricing.output}/M</span>
+            <span className="text-[11px] text-gray-500 shrink-0">{formatPricingPerMillion(pricing)}</span>
           )}
           {pricing && pricing.input === 0 && pricing.output === 0 && (
             <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
@@ -1708,10 +1708,7 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                       </span>
                                     )}
                                     {model.pricing && model.pricing.input > 0 && (
-                                      <span>
-                                        {model.pricing.currency === 'CNY' ? '¥' : '$'}
-                                        {model.pricing.input}/{model.pricing.currency === 'CNY' ? '¥' : '$'}{model.pricing.output}/M
-                                      </span>
+                                      <span>{formatPricingPerMillion(model.pricing)}</span>
                                     )}
                                     {model.pricing && model.pricing.input === 0 && (
                                       <span className="text-green-600">{t('status.free')}</span>
@@ -2926,8 +2923,7 @@ function formatModelPricing(
   const pricing = model.pricing;
   if (!pricing) return unavailableLabel;
   if (pricing.input === 0 && pricing.output === 0) return freeLabel;
-  const symbol = pricing.currency === 'CNY' ? '¥' : pricing.currency === 'USD' ? '$' : `${pricing.currency} `;
-  return `${symbol}${pricing.input} / ${symbol}${pricing.output} / 1M`;
+  return formatPricingPerMillion(pricing);
 }
 
 function ModelSelectionInfo({ model }: { model: ModelDefinitionV2 }) {

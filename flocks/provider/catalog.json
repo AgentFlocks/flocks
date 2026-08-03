@@ -52,7 +52,7 @@
       "THREATBOOK_CN_LLM_API_KEY"
     ],
     "models": {
-      "git": {
+      "deepseek-v4-flash-0731": {
         "name": "deepseek-v4-flash-0731",
         "family": "deepseek-v4",
         "capabilities": {
