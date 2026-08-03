@@ -219,6 +219,7 @@
     "streaming": "继续输出中...",
     "process": {
       "title": "查看 {{count}} 个步骤",
+      "duration": "用时 {{duration}}",
       "deepThinking": "深度思考",
       "reasoningCount": "{{count}} 段思考",
       "toolCount": "{{count}} 次工具调用",

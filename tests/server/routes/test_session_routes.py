@@ -24,6 +24,8 @@ from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.message import (
     Message,
     MessageRole,
+    PartTime,
+    ReasoningPart,
     ToolPart,
     ToolStateError,
     ToolStateRunning,
@@ -1289,6 +1291,32 @@ class TestSessionMessages:
             any(p.get("text") == "Hello!" for p in m.get("parts", []))
             for m in messages
         )
+
+    @pytest.mark.asyncio
+    async def test_list_messages_preserves_reasoning_part_time(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        """Reloaded message history retains timing needed by the process summary."""
+        message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ReasoningPart(
+            id="part_timed_reasoning",
+            sessionID=session_id,
+            messageID=message.id,
+            text="Inspect the request.",
+            time=PartTime(start=1_000, end=4_500),
+        )
+        await Message.store_part(session_id, message.id, part)
+
+        response = await client.get(f"/api/session/{session_id}/message")
+
+        assert response.status_code == status.HTTP_200_OK
+        messages = response.json()
+        reloaded_message = next(item for item in messages if item["info"]["id"] == message.id)
+        reloaded_part = next(item for item in reloaded_message["parts"] if item["id"] == part.id)
+        assert reloaded_part["time"]["start"] == 1_000
+        assert reloaded_part["time"]["end"] == 4_500
 
     @pytest.mark.asyncio
     async def test_list_messages_keeps_running_tool_when_session_busy(

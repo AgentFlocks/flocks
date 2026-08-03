@@ -140,6 +140,11 @@ export interface MessagePart {
   toolCall?: ToolCall;
   toolResult?: ToolResult;
   thinking?: string;
+  time?: {
+    start: number;
+    end?: number;
+    compacted?: number;
+  };
   image?: {
     url: string;
     alt?: string;

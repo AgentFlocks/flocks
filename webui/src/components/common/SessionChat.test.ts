@@ -20,6 +20,7 @@ import {
   getMessageBubbleClassName,
   getMessageErrorText,
   getMessageGroupClassName,
+  getProcessGroupDurationMs,
   getRenderableThinkingText,
   getThinkingFirstSentence,
   getRenderableFileUrl,
@@ -34,6 +35,7 @@ import {
   shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
+  formatProcessDuration,
 } from './SessionChat';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
@@ -62,6 +64,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
   'chat.process.title': '查看 {{count}} 个步骤',
+  'chat.process.duration': '用时 {{duration}}',
   'chat.process.deepThinking': '深度思考',
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
@@ -1676,6 +1679,53 @@ describe('getThinkingFirstSentence', () => {
   });
 });
 
+describe('process group duration', () => {
+  it('uses the full wall-clock range and the current time for an active step', () => {
+    const parts = [
+      { id: 'reason', type: 'reasoning', time: { start: 1_000, end: 2_000 } },
+      { id: 'tool', type: 'tool', state: { status: 'running', time: { start: 2_500 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts, 5_000)).toBe(4_000);
+    expect(formatProcessDuration(500)).toBe('1s');
+    expect(formatProcessDuration(7_600)).toBe('7s');
+    expect(formatProcessDuration(260_900)).toBe('4m20s');
+    expect(getProcessGroupDurationMs([{ id: 'legacy', type: 'reasoning' }] as Message['parts']))
+      .toBeNull();
+  });
+
+  it('updates the displayed duration while the last process step is active', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-duration',
+          role: 'assistant',
+          parts: [{
+            id: 'tool-active-duration',
+            type: 'tool',
+            tool: 'read',
+            state: {
+              status: 'running',
+              input: { filePath: 'workflow.md' },
+              time: { start: 1_000 },
+            },
+          }] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('用时 4s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('用时 5s');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
 describe('ChatMessageBubble reasoning streaming', () => {
   it.each(['reasoning', 'thinking'] as const)(
     'paces an active %s part after a tool and flushes the completed text',
@@ -2073,6 +2123,7 @@ describe('SessionChat intermediate process collapse', () => {
               sessionID: 'sess-1',
               type: 'reasoning',
               text: '需要先读取工作流文件。然后检查配置。',
+              time: { start: 1_000, end: 2_000 },
             } as any,
             {
               id: 'tool-1',
@@ -2085,6 +2136,7 @@ describe('SessionChat intermediate process collapse', () => {
                 status: 'completed',
                 input: { filePath: 'workflow.md' },
                 output: 'workflow content',
+                time: { start: 2_000, end: 4_500 },
               },
             } as any,
             {
@@ -2114,6 +2166,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('· 用时 3s');
     expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
     expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
     expect(processGroup.className).not.toContain('rounded-lg');

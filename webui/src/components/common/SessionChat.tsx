@@ -301,6 +301,50 @@ export function getThinkingFirstSentence(text: string): string {
   return firstLine;
 }
 
+function getProcessPartTime(part: MessagePart): { start: number; end?: number } | undefined {
+  return part.type === 'tool' ? part.state?.time : part.time;
+}
+
+export function getProcessGroupDurationMs(
+  parts: readonly MessagePart[],
+  activeNowMs?: number,
+): number | null {
+  let firstStart = Number.POSITIVE_INFINITY;
+  let lastEnd = Number.NEGATIVE_INFINITY;
+
+  for (const part of parts) {
+    const time = getProcessPartTime(part);
+    if (!time || !Number.isFinite(time.start)) continue;
+    const end = Number.isFinite(time.end) ? time.end : activeNowMs;
+    if (end === undefined || !Number.isFinite(end)) continue;
+    firstStart = Math.min(firstStart, time.start);
+    lastEnd = Math.max(lastEnd, end);
+  }
+
+  if (!Number.isFinite(firstStart) || !Number.isFinite(lastEnd)) return null;
+  return Math.max(0, lastEnd - firstStart);
+}
+
+export function formatProcessDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.floor(durationMs / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}m${totalSeconds % 60}s`;
+}
+
+function useProcessElapsedClock(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+
+  return now;
+}
+
 const StreamingReasoningText = memo(function StreamingReasoningText({
   content,
   isStreaming,
@@ -4370,6 +4414,7 @@ function ChatMessageBubbleInner({
   const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
@@ -4687,6 +4732,11 @@ function ChatMessageBubbleInner({
           const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
+            const processGroupActive = isActive && group.some(({ part }) => part === activeTailPart);
+            const processDurationMs = getProcessGroupDurationMs(
+              group.map(({ part }) => part),
+              processGroupActive ? processElapsedClock : undefined,
+            );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
             const effectiveProcessGroupOpen = hasStoredOpenState
@@ -4706,6 +4756,14 @@ function ChatMessageBubbleInner({
                     <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
                     </span>
+                    {processDurationMs !== null && (
+                      <span
+                        data-testid="chat-process-duration"
+                        className="shrink-0 text-xs font-normal text-[#9da29f] dark:text-zinc-500"
+                      >
+                        · {t('chat.process.duration', { duration: formatProcessDuration(processDurationMs) })}
+                      </span>
+                    )}
                   </>
                 )}
               >

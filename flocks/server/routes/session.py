@@ -2179,6 +2179,7 @@ class MessagePartInfo(BaseModel):
     sessionID: str
     type: str
     text: Optional[str] = None
+    time: Optional[Dict[str, Any]] = None
     synthetic: Optional[bool] = None
     tool: Optional[str] = None
     state: Optional[Dict[str, Any]] = None
@@ -2224,6 +2225,14 @@ def _part_to_response_info(
 ) -> MessagePartInfo:
     text_value = getattr(part, "text", None) if part.type in ("text", "reasoning", "thinking") else None
 
+    raw_time = getattr(part, "time", None)
+    if hasattr(raw_time, "model_dump"):
+        time_value = raw_time.model_dump()
+    elif isinstance(raw_time, dict):
+        time_value = raw_time
+    else:
+        time_value = None
+
     url_value = getattr(part, "url", None) if part.type == "file" else None
 
     state_value = None
@@ -2241,6 +2250,7 @@ def _part_to_response_info(
         sessionID=session_id,
         type=part.type,
         text=text_value,
+        time=time_value,
         synthetic=getattr(part, "synthetic", None),
         tool=getattr(part, "tool", None) if part.type == "tool" else None,
         state=state_value,

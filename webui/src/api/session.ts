@@ -8,6 +8,11 @@ export interface SessionMessagePartPayload {
   sessionID: string;
   type: string;
   text?: string;
+  time?: {
+    start: number;
+    end?: number;
+    compacted?: number;
+  };
   synthetic?: boolean;
   tool?: string;
   state?: Record<string, unknown>;
