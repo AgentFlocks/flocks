@@ -64,7 +64,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
   'chat.process.title': '查看 {{count}} 个步骤',
-  'chat.process.duration': '用时 {{duration}}',
+  'chat.process.duration': '已处理 {{duration}}',
   'chat.process.deepThinking': '深度思考',
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
@@ -1717,9 +1717,9 @@ describe('process group duration', () => {
         collapseIntermediateSteps: true,
       }));
 
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('用时 4s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4s');
       act(() => vi.advanceTimersByTime(1_000));
-      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('用时 5s');
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
     } finally {
       vi.useRealTimers();
     }
@@ -2166,7 +2166,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
-    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('· 用时 3s');
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('· 已处理 3s');
     expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
     expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
     expect(processGroup.className).not.toContain('rounded-lg');

@@ -219,7 +219,7 @@
     "streaming": "Streaming...",
     "process": {
       "title": "View {{count}} steps",
-      "duration": "Elapsed {{duration}}",
+      "duration": "Processed in {{duration}}",
       "deepThinking": "Deep thinking",
       "reasoningCount": "{{count}} reasoning",
       "toolCount": "{{count}} tool calls",
