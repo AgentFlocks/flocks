@@ -22,6 +22,17 @@ export function getDefaultDashboardCurrency(language: string | undefined): Dashb
   return language?.toLowerCase().startsWith('zh') ? 'CNY' : 'USD';
 }
 
+export function convertCurrencyAmount(
+  amount: number,
+  sourceCurrency: string,
+  targetCurrency: string,
+): number {
+  if (sourceCurrency === targetCurrency) return amount;
+  if (sourceCurrency === 'USD' && targetCurrency === 'CNY') return amount * USD_TO_CNY;
+  if (sourceCurrency === 'CNY' && targetCurrency === 'USD') return amount / USD_TO_CNY;
+  return 0;
+}
+
 export function getConvertedTotalCost(
   usageStats: UsageStats | null,
   targetCurrency: DashboardCurrency,
@@ -32,16 +43,11 @@ export function getConvertedTotalCost(
   }
 
   const total = buckets.reduce((sum, bucket) => {
-    if (bucket.currency === targetCurrency) {
-      return sum + bucket.total_cost;
-    }
-    if (bucket.currency === 'USD' && targetCurrency === 'CNY') {
-      return sum + (bucket.total_cost * USD_TO_CNY);
-    }
-    if (bucket.currency === 'CNY' && targetCurrency === 'USD') {
-      return sum + (bucket.total_cost / USD_TO_CNY);
-    }
-    return sum;
+    return sum + convertCurrencyAmount(
+      bucket.total_cost,
+      bucket.currency,
+      targetCurrency,
+    );
   }, 0);
 
   if (total <= 0) {

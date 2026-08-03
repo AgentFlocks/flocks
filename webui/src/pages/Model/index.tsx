@@ -26,6 +26,7 @@ import {
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
 import { formatPricingPerMillion } from '@/utils/modelPricing';
 import {
+  convertCurrencyAmount,
   formatTokenMillions,
   getConvertedTotalCost,
   getDefaultDashboardCurrency,
@@ -68,6 +69,19 @@ const AZURE_PROVIDER_IDS = new Set(['azure-openai', 'azure']);
 
 function isAzureProviderId(providerId: string): boolean {
   return AZURE_PROVIDER_IDS.has(providerId);
+}
+
+function convertEditablePrice(
+  value: string,
+  sourceCurrency: string,
+  targetCurrency: string,
+): string {
+  if (value.trim() === '') return value;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return value;
+  const converted = convertCurrencyAmount(amount, sourceCurrency, targetCurrency);
+  const precision = targetCurrency === 'CNY' ? 4 : 6;
+  return String(Number(converted.toFixed(precision)));
 }
 
 // ==================== Connection Cache ====================
@@ -1828,14 +1842,23 @@ function useModelForm() {
   const [supportsReasoning, setSupportsReasoning] = useState(true);
   const [inputPrice, setInputPrice] = useState('0');
   const [outputPrice, setOutputPrice] = useState('0');
+  const [cacheReadPrice, setCacheReadPrice] = useState('');
   const [currency, setCurrency] = useState('USD');
+
+  const changeCurrency = useCallback((nextCurrency: string) => {
+    if (nextCurrency === currency) return;
+    setInputPrice(value => convertEditablePrice(value, currency, nextCurrency));
+    setOutputPrice(value => convertEditablePrice(value, currency, nextCurrency));
+    setCacheReadPrice(value => convertEditablePrice(value, currency, nextCurrency));
+    setCurrency(nextCurrency);
+  }, [currency]);
 
   const reset = useCallback(() => {
     setModelId(''); setName('');
     setContextWindow(''); setMaxOutput('');
     setSupportsVision(false); setSupportsTools(true);
     setSupportsStreaming(true); setSupportsReasoning(true);
-    setInputPrice('0'); setOutputPrice('0'); setCurrency('USD');
+    setInputPrice('0'); setOutputPrice('0'); setCacheReadPrice(''); setCurrency('USD');
   }, []);
 
   const toPayload = useCallback(() => {
@@ -1850,6 +1873,10 @@ function useModelForm() {
       output_price: parseFloat(outputPrice) || 0,
       currency,
     };
+    const parsedCacheReadPrice = parseFloat(cacheReadPrice);
+    if (Number.isFinite(parsedCacheReadPrice) && parsedCacheReadPrice >= 0) {
+      payload.cache_read_price = parsedCacheReadPrice;
+    }
     const parsedContextWindow = parseInt(contextWindow);
     if (Number.isFinite(parsedContextWindow) && parsedContextWindow > 0) {
       payload.context_window = parsedContextWindow;
@@ -1859,7 +1886,7 @@ function useModelForm() {
       payload.max_output_tokens = parsedMaxOutput;
     }
     return payload;
-  }, [modelId, name, contextWindow, maxOutput, supportsVision, supportsTools, supportsStreaming, supportsReasoning, inputPrice, outputPrice, currency]);
+  }, [modelId, name, contextWindow, maxOutput, supportsVision, supportsTools, supportsStreaming, supportsReasoning, inputPrice, outputPrice, cacheReadPrice, currency]);
 
   const isValid = modelId.trim() !== '' && name.trim() !== '';
 
@@ -1869,7 +1896,8 @@ function useModelForm() {
     supportsVision, setSupportsVision, supportsTools, setSupportsTools,
     supportsStreaming, setSupportsStreaming, supportsReasoning, setSupportsReasoning,
     inputPrice, setInputPrice, outputPrice, setOutputPrice,
-    currency, setCurrency,
+    cacheReadPrice, setCacheReadPrice,
+    currency, setCurrency: changeCurrency,
     reset, toPayload, isValid,
   };
 }
@@ -1947,7 +1975,7 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
 
       <div>
         <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
-        <div className="grid grid-cols-3 gap-3">
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
           <div>
             <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
             <input
@@ -1966,6 +1994,17 @@ function ModelFormFields({ form, testResult, testing, modelIdPlaceholder, modelI
               value={form.outputPrice}
               onChange={e => form.setOutputPrice(e.target.value)}
               className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+            />
+          </div>
+          <div>
+            <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
+            <input
+              type="number"
+              step="0.01"
+              value={form.cacheReadPrice}
+              onChange={e => form.setCacheReadPrice(e.target.value)}
+              className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-slate-400 text-sm"
+              placeholder="—"
             />
           </div>
           <div>
@@ -2681,11 +2720,22 @@ function ModelDetailSheet({
   const [supportsReasoning, setSupportsReasoning] = useState(modelSupportsReasoning);
   const [inputPrice, setInputPrice] = useState(model.pricing ? String(model.pricing.input) : '0');
   const [outputPrice, setOutputPrice] = useState(model.pricing ? String(model.pricing.output) : '0');
+  const [cacheReadPrice, setCacheReadPrice] = useState(
+    model.pricing?.cache_read != null ? String(model.pricing.cache_read) : '',
+  );
   const [currency, setCurrency] = useState(model.pricing?.currency ?? 'USD');
   const [enabled, setEnabled] = useState(true);
   const [defaultParameters, setDefaultParameters] = useState<Record<string, any>>({});
   const [loading, setLoading] = useState(false);
   const [loadingSettings, setLoadingSettings] = useState(true);
+
+  const handleCurrencyChange = (nextCurrency: string) => {
+    if (nextCurrency === currency) return;
+    setInputPrice(value => convertEditablePrice(value, currency, nextCurrency));
+    setOutputPrice(value => convertEditablePrice(value, currency, nextCurrency));
+    setCacheReadPrice(value => convertEditablePrice(value, currency, nextCurrency));
+    setCurrency(nextCurrency);
+  };
 
   useEffect(() => {
     modelSettingsAPI.get(provider.id, model.id).then(r => {
@@ -2723,6 +2773,9 @@ function ModelDetailSheet({
           supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
           input_price: parseFloat(inputPrice) || 0,
           output_price: parseFloat(outputPrice) || 0,
+          cache_read_price: cacheReadPrice.trim() === ''
+            ? undefined
+            : parseFloat(cacheReadPrice) || 0,
           currency,
         }),
         modelSettingsAPI.update(provider.id, model.id, {
@@ -2831,7 +2884,7 @@ function ModelDetailSheet({
             {/* 价格 — 可编辑 */}
             <div>
               <label className="block text-sm font-medium text-gray-700 mb-2">{t('form.pricing')}</label>
-              <div className="grid grid-cols-3 gap-3">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.input')}</label>
                   <input type="number" step="0.01" value={inputPrice} onChange={e => setInputPrice(e.target.value)} className={inputCls} />
@@ -2841,8 +2894,19 @@ function ModelDetailSheet({
                   <input type="number" step="0.01" value={outputPrice} onChange={e => setOutputPrice(e.target.value)} className={inputCls} />
                 </div>
                 <div>
+                  <label className="block text-xs text-gray-500 mb-1">{t('form.cacheRead')}</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={cacheReadPrice}
+                    onChange={e => setCacheReadPrice(e.target.value)}
+                    className={inputCls}
+                    placeholder="—"
+                  />
+                </div>
+                <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
-                  <select value={currency} onChange={e => setCurrency(e.target.value)} className={inputCls}>
+                  <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
                     <option value="USD">USD</option>
                     <option value="CNY">CNY</option>
                   </select>

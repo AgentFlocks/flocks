@@ -66,6 +66,7 @@ async def test_create_custom_model_accepts_string_currency(
             "supports_reasoning": False,
             "input_price": 0.0,
             "output_price": 0.0,
+            "cache_read_price": 0.2,
             "currency": "USD",
         },
     )
@@ -74,11 +75,14 @@ async def test_create_custom_model_accepts_string_currency(
     data = response.json()
     assert data["provider_id"] == "custom-tb-inner"
     assert data["model_id"] == "minimax:MiniMax-M2.7"
+    assert data["cache_read_price"] == 0.2
     assert data["currency"] == "USD"
 
     raw = ConfigWriter.get_provider_raw("custom-tb-inner")
     assert raw is not None
+    assert raw["models"]["minimax:MiniMax-M2.7"]["cache_read_price"] == 0.2
     assert raw["models"]["minimax:MiniMax-M2.7"]["currency"] == "USD"
+    assert Provider._models["minimax:MiniMax-M2.7"].pricing["cache_read"] == 0.2
     assert Provider._models["minimax:MiniMax-M2.7"].pricing["currency"] == "USD"
 
 

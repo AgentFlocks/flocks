@@ -18,6 +18,9 @@ const mocks = vi.hoisted(() => ({
   getSummary: vi.fn(),
   getResolved: vi.fn(),
   listDefinitions: vi.fn(),
+  createDefinition: vi.fn(),
+  getModelSettings: vi.fn(),
+  updateModelSettings: vi.fn(),
   catalogList: vi.fn(),
   createProvider: vi.fn(),
   getCredentials: vi.fn(),
@@ -123,7 +126,7 @@ vi.mock('@/api/provider', () => ({
   },
   modelV2API: {
     listDefinitions: mocks.listDefinitions,
-    createDefinition: vi.fn(),
+    createDefinition: mocks.createDefinition,
     deleteDefinition: vi.fn(),
   },
   usageAPI: {
@@ -133,8 +136,8 @@ vi.mock('@/api/provider', () => ({
     createProvider: mocks.createProvider,
   },
   modelSettingsAPI: {
-    get: vi.fn(),
-    update: vi.fn(),
+    get: mocks.getModelSettings,
+    update: mocks.updateModelSettings,
   },
   catalogAPI: {
     list: mocks.catalogList,
@@ -450,6 +453,11 @@ describe('ModelPage default model selector', () => {
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
     mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
+    mocks.createDefinition.mockResolvedValue({ data: {} });
+    mocks.getModelSettings.mockResolvedValue({
+      data: { enabled: true, default_parameters: {} },
+    });
+    mocks.updateModelSettings.mockResolvedValue({ data: {} });
     mocks.getCredentials.mockResolvedValue({ data: null });
     mocks.testCredentials.mockResolvedValue({ data: { success: true, latency_ms: 10 } });
   });
@@ -484,5 +492,63 @@ describe('ModelPage default model selector', () => {
     expect(tooltip).toHaveTextContent(/\b5(?:\.0+)?\b/);
     expect(tooltip).toHaveTextContent('$1.25/$5/$0.25/M');
     expect(tooltip).toHaveTextContent(/USD|\$/);
+  });
+
+  it('shows and saves cache-read pricing in model details', async () => {
+    const user = userEvent.setup();
+    mocks.listDefinitions.mockResolvedValue({
+      data: {
+        models: [
+          models[0],
+          {
+            ...models[1],
+            pricing: {
+              input: 1,
+              output: 2,
+              cache_read: 0.2,
+              unit: 1000000,
+              currency: 'CNY',
+            },
+          },
+        ],
+        total: models.length,
+      },
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('MiniMax Vision M3'));
+    const cacheReadLabel = await screen.findByText('form.cacheRead');
+    const cacheReadInput = cacheReadLabel.parentElement?.querySelector('input');
+    const inputPrice = screen.getByText('form.input').parentElement?.querySelector('input');
+    const outputPrice = screen.getByText('form.output').parentElement?.querySelector('input');
+    const currencySelect = screen.getByText('form.currency').parentElement?.querySelector('select');
+    expect(cacheReadInput).toHaveValue(0.2);
+
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'USD');
+
+    expect(inputPrice).toHaveValue(0.142857);
+    expect(outputPrice).toHaveValue(0.285714);
+    expect(cacheReadInput).toHaveValue(0.028571);
+
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'CNY');
+    expect(inputPrice).toHaveValue(1);
+    expect(outputPrice).toHaveValue(2);
+    expect(cacheReadInput).toHaveValue(0.2);
+
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'USD');
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mocks.createDefinition).toHaveBeenCalledWith(
+        'minimax',
+        expect.objectContaining({
+          input_price: 0.142857,
+          output_price: 0.285714,
+          cache_read_price: 0.028571,
+          currency: 'USD',
+        }),
+      );
+    });
   });
 });
