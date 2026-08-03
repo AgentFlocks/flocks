@@ -122,10 +122,13 @@ def _filesystem_action_payload(
         if isinstance(sandbox, Mapping)
         else ""
     )
-    workspace_dir = (
+    workspace_root = str((profile.get("workspace_dir") or os.getcwd())).strip() or os.getcwd()
+    project_root = str(profile.get("project_root") or "").strip() or None
+    operation_cwd = (
         sandbox_workspace_dir
-        or str((profile.get("workspace_dir") or os.getcwd())).strip()
-        or os.getcwd()
+        or str((tool_context_extra.get("workspace_dir") or "")).strip()
+        or project_root
+        or workspace_root
     )
     permission_mode = str(profile.get("permission_mode") or "readonly").strip().lower()
     runtime_mode = str(profile.get("runtime_mode") or "exe-mode").strip().lower()
@@ -139,9 +142,8 @@ def _filesystem_action_payload(
     )
     if operation in {"read", "search", "write", "edit", "apply_patch", "delete", "mkdir"} and target_path is None:
         target_path = _first_present(tool_input, ("filePath", "path", "dirPath"))
-    source_path = _normalize_operation_path(source_path, cwd=workspace_dir)
-    target_path = _normalize_operation_path(target_path, cwd=workspace_dir)
-    workspace_root = workspace_dir
+    source_path = _normalize_operation_path(source_path, cwd=operation_cwd)
+    target_path = _normalize_operation_path(target_path, cwd=operation_cwd)
     owner_username = _first_present(profile, ("owner_username",))
     output_root = str(
         WorkspaceManager.get_instance().get_default_outputs_dir(
@@ -151,7 +153,6 @@ def _filesystem_action_payload(
     )
     flocks_root = os.path.expanduser(os.getenv("FLOCKS_ROOT", "~/.flocks"))
     plugins_root = os.path.join(flocks_root, "plugins")
-    project_root = str(profile.get("project_root") or "").strip() or None
     project_id = _first_present(profile, ("project_id",))
     project_revision_raw = profile.get("project_revision")
     project_revision = None
@@ -176,7 +177,7 @@ def _filesystem_action_payload(
         "operation": operation,
         "source_path": source_path,
         "target_path": target_path,
-        "cwd": workspace_dir,
+        "cwd": operation_cwd,
         "session_permission_mode": permission_mode,
         "owner_username": owner_username,
         "workspace": {
@@ -206,7 +207,7 @@ def _filesystem_action_payload(
         patch_text = str(tool_input.get("patchText") or tool_input.get("patch_text") or "")
         payload["apply_patch_action"] = _extract_apply_patch_action(
             patch_text=patch_text,
-            cwd=workspace_dir,
+            cwd=operation_cwd,
         )
     return payload
 

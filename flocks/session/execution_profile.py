@@ -7,7 +7,10 @@ all execution entrypoints can read one canonical, trusted envelope.
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, Mapping
+
+from flocks.workspace.manager import WorkspaceManager
 
 if TYPE_CHECKING:
     from flocks.session.session import SessionInfo
@@ -36,6 +39,13 @@ def _as_list(value: Any) -> list[str]:
 
 def _normalize_entry(value: Any) -> str:
     return str(value or "interactive").strip().lower() or "interactive"
+
+
+def _workspace_root_dir() -> str:
+    try:
+        return str(WorkspaceManager.get_instance().get_workspace_dir())
+    except Exception:
+        return str((Path.home() / ".flocks" / "workspace").resolve())
 
 
 def _default_permission_mode(entry: str) -> str:
@@ -88,11 +98,12 @@ def default_execution_profile(
     if visible and default_agent_name and default_agent_name not in visible:
         default_agent_name = visible[0]
     project_root = str(getattr(session, "directory", "") or "").strip()
+    workspace_root = _workspace_root_dir()
     return {
         "version": PROFILE_VERSION,
         "session_id": str(session.id),
         "project_id": str(session.project_id),
-        "workspace_dir": project_root,
+        "workspace_dir": workspace_root,
         "project_root": project_root,
         "project_revision": getattr(
             getattr(session, "time", None),
@@ -127,7 +138,8 @@ def profile_from_session(session: "SessionInfo") -> dict[str, Any]:
     profile["session_id"] = str(session.id)
     profile["project_id"] = str(session.project_id)
     project_root = str(getattr(session, "directory", "") or "").strip()
-    profile["workspace_dir"] = project_root
+    workspace_root = _workspace_root_dir()
+    profile["workspace_dir"] = workspace_root
     profile["project_root"] = project_root
     profile["project_revision"] = getattr(
         getattr(session, "time", None),
@@ -183,7 +195,8 @@ def merge_profile(
     merged["session_id"] = str(session.id)
     merged["project_id"] = str(session.project_id)
     project_root = str(getattr(session, "directory", "") or "").strip()
-    merged["workspace_dir"] = project_root
+    workspace_root = _workspace_root_dir()
+    merged["workspace_dir"] = workspace_root
     merged["project_root"] = project_root
     merged["project_revision"] = getattr(
         getattr(session, "time", None),
