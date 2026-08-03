@@ -9,7 +9,7 @@ Covered endpoints
 Directory:  GET /tree, GET /list, POST /dir, DELETE /dir
 File:       POST /upload, GET /file, PUT /file, DELETE /file,
             GET /preview, GET /download, POST /download/zip, POST /move
-Memory:     GET /memory/list, GET/PUT /memory/file, GET /memory/preview,
+Memory:     GET /memory/list, GET /memory/file, GET /memory/preview,
             GET /memory/download
 Stats:      GET /stats
 """
@@ -663,48 +663,25 @@ class TestReveal:
         assert r.status_code == 400
 
 
-# ─── Memory files ────────────────────────────────────────────────────────────
+# ─── Memory view (read-only) ─────────────────────────────────────────────────
 
 class TestMemoryView:
-    def test_list_memory_without_files_returns_empty_daily_tree(self, workspace_client):
+    def test_list_memory_empty(self, workspace_client):
         r = _client(workspace_client).get("/api/workspace/memory/list")
         assert r.status_code == 200
-        assert len(r.json()) == 1
-        daily = r.json()[0]
-        assert daily["path"] == "daily"
-        assert daily["type"] == "directory"
-        assert daily["children"] == []
+        assert r.json() == []
 
     def test_list_memory_with_files(self, workspace_client):
         mem = _mem(workspace_client)
-        (mem / "USER.md").write_text("# User")
         (mem / "MEMORY.md").write_text("# Memory")
-        (mem / "daily").mkdir()
-        (mem / "daily" / "2026-03-14.md").write_text("## Daily")
-        (mem / "projects" / "prj_example").mkdir(parents=True)
-        (mem / "projects" / "prj_example" / "MEMORY.md").write_text(
-            "# Project Memory"
-        )
-
+        (mem / "2026-03-14.md").write_text("## Daily")
         r = _client(workspace_client).get("/api/workspace/memory/list")
-
         assert r.status_code == 200
-        assert [node["name"] for node in r.json()] == [
-            "USER.md",
-            "MEMORY.md",
-            "projects",
-            "daily",
-        ]
-        nodes = {node["name"]: node for node in r.json()}
-        assert set(nodes) == {"USER.md", "MEMORY.md", "daily", "projects"}
-        assert nodes["USER.md"]["type"] == "file"
-        assert nodes["MEMORY.md"]["type"] == "file"
-        assert nodes["daily"]["type"] == "directory"
-        assert nodes["daily"]["children"][0]["path"] == "daily/2026-03-14.md"
-        assert nodes["projects"]["type"] == "directory"
-        project = nodes["projects"]["children"][0]
-        assert project["path"] == "projects/prj_example"
-        assert project["children"][0]["path"] == "projects/prj_example/MEMORY.md"
+        names = {n["name"] for n in r.json()}
+        assert {"MEMORY.md", "2026-03-14.md"}.issubset(names)
+        # All returned nodes should be text files
+        for node in r.json():
+            assert node["is_text_file"] is True
 
     def test_read_memory_file(self, workspace_client):
         mem = _mem(workspace_client)
@@ -785,36 +762,13 @@ class TestMemoryView:
         r = _client(workspace_client).get("/api/workspace/memory/preview?path=../../etc/passwd")
         assert r.status_code == 400
 
-    def test_workspace_write_cannot_escape_to_memory(self, workspace_client):
-        """The workspace write endpoint remains confined to the workspace."""
+    def test_memory_write_not_allowed(self, workspace_client):
+        """Memory directory has no write endpoint — PUT /file with memory path is confined to workspace."""
+        # Trying to write to memory via workspace file endpoint should be rejected
+        # because memory dir is outside workspace dir
         mem_path_attempt = "../data/memory/MEMORY.md"
         r = _client(workspace_client).put(
             "/api/workspace/file",
             json={"path": mem_path_attempt, "content": "hacked"},
-        )
-        assert r.status_code == 400
-
-    def test_write_memory_file(self, workspace_client):
-        mem = _mem(workspace_client)
-        (mem / "daily").mkdir(exist_ok=True)
-        target = mem / "daily" / "2026-03-14.md"
-        target.write_text("old content")
-
-        r = _client(workspace_client).put(
-            "/api/workspace/memory/file",
-            json={"path": "daily/2026-03-14.md", "content": "new content"},
-        )
-
-        assert r.status_code == 200
-        assert r.json() == {
-            "path": "daily/2026-03-14.md",
-            "written": True,
-        }
-        assert target.read_text() == "new content"
-
-    def test_write_memory_traversal_rejected(self, workspace_client):
-        r = _client(workspace_client).put(
-            "/api/workspace/memory/file",
-            json={"path": "../../outside.md", "content": "hacked"},
         )
         assert r.status_code == 400

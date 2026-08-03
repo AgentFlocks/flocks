@@ -257,11 +257,7 @@ async def grep_tool(
         )
     
     try:
-        resolution = await resolve_tool_path(
-            ctx,
-            path or ".",
-            allow_host_memory=True,
-        )
+        resolution = await resolve_tool_path(ctx, path or ".")
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=pattern)
 

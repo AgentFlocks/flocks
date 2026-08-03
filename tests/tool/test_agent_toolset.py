@@ -125,6 +125,7 @@ def test_builtin_agent_yaml_tool_names_match_current_registry_surface() -> None:
         "oracle",
         "plan",
         "rex_junior",
+        "self_enhance",
     ):
         agent_yaml = agent_root / agent_name / "agent.yaml"
         if not agent_yaml.exists():

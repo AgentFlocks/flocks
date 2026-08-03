@@ -258,16 +258,21 @@ async def lifespan(app: FastAPI):
     )
     log.info("question_handler.initialized")
     
-    # Memory is always enabled.
+    # Register built-in hooks if memory is enabled
     try:
-        from flocks.hooks.builtin import register_builtin_hooks
-
-        await _run_startup_phase(
-            log,
-            "hooks.register_builtin",
-            register_builtin_hooks,
-        )
-        log.info("hooks.registered")
+        config = await Config.get()
+        # ``config.memory`` may be ``None`` when the memory system is not
+        # configured at all; in that case there is nothing to register.
+        memory_cfg = getattr(config, "memory", None)
+        memory_enabled = bool(getattr(memory_cfg, "enabled", False)) if memory_cfg else False
+        if memory_enabled:
+            from flocks.hooks.builtin import register_builtin_hooks
+            await _run_startup_phase(
+                log,
+                "hooks.register_builtin",
+                register_builtin_hooks,
+            )
+            log.info("hooks.registered")
     except Exception as e:
         # Hook registration failure should not stop server startup
         log.warn("hooks.register_failed", {"error": str(e)})

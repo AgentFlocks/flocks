@@ -56,6 +56,34 @@ class MemorySyncSessionConfig(BaseModel):
     )
 
 
+class MemoryHooksSessionMemoryConfig(BaseModel):
+    """Session memory hook configuration"""
+    enabled: bool = Field(
+        True,
+        description="Enable session memory hook"
+    )
+    message_count: int = Field(
+        15,
+        description="Number of recent messages to save"
+    )
+    use_llm_slug: bool = Field(
+        True,
+        description="Use LLM to generate slug"
+    )
+    slug_timeout: int = Field(
+        15,
+        description="Slug generation timeout (seconds)"
+    )
+
+
+class MemoryHooksConfig(BaseModel):
+    """Hooks configuration"""
+    session_memory: MemoryHooksSessionMemoryConfig = Field(
+        default_factory=MemoryHooksSessionMemoryConfig,
+        description="Session memory hook configuration"
+    )
+
+
 class MemorySyncConfig(BaseModel):
     """Sync operation configuration"""
     on_session_start: bool = Field(
@@ -64,7 +92,7 @@ class MemorySyncConfig(BaseModel):
     )
     on_search: bool = Field(
         True,
-        description="Run incremental sync before every search"
+        description="Sync before search if dirty"
     )
     watch: bool = Field(
         True,
@@ -171,35 +199,11 @@ class MemoryAutoFlushConfig(BaseModel):
         description="Reserved tokens"
     )
     system_prompt: str = Field(
-        (
-            "Session nearing context limit. Perform only durable Memory "
-            "maintenance; the lifecycle will resume the current task."
-        ),
+        "Session nearing context limit. Store important memories now.",
         description="System prompt for memory flush"
     )
     user_prompt: str = Field(
-        """
-Preserve durable knowledge from this Session, then reply `NO_REPLY`.
-
-Classify each candidate in order:
-1. Secret, guess, transient state, one-off result, or cheaply rediscoverable
-   fact: skip it.
-2. Repeatable procedure: skip it; Dream self-improvement handles Skills.
-3. User information or preference: `USER.md`.
-4. Current-project-only knowledge: Project `MEMORY.md`.
-5. Cross-project declarative Agent or environment knowledge: Global `MEMORY.md`.
-6. Weak, unclear, or already represented knowledge: make no change.
-
-Store each accepted item in exactly one destination. Read the current file
-first; use `edit` for an existing file and `write` only when it is missing.
-Within Global `MEMORY.md`, use `Environment and Tools` for stable environment
-or tool facts, `Lessons and Corrections` for conventions and verified guidance,
-and `References` for cross-project external pointers. Within Project
-`MEMORY.md`, use `Project Context` for durable project facts, goals, decisions,
-and constraints, `Lessons and Corrections` for project-specific guidance and
-verified lessons, and `References` for project-specific external pointers.
-Never write or edit Daily Memory. Do not continue task work in this flush turn.
-""".strip(),
+        "Write any lasting notes to memory/ directory; reply with NO_REPLY if nothing to store.",
         description="User prompt for memory flush"
     )
 
@@ -281,6 +285,10 @@ class CompactionConfig(BaseModel):
 
 class MemoryConfig(BaseModel):
     """Complete memory system configuration"""
+    enabled: bool = Field(
+        True,
+        description="Enable memory system"
+    )
     sources: List[Literal["memory", "session"]] = Field(
         ["memory"],
         description="Memory sources to index"
@@ -295,6 +303,10 @@ class MemoryConfig(BaseModel):
     )
     
     # Sub-configurations
+    hooks: MemoryHooksConfig = Field(
+        default_factory=MemoryHooksConfig,
+        description="Hooks configuration"
+    )
     embedding: MemoryEmbeddingConfig = Field(
         default_factory=MemoryEmbeddingConfig,
         description="Embedding configuration"
@@ -327,13 +339,3 @@ class MemoryConfig(BaseModel):
         default_factory=CompactionConfig,
         description="Dynamic compaction configuration (auto-scales to model context)"
     )
-
-
-def resolve_memory_config(app_config: object) -> MemoryConfig:
-    """Resolve runtime Memory config, using defaults when absent."""
-    memory_config = getattr(app_config, "memory", None)
-    if isinstance(memory_config, MemoryConfig):
-        return memory_config
-    if isinstance(memory_config, dict):
-        return MemoryConfig(**memory_config)
-    return MemoryConfig()

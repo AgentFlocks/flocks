@@ -11,15 +11,8 @@ from pydantic import BaseModel, Field
 
 class MemorySource(str, Enum):
     """Memory source type"""
-    MEMORY = "memory"      # Global and Project Markdown memory files
+    MEMORY = "memory"      # MEMORY.md and memory/*.md files
     SESSION = "session"    # Historical session transcripts
-
-
-class MemoryScope(str, Enum):
-    """Visibility scope for file-backed Memory."""
-
-    GLOBAL = "global"
-    PROJECT = "project"
 
 
 class MemorySearchResult(BaseModel):
@@ -68,11 +61,6 @@ class MemoryProviderStatus(BaseModel):
 
 class MemoryFileEntry(BaseModel):
     """File entry for indexing"""
-    scope: MemoryScope = Field(
-        MemoryScope.GLOBAL,
-        description="Memory visibility scope",
-    )
-    scope_id: str = Field("global", description="Scope identifier")
     path: str = Field(..., description="Relative path")
     abs_path: str = Field(..., description="Absolute path")
     mtime_ms: float = Field(..., description="Modification time (milliseconds)")

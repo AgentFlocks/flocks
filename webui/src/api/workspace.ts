@@ -10,14 +10,6 @@ export interface WorkspaceNode {
   modified_at?: number;
   is_text_file?: boolean;
   children?: WorkspaceNode[];
-  project_name?: string;
-  project_worktree?: string;
-}
-
-export interface WorkspaceProject {
-  id: string;
-  name?: string | null;
-  worktree: string;
 }
 
 export interface WorkspaceStats {
@@ -112,18 +104,12 @@ export const workspaceAPI = {
       { path },
     ),
 
-  // Memory
+  // Memory (read-only)
   listMemory: () =>
     client.get<WorkspaceNode[]>('/api/workspace/memory/list'),
 
-  listVisibleProjects: () =>
-    client.get<WorkspaceProject[]>('/api/project'),
-
   readMemoryFile: (path: string) =>
     client.get<WorkspaceFileContentResponse>('/api/workspace/memory/file', { params: { path } }),
-
-  writeMemoryFile: (path: string, content: string) =>
-    client.put<{ path: string; written: boolean }>('/api/workspace/memory/file', { path, content }),
 
   memoryDownloadUrl: (path: string) =>
     `${client.defaults.baseURL ?? ''}/api/workspace/memory/download?path=${encodeURIComponent(path)}`,
