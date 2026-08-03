@@ -4595,15 +4595,15 @@ function ChatMessageBubbleInner({
                           )}
                         </span>
                         <span className="shrink-0">{t('chat.process.deepThinking')}</span>
-                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
                         {!isExpanded && (
                           <span
                             data-testid="chat-process-reasoning-preview"
-                            className="min-w-0 flex-1 truncate font-normal text-[#9da29f] dark:text-zinc-500"
+                            className="min-w-0 truncate font-normal text-[#9da29f] dark:text-zinc-500"
                           >
                             {getThinkingFirstSentence(thinkingText)}
                           </span>
                         )}
+                        <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
                         <div className="mb-[9px] ml-2 mt-[3px] max-h-52 overflow-y-auto whitespace-pre-wrap border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-sm leading-7 text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
