@@ -668,8 +668,9 @@ def _mark_cwd_fallback_warned() -> None:
 
 
 def is_channel_media_placeholder(text: str) -> bool:
-    """Return whether text is a channel-generated media placeholder."""
-    return bool(_CHANNEL_TITLE_PLACEHOLDER_RE.fullmatch(text.strip()))
+    """Return whether text is only a channel-generated media placeholder."""
+    match = _CHANNEL_TITLE_PLACEHOLDER_RE.fullmatch(text.strip())
+    return bool(match and not (match.group(1) or "").strip())
 
 
 def extract_channel_title_text(raw_text: str) -> str:

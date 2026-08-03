@@ -1938,9 +1938,8 @@ class TestIsChannelMediaPlaceholder:
         assert is_channel_media_placeholder("hello") is False
         assert is_channel_media_placeholder("看这个") is False
         assert is_channel_media_placeholder("") is False
-        # Suffix beyond the placeholder is fine — the text starts with a
-        # placeholder token, so the dispatcher will still rewrite it.
-        assert is_channel_media_placeholder("[文件消息: x] extra text") is True
+        assert is_channel_media_placeholder("[文件消息: x] extra text") is False
+        assert is_channel_media_placeholder("[图片]\n请分析") is False
         assert is_channel_media_placeholder("not a placeholder [文件消息: x]") is False
 
 
@@ -1949,6 +1948,61 @@ class TestIsChannelMediaPlaceholder:
 # ------------------------------------------------------------------
 
 class TestAppendUserMessagePerChannel:
+    @pytest.mark.asyncio
+    async def test_captioned_media_text_is_not_replaced(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.session.message import TextPart
+
+        created_message = SimpleNamespace(id="m1")
+        caption = "[图片]: 请识别发票金额"
+        text_part = TextPart(
+            id="part_text",
+            sessionID="s1",
+            messageID="m1",
+            text=caption,
+        )
+        store_part = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.parts",
+            AsyncMock(return_value=[text_part]),
+        )
+
+        import flocks.channel.builtin.telegram.inbound_media as tg_inb
+
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="invoice.jpg",
+                mime="image/jpeg",
+                url="file:///tmp/invoice.jpg",
+                source={"channel": "telegram"},
+            )
+
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_download)
+
+        await InboundDispatcher._append_user_message_unchecked(
+            "s1",
+            caption,
+            InboundMessage(
+                channel_id="telegram",
+                account_id="a",
+                message_id="m1",
+                sender_id="u",
+                media_url="telegram://photo/ABC",
+            ),
+            None,
+        )
+
+        assert store_part.await_count == 1
+        assert store_part.await_args.args[2].type == "file"
+
     @pytest.mark.asyncio
     async def test_wecom_pipeline_stores_file_part(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher

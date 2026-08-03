@@ -444,10 +444,15 @@ def _has_legacy_channel_title(
     session: SessionModel,
     binding: _ChannelSessionBinding,
 ) -> bool:
-    """Return whether a stored title is an exact legacy channel fallback."""
+    """Return whether a stored title matches a legacy channel fallback."""
     prefix = f"[{binding.channel_id.capitalize()}]"
     if binding.chat_type == ChatType.DIRECT:
-        expected = f"{prefix} DM — {binding.chat_id}"
+        direct_prefix = f"{prefix} DM — "
+        title = session.title.strip()
+        return (
+            title.casefold().startswith(direct_prefix.casefold())
+            and bool(title[len(direct_prefix):].strip())
+        )
     else:
         expected = f"{prefix} {binding.chat_id}"
     return session.title.strip().casefold() == expected.casefold()
@@ -785,13 +790,12 @@ async def list_sessions(
     visible_project_ids = Project.visible_project_ids(current_user.id)
     shared_project_ids = Project.shared_project_ids()
     
-    filtered = []
-    effective_project_ids: Dict[str, str] = {}
-    term = search.lower() if search else None
+    eligible = []
+    eligible_project_ids: Dict[str, str] = {}
+    term = search.casefold() if search else None
     manager_categories = {"user", "workflow", "entity-config"}
     project_names = Project.registered_project_names() if view == "list" else {}
-    skip_remaining = offset or 0
-    
+
     for session in all_sessions:
         if session.status == "archived":
             if current_user.role != "admin" and not SessionPolicy.is_owner(session, current_user):
@@ -824,8 +828,6 @@ async def list_sessions(
             continue
         if start is not None and session.time.updated < start:
             continue
-        if term is not None and term not in session.title.lower():
-            continue
         if manager:
             if session.category not in manager_categories:
                 continue
@@ -836,22 +838,43 @@ async def list_sessions(
             # exclude test sessions from the default listing
             continue
 
+        eligible.append(session)
+        eligible_project_ids[session.id] = effective_project_id
+
+    channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+    channel_title_overrides: Dict[str, str] = {}
+    if view == "list" and term is not None:
+        # Search the same derived title that the lightweight list displays.
+        channel_bindings = await _latest_channel_bindings([session.id for session in eligible])
+        channel_title_overrides = await _legacy_channel_title_overrides(
+            eligible,
+            channel_bindings,
+        )
+
+    filtered = []
+    effective_project_ids: Dict[str, str] = {}
+    skip_remaining = offset or 0
+    for session in eligible:
+        searchable_title = channel_title_overrides.get(session.id, session.title)
+        if term is not None and term not in searchable_title.casefold():
+            continue
         if skip_remaining > 0:
             skip_remaining -= 1
             continue
-        
+
         filtered.append(session)
-        effective_project_ids[session.id] = effective_project_id
-        
+        effective_project_ids[session.id] = eligible_project_ids[session.id]
+
         if limit is not None and len(filtered) >= limit:
             break
 
     if view == "list":
-        channel_bindings = await _latest_channel_bindings([session.id for session in filtered])
-        channel_title_overrides = await _legacy_channel_title_overrides(
-            filtered,
-            channel_bindings,
-        )
+        if term is None:
+            channel_bindings = await _latest_channel_bindings([session.id for session in filtered])
+            channel_title_overrides = await _legacy_channel_title_overrides(
+                filtered,
+                channel_bindings,
+            )
         response = [
             _session_to_list_item(
                 s,

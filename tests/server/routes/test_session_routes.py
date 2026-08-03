@@ -467,6 +467,95 @@ class TestSessionCRUD:
         assert session_id in list_bindings_mock.await_args.kwargs["session_ids"]
 
     @pytest.mark.asyncio
+    async def test_manager_list_recognizes_legacy_direct_title_with_sender_name(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "[Telegram] DM — Alice"},
+        )
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            AsyncMock(return_value=[SimpleNamespace(
+                session_id=session_id,
+                channel_id="telegram",
+                chat_id="12345",
+                chat_type="direct",
+            )]),
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == session_id)
+        assert row["title"] == "[Telegram] 你是谁"
+
+    @pytest.mark.asyncio
+    async def test_manager_search_matches_derived_channel_title_before_pagination(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post("/api/session", json={"title": "[Wecom] room-1"})
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        decoy_resp = await client.post(
+            "/api/session",
+            json={"title": "Unrelated newer session"},
+        )
+        decoy_id = decoy_resp.json()["id"]
+        list_bindings_mock = AsyncMock(return_value=[SimpleNamespace(
+            session_id=session_id,
+            channel_id="wecom",
+            chat_id="room-1",
+            chat_type="group",
+        )])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={
+                "view": "list",
+                "manager": "true",
+                "roots": "true",
+                "search": "你是谁",
+                "limit": "1",
+                "offset": "0",
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert [item["id"] for item in response.json()] == [session_id]
+        assert response.json()[0]["title"] == "[Wecom] 你是谁"
+        queried_session_ids = list_bindings_mock.await_args.kwargs["session_ids"]
+        assert session_id in queried_session_ids
+        assert decoy_id in queried_session_ids
+
+    @pytest.mark.asyncio
     async def test_channel_binding_lookup_batches_large_session_lists(
         self,
         monkeypatch: pytest.MonkeyPatch,

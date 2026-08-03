@@ -94,7 +94,8 @@ def test_build_title_uses_media_caption_or_following_text() -> None:
 
 def test_channel_title_helpers_share_placeholder_rules() -> None:
     assert is_channel_media_placeholder("[图片消息]") is True
-    assert is_channel_media_placeholder("[文件: report.pdf]: 总结报告") is True
+    assert is_channel_media_placeholder("[文件: report.pdf]: 总结报告") is False
+    assert is_channel_media_placeholder("[图片]\n请分析这张图") is False
     assert is_channel_media_placeholder("普通消息") is False
     assert extract_channel_title_text("[图片消息]\n请分析这张图") == "请分析这张图"
     assert extract_channel_title_text("[文件: report.pdf]: 总结报告") == "总结报告"
