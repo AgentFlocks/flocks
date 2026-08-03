@@ -77,7 +77,7 @@
     "retry": "重试",
     "noFiles": "暂无记忆文件",
     "noMatch": "无匹配结果",
-    "readOnly": "只读 · 由 Agent 自动写入",
+    "fileCount": "{{count}} 个文件",
     "readFailed": "读取失败",
     "selectPrompt": "选择左侧文件以预览内容",
     "selectDesc": "记忆文件由 Rex 等 Agent 自动写入，记录任务上下文与关键信息",
