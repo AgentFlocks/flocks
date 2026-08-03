@@ -272,6 +272,79 @@ export function getRenderableThinkingText(part: Pick<MessagePart, 'type' | 'text
   return text;
 }
 
+const NON_TERMINAL_PERIOD_TOKENS = new Set([
+  'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'no', 'fig',
+]);
+const CONTEXTUAL_PERIOD_TOKENS = new Set([
+  'etc', 'inc', 'ltd',
+]);
+
+function isNonTerminalPeriod(line: string, index: number): boolean {
+  const before = line.slice(0, index).trimEnd();
+  const after = line.slice(index + 1).trimStart();
+  if (after && /(?:^|[:：]\s*)(?:\d+|[A-Za-z])$/.test(before)) return true;
+  const token = before.match(/(?:^|\s)([A-Za-z.]+)$/)?.[1].toLowerCase();
+  if (!token) return false;
+  if (NON_TERMINAL_PERIOD_TOKENS.has(token) || /^(?:[a-z]\.)+[a-z]$/.test(token)) {
+    return true;
+  }
+  return CONTEXTUAL_PERIOD_TOKENS.has(token) && /^[a-z\d]/.test(after);
+}
+
+export function getThinkingFirstSentence(text: string): string {
+  const firstLine = text.split(/\r?\n/).map((line) => line.trim()).find(Boolean) || '';
+  for (const match of firstLine.matchAll(/[。！？!?]|\.(?=\s|$)/g)) {
+    const sentenceEnd = match.index;
+    if (match[0] === '.' && isNonTerminalPeriod(firstLine, sentenceEnd)) continue;
+    return firstLine.slice(0, sentenceEnd + 1);
+  }
+  return firstLine;
+}
+
+function getProcessPartTime(part: MessagePart): { start: number; end?: number } | undefined {
+  return part.type === 'tool' ? part.state?.time : part.time;
+}
+
+export function getProcessGroupDurationMs(
+  parts: readonly MessagePart[],
+  activeNowMs?: number,
+): number | null {
+  let firstStart = Number.POSITIVE_INFINITY;
+  let lastEnd = Number.NEGATIVE_INFINITY;
+
+  for (const part of parts) {
+    const time = getProcessPartTime(part);
+    if (!time || !Number.isFinite(time.start)) continue;
+    const end = Number.isFinite(time.end) ? time.end : activeNowMs;
+    if (end === undefined || !Number.isFinite(end)) continue;
+    firstStart = Math.min(firstStart, time.start);
+    lastEnd = Math.max(lastEnd, end);
+  }
+
+  if (!Number.isFinite(firstStart) || !Number.isFinite(lastEnd)) return null;
+  return Math.max(0, lastEnd - firstStart);
+}
+
+export function formatProcessDuration(durationMs: number): string {
+  const totalSeconds = Math.max(1, Math.floor(durationMs / 1_000));
+  if (totalSeconds < 60) return `${totalSeconds}s`;
+  const minutes = Math.floor(totalSeconds / 60);
+  return `${minutes}m${totalSeconds % 60}s`;
+}
+
+function useProcessElapsedClock(enabled: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
+
+  useEffect(() => {
+    if (!enabled) return undefined;
+    setNow(Date.now());
+    const timer = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(timer);
+  }, [enabled]);
+
+  return now;
+}
+
 const StreamingReasoningText = memo(function StreamingReasoningText({
   content,
   isStreaming,
@@ -3987,10 +4060,10 @@ export default function SessionChat({
                       aria-label={t('chat.addMenu.title')}
                       aria-haspopup="menu"
                       aria-expanded={showComposerAddMenu}
-                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full border transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
+                      className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-all duration-150 disabled:cursor-not-allowed disabled:opacity-40 ${
                         showComposerAddMenu
-                          ? 'border-zinc-300 bg-white text-zinc-900 shadow-[0_2px_8px_rgba(22,27,34,0.08)] dark:border-white/[0.14] dark:bg-white/[0.09] dark:text-white'
-                          : 'border-transparent text-zinc-500 hover:border-zinc-200 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:border-white/[0.10] dark:hover:bg-white/[0.07] dark:hover:text-white'
+                          ? 'bg-zinc-100 text-zinc-900 dark:bg-white/[0.09] dark:text-white'
+                          : 'text-zinc-500 hover:bg-white hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-white/[0.07] dark:hover:text-white'
                       }`}
                     >
                       <Plus className="h-[17px] w-[17px]" strokeWidth={2} />
@@ -4014,7 +4087,7 @@ export default function SessionChat({
                           }}
                           className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
                         >
-                          <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                          <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
                             <Paperclip className="h-3.5 w-3.5" />
                           </span>
                           <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.files')}</span>
@@ -4341,6 +4414,7 @@ function ChatMessageBubbleInner({
   const { t, i18n } = useTranslation('session');
   const isUser = message.role === 'user';
   const parts: MessagePart[] = Array.isArray(message.parts) ? message.parts : [];
+  const processElapsedClock = useProcessElapsedClock(isActive && collapseIntermediateSteps);
   const { getPartExpanded, togglePart } = useReasoningToggle(parts, message.finish);
   // Lightbox state for inline image previews. Browsers block top-level
   // navigation to ``data:`` URLs (the format we send for chat images), so a
@@ -4588,7 +4662,15 @@ function ChatMessageBubbleInner({
                             <Brain className="h-[15px] w-[15px]" />
                           )}
                         </span>
-                        <span className="min-w-0">{t('chat.process.deepThinking')}</span>
+                        <span className="shrink-0">{t('chat.process.deepThinking')}</span>
+                        {!isExpanded && (
+                          <span
+                            data-testid="chat-process-reasoning-preview"
+                            className="min-w-0 truncate font-normal text-[#9da29f] dark:text-zinc-500"
+                          >
+                            {getThinkingFirstSentence(thinkingText)}
+                          </span>
+                        )}
                         <ChevronDown className={`ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform dark:text-zinc-500 ${isExpanded ? 'rotate-180' : ''}`} />
                       </button>
                       {isExpanded && isVisible && (
@@ -4650,6 +4732,11 @@ function ChatMessageBubbleInner({
           const renderProcessGroup = (group: Array<{ part: MessagePart; index: number }>, groupIndex: number) => {
             const processGroupOpen = processGroupsDefaultOpen || (processGroupsOpenWhileActive && isActive);
             const processGroupKey = `${message.id}:process:${groupIndex}`;
+            const processGroupActive = isActive && group.some(({ part }) => part === activeTailPart);
+            const processDurationMs = getProcessGroupDurationMs(
+              group.map(({ part }) => part),
+              processGroupActive ? processElapsedClock : undefined,
+            );
             const hasStoredOpenState = !!processGroupOpenState
               && Object.prototype.hasOwnProperty.call(processGroupOpenState, processGroupKey);
             const effectiveProcessGroupOpen = hasStoredOpenState
@@ -4669,6 +4756,14 @@ function ChatMessageBubbleInner({
                     <span className="min-w-0">
                       {t('chat.process.title', { count: group.length })}
                     </span>
+                    {processDurationMs !== null && (
+                      <span
+                        data-testid="chat-process-duration"
+                        className="shrink-0 text-xs font-normal text-[#9da29f] dark:text-zinc-500"
+                      >
+                        · {t('chat.process.duration', { duration: formatProcessDuration(processDurationMs) })}
+                      </span>
+                    )}
                   </>
                 )}
               >

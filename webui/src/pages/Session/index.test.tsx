@@ -466,9 +466,12 @@ describe('SessionPage session actions menu', () => {
 
     await screen.findByRole('button', { name: 'executionMode.title' });
     const agentButton = screen.getByRole('button', { name: 'chat.addMenu.agent' });
+    const agentIconContainer = agentButton.querySelector('svg')?.parentElement;
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
     expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
+    expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(agentIconContainer?.className).not.toContain('shadow-');
   });
 
   it('persists Plan per session', async () => {
@@ -1002,6 +1005,54 @@ describe('SessionPage session actions menu', () => {
     const sessionCard = sessionTitle.closest('[class*="cursor-pointer"]');
     expect(sessionCard).not.toBeNull();
     expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-lg', 'border-transparent');
+  });
+
+  it('hides the channel title prefix until the session is renamed', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        title: '[Wecom] 你能干什么事情',
+        channelID: 'wecom',
+        channelChatType: 'direct',
+      }, {
+        ...session,
+        id: 'session-2',
+        title: '[Wecom] 群聊问题',
+        channelID: 'wecom',
+        channelChatType: 'group',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    const displayTitle = await screen.findByText('你能干什么事情');
+    const sessionRow = displayTitle.closest('div.group');
+    expect(sessionRow).not.toBeNull();
+    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'wecom' }))
+      .toHaveAttribute('src', '/channel-wecom.png');
+    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'channelDirectChat' }))
+      .toHaveAttribute('data-channel-chat-type', 'direct');
+    expect(screen.queryByText('[Wecom] 你能干什么事情')).not.toBeInTheDocument();
+
+    const groupTitle = screen.getByText('群聊问题');
+    const groupRow = groupTitle.closest('div.group');
+    expect(groupRow).not.toBeNull();
+    expect(within(groupRow as HTMLElement).getByRole('img', { name: 'channelGroupChat' }))
+      .toHaveAttribute('data-channel-chat-type', 'group');
+
+    await user.click(within(sessionRow as HTMLElement).getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'rename' }));
+
+    expect(screen.getByRole('textbox', { name: 'rename' }))
+      .toHaveValue('[Wecom] 你能干什么事情');
   });
 
   it('groups legacy sessions by the effective project returned by the backend', async () => {
@@ -2920,6 +2971,11 @@ describe('SessionPage session actions menu', () => {
     const workflowButton = screen.getByRole('button', { name: 'chat.addMenu.workflows' });
     const menuButtons = screen.getAllByRole('button');
     expect(menuButtons.indexOf(skillButton)).toBeLessThan(menuButtons.indexOf(workflowButton));
+    for (const button of [skillButton, workflowButton]) {
+      const iconContainer = button.querySelector('svg')?.parentElement;
+      expect(iconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+      expect(iconContainer?.className).not.toContain('shadow-');
+    }
 
     await user.click(workflowButton);
     expect(screen.queryByText('security')).not.toBeInTheDocument();

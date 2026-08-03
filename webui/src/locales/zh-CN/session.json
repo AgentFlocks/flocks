@@ -83,6 +83,8 @@
   },
   "workflowSession": "工作流会话",
   "configSession": "配置会话",
+  "channelDirectChat": "私聊",
+  "channelGroupChat": "群聊",
   "showHistory": "显示对话历史",
   "hideHistory": "隐藏对话历史",
   "realTimeOk": "实时连接正常",
@@ -217,6 +219,7 @@
     "streaming": "继续输出中...",
     "process": {
       "title": "查看 {{count}} 个步骤",
+      "duration": "已处理 {{duration}}",
       "deepThinking": "深度思考",
       "reasoningCount": "{{count}} 段思考",
       "toolCount": "{{count}} 次工具调用",

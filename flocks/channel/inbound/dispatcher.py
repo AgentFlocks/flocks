@@ -17,7 +17,10 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from flocks.channel.base import ChatType, InboundMessage, OutboundContext
-from flocks.channel.inbound.session_binding import SessionBindingService
+from flocks.channel.inbound.session_binding import (
+    SessionBindingService,
+    is_channel_media_placeholder,
+)
 from flocks.config.config import ChannelConfig
 from flocks.utils.log import Log
 
@@ -872,6 +875,7 @@ class InboundDispatcher:
         from flocks.session.session import Session
         from flocks.channel.inbound.session_binding import (
             _build_title,
+            _build_title_fallback,
             resolve_channel_session_owner_kwargs,
         )
 
@@ -881,10 +885,15 @@ class InboundDispatcher:
             return
 
         owner_kwargs = await resolve_channel_session_owner_kwargs(session)
+        title = (
+            _build_title(msg, initial_text)
+            if initial_text and initial_text.strip()
+            else _build_title_fallback(msg)
+        )
         new_session = await Session.create(
             project_id=session.project_id,
             directory=session.directory,
-            title=_build_title(msg),
+            title=title,
             agent=session.agent,
             **Session.inherited_model_kwargs(session),
             **owner_kwargs,
@@ -1318,7 +1327,7 @@ class InboundDispatcher:
                 parts = await Message.parts(message.id, session_id=session_id)
                 for p in parts:
                     if p.type == "text" and hasattr(p, "text") and p.text:
-                        if _is_placeholder_text(p.text):
+                        if is_channel_media_placeholder(p.text):
                             updated = TextPart(
                                 id=p.id,
                                 sessionID=session_id,
@@ -1567,23 +1576,6 @@ _DOWNLOADERS: dict[str, Any] = {}
 def register_inbound_media_downloader(channel_id: str, downloader: Any) -> None:
     """Register a per-channel ``download_inbound_media`` callable."""
     _DOWNLOADERS[channel_id] = downloader
-
-
-def _is_placeholder_text(text: str) -> bool:
-    """True if *text* is one of the channel-generated media placeholders."""
-    if not text:
-        return False
-    placeholders = (
-        "[图片消息]",
-        "[文件消息]",
-        "[Image]",
-        "[Attachment]",
-        "[图片]",
-        "[文件]",
-    )
-    if text in placeholders:
-        return True
-    return text.startswith("[文件消息:") or text.startswith("[图片消息:")
 
 
 # Best-effort eager registration at import time.  Channels that need

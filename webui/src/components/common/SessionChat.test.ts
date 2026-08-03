@@ -20,7 +20,9 @@ import {
   getMessageBubbleClassName,
   getMessageErrorText,
   getMessageGroupClassName,
+  getProcessGroupDurationMs,
   getRenderableThinkingText,
+  getThinkingFirstSentence,
   getRenderableFileUrl,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
@@ -33,6 +35,7 @@ import {
   shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
+  formatProcessDuration,
 } from './SessionChat';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
@@ -61,6 +64,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
   'chat.process.title': '查看 {{count}} 个步骤',
+  'chat.process.duration': '已处理 {{duration}}',
   'chat.process.deepThinking': '深度思考',
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
@@ -1514,10 +1518,16 @@ describe('SessionChat composer controls', () => {
       ),
     }));
 
-    await user.click(screen.getByRole('button', { name: '添加' }));
+    const addButton = screen.getByRole('button', { name: '添加' });
+    await user.click(addButton);
 
     expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
-    expect(screen.getByText('文件和图片')).toBeInTheDocument();
+    expect(addButton).not.toHaveClass('border');
+    expect(addButton.className).not.toContain('shadow-');
+    const filesMenuItem = screen.getByRole('menuitem', { name: '文件和图片' });
+    const filesIconContainer = filesMenuItem.querySelector('svg')?.parentElement;
+    expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(filesIconContainer?.className).not.toContain('shadow-');
     await user.click(screen.getByRole('button', { name: '智能体' }));
     expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '技能' }));
@@ -1646,6 +1656,73 @@ describe('getRenderableThinkingText', () => {
 
   it('keeps meaningful reasoning text', () => {
     expect(getRenderableThinkingText({ type: 'reasoning', text: '需要更新 todo 状态' } as any)).toBe('需要更新 todo 状态');
+  });
+});
+
+describe('getThinkingFirstSentence', () => {
+  it('extracts the first sentence from the first non-empty line', () => {
+    expect(getThinkingFirstSentence('先检查上下文。再读取文件。')).toBe('先检查上下文。');
+    expect(getThinkingFirstSentence('Inspect the context.\nThen read the file.')).toBe('Inspect the context.');
+    expect(getThinkingFirstSentence('\n用户问了两个问题：\n1. 第一个问题')).toBe('用户问了两个问题：');
+    expect(getThinkingFirstSentence('1. Inspect the context before changing code.')).toBe(
+      '1. Inspect the context before changing code.',
+    );
+    expect(getThinkingFirstSentence('用户问了两个问题： 1. 查询 IP 情报。 2. 查询金价。')).toBe(
+      '用户问了两个问题： 1. 查询 IP 情报。',
+    );
+    expect(getThinkingFirstSentence('Dr. Smith checks the context. Then edits.')).toBe(
+      'Dr. Smith checks the context.',
+    );
+    expect(getThinkingFirstSentence('Check inputs, etc. Then continue.')).toBe(
+      'Check inputs, etc.',
+    );
+  });
+});
+
+describe('process group duration', () => {
+  it('uses the full wall-clock range and the current time for an active step', () => {
+    const parts = [
+      { id: 'reason', type: 'reasoning', time: { start: 1_000, end: 2_000 } },
+      { id: 'tool', type: 'tool', state: { status: 'running', time: { start: 2_500 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts, 5_000)).toBe(4_000);
+    expect(formatProcessDuration(500)).toBe('1s');
+    expect(formatProcessDuration(7_600)).toBe('7s');
+    expect(formatProcessDuration(260_900)).toBe('4m20s');
+    expect(getProcessGroupDurationMs([{ id: 'legacy', type: 'reasoning' }] as Message['parts']))
+      .toBeNull();
+  });
+
+  it('updates the displayed duration while the last process step is active', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-duration',
+          role: 'assistant',
+          parts: [{
+            id: 'tool-active-duration',
+            type: 'tool',
+            tool: 'read',
+            state: {
+              status: 'running',
+              input: { filePath: 'workflow.md' },
+              time: { start: 1_000 },
+            },
+          }] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -2045,7 +2122,8 @@ describe('SessionChat intermediate process collapse', () => {
               messageID: 'assistant-process',
               sessionID: 'sess-1',
               type: 'reasoning',
-              text: '需要先读取工作流文件',
+              text: '需要先读取工作流文件。然后检查配置。',
+              time: { start: 1_000, end: 2_000 },
             } as any,
             {
               id: 'tool-1',
@@ -2058,6 +2136,7 @@ describe('SessionChat intermediate process collapse', () => {
                 status: 'completed',
                 input: { filePath: 'workflow.md' },
                 output: 'workflow content',
+                time: { start: 2_000, end: 4_500 },
               },
             } as any,
             {
@@ -2087,6 +2166,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('· 已处理 3s');
     expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
     expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
     expect(processGroup.className).not.toContain('rounded-lg');
@@ -2099,7 +2179,33 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
     expect(screen.getByTestId('chat-process-reasoning-step').querySelector('button')).toHaveClass('text-sm');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).toHaveTextContent('需要先读取工作流文件。');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveTextContent('然后检查配置');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveClass('flex-1');
+    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('lucide-chevron-down');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
+  });
+
+  it('hides the reasoning preview while the reasoning body is expanded', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-expanded-reasoning',
+        role: 'assistant',
+        parts: [{
+          id: 'reason-expanded',
+          messageID: 'assistant-expanded-reasoning',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '用户问了两个问题：\n1. 第一个问题',
+        } as any],
+      }),
+      isActive: true,
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: true,
+    }));
+
+    expect(screen.queryByTestId('chat-process-reasoning-preview')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('1. 第一个问题');
   });
 
   it('opens process groups while an assistant message is active and collapses after completion', () => {

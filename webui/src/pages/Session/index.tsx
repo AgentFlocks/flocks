@@ -6,12 +6,13 @@ import {
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X, Check,
   FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive, BookOpen,
-  Hammer, ClipboardList, Target,
+  Hammer, ClipboardList, Target, UserRound, UsersRound,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import { useSSE } from '@/hooks/useSSE';
@@ -58,6 +59,37 @@ function sanitizeSessionExportName(value: string) {
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-')
     .replace(/^-|-$/g, '') || 'session';
+}
+
+function getSessionDisplayTitle(session: Pick<Session, 'title' | 'channelID'>): string {
+  if (!session.channelID) return session.title;
+  const prefix = `[${session.channelID}]`;
+  if (session.title.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {
+    return session.title;
+  }
+  return session.title.slice(prefix.length).trim() || session.title;
+}
+
+function ChannelChatTypeBadge({
+  chatType,
+  label,
+}: {
+  chatType: NonNullable<Session['channelChatType']>;
+  label: string;
+}) {
+  const Icon = chatType === 'direct' ? UserRound : UsersRound;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      data-channel-chat-type={chatType}
+      className={`absolute -bottom-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-white ring-1 ring-white dark:bg-[#252c35] dark:ring-[#252c35] ${
+        chatType === 'direct' ? 'text-zinc-500' : 'text-blue-500'
+      }`}
+    >
+      <Icon aria-hidden="true" className="h-2 w-2 stroke-[2.5]" />
+    </span>
+  );
 }
 
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
@@ -162,7 +194,7 @@ function ComposerResourcePicker({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+        <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
           <Icon className="h-3.5 w-3.5" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -385,6 +417,12 @@ function SessionSidebarItemInner({
   onCancelRename,
   onToggleMenu,
 }: SessionSidebarItemProps) {
+  const channelChatLabel = !session.channelChatType
+    ? session.channelID
+    : session.channelChatType === 'direct'
+      ? t('channelDirectChat')
+      : t('channelGroupChat');
+
   return (
     <div
       onClick={() => onSelect(session.id)}
@@ -407,6 +445,20 @@ function SessionSidebarItemInner({
             onClick={(e) => e.stopPropagation()}
             className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
           />
+        )}
+        {session.channelID && (
+          <span
+            title={channelChatLabel}
+            className="relative inline-flex h-3.5 w-3.5 flex-shrink-0"
+          >
+            <ChannelIcon channelId={session.channelID} size="xs" />
+            {session.channelChatType && (
+              <ChannelChatTypeBadge
+                chatType={session.channelChatType}
+                label={channelChatLabel || session.channelID}
+              />
+            )}
+          </span>
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
@@ -437,7 +489,7 @@ function SessionSidebarItemInner({
           />
         ) : (
           <h3 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium">
-            <span className="truncate">{session.title}</span>
+            <span className="truncate">{getSessionDisplayTitle(session)}</span>
             {session.isShared && (
               <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
                 {t('sharedTag')}
@@ -499,6 +551,8 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.nested === next.nested &&
   prev.session.title === next.session.title &&
   prev.session.category === next.session.category &&
+  prev.session.channelID === next.session.channelID &&
+  prev.session.channelChatType === next.session.channelChatType &&
   prev.session.isShared === next.session.isShared &&
   prev.session.time?.updated === next.session.time?.updated &&
   prev.selected === next.selected &&
@@ -2838,7 +2892,7 @@ export default function SessionPage() {
                 aria-haspopup="menu"
                 aria-expanded={showAgentOptions}
               >
-                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
                   <Bot className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>

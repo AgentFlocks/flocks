@@ -83,6 +83,8 @@
   },
   "workflowSession": "Workflow Session",
   "configSession": "Config Session",
+  "channelDirectChat": "Direct chat",
+  "channelGroupChat": "Group chat",
   "showHistory": "Show conversation history",
   "hideHistory": "Hide conversation history",
   "realTimeOk": "Real-time connection active",
@@ -217,6 +219,7 @@
     "streaming": "Streaming...",
     "process": {
       "title": "View {{count}} steps",
+      "duration": "Processed in {{duration}}",
       "deepThinking": "Deep thinking",
       "reasoningCount": "{{count}} reasoning",
       "toolCount": "{{count}} tool calls",
