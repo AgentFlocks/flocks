@@ -551,4 +551,58 @@ describe('ModelPage default model selector', () => {
       );
     });
   });
+
+  it('keeps prices unchanged when the source currency is unsupported', async () => {
+    const user = userEvent.setup();
+    mocks.listDefinitions.mockResolvedValue({
+      data: {
+        models: [
+          models[0],
+          {
+            ...models[1],
+            pricing: {
+              input: 1,
+              output: 2,
+              cache_read: 0.2,
+              unit: 1000000,
+              currency: 'EUR',
+            },
+          },
+        ],
+        total: models.length,
+      },
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('MiniMax Vision M3'));
+    const inputPrice = screen.getByText('form.input').parentElement?.querySelector('input');
+    const outputPrice = screen.getByText('form.output').parentElement?.querySelector('input');
+    const cacheReadPrice = screen.getByText('form.cacheRead').parentElement?.querySelector('input');
+    const currencySelect = screen.getByText('form.currency').parentElement?.querySelector('select');
+
+    expect(currencySelect).toHaveValue('EUR');
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'CNY');
+
+    expect(currencySelect).toHaveValue('EUR');
+    expect(inputPrice).toHaveValue(1);
+    expect(outputPrice).toHaveValue(2);
+    expect(cacheReadPrice).toHaveValue(0.2);
+  });
+
+  it('sends null when the cache-read price is cleared', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('MiniMax Vision M3'));
+    const cacheReadPrice = screen.getByText('form.cacheRead').parentElement?.querySelector('input');
+    await user.clear(cacheReadPrice as HTMLInputElement);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mocks.createDefinition).toHaveBeenCalledWith(
+        'minimax',
+        expect.objectContaining({ cache_read_price: null }),
+      );
+    });
+  });
 });

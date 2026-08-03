@@ -45,6 +45,7 @@ describe('usageDisplay helpers', () => {
   it('converts individual amounts between USD and CNY', () => {
     expect(convertCurrencyAmount(1, 'USD', 'CNY')).toBe(7);
     expect(convertCurrencyAmount(7, 'CNY', 'USD')).toBe(1);
+    expect(convertCurrencyAmount(1, 'EUR', 'CNY')).toBeNull();
   });
 
   it('toggles dashboard currency', () => {

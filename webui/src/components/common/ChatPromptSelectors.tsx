@@ -11,7 +11,7 @@ import {
 import { useAgents } from '@/hooks/useAgents';
 import { useProviders } from '@/hooks/useProviders';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
-import { formatPricingPerMillion } from '@/utils/modelPricing';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import type { ModelDefinitionV2 } from '@/types';
 
 export type AgentSourceFilter = 'all' | 'builtin' | 'custom';
@@ -117,7 +117,7 @@ export function useChatModelOptions({ enableAuto = false }: { enableAuto?: boole
 
     const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
       if (!pricing) return t('modelPicker.noCost');
-      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
+      if (isPricingFree(pricing)) return t('modelPicker.free');
       return formatPricingPerMillion(pricing);
     };
 

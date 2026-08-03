@@ -287,6 +287,9 @@ async def create_model(provider_id: str, body: CreateModelReq):
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
     limits = await _resolve_model_limits(provider_id, body, raw)
+    cache_read_price = body.cache_read_price
+    if existing_model and "cache_read_price" not in body.model_fields_set:
+        cache_read_price = existing_model.get("cache_read_price")
 
     now = datetime.now(UTC).isoformat()
     model_config = {
@@ -299,7 +302,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
         "supports_reasoning": body.supports_reasoning,
         "input_price": body.input_price,
         "output_price": body.output_price,
-        "cache_read_price": body.cache_read_price,
+        "cache_read_price": cache_read_price,
         "currency": body.currency,
         "created_at": existing_model.get("created_at", now) if existing_model else now,
     }
@@ -310,7 +313,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
     # Add/update runtime
     _add_model_to_runtime(
         provider_id,
-        body,
+        body.model_copy(update={"cache_read_price": cache_read_price}),
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
     )
@@ -328,7 +331,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
         input_price=body.input_price, output_price=body.output_price,
-        cache_read_price=body.cache_read_price,
+        cache_read_price=cache_read_price,
         currency=body.currency, created_at=now,
     )
 

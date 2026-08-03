@@ -87,6 +87,55 @@ async def test_create_custom_model_accepts_string_currency(
 
 
 @pytest.mark.asyncio
+async def test_update_custom_model_preserves_omitted_cache_price(
+    client: AsyncClient,
+    temp_custom_provider_project,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.config.config_writer import ConfigWriter
+    from flocks.provider.provider import Provider
+
+    monkeypatch.setattr(Provider, "_models", Provider._models.copy())
+    payload = {
+        "model_id": "cached-model",
+        "name": "Cached Model",
+        "input_price": 1.0,
+        "output_price": 2.0,
+        "cache_read_price": 0.2,
+        "currency": "CNY",
+    }
+    created = await client.post(
+        "/api/custom/models/custom-tb-inner",
+        json=payload,
+    )
+    assert created.status_code == 201, created.text
+
+    payload.pop("cache_read_price")
+    updated = await client.post(
+        "/api/custom/models/custom-tb-inner",
+        json=payload,
+    )
+
+    assert updated.status_code == 201, updated.text
+    assert updated.json()["cache_read_price"] == 0.2
+    raw = ConfigWriter.get_provider_raw("custom-tb-inner")
+    assert raw is not None
+    assert raw["models"]["cached-model"]["cache_read_price"] == 0.2
+    assert Provider._models["cached-model"].pricing["cache_read"] == 0.2
+
+    cleared = await client.post(
+        "/api/custom/models/custom-tb-inner",
+        json={**payload, "cache_read_price": None},
+    )
+    assert cleared.status_code == 201, cleared.text
+    assert cleared.json()["cache_read_price"] is None
+    raw = ConfigWriter.get_provider_raw("custom-tb-inner")
+    assert raw is not None
+    assert raw["models"]["cached-model"]["cache_read_price"] is None
+    assert "cache_read" not in Provider._models["cached-model"].pricing
+
+
+@pytest.mark.asyncio
 async def test_create_custom_model_defaults_reasoning_on(
     client: AsyncClient,
     temp_custom_provider_project,

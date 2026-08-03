@@ -26,11 +26,11 @@ export function convertCurrencyAmount(
   amount: number,
   sourceCurrency: string,
   targetCurrency: string,
-): number {
+): number | null {
   if (sourceCurrency === targetCurrency) return amount;
   if (sourceCurrency === 'USD' && targetCurrency === 'CNY') return amount * USD_TO_CNY;
   if (sourceCurrency === 'CNY' && targetCurrency === 'USD') return amount / USD_TO_CNY;
-  return 0;
+  return null;
 }
 
 export function getConvertedTotalCost(
@@ -43,11 +43,11 @@ export function getConvertedTotalCost(
   }
 
   const total = buckets.reduce((sum, bucket) => {
-    return sum + convertCurrencyAmount(
+    return sum + (convertCurrencyAmount(
       bucket.total_cost,
       bucket.currency,
       targetCurrency,
-    );
+    ) ?? 0);
   }, 0);
 
   if (total <= 0) {

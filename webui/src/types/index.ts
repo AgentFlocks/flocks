@@ -596,7 +596,7 @@ export interface CustomModelCreate {
   supports_reasoning?: boolean;
   input_price?: number;
   output_price?: number;
-  cache_read_price?: number;
+  cache_read_price?: number | null;
   currency?: string;
 }
 
@@ -613,7 +613,7 @@ export interface CustomModelInfo {
   supports_reasoning: boolean;
   input_price: number;
   output_price: number;
-  cache_read_price?: number;
+  cache_read_price?: number | null;
   currency: string;
   created_at: string;
 }

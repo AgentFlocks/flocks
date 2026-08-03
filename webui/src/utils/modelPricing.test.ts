@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { formatPricingPerMillion } from './modelPricing';
+import { formatPricingPerMillion, isPricingFree } from './modelPricing';
 
 describe('formatPricingPerMillion', () => {
   it('formats input and output prices', () => {
@@ -18,5 +18,14 @@ describe('formatPricingPerMillion', () => {
       cache_read: 0.2,
       currency: 'CNY',
     })).toBe('¥1/¥2/¥0.2/M');
+  });
+
+  it('does not mark cache-only pricing as free', () => {
+    expect(isPricingFree({
+      input: 0,
+      output: 0,
+      cache_read: 0.2,
+      currency: 'CNY',
+    })).toBe(false);
   });
 });

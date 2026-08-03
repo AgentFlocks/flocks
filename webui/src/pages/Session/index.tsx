@@ -40,7 +40,7 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
-import { formatPricingPerMillion } from '@/utils/modelPricing';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import type { ModelDefinitionV2, Session } from '@/types';
 import { useAuth } from '@/contexts/AuthContext';
 import {
@@ -844,7 +844,7 @@ export default function SessionPage() {
 
     const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
       if (!pricing) return t('modelPicker.noCost');
-      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
+      if (isPricingFree(pricing)) return t('modelPicker.free');
       return formatPricingPerMillion(pricing);
     };
 

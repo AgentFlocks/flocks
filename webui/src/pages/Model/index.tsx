@@ -24,7 +24,7 @@ import {
   customAPI, modelSettingsAPI, catalogAPI, defaultModelAPI,
 } from '@/api/provider';
 import { hasPendingProviderCredentialChanges } from './providerCredentialUtils';
-import { formatPricingPerMillion } from '@/utils/modelPricing';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import {
   convertCurrencyAmount,
   formatTokenMillions,
@@ -80,6 +80,7 @@ function convertEditablePrice(
   const amount = Number(value);
   if (!Number.isFinite(amount)) return value;
   const converted = convertCurrencyAmount(amount, sourceCurrency, targetCurrency);
+  if (converted === null) return value;
   const precision = targetCurrency === 'CNY' ? 4 : 6;
   return String(Number(converted.toFixed(precision)));
 }
@@ -1015,10 +1016,10 @@ function ModelCard({ model, enabled, testStatus, onOpenDetail, onTestModel, onTo
             {model.id}
           </span>
           {contextK && <span className="text-[11px] text-gray-500 shrink-0">{contextK}</span>}
-          {pricing && pricing.input > 0 && (
+          {pricing && !isPricingFree(pricing) && (
             <span className="text-[11px] text-gray-500 shrink-0">{formatPricingPerMillion(pricing)}</span>
           )}
-          {pricing && pricing.input === 0 && pricing.output === 0 && (
+          {pricing && isPricingFree(pricing) && (
             <span className="text-[11px] text-green-600 font-medium shrink-0">{t('status.free')}</span>
           )}
           {enabled && (
@@ -1721,10 +1722,10 @@ function AddProviderDialog({ connectedIds, onClose, onAdded }: {
                                           : `${(model.limits.context_window / 1000).toFixed(0)}K`} ctx
                                       </span>
                                     )}
-                                    {model.pricing && model.pricing.input > 0 && (
+                                    {model.pricing && !isPricingFree(model.pricing) && (
                                       <span>{formatPricingPerMillion(model.pricing)}</span>
                                     )}
-                                    {model.pricing && model.pricing.input === 0 && (
+                                    {model.pricing && isPricingFree(model.pricing) && (
                                       <span className="text-green-600">{t('status.free')}</span>
                                     )}
                                   </div>
@@ -1847,6 +1848,7 @@ function useModelForm() {
 
   const changeCurrency = useCallback((nextCurrency: string) => {
     if (nextCurrency === currency) return;
+    if (convertCurrencyAmount(1, currency, nextCurrency) === null) return;
     setInputPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setOutputPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setCacheReadPrice(value => convertEditablePrice(value, currency, nextCurrency));
@@ -2731,6 +2733,7 @@ function ModelDetailSheet({
 
   const handleCurrencyChange = (nextCurrency: string) => {
     if (nextCurrency === currency) return;
+    if (convertCurrencyAmount(1, currency, nextCurrency) === null) return;
     setInputPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setOutputPrice(value => convertEditablePrice(value, currency, nextCurrency));
     setCacheReadPrice(value => convertEditablePrice(value, currency, nextCurrency));
@@ -2774,7 +2777,7 @@ function ModelDetailSheet({
           input_price: parseFloat(inputPrice) || 0,
           output_price: parseFloat(outputPrice) || 0,
           cache_read_price: cacheReadPrice.trim() === ''
-            ? undefined
+            ? null
             : parseFloat(cacheReadPrice) || 0,
           currency,
         }),
@@ -2907,6 +2910,9 @@ function ModelDetailSheet({
                 <div>
                   <label className="block text-xs text-gray-500 mb-1">{t('form.currency')}</label>
                   <select value={currency} onChange={e => handleCurrencyChange(e.target.value)} className={inputCls}>
+                    {currency !== 'USD' && currency !== 'CNY' && (
+                      <option value={currency}>{currency}</option>
+                    )}
                     <option value="USD">USD</option>
                     <option value="CNY">CNY</option>
                   </select>
@@ -2986,7 +2992,7 @@ function formatModelPricing(
 ): string {
   const pricing = model.pricing;
   if (!pricing) return unavailableLabel;
-  if (pricing.input === 0 && pricing.output === 0) return freeLabel;
+  if (isPricingFree(pricing)) return freeLabel;
   return formatPricingPerMillion(pricing);
 }
 

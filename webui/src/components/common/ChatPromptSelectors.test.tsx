@@ -243,8 +243,8 @@ describe('useChatModelOptions', () => {
         models: [{
           ...makeModelDefinition(),
           pricing: {
-            input: 1,
-            output: 2,
+            input: 0,
+            output: 0,
             cache_read: 0.2,
             unit: 1000000,
             currency: 'CNY',
@@ -259,7 +259,7 @@ describe('useChatModelOptions', () => {
     const { result } = renderHook(() => useChatModelOptions());
 
     await waitFor(() => {
-      expect(result.current.options[0]?.pricingLabel).toBe('¥1/¥2/¥0.2/M');
+      expect(result.current.options[0]?.pricingLabel).toBe('¥0/¥0/¥0.2/M');
     });
   });
 
