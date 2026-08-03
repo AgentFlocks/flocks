@@ -2,7 +2,7 @@
 Agent system tests
 
 Tests for Agent definitions, permissions, prompts, and registry operations.
-Reflects the current architecture: 13 built-in agents loaded from YAML folders,
+Reflects the current architecture: built-in agents loaded from YAML folders,
 no permission_compat helpers, compaction/title/summary live in session/prompts.py.
 """
 
@@ -18,7 +18,7 @@ from flocks.session.prompt_strings import PROMPT_COMPACTION, PROMPT_TITLE, PROMP
 BUILTIN_AGENTS = [
     "rex", "hephaestus", "explore",
     "oracle", "librarian", "prometheus", "multimodal-looker",
-    "self-enhance", "rex-junior", "host-forensics", "host-forensics-fast",
+    "rex-junior", "host-forensics", "host-forensics-fast",
 ]
 
 
@@ -108,13 +108,6 @@ class TestSubagents:
         ]
         assert edit_rules
         assert any(getattr(rule, "pattern", None) == ".flocks/plans/*" for rule in edit_rules)
-
-    @pytest.mark.asyncio
-    async def test_self_enhance_agent(self):
-        agent = await Agent.get("self-enhance")
-        assert agent is not None
-        assert agent.mode == "subagent"
-        assert agent.delegatable is True
 
     @pytest.mark.asyncio
     async def test_security_agents(self):

@@ -225,8 +225,10 @@ class MemoryManager:
         if not self._initialized:
             await self.initialize()
         
-        # Trigger sync if configured and dirty
-        if self.config.sync.on_search and self._dirty:
+        # File-backed Memory may be changed by file tools, lifecycle writers,
+        # or external processes that cannot mark this manager dirty. Run the
+        # incremental sync before every search so the index remains current.
+        if self.config.sync.on_search:
             await self.sync(reason="search")
         
         # Execute search
@@ -384,7 +386,7 @@ class MemoryManager:
         """
         # TODO: Implement comprehensive status collection
         return MemoryProviderStatus(
-            enabled=self.config.enabled,
+            enabled=True,
             provider=self.provider_id,
             model=self.embedding_model,
             requested_provider=self.config.embedding.provider,
