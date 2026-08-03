@@ -64,7 +64,7 @@ class MemorySyncConfig(BaseModel):
     )
     on_search: bool = Field(
         True,
-        description="Sync before search if dirty"
+        description="Run incremental sync before every search"
     )
     watch: bool = Field(
         True,
