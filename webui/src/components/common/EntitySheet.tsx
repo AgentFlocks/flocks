@@ -266,6 +266,8 @@ export default function EntitySheet({
     error: sessionError,
     create: createRexSession,
     createAndSend: createAndSendRex,
+    pendingOptimisticMessage: pendingRexOptimisticMessage,
+    consumePendingOptimisticMessage: consumePendingRexOptimisticMessage,
     retry: retryRexSession,
     reset: resetRexSession,
   } = useSessionChat({
@@ -710,6 +712,8 @@ export default function EntitySheet({
                     centerToolbarSlot={rexCenterToolbarSlot}
                     composerTextareaMinHeight={rexComposerTextareaMinHeight}
                     composerTextareaMaxHeight={rexComposerTextareaMaxHeight}
+                    initialOptimisticMessage={pendingRexOptimisticMessage}
+                    onInitialOptimisticMessageConsumed={consumePendingRexOptimisticMessage}
                     onCreateAndSend={!activeRexSessionId ? (text, imageParts, agentOverride, modelOverride, options) => createAndSendRex({
                       text,
                       imageParts,

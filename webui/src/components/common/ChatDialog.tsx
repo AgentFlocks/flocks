@@ -37,7 +37,13 @@ export default function ChatDialog({
 }: ChatDialogProps) {
   const { t } = useTranslation('common');
   const supportsVision = useDefaultModelVision();
-  const { sessionId, createAndSend, reset } = useSessionChat({
+  const {
+    sessionId,
+    pendingOptimisticMessage,
+    createAndSend,
+    consumePendingOptimisticMessage,
+    reset,
+  } = useSessionChat({
     title,
   });
 
@@ -84,6 +90,8 @@ export default function ChatDialog({
           emptyText={t('chat.starting')}
           suggestions={suggestions}
           supportsVision={supportsVision}
+          initialOptimisticMessage={pendingOptimisticMessage}
+          onInitialOptimisticMessageConsumed={consumePendingOptimisticMessage}
           onCreateAndSend={!sessionId ? (text, imageParts) => createAndSend({ text, imageParts }) : undefined}
           welcomeContent={!sessionId ? (
             <div className="text-center max-w-md">

@@ -202,6 +202,8 @@ export default function ChatTab({
     error,
     create: createSession,
     createAndSend: createAndSendSession,
+    pendingOptimisticMessage,
+    consumePendingOptimisticMessage,
     reset: resetSession,
   } = useSessionChat({
     title: t('detail.chat.sessionTitle', { name: workflowDisplayName }),
@@ -595,6 +597,8 @@ export default function ChatTab({
           onNodeRefDismiss={onNodeRefDismiss}
           onStreamingDone={handleStreamingDone}
           initialMessage={initialMessage}
+          initialOptimisticMessage={pendingOptimisticMessage}
+          onInitialOptimisticMessageConsumed={consumePendingOptimisticMessage}
           onSSEEvent={handleSSEEvent}
           supportsVision={effectiveSupportsVision}
           contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}

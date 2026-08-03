@@ -2905,6 +2905,43 @@ describe('SessionChat intermediate process collapse', () => {
 });
 
 describe('SessionChat optimistic message identity', () => {
+  it('seeds the optimistic first message before relying on history or SSE', async () => {
+    const addMessage = vi.fn();
+    const onConsumed = vi.fn();
+    const optimisticMessage = makeMessage({
+      id: 'msg_000000000001abcdefghijklmn',
+      sessionID: 'sess-1',
+      role: 'user',
+      parts: [{
+        id: 'temp-msg_000000000001abcdefghijklmn-text',
+        type: 'text',
+        text: 'hello',
+      } as Message['parts'][number]],
+    });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialOptimisticMessage: optimisticMessage,
+      onInitialOptimisticMessageConsumed: onConsumed,
+    }));
+
+    await waitFor(() => expect(addMessage).toHaveBeenCalledWith(optimisticMessage));
+    expect(onConsumed).toHaveBeenCalledWith(optimisticMessage.id);
+  });
+
   it.each([
     ['prompt', 'message that fails', '/api/session/sess-1/prompt_async'],
     ['slash command', '/tools', '/api/session/sess-1/command'],
