@@ -42,6 +42,7 @@ def test_add_model_to_runtime_preserves_reasoning_and_currency(monkeypatch):
         supports_reasoning=True,
         input_price=0.0,
         output_price=0.0,
+        cache_read_price=0.2,
         currency="USD",
     )
 
@@ -54,7 +55,12 @@ def test_add_model_to_runtime_preserves_reasoning_and_currency(monkeypatch):
         saved = Provider._models[body.model_id]
 
         assert saved.capabilities.supports_reasoning is True
-        assert saved.pricing == {"input": 0.0, "output": 0.0, "currency": "USD"}
+        assert saved.pricing == {
+            "input": 0.0,
+            "output": 0.0,
+            "cache_read": 0.2,
+            "currency": "USD",
+        }
         assert provider._custom_models[0].pricing["currency"] == "USD"
         assert provider._config_models[0].capabilities.supports_reasoning is True
     finally:
