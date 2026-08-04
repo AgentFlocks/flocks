@@ -1022,8 +1022,8 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     triage = payload["workflows"][0]
     assert triage["latestExecutionHash"] == "wf-triage"
     assert triage["latestAlertName"] == "远程命令执行攻击"
-    assert triage["progressLabel"] == "第 2/3 步"
-    assert triage["progressPercent"] == 0.6667
+    assert triage["progressLabel"] == "第 2/4 步"
+    assert triage["progressPercent"] == 0.5
     assert triage["sessionId"] == "session-triage-1"
     assert triage["messageId"] == "msg-triage-1"
     denoise = payload["workflows"][1]
