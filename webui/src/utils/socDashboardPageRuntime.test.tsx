@@ -192,6 +192,7 @@ describe('SOC dashboard contract page runtime', () => {
         return Promise.resolve({
           data: {
             sessionCount: 12,
+            activeExecutionCount: 9,
             scheduledExecutionCount: 20,
             scheduledTodayExecutionCount: 2,
             workflowExecutionCount: 745000,
@@ -245,7 +246,7 @@ describe('SOC dashboard contract page runtime', () => {
     const activeCard = cards.find((card) => within(card).queryByText('执行中')) as HTMLElement;
     const workflowCard = cards.find((card) => within(card).queryByText('工作流调用')) as HTMLElement;
 
-    expect(activeCard.querySelector('b.animated-number')).toHaveAttribute('title', '5');
+    expect(activeCard.querySelector('b.animated-number')).toHaveAttribute('title', '9');
     expect(workflowCard).toHaveAttribute(
       'title',
       '优先来自 workflow_stats.call_count；今日为当天 call_count 增量，缺少快照时回退执行记录数',
