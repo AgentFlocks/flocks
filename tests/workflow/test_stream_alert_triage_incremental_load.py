@@ -11,7 +11,7 @@ from types import SimpleNamespace
 
 import flocks.config
 import pytest
-from flocks.workflow import Workflow, WorkflowEngine
+from flocks.workflow import NodeTimeoutError, Workflow, WorkflowEngine
 from flocks.workflow.repl_runtime import PythonExecRuntime
 
 
@@ -438,6 +438,8 @@ def test_triage_timeout_does_not_commit_production_cursor(monkeypatch, tmp_path:
                     "id": "triage",
                     "type": "python",
                     "description": "Exceed the node timeout before persistence succeeds",
+                    "processIsolated": True,
+                    "timeoutFatal": True,
                     "code": (
                         "import time\n"
                         "triage_outputs = outputs\n"
@@ -466,14 +468,13 @@ def test_triage_timeout_does_not_commit_production_cursor(monkeypatch, tmp_path:
         max_parallel_workers=1,
     )
 
-    result = engine.run(initial_inputs={}, retain_history=True)
-    time.sleep(0.25)
+    with pytest.raises(NodeTimeoutError) as caught:
+        engine.run(initial_inputs={}, retain_history=True)
 
-    triage_step = next(step for step in result.history if step.node_id == "triage")
-    commit_step = next(step for step in result.history if step.node_id == "commit")
+    history = caught.value.execution_context["history"]
+    triage_step = next(step for step in history if step.node_id == "triage")
     assert "节点执行超时" in (triage_step.error or "")
-    assert commit_step.error is None
-    assert commit_step.outputs["cursor_committed"] is False
+    assert all(step.node_id != "commit" for step in history)
     assert not cursor_path.exists()
 
 

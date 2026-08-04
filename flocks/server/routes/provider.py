@@ -676,11 +676,14 @@ async def get_provider_catalog():
                     },
                     "limits": {
                         "context_window": m.limits.context_window,
+                        "max_input_tokens": m.limits.max_input_tokens,
                         "max_output_tokens": m.limits.max_output_tokens,
                     } if m.limits else None,
                     "pricing": {
                         "input": m.pricing.input,
                         "output": m.pricing.output,
+                        "cache_read": m.pricing.cache_read,
+                        "cache_write": m.pricing.cache_write,
                         "currency": m.pricing.currency,
                     } if m.pricing else None,
                 }

@@ -6,6 +6,7 @@ from dataclasses import dataclass, field
 import hashlib
 from itertools import islice
 import logging
+import threading
 import time
 import traceback
 import uuid
@@ -14,11 +15,11 @@ from typing import Any, Callable, Deque, Dict, List, Literal, NamedTuple, Option
 
 from .code_gen import CodeGen, SimpleCodeGen, LLMCodeGen
 from .edge_resolver import EdgeResolver
-from .errors import MaxStepsExceededError, NodeExecutionError, RunCancelledError, RunTimeoutError
+from .errors import MaxStepsExceededError, NodeExecutionError, NodeTimeoutError, RunCancelledError, RunTimeoutError
 from .execution_plan import WorkflowExecutionPlan
 from .execution_state import ExecutionResult, StepResult, WorkflowExecutionState
 from .models import Edge, Workflow, Node
-from .repl_runtime import PythonExecRuntime, Runtime
+from .repl_runtime import HostProcessPythonExecRuntime, PythonExecRuntime, Runtime
 
 
 _logger = logging.getLogger("flocks.workflow.engine")
@@ -82,6 +83,23 @@ def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
     if len(text) <= max_chars:
         return text
     return text[:max_chars] + f"...[truncated:{len(text) - max_chars}]"
+
+
+def _input_hash_for_dedup(node_id: str, inputs: Dict[str, Any]) -> str:
+    """Hash canonical inputs without retaining one full serialized copy."""
+    try:
+        digest = hashlib.sha256()
+        encoder = json.JSONEncoder(
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        for chunk in encoder.iterencode({"n": node_id, "i": inputs}):
+            digest.update(chunk.encode())
+        return digest.hexdigest()[:16]
+    except Exception:
+        return ""
 
 
 def _default_workflow_loader(workflow_id: str) -> "Workflow":
@@ -176,6 +194,7 @@ class WorkflowEngine:
                 tool_registry=self.runtime.tool_registry,
                 cancel_checker=self.runtime.cancel_checker,
                 cleanup_globals_after_execute=self.runtime.cleanup_globals_after_execute,
+                enable_cancel_trace=self.runtime.enable_cancel_trace,
             )
         return self.runtime
 
@@ -214,10 +233,24 @@ class WorkflowEngine:
         timeout_executor: Optional[ThreadPoolExecutor] = None
         if step_timeout_s is not None:
             timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
+        timeout_cancel_event = threading.Event()
         previous_cancel_checker = None
+        previous_enable_cancel_trace = None
         if isinstance(self.runtime, PythonExecRuntime):
             previous_cancel_checker = self.runtime.cancel_checker
-            self.runtime.cancel_checker = cancel
+            previous_enable_cancel_trace = self.runtime.enable_cancel_trace
+
+            def _runtime_cancel_requested() -> bool:
+                return timeout_cancel_event.is_set() or bool(cancel and cancel())
+
+            self.runtime.cancel_checker = (
+                _runtime_cancel_requested if step_timeout_s is not None or cancel is not None else None
+            )
+            # A timeout-only checker is consumed by isolated-process RPC calls.
+            # Enabling sys.settrace for every ordinary workflow line would add
+            # a large steady-state cost; host-thread timeouts keep their legacy
+            # nonfatal, best-effort semantics.
+            self.runtime.enable_cancel_trace = cancel is not None
         try:
 
             def _raise_cancelled() -> None:
@@ -292,24 +325,11 @@ class WorkflowEngine:
                         inputs = merged
                         state.join_seen_sources.pop(node_id, None)
 
-                    # Dedup: skip if same node already ran with identical inputs.
-                    # Lightweight history mode is used by high-throughput ingest
-                    # paths with large payloads; hashing full inputs there would
-                    # serialize the same large alert lists we are trying not to
-                    # retain.
-                    if self.history_mode == "summary":
-                        _input_hash = ""
-                    else:
-                        try:
-                            _hash_raw = json.dumps(
-                                {"n": node_id, "i": inputs},
-                                sort_keys=True,
-                                ensure_ascii=False,
-                                default=str,
-                            )
-                            _input_hash = hashlib.sha256(_hash_raw.encode()).hexdigest()[:16]
-                        except Exception:
-                            _input_hash = ""
+                    # History retention is observational and must not alter
+                    # workflow graph semantics. Stream the hash so summary mode
+                    # can still deduplicate large inputs without retaining a
+                    # second complete JSON payload.
+                    _input_hash = _input_hash_for_dedup(node_id, inputs)
                     if _input_hash and node_id in _dedup_hashes and _dedup_hashes[node_id] == _input_hash:
                         _logger.info(
                             "wf.step.dedup_skip node=%s (identical input hash %s)",
@@ -327,7 +347,15 @@ class WorkflowEngine:
                     continue
 
                 # ── Phase 2: execute ready items ──────────────────────────
-                use_parallel = self.max_parallel_workers > 1 and len(ready) > 1
+                # Process-isolated nodes own a child process and a cancellation
+                # boundary. Keep their engine-level execution serial so a
+                # mixed batch cannot leave an isolated child running after a
+                # host-thread sibling times out.
+                use_parallel = (
+                    self.max_parallel_workers > 1
+                    and len(ready) > 1
+                    and not any(item[1].process_isolated for item in ready)
+                )
                 exec_results: List[_ExecOutcome] = []
                 _outs: Optional[Dict[str, Any]] = None
                 _so = ""
@@ -444,6 +472,9 @@ class WorkflowEngine:
                                 _ExecOutcome(_idx, _outs, _so, None, None, (time.perf_counter() - _t0) * 1000.0)
                             )
                         except FuturesTimeoutError as _fte:
+                            _process_isolated = bool(_nd.process_isolated)
+                            if _process_isolated:
+                                timeout_cancel_event.set()
                             _fte_msg = str(_fte).strip()
                             _err = _fte_msg if _fte_msg else f"节点执行超时 ({self.node_timeout_s}s)"
                             exec_results.append(
@@ -453,10 +484,21 @@ class WorkflowEngine:
                             )
                             if timeout_executor is not None:
                                 try:
-                                    timeout_executor.shutdown(wait=False, cancel_futures=True)
+                                    timeout_executor.shutdown(
+                                        wait=_process_isolated,
+                                        cancel_futures=True,
+                                    )
                                 except TypeError:
-                                    timeout_executor.shutdown(wait=False)
-                                timeout_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="wf-node")
+                                    timeout_executor.shutdown(wait=_process_isolated)
+                                timeout_executor = None
+                            if _process_isolated and not _nd.timeout_fatal:
+                                timeout_cancel_event.clear()
+                            if _nd.timeout_fatal:
+                                break
+                            timeout_executor = ThreadPoolExecutor(
+                                max_workers=1,
+                                thread_name_prefix="wf-node",
+                            )
                         except RunCancelledError as _ce:
                             _ce.execution_context = state.build_context()
                             raise
@@ -605,6 +647,19 @@ class WorkflowEngine:
                                     "wf.step_end.hook_error",
                                     extra={"run_id": rid, "step": _sn, "node_id": _nid},
                                 )
+                        if _eo.is_timeout and _nd.timeout_fatal and _stop_exc is None:
+                            _stop_exc = NodeTimeoutError(
+                                node_id=_nid,
+                                timeout_s=float(step_timeout_s or 0),
+                                execution_context={
+                                    "run_id": rid,
+                                    "steps": state.steps + len(exec_results),
+                                    "last_node_id": _nid,
+                                    "outputs": state.last_outputs,
+                                    "history": state.history,
+                                },
+                            )
+                            continue
                         if self.stop_on_error and _stop_exc is None and not _eo.is_timeout:
                             _stop_exc = NodeExecutionError(
                                 node_id=_nid,
@@ -733,13 +788,14 @@ class WorkflowEngine:
                 raise NodeExecutionError(node_id=pending_joins[0][0], message=msg)
             return state.to_result()
         finally:
-            if isinstance(self.runtime, PythonExecRuntime):
-                self.runtime.cancel_checker = previous_cancel_checker
             if timeout_executor is not None:
                 try:
                     timeout_executor.shutdown(wait=False, cancel_futures=True)
                 except TypeError:
                     timeout_executor.shutdown(wait=False)
+            if isinstance(self.runtime, PythonExecRuntime):
+                self.runtime.cancel_checker = previous_cancel_checker
+                self.runtime.enable_cancel_trace = bool(previous_enable_cancel_trace)
 
     def run_node(self, node_id: str, inputs: Dict[str, Any]) -> "StepResult":
         """Public API: execute a single node by id and return a StepResult.
@@ -792,6 +848,13 @@ class WorkflowEngine:
         node_id = node.id
         if node.type == "python":
             assert node.code is not None
+            if node.process_isolated and isinstance(_rt, PythonExecRuntime):
+                _rt = HostProcessPythonExecRuntime(
+                    tool_registry=_rt.tool_registry,
+                    cancel_checker=_rt.cancel_checker,
+                    inherited_fd_keys=tuple(node.process_inherit_fd_keys),
+                    retained_fd_keys=tuple(node.process_retain_fd_keys),
+                )
             return _rt.execute(node.code, inputs)
         if node.type == "logic":
             assert self.code_gen is not None
@@ -806,6 +869,13 @@ class WorkflowEngine:
                     ) from gen_error
                 if self.mutate_workflow:
                     node.code = code
+            if node.process_isolated and isinstance(_rt, PythonExecRuntime):
+                _rt = HostProcessPythonExecRuntime(
+                    tool_registry=_rt.tool_registry,
+                    cancel_checker=_rt.cancel_checker,
+                    inherited_fd_keys=tuple(node.process_inherit_fd_keys),
+                    retained_fd_keys=tuple(node.process_retain_fd_keys),
+                )
             return _rt.execute(code, inputs)
         if node.type in {"branch", "loop"}:
             return {}, ""

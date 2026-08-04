@@ -40,6 +40,7 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
 import type { Message, ModelDefinitionV2, Session } from '@/types';
 import { createMessageId } from '@/utils/messageId';
 import { useAuth } from '@/contexts/AuthContext';
@@ -845,9 +846,8 @@ export default function SessionPage() {
 
     const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
       if (!pricing) return t('modelPicker.noCost');
-      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
-      const currencySymbol = pricing.currency === 'CNY' ? '¥' : '$';
-      return `${currencySymbol}${pricing.input}/${currencySymbol}${pricing.output}/M`;
+      if (isPricingFree(pricing)) return t('modelPicker.free');
+      return formatPricingPerMillion(pricing);
     };
 
     const formatContextWindow = (contextWindow?: number): string => {

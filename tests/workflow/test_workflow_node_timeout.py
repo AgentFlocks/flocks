@@ -1,13 +1,18 @@
-"""Test workflow node timeout: node times out is skipped and error is recorded."""
+"""Regression tests for isolated and compatibility node timeouts."""
+
+import os
+import threading
+import time
 
 import pytest
 
-from flocks.workflow import Workflow, WorkflowEngine, run_workflow
-from flocks.workflow.repl_runtime import PythonExecRuntime
+import flocks.workflow.repl_runtime as repl_runtime_module
+from flocks.workflow import NodeExecutionError, NodeTimeoutError, Workflow, WorkflowEngine, run_workflow
+from flocks.workflow.repl_runtime import HostProcessPythonExecRuntime, PythonExecRuntime
 
 
-def test_node_timeout_skips_node_and_records_error():
-    """When a node exceeds node_timeout_s, it is skipped and error is in history."""
+def test_node_timeout_aborts_run_without_orphan_thread_or_downstream():
+    """A timed-out subprocess is killed before the run fails."""
     workflow = Workflow.from_dict({
         "name": "timeout_test",
         "start": "slow",
@@ -16,7 +21,9 @@ def test_node_timeout_skips_node_and_records_error():
                 "id": "slow",
                 "type": "python",
                 "code": "import time; time.sleep(5); outputs['x'] = 1",
-                "description": "Sleep 5s",
+                "description": "Never finishes within the timeout",
+                "processIsolated": True,
+                "timeoutFatal": True,
             },
             {
                 "id": "fast",
@@ -31,25 +38,272 @@ def test_node_timeout_skips_node_and_records_error():
     engine = WorkflowEngine(
         workflow,
         runtime=rt,
-        node_timeout_s=1.0,
+        node_timeout_s=0.05,
         stop_on_error=False,
     )
-    result = engine.run(initial_inputs={}, retain_history=True)
+    baseline_threads = {thread.ident for thread in threading.enumerate() if thread.name.startswith("wf-node")}
+    started = time.perf_counter()
+    with pytest.raises(NodeTimeoutError) as caught:
+        engine.run(initial_inputs={}, retain_history=True)
+    elapsed = time.perf_counter() - started
 
-    assert result.steps == 2
-    assert len(result.history) == 2
+    history = caught.value.execution_context["history"]
+    assert elapsed < 1.0
+    assert caught.value.execution_context["steps"] == 1
+    assert len(history) == 1
 
-    step_slow = result.history[0]
+    step_slow = history[0]
     assert step_slow.node_id == "slow"
     assert step_slow.error is not None
     assert "节点执行超时" in step_slow.error
-    assert "1.0" in step_slow.error
+    assert "0.05" in step_slow.error
     assert step_slow.outputs == {}
+    assert {thread.ident for thread in threading.enumerate() if thread.name.startswith("wf-node")} == baseline_threads
 
-    step_fast = result.history[1]
-    assert step_fast.node_id == "fast"
-    assert step_fast.error is None
-    assert step_fast.outputs.get("y") == 10  # x missing, get('x', 0) = 0, 0+10=10
+
+def test_process_isolated_timeout_can_remain_nonfatal_for_compatibility():
+    """Fatal timeout semantics remain opt-in at the node level."""
+    workflow = Workflow.from_dict({
+        "name": "cooperative_timeout",
+        "start": "slow",
+        "nodes": [
+            {
+                "id": "slow",
+                "type": "python",
+                "code": "import time; time.sleep(5)",
+                "processIsolated": True,
+            }
+        ],
+        "edges": [],
+    })
+    engine = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(),
+        node_timeout_s=0.05,
+    )
+
+    started = time.perf_counter()
+    result = engine.run(retain_history=True)
+
+    assert time.perf_counter() - started < 0.5
+    assert result.steps == 1
+    assert "节点执行超时" in (result.history[0].error or "")
+    assert not any(thread.name.startswith("wf-node") for thread in threading.enumerate())
+
+
+def test_process_timeout_closes_inherited_parent_fd(tmp_path):
+    lease_fd = os.open(tmp_path / "lease.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    workflow = Workflow.from_dict({
+        "start": "slow",
+        "nodes": [
+            {
+                "id": "slow",
+                "type": "python",
+                "code": "import os, time\nos.fstat(inputs['lease_fd'])\ntime.sleep(5)",
+                "processIsolated": True,
+                "processInheritFdKeys": ["lease_fd"],
+                "timeoutFatal": True,
+            }
+        ],
+        "edges": [],
+    })
+
+    with pytest.raises(NodeTimeoutError):
+        WorkflowEngine(
+            workflow,
+            runtime=PythonExecRuntime(),
+            node_timeout_s=0.05,
+        ).run({"lease_fd": lease_fd})
+
+    with pytest.raises(OSError):
+        os.fstat(lease_fd)
+
+
+def test_process_rpc_bridge_matches_concurrent_responses_by_request_id():
+    class Registry:
+        cancel_checker = None
+
+        def __init__(self):
+            self.active = 0
+            self.peak = 0
+            self.lock = threading.Lock()
+
+        def run(self, _name, *, value):
+            with self.lock:
+                self.active += 1
+                self.peak = max(self.peak, self.active)
+            try:
+                time.sleep((8 - value) * 0.005)
+                return value
+            finally:
+                with self.lock:
+                    self.active -= 1
+
+    registry = Registry()
+    workflow = Workflow.from_dict({
+        "start": "parallel_rpc",
+        "nodes": [
+            {
+                "id": "parallel_rpc",
+                "type": "python",
+                "processIsolated": True,
+                "code": (
+                    "from concurrent.futures import ThreadPoolExecutor\n"
+                    "def call(value):\n"
+                    "    return tool.run('echo', value=value)\n"
+                    "with ThreadPoolExecutor(max_workers=8) as pool:\n"
+                    "    outputs['values'] = list(pool.map(call, range(8)))"
+                ),
+            }
+        ],
+        "edges": [],
+    })
+
+    result = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(tool_registry=registry),
+        node_timeout_s=3,
+        history_mode="full",
+    ).run()
+
+    assert result.outputs["values"] == list(range(8))
+    assert registry.peak > 1
+
+
+def test_process_isolated_runtime_exposes_cooperative_cancel_hooks():
+    workflow = Workflow.from_dict({
+        "start": "check_cancel",
+        "nodes": [
+            {
+                "id": "check_cancel",
+                "type": "python",
+                "processIsolated": True,
+                "code": (
+                    "outputs['cancelled'] = cancelled()\n"
+                    "outputs['is_cancelled'] = is_cancelled()"
+                ),
+            }
+        ],
+        "edges": [],
+    })
+
+    result = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(),
+        node_timeout_s=3,
+    ).run()
+
+    assert result.outputs == {"cancelled": False, "is_cancelled": False}
+
+
+def test_process_isolated_system_exit_preserves_outputs():
+    workflow = Workflow.from_dict({
+        "start": "early_return",
+        "nodes": [
+            {
+                "id": "early_return",
+                "type": "python",
+                "processIsolated": True,
+                "code": "outputs['x'] = 1\nraise SystemExit(0)",
+            }
+        ],
+        "edges": [],
+    })
+
+    result = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(),
+        node_timeout_s=3,
+    ).run()
+
+    assert result.outputs == {"x": 1}
+
+
+def test_process_retained_fd_stays_in_parent_and_crosses_node_boundary(tmp_path):
+    lease_fd = os.open(tmp_path / "lease.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    workflow = Workflow.from_dict({
+        "start": "passthrough",
+        "nodes": [
+            {
+                "id": "passthrough",
+                "type": "python",
+                "processIsolated": True,
+                "processRetainFdKeys": ["lease_fd"],
+                "code": (
+                    "outputs['child_fd'] = inputs.get('lease_fd')\n"
+                    "outputs['lease_fd'] = inputs.get('lease_fd')"
+                ),
+            }
+        ],
+        "edges": [],
+    })
+
+    try:
+        result = WorkflowEngine(
+            workflow,
+            runtime=PythonExecRuntime(),
+            node_timeout_s=3,
+        ).run({"lease_fd": lease_fd})
+
+        # The child sees a harmless placeholder descriptor, while the parent
+        # restores and continues owning the actual lease descriptor.
+        assert isinstance(result.outputs["child_fd"], int)
+        assert result.outputs["lease_fd"] == lease_fd
+        os.fstat(lease_fd)
+    finally:
+        try:
+            os.close(lease_fd)
+        except OSError:
+            pass
+
+
+def test_process_retained_fd_is_closed_when_child_fails(tmp_path):
+    lease_fd = os.open(tmp_path / "lease.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    workflow = Workflow.from_dict({
+        "start": "fail",
+        "nodes": [
+            {
+                "id": "fail",
+                "type": "python",
+                "processIsolated": True,
+                "processRetainFdKeys": ["lease_fd"],
+                "code": "raise RuntimeError('boom')",
+            }
+        ],
+        "edges": [],
+    })
+
+    with pytest.raises(NodeExecutionError, match="boom"):
+        WorkflowEngine(
+            workflow,
+            runtime=PythonExecRuntime(),
+            node_timeout_s=3,
+        ).run({"lease_fd": lease_fd})
+
+    with pytest.raises(OSError):
+        os.fstat(lease_fd)
+
+
+def test_host_process_windows_launch_does_not_require_posix_shell(monkeypatch):
+    real_popen = repl_runtime_module.subprocess.Popen
+    script_paths = []
+
+    def checking_popen(args, *popen_args, **popen_kwargs):
+        assert args[0] != "sh"
+        script_paths.append(args[-1])
+        return real_popen(args, *popen_args, **popen_kwargs)
+
+    monkeypatch.setattr(repl_runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(repl_runtime_module.subprocess, "Popen", checking_popen)
+
+    outputs, _stdout = HostProcessPythonExecRuntime().execute(
+        "outputs['ok'] = True",
+        {},
+    )
+
+    assert outputs == {"ok": True}
+    assert script_paths
+    assert all(not os.path.exists(path) for path in script_paths)
 
 
 def test_node_timeout_none_disabled():
@@ -81,8 +335,10 @@ def test_run_workflow_node_timeout_param():
             {
                 "id": "s",
                 "type": "python",
-                "code": "import time; time.sleep(3); outputs['ok'] = 1",
+                "code": "import time; time.sleep(0.5); outputs['ok'] = 1",
                 "description": "Slow",
+                "processIsolated": True,
+                "timeoutFatal": True,
             },
         ],
         "edges": [],
@@ -94,7 +350,8 @@ def test_run_workflow_node_timeout_param():
         ensure_requirements=False,
         retain_history=True,
     )
-    assert result.status == "SUCCEEDED"
+    assert result.status == "FAILED"
+    assert "NodeTimeoutError" in (result.error or "")
     assert len(result.history) == 1
     assert result.history[0].get("error") is not None
     assert "节点执行超时" in result.history[0]["error"]
@@ -111,6 +368,8 @@ def test_run_workflow_uses_metadata_node_timeout_default():
                 "type": "python",
                 "code": "import time; time.sleep(0.2); outputs['ok'] = 1",
                 "description": "Slow-ish",
+                "processIsolated": True,
+                "timeoutFatal": True,
             },
         ],
         "edges": [],
@@ -122,7 +381,8 @@ def test_run_workflow_uses_metadata_node_timeout_default():
         ensure_requirements=False,
         retain_history=True,
     )
-    assert result.status == "SUCCEEDED"
+    assert result.status == "FAILED"
+    assert "NodeTimeoutError" in (result.error or "")
     assert len(result.history) == 1
     assert "节点执行超时" in (result.history[0].get("error") or "")
 
@@ -138,6 +398,8 @@ def test_run_workflow_explicit_node_timeout_overrides_metadata():
                 "type": "python",
                 "code": "import time; time.sleep(0.2); outputs['ok'] = 1",
                 "description": "Slow-ish",
+                "processIsolated": True,
+                "timeoutFatal": True,
             },
         ],
         "edges": [],
