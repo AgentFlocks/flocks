@@ -88,6 +88,7 @@ EXPECTED_MAPPING_KEYS = {
             "cursor_invalidated",
             "_batch_lease_fd",
             "batch_lease_token",
+            "_triage_state_dir",
         },
         ("concurrent_triage", "commit_cursor"): {
             "cursor_enabled",
@@ -101,7 +102,7 @@ EXPECTED_MAPPING_KEYS = {
             "input_date",
             "load_stats",
             "loaded_files",
-            "enriched_alerts_with_triage",
+            "top_triage_result",
             "triage_results",
             "triage_stats",
             "triage_output_mode",
@@ -125,7 +126,7 @@ EXPECTED_MAPPING_KEYS = {
             "input_date",
             "load_stats",
             "loaded_files",
-            "enriched_alerts_with_triage",
+            "top_triage_result",
             "triage_results",
             "triage_stats",
             "triage_output_mode",
@@ -303,7 +304,8 @@ def test_triage_execution_drops_loader_payload_before_commit_and_summary(
     assert "enriched_alerts" not in steps["commit_cursor"].inputs
     assert steps["commit_cursor"].inputs["_triage_persistence_succeeded"] is True
     assert "pending_cursor" not in steps["summarize"].inputs
-    assert "enriched_alerts_with_triage" in steps["summarize"].inputs
+    assert "top_triage_result" in steps["summarize"].inputs
+    assert "enriched_alerts_with_triage" not in steps["summarize"].inputs
 
 
 def test_production_triage_lease_survives_node_boundaries_and_is_released(

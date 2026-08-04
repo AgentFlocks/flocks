@@ -6,7 +6,7 @@
   "nameCn": "HTTP研判工作流",
   "description": "Downstream alert triage workflow that writes triage results to SOC DB by default with optional JSONL output.",
   "descriptionCn": "下游告警研判工作流，默认写入 SOC DB，并保留 JSONL 输出配置。",
-  "version": "1.0.0",
+  "version": "1.1.1",
   "author": "Flocks Team",
   "license": "MIT",
   "homepage": "",

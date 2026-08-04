@@ -26,6 +26,21 @@ class Node(BaseModel):
     join_namespace_key: str = "__by_source__"
     input_schema: Optional[Dict[str, Any]] = Field(None, alias="inputSchema")
     output_schema: Optional[Dict[str, Any]] = Field(None, alias="outputSchema")
+    # Trusted host subprocess isolation for memory-heavy Python nodes. The
+    # child exits after the node, returning its allocator arenas to the OS.
+    process_isolated: bool = Field(False, alias="processIsolated")
+    process_inherit_fd_keys: List[str] = Field(
+        default_factory=list,
+        alias="processInheritFdKeys",
+    )
+    # File descriptors that must remain owned by the parent while the child
+    # executes, then continue downstream unchanged. Unlike inherited FDs these
+    # are only opaque numeric values in the child, which is portable to Windows.
+    process_retain_fd_keys: List[str] = Field(
+        default_factory=list,
+        alias="processRetainFdKeys",
+    )
+    timeout_fatal: bool = Field(False, alias="timeoutFatal")
 
     # tool 节点
     tool_name: Optional[str] = None
@@ -52,6 +67,12 @@ class Node(BaseModel):
 
     @model_validator(mode="after")
     def _validate_code(self) -> "Node":
+        overlapping_fd_keys = set(self.process_inherit_fd_keys).intersection(self.process_retain_fd_keys)
+        if overlapping_fd_keys:
+            raise ValueError(
+                "processInheritFdKeys and processRetainFdKeys must not overlap: "
+                + ", ".join(sorted(overlapping_fd_keys))
+            )
         if self.type == "python":
             if self.code is None or not str(self.code).strip():
                 raise ValueError("python node requires non-empty code")
