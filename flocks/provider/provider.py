@@ -49,6 +49,8 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
         (
             pricing.get("input") if isinstance(pricing, dict) else None,
             pricing.get("output") if isinstance(pricing, dict) else None,
+            pricing.get("cache_read") if isinstance(pricing, dict) else None,
+            pricing.get("cache_write") if isinstance(pricing, dict) else None,
             pricing.get("currency") if isinstance(pricing, dict) else None,
         )
         if pricing is not None
@@ -849,13 +851,20 @@ class Provider:
                             # Create ModelInfo from config
                             _input_price = model_dict.get("input_price")
                             _output_price = model_dict.get("output_price")
+                            _cache_read_price = model_dict.get("cache_read_price")
                             _pricing = None
-                            if _input_price is not None or _output_price is not None:
+                            if (
+                                _input_price is not None
+                                or _output_price is not None
+                                or _cache_read_price is not None
+                            ):
                                 _pricing = {
                                     "input": float(_input_price or 0.0),
                                     "output": float(_output_price or 0.0),
                                     "currency": model_dict.get("currency", "USD"),
                                 }
+                                if _cache_read_price is not None:
+                                    _pricing["cache_read"] = float(_cache_read_price)
                             model_info = ModelInfo(
                                 id=model_id,
                                 name=model_dict.get("name", model_id),
@@ -1233,6 +1242,8 @@ class BaseProvider:
             pricing = PriceConfig(
                 input=model.pricing.get("input", 0.0),
                 output=model.pricing.get("output", 0.0),
+                cache_read=model.pricing.get("cache_read"),
+                cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
             )
         max_output = model.capabilities.max_tokens or 4096
@@ -1325,6 +1336,8 @@ class BaseProvider:
             overridden.pricing = PriceConfig(
                 input=model.pricing.get("input", 0.0),
                 output=model.pricing.get("output", 0.0),
+                cache_read=model.pricing.get("cache_read"),
+                cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
             )
 

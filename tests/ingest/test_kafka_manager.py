@@ -16,6 +16,8 @@ from __future__ import annotations
 import asyncio
 import json
 import sys
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -221,6 +223,31 @@ async def test_worker_decodes_queued_raw_message(monkeypatch: pytest.MonkeyPatch
     assert captured == [{"ok": True}]
 
 
+def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
+    trigger = TriggerDefinition.model_validate(
+        {
+            "id": "kafka-limited",
+            "type": "kafka",
+            "concurrency": {"maxParallel": 2, "queueSize": 40},
+        }
+    )
+    assert kafka_manager._worker_count_for_trigger(trigger) == 2
+    assert kafka_manager._queue_size_for_trigger(trigger) == 40
+
+    oversized = TriggerDefinition.model_validate(
+        {
+            "id": "kafka-capped",
+            "type": "kafka",
+            "concurrency": {"maxParallel": 999, "queueSize": 999_999},
+        }
+    )
+    assert (
+        kafka_manager._worker_count_for_trigger(oversized)
+        == kafka_manager._MAX_CONCURRENT_EXECUTIONS
+    )
+    assert kafka_manager._queue_size_for_trigger(oversized) == kafka_manager._MAX_QUEUE_SIZE
+
+
 @pytest.mark.asyncio
 async def test_stop_workflow_cancels_worker_pool() -> None:
     """``stop_workflow`` must cancel and drain the worker pool cleanly."""
@@ -258,6 +285,153 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
     assert workflow_id not in manager._worker_pools
     assert workflow_id not in manager._queues
     assert manager._status[workflow_id]["state"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_stop_workflow_signals_running_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = kafka_manager.KafkaManager()
+    workflow_id = "test-wf-running-stop"
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    abort = asyncio.Event()
+    started = threading.Event()
+    stopped = threading.Event()
+    trigger = TriggerDefinition.model_validate(
+        {"id": "kafka-default", "type": "kafka", "mapping": {"message": "$.body"}}
+    )
+
+    async def _fake_create_execution_record(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return {"id": "exec-running-stop"}
+
+    async def _fake_record_execution_result(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        started.set()
+        while not kwargs["cancel"]():
+            time.sleep(0.01)
+        stopped.set()
+        return SimpleNamespace(
+            status="CANCELLED",
+            error=None,
+            outputs={},
+            history=[],
+            last_node_id=None,
+            steps=0,
+        )
+
+    monkeypatch.setattr(kafka_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(kafka_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(kafka_manager, "run_workflow", _fake_run_workflow)
+
+    manager._queues[workflow_id] = queue
+    manager._abort_events[workflow_id] = abort
+    generation_cancel_event = threading.Event()
+    manager._generation_cancel_events[workflow_id] = generation_cancel_event
+    queue.put_nowait({"message": "demo"})
+    worker = asyncio.create_task(
+        manager._worker_loop(
+            workflow_id,
+            {},
+            trigger,
+            {},
+            queue,
+            abort,
+            "topic-a",
+            generation_cancel_event,
+        ),
+        name="running-stop-worker",
+    )
+    manager._worker_pools[workflow_id] = [worker]
+
+    assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1.0), timeout=2.0)
+    await manager.stop_workflow(workflow_id)
+
+    assert stopped.is_set()
+    assert worker.done()
+    assert workflow_id not in manager._generation_cancel_events
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_run_that_is_still_creating_execution_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = kafka_manager.KafkaManager()
+    workflow_id = "test-kafka-late-run-registration"
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    abort = asyncio.Event()
+    generation_cancel_event = threading.Event()
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    cancel_state_seen: list[bool] = []
+    trigger = TriggerDefinition.model_validate(
+        {"id": "kafka-default", "type": "kafka", "mapping": {"message": "$.body"}}
+    )
+
+    async def _slow_create(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        create_started.set()
+        await allow_create.wait()
+        return {"id": "exec-late-run"}
+
+    async def _record(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    def _run_workflow(**kwargs):  # noqa: ANN003
+        cancel_state_seen.append(kwargs["cancel"]())
+        return SimpleNamespace(
+            status="CANCELLED",
+            error=None,
+            outputs={},
+            history=[],
+            last_node_id=None,
+            steps=0,
+        )
+
+    monkeypatch.setattr(kafka_manager, "create_execution_record", _slow_create)
+    monkeypatch.setattr(kafka_manager, "record_execution_result", _record)
+    monkeypatch.setattr(kafka_manager, "run_workflow", _run_workflow)
+    manager._queues[workflow_id] = queue
+    manager._abort_events[workflow_id] = abort
+    manager._generation_cancel_events[workflow_id] = generation_cancel_event
+    queue.put_nowait({"message": "demo"})
+    worker = asyncio.create_task(
+        manager._worker_loop(
+            workflow_id,
+            {},
+            trigger,
+            {},
+            queue,
+            abort,
+            "topic-a",
+            generation_cancel_event,
+        )
+    )
+    manager._worker_pools[workflow_id] = [worker]
+
+    await create_started.wait()
+    stop_task = asyncio.create_task(manager.stop_workflow(workflow_id))
+    await asyncio.sleep(0)
+    allow_create.set()
+    await stop_task
+
+    assert cancel_state_seen == [True]
+    assert worker.done()
+
+
+@pytest.mark.asyncio
+async def test_restart_refuses_to_overlap_draining_generation() -> None:
+    manager = kafka_manager.KafkaManager()
+    workflow_id = "test-kafka-draining-restart"
+    release = asyncio.Event()
+    draining = asyncio.create_task(release.wait())
+    manager._draining_workers[workflow_id] = {draining}
+    try:
+        status = await manager.restart_workflow(workflow_id)
+        assert status == {"state": "failed", "error": "previous_workers_still_draining"}
+    finally:
+        release.set()
+        await draining
 
 
 @pytest.mark.asyncio
@@ -436,6 +610,8 @@ async def test_trigger_workflow_compacts_kafka_execution_record(
     assert captured_input_params["kafka_message"]["alarmData"]["chars"] == 50_000
     assert captured_run_kwargs["run_id"] == "exec-compact"
     assert captured_run_kwargs["execution_profile"] == "high_frequency"
+    assert callable(captured_run_kwargs["cancel"])
+    assert captured_run_kwargs["cancel"]() is False
     assert callable(captured_run_kwargs["on_step_complete"])
     assert captured_exec_data["outputResults"] == {
         "_enriched_alerts_count": 1,

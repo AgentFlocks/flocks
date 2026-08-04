@@ -114,6 +114,7 @@
     "pricing": "价格（每百万 Token）",
     "input": "输入",
     "output": "输出",
+    "cacheRead": "缓存命中",
     "currency": "货币",
     "fillModelId": "请填写模型 ID 和名称",
     "testingConnection": "正在测试连接…",

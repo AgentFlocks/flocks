@@ -40,7 +40,9 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
-import type { ModelDefinitionV2, Session } from '@/types';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import type { Message, ModelDefinitionV2, Session } from '@/types';
+import { createMessageId } from '@/utils/messageId';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   DEFAULT_SESSION_EXECUTION_MODE,
@@ -682,6 +684,7 @@ export default function SessionPage() {
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
+  const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -843,9 +846,8 @@ export default function SessionPage() {
 
     const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
       if (!pricing) return t('modelPicker.noCost');
-      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
-      const currencySymbol = pricing.currency === 'CNY' ? '¥' : '$';
-      return `${currencySymbol}${pricing.input}/${currencySymbol}${pricing.output}/M`;
+      if (isPricingFree(pricing)) return t('modelPicker.free');
+      return formatPricingPerMillion(pricing);
     };
 
     const formatContextWindow = (contextWindow?: number): string => {
@@ -1615,9 +1617,39 @@ export default function SessionPage() {
         ...(selectedModelAuto ? { model_auto: true } : {}),
       });
       const newSessionId = response.data.id;
+      const messageId = createMessageId();
+      const visibleText = options?.displayText || text;
+      const effectiveAgent = agentOverride || selectedAgent || 'rex';
+      const optimisticParts: Message['parts'] = [];
+      if (visibleText) {
+        optimisticParts.push({
+          id: `temp-${messageId}-text`,
+          type: 'text',
+          text: visibleText,
+        });
+      }
+      imageParts?.forEach((image, index) => {
+        optimisticParts.push({
+          id: `temp-${messageId}-img-${index}`,
+          type: 'file',
+          url: image.url,
+          mime: image.mime,
+          filename: image.filename,
+        });
+      });
+
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, imageParts),
+        messageID: messageId,
+      };
+      if (effectiveAgent) payload.agent = effectiveAgent;
+      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
+      if (options?.displayText) payload.displayText = options.displayText;
+      payload.executionMode = effectiveExecutionMode;
+      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
       addSession(response.data);
-      await fetchProjects(undefined, searchQuery);
+      void fetchProjects(undefined, searchQuery).catch(() => {});
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1636,17 +1668,17 @@ export default function SessionPage() {
         );
       }
       setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
+      setPendingOptimisticMessage({
+        id: messageId,
+        sessionID: newSessionId,
+        role: 'user',
+        parts: optimisticParts.length > 0
+          ? optimisticParts
+          : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+        timestamp: Date.now(),
+        agent: effectiveAgent,
+      });
       setSelectedSessionId(newSessionId);
-
-      const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
-      };
-      const effectiveAgent = agentOverride || selectedAgent || 'rex';
-      if (effectiveAgent) payload.agent = effectiveAgent;
-      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
-      if (options?.displayText) payload.displayText = options.displayText;
-      payload.executionMode = effectiveExecutionMode;
-      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
       if (effectiveExecutionMode === 'goal') {
         setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
         writeSessionExecutionMode(
@@ -2840,11 +2872,17 @@ export default function SessionPage() {
           composerTextareaMinHeight={56}
           initialMessage={pendingInitialMessage}
           initialDisplayText={pendingInitialDisplayText}
+          initialOptimisticMessage={pendingOptimisticMessage}
           focusMessageId={pendingFocusMessageId}
           onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
+          }}
+          onInitialOptimisticMessageConsumed={(messageId) => {
+            setPendingOptimisticMessage((message) => (
+              message?.id === messageId ? null : message
+            ));
           }}
           onSseStatusChange={activeChatSessionId ? setSseStatus : undefined}
           onSSEEvent={handleSSEEvent}

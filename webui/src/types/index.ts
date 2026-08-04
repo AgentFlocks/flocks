@@ -499,6 +499,7 @@ export interface ModelCapabilitiesV2 {
 
 export interface ModelLimitsV2 {
   context_window: number;
+  max_input_tokens?: number;
   max_output_tokens: number;
 }
 
@@ -595,6 +596,7 @@ export interface CustomModelCreate {
   supports_reasoning?: boolean;
   input_price?: number;
   output_price?: number;
+  cache_read_price?: number | null;
   currency?: string;
 }
 
@@ -611,6 +613,7 @@ export interface CustomModelInfo {
   supports_reasoning: boolean;
   input_price: number;
   output_price: number;
+  cache_read_price?: number | null;
   currency: string;
   created_at: string;
 }
@@ -668,11 +671,14 @@ export interface CatalogModel {
   };
   limits?: {
     context_window: number;
+    max_input_tokens?: number;
     max_output_tokens: number;
   };
   pricing?: {
     input: number;
     output: number;
+    cache_read?: number;
+    cache_write?: number;
     currency: string;
   };
 }
