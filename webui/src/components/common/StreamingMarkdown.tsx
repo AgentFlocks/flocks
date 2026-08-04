@@ -1,11 +1,14 @@
 import { memo, useState, useEffect, useRef, useCallback } from 'react';
 import ReactMarkdown from 'react-markdown';
 import rehypeHighlight from 'rehype-highlight';
+import rehypeKatex from 'rehype-katex';
 import rehypeRaw from 'rehype-raw';
 import rehypeSanitize, { defaultSchema } from 'rehype-sanitize';
 import remarkBreaks from 'remark-breaks';
 import remarkGfm from 'remark-gfm';
+import remarkMath from 'remark-math';
 import 'highlight.js/styles/github-dark.css';
+import 'katex/dist/katex.min.css';
 
 const sanitizeSchema = {
   ...defaultSchema,
@@ -17,6 +20,107 @@ const BACKLOG_RATE_BOOST = 4;
 const MAX_STREAMING_GRAPHEMES_PER_SECOND = 360;
 const MAX_STREAMING_GRAPHEMES_PER_FRAME = 8;
 const MAX_DRAIN_ELAPSED_MS = 50;
+
+function replaceLatexDelimiters(value: string): string {
+  return value
+    .replace(/\\\[([\s\S]*?)\\\]/g, (_, equation: string) => `$$${equation}$$`)
+    .replace(/\\\(([\s\S]*?)\\\)/g, (_, equation: string) => `$${equation}$`);
+}
+
+function countRun(value: string, start: number, character: string): number {
+  let end = start;
+  while (value[end] === character) end += 1;
+  return end - start;
+}
+
+function findFenceEnd(
+  value: string,
+  contentStart: number,
+  marker: string,
+  minimumLength: number,
+): number {
+  let lineStart = contentStart;
+
+  while (lineStart < value.length) {
+    let markerStart = lineStart;
+    while (markerStart < lineStart + 3 && value[markerStart] === ' ') markerStart += 1;
+
+    if (value[markerStart] === marker) {
+      const markerLength = countRun(value, markerStart, marker);
+      const lineEnd = value.indexOf('\n', markerStart + markerLength);
+      const suffixEnd = lineEnd === -1 ? value.length : lineEnd;
+      const suffix = value.slice(markerStart + markerLength, suffixEnd);
+
+      if (markerLength >= minimumLength && /^[\t ]*\r?$/.test(suffix)) {
+        return lineEnd === -1 ? value.length : lineEnd + 1;
+      }
+    }
+
+    const nextLine = value.indexOf('\n', lineStart);
+    if (nextLine === -1) return value.length;
+    lineStart = nextLine + 1;
+  }
+
+  return value.length;
+}
+
+/** Convert model-style LaTeX delimiters without touching Markdown code. */
+export function normalizeLatexDelimiters(value: string): string {
+  let output = '';
+  let plainStart = 0;
+  let index = 0;
+
+  while (index < value.length) {
+    const isLineStart = index === 0 || value[index - 1] === '\n';
+
+    if (isLineStart) {
+      let markerStart = index;
+      while (markerStart < index + 3 && value[markerStart] === ' ') markerStart += 1;
+      const marker = value[markerStart];
+
+      if (marker === '`' || marker === '~') {
+        const markerLength = countRun(value, markerStart, marker);
+        if (markerLength >= 3) {
+          const openingLineEnd = value.indexOf('\n', markerStart + markerLength);
+          const codeEnd = openingLineEnd === -1
+            ? value.length
+            : findFenceEnd(value, openingLineEnd + 1, marker, markerLength);
+          output += replaceLatexDelimiters(value.slice(plainStart, index));
+          output += value.slice(index, codeEnd);
+          index = codeEnd;
+          plainStart = codeEnd;
+          continue;
+        }
+      }
+    }
+
+    if (value[index] === '`') {
+      const markerLength = countRun(value, index, '`');
+      let closingStart = index + markerLength;
+
+      while (closingStart < value.length) {
+        closingStart = value.indexOf('`', closingStart);
+        if (closingStart === -1) break;
+        const closingLength = countRun(value, closingStart, '`');
+        if (closingLength === markerLength) break;
+        closingStart += closingLength;
+      }
+
+      if (closingStart !== -1) {
+        const codeEnd = closingStart + markerLength;
+        output += replaceLatexDelimiters(value.slice(plainStart, index));
+        output += value.slice(index, codeEnd);
+        index = codeEnd;
+        plainStart = codeEnd;
+        continue;
+      }
+    }
+
+    index += 1;
+  }
+
+  return output + replaceLatexDelimiters(value.slice(plainStart));
+}
 
 interface SegmentData {
   segment: string;
@@ -247,11 +351,18 @@ export interface StreamingMarkdownProps {
  * limiting ReactMarkdown re-parses to ~60fps instead of every SSE chunk.
  */
 const MarkdownContent = memo(function MarkdownContent({ content }: { content: string }) {
+  const normalizedContent = normalizeLatexDelimiters(content);
+
   return (
     <div className="prose prose-sm w-full min-w-0 max-w-full">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkBreaks]}
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, sanitizeSchema], [rehypeHighlight, { detect: false, ignoreMissing: true }]]}
+        remarkPlugins={[remarkGfm, remarkBreaks, remarkMath]}
+        rehypePlugins={[
+          rehypeRaw,
+          [rehypeSanitize, sanitizeSchema],
+          rehypeKatex,
+          [rehypeHighlight, { detect: false, ignoreMissing: true }],
+        ]}
         components={{
           code({ className, children, ...props }) {
             // Detect block-level code (fenced code block):
@@ -280,7 +391,7 @@ const MarkdownContent = memo(function MarkdownContent({ content }: { content: st
           },
         }}
       >
-        {content}
+        {normalizedContent}
       </ReactMarkdown>
     </div>
   );
