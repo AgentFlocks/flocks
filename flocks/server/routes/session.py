@@ -10,6 +10,7 @@ import asyncio
 import json
 import os
 import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query, Request
@@ -17,6 +18,7 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
 from flocks.auth.context import AuthUser, get_current_auth_user, reset_current_auth_user, set_current_auth_user
+from flocks.channel.base import ChatType
 from flocks.server.routes._timing import log_route_timing
 from flocks.audit import emit_audit_event
 from flocks.license import assert_license_active
@@ -50,6 +52,7 @@ log = Log.create(service="session-routes")
 # Default agent name constant
 DEFAULT_AGENT = "rex"
 DEFAULT_MESSAGE_PAGE_LIMIT = 50
+_CHANNEL_BINDING_QUERY_BATCH_SIZE = 500
 _CONTEXT_USAGE_CACHE_TTL_SECONDS = 5.0
 _context_usage_cache: Dict[Tuple[str, int], Tuple[float, ContextUsageSnapshot]] = {}
 _context_usage_inflight: Dict[Tuple[str, int], asyncio.Task[ContextUsageSnapshot]] = {}
@@ -280,6 +283,8 @@ class SessionListItem(BaseModel):
     title: str
     time: SessionTime
     category: str = "user"
+    channelID: Optional[str] = None
+    channelChatType: Optional[ChatType] = None
     status: str = "active"
     parentID: Optional[str] = None
     provider: Optional[str] = None
@@ -291,6 +296,13 @@ class SessionListItem(BaseModel):
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
+
+
+@dataclass(frozen=True)
+class _ChannelSessionBinding:
+    channel_id: str
+    chat_id: str
+    chat_type: ChatType
 
 
 def _session_to_response(
@@ -350,6 +362,8 @@ def _session_to_list_item(
     effective_project_id: Optional[str] = None,
     shared_project_ids: Optional[set[str]] = None,
     project_name: Optional[str] = None,
+    channel_binding: Optional[_ChannelSessionBinding] = None,
+    title_override: Optional[str] = None,
 ) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
@@ -366,7 +380,7 @@ def _session_to_list_item(
         projectName=project_name,
         effectiveProjectID=effective_project_id,
         directory=session.directory,
-        title=session.title,
+        title=title_override if title_override is not None else session.title,
         time=SessionTime(
             created=session.time.created,
             updated=session.time.updated,
@@ -374,6 +388,8 @@ def _session_to_list_item(
             archived=session.time.archived,
         ),
         category=session.category,
+        channelID=channel_binding.channel_id if channel_binding else None,
+        channelChatType=channel_binding.chat_type if channel_binding else None,
         status=session.status,
         parentID=session.parent_id,
         provider=session.provider,
@@ -386,6 +402,119 @@ def _session_to_list_item(
         canDelete=SessionPolicy.can_delete(session, current_user),
         isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
+
+
+async def _latest_channel_bindings(
+    session_ids: List[str],
+) -> Dict[str, _ChannelSessionBinding]:
+    """Return the most recently active channel metadata for each session."""
+    if not session_ids:
+        return {}
+    try:
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        service = SessionBindingService()
+        unique_session_ids = list(dict.fromkeys(session_ids))
+        channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+        for start in range(0, len(unique_session_ids), _CHANNEL_BINDING_QUERY_BATCH_SIZE):
+            batch = unique_session_ids[start:start + _CHANNEL_BINDING_QUERY_BATCH_SIZE]
+            for binding in await service.list_bindings(session_ids=batch):
+                if binding.session_id in channel_bindings:
+                    continue
+                try:
+                    chat_type = ChatType(binding.chat_type)
+                except (TypeError, ValueError):
+                    log.warn("session.list.unknown_channel_chat_type", {
+                        "session_id": binding.session_id,
+                        "chat_type": str(binding.chat_type),
+                    })
+                    continue
+                channel_bindings[binding.session_id] = _ChannelSessionBinding(
+                    channel_id=binding.channel_id,
+                    chat_id=binding.chat_id,
+                    chat_type=chat_type,
+                )
+        return channel_bindings
+    except Exception as exc:
+        log.warn("session.list.channel_bindings_error", {"error": str(exc)})
+        return {}
+
+
+def _has_legacy_channel_title(
+    session: SessionModel,
+    binding: _ChannelSessionBinding,
+) -> bool:
+    """Return whether a stored title matches a legacy channel fallback."""
+    prefix = f"[{binding.channel_id.capitalize()}]"
+    if binding.chat_type == ChatType.DIRECT:
+        direct_prefix = f"{prefix} DM — "
+        title = session.title.strip()
+        return (
+            title.casefold().startswith(direct_prefix.casefold())
+            and bool(title[len(direct_prefix):].strip())
+        )
+    else:
+        expected = f"{prefix} {binding.chat_id}"
+    return session.title.strip().casefold() == expected.casefold()
+
+
+async def _first_user_channel_title(session_id: str) -> Optional[str]:
+    """Read the first valid user-authored text stored for a channel session."""
+    from flocks.channel.inbound.session_binding import extract_channel_title_text
+    from flocks.session.message import Message
+
+    messages = await Message.list(session_id, include_archived=True)
+    for message in messages:
+        if message.role != "user":
+            continue
+        with_parts = await Message.get_with_parts_lazy(session_id, message.id)
+        if not with_parts:
+            continue
+        raw_text = "\n".join(
+            part.text
+            for part in with_parts.parts
+            if part.type == "text"
+            and not getattr(part, "synthetic", False)
+            and getattr(part, "text", "")
+        )
+        title_text = extract_channel_title_text(raw_text)
+        if title_text:
+            return title_text
+    return None
+
+
+async def _legacy_channel_title_overrides(
+    sessions: List[SessionModel],
+    channel_bindings: Dict[str, _ChannelSessionBinding],
+) -> Dict[str, str]:
+    """Derive display titles for legacy fallback names without mutating storage."""
+    from flocks.channel.inbound.session_binding import format_channel_title
+
+    candidates = []
+    for session in sessions:
+        binding = channel_bindings.get(session.id)
+        if binding and _has_legacy_channel_title(session, binding):
+            candidates.append(session)
+
+    async def resolve(session: SessionModel) -> tuple[str, Optional[str]]:
+        try:
+            title_text = await _first_user_channel_title(session.id)
+            binding = channel_bindings[session.id]
+            title = (
+                format_channel_title(binding.channel_id, title_text)
+                if title_text
+                else None
+            )
+            return session.id, title
+        except Exception as exc:
+            log.warn("session.list.channel_title_override_error", {
+                "session_id": session.id,
+                "error": str(exc),
+            })
+            return session.id, None
+
+    resolved = await asyncio.gather(*(resolve(session) for session in candidates))
+    return {session_id: title for session_id, title in resolved if title is not None}
 
 
 async def _session_to_response_with_goal(
@@ -661,13 +790,12 @@ async def list_sessions(
     visible_project_ids = Project.visible_project_ids(current_user.id)
     shared_project_ids = Project.shared_project_ids()
     
-    filtered = []
-    effective_project_ids: Dict[str, str] = {}
-    term = search.lower() if search else None
+    eligible = []
+    eligible_project_ids: Dict[str, str] = {}
+    term = search.casefold() if search else None
     manager_categories = {"user", "workflow", "entity-config"}
     project_names = Project.registered_project_names() if view == "list" else {}
-    skip_remaining = offset or 0
-    
+
     for session in all_sessions:
         if session.status == "archived":
             if current_user.role != "admin" and not SessionPolicy.is_owner(session, current_user):
@@ -700,8 +828,6 @@ async def list_sessions(
             continue
         if start is not None and session.time.updated < start:
             continue
-        if term is not None and term not in session.title.lower():
-            continue
         if manager:
             if session.category not in manager_categories:
                 continue
@@ -712,23 +838,51 @@ async def list_sessions(
             # exclude test sessions from the default listing
             continue
 
+        eligible.append(session)
+        eligible_project_ids[session.id] = effective_project_id
+
+    channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+    channel_title_overrides: Dict[str, str] = {}
+    if view == "list" and term is not None:
+        # Search the same derived title that the lightweight list displays.
+        channel_bindings = await _latest_channel_bindings([session.id for session in eligible])
+        channel_title_overrides = await _legacy_channel_title_overrides(
+            eligible,
+            channel_bindings,
+        )
+
+    filtered = []
+    effective_project_ids: Dict[str, str] = {}
+    skip_remaining = offset or 0
+    for session in eligible:
+        searchable_title = channel_title_overrides.get(session.id, session.title)
+        if term is not None and term not in searchable_title.casefold():
+            continue
         if skip_remaining > 0:
             skip_remaining -= 1
             continue
-        
+
         filtered.append(session)
-        effective_project_ids[session.id] = effective_project_id
-        
+        effective_project_ids[session.id] = eligible_project_ids[session.id]
+
         if limit is not None and len(filtered) >= limit:
             break
 
     if view == "list":
+        if term is None:
+            channel_bindings = await _latest_channel_bindings([session.id for session in filtered])
+            channel_title_overrides = await _legacy_channel_title_overrides(
+                filtered,
+                channel_bindings,
+            )
         response = [
             _session_to_list_item(
                 s,
-                effective_project_ids[s.id],
-                shared_project_ids,
-                project_names.get(s.project_id),
+                effective_project_id=effective_project_ids[s.id],
+                shared_project_ids=shared_project_ids,
+                project_name=project_names.get(s.project_id),
+                channel_binding=channel_bindings.get(s.id),
+                title_override=channel_title_overrides.get(s.id),
             )
             for s in filtered
         ]
@@ -2048,6 +2202,7 @@ class MessagePartInfo(BaseModel):
     sessionID: str
     type: str
     text: Optional[str] = None
+    time: Optional[Dict[str, Any]] = None
     synthetic: Optional[bool] = None
     tool: Optional[str] = None
     state: Optional[Dict[str, Any]] = None
@@ -2093,6 +2248,14 @@ def _part_to_response_info(
 ) -> MessagePartInfo:
     text_value = getattr(part, "text", None) if part.type in ("text", "reasoning", "thinking") else None
 
+    raw_time = getattr(part, "time", None)
+    if hasattr(raw_time, "model_dump"):
+        time_value = raw_time.model_dump()
+    elif isinstance(raw_time, dict):
+        time_value = raw_time
+    else:
+        time_value = None
+
     url_value = getattr(part, "url", None) if part.type == "file" else None
 
     state_value = None
@@ -2110,6 +2273,7 @@ def _part_to_response_info(
         sessionID=session_id,
         type=part.type,
         text=text_value,
+        time=time_value,
         synthetic=getattr(part, "synthetic", None),
         tool=getattr(part, "tool", None) if part.type == "tool" else None,
         state=state_value,
@@ -4181,6 +4345,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         model_info: Optional[Dict[str, str]] = None,
         *,
         agent_override: Optional[str] = None,
+        ignored: Optional[bool] = None,
     ) -> str:
         now_ms = int(_time.time() * 1000)
         user_msg_id = event.message_id or Identifier.create("message")
@@ -4197,6 +4362,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 agent=message_agent,
                 executionMode=event.execution_mode,
                 **({"model": model_info} if model_info else {}),
+                ignored=ignored,
                 part_id=user_part_id,
             ),
             expected_generation=lifecycle_generation,
@@ -4219,6 +4385,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "sessionID": sessionID,
                 "type": "text",
                 "text": user_text,
+                **({"ignored": ignored} if ignored is not None else {}),
                 "time": {"start": now_ms},
             }
         })
@@ -4226,7 +4393,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
 
     async def _publish_direct_response(output_event, text: str) -> None:
         user_text = output_event.user_visible_text
-        parent_msg_id = await _create_user_message(user_text)
+        parent_msg_id = await _create_user_message(user_text, ignored=True)
         asst_now = int(_time.time() * 1000)
         asst_msg_id = Identifier.ascending("message")
         asst_part_id = Identifier.ascending("part")
@@ -4243,6 +4410,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 providerID="builtin",
                 agent=agent_name,
                 finish="stop",
+                ignored=True,
                 part_id=asst_part_id,
             ),
             expected_generation=lifecycle_generation,
@@ -4274,6 +4442,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "sessionID": sessionID,
                 "type": "text",
                 "text": text,
+                "ignored": True,
                 "time": {"start": asst_now, "end": asst_now},
             }
         })
@@ -4281,8 +4450,6 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             publish_event,
             sessionID,
             session=session,
-            provider_id="builtin",
-            model_id="command",
         )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:

@@ -17,6 +17,8 @@ covered by a separate route-level test that exercises the bind failure path.
 from __future__ import annotations
 
 import asyncio
+import threading
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -128,6 +130,31 @@ async def test_bounded_queue_drops_excess_on_full() -> None:
     assert queue.qsize() == 4
 
 
+def test_trigger_concurrency_config_is_honored_with_safety_caps() -> None:
+    trigger = TriggerDefinition.model_validate(
+        {
+            "id": "syslog-limited",
+            "type": "syslog",
+            "concurrency": {"maxParallel": 3, "queueSize": 25},
+        }
+    )
+    assert syslog_manager._worker_count_for_trigger(trigger) == 3
+    assert syslog_manager._queue_size_for_trigger(trigger) == 25
+
+    oversized = TriggerDefinition.model_validate(
+        {
+            "id": "syslog-capped",
+            "type": "syslog",
+            "concurrency": {"maxParallel": 999, "queueSize": 999_999},
+        }
+    )
+    assert (
+        syslog_manager._worker_count_for_trigger(oversized)
+        == syslog_manager._MAX_CONCURRENT_EXECUTIONS
+    )
+    assert syslog_manager._queue_size_for_trigger(oversized) == syslog_manager._MAX_QUEUE_SIZE
+
+
 @pytest.mark.asyncio
 async def test_stop_workflow_cancels_worker_pool() -> None:
     """``stop_workflow`` must cancel and drain the worker pool cleanly.
@@ -172,6 +199,149 @@ async def test_stop_workflow_cancels_worker_pool() -> None:
     assert workflow_id not in manager._worker_pools
     assert workflow_id not in manager._queues
     assert manager._listener_status[workflow_id]["state"] == "stopped"
+
+
+@pytest.mark.asyncio
+async def test_stop_workflow_signals_running_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = syslog_manager.SyslogManager()
+    workflow_id = "test-wf-running-stop"
+    queue: asyncio.Queue = asyncio.Queue(maxsize=2)
+    abort = asyncio.Event()
+    started = threading.Event()
+    stopped = threading.Event()
+    trigger = TriggerDefinition.model_validate(
+        {"id": "syslog-default", "type": "syslog", "mapping": {"message": "$.body"}}
+    )
+
+    async def _fake_create_execution_record(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return {"id": "exec-running-stop"}
+
+    async def _fake_record_execution_result(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    def _fake_run_workflow(**kwargs):  # noqa: ANN003
+        started.set()
+        while not kwargs["cancel"]():
+            time.sleep(0.01)
+        stopped.set()
+        return SimpleNamespace(
+            status="CANCELLED",
+            error=None,
+            outputs={},
+            history=[],
+            last_node_id=None,
+            steps=0,
+        )
+
+    monkeypatch.setattr(syslog_manager, "create_execution_record", _fake_create_execution_record)
+    monkeypatch.setattr(syslog_manager, "record_execution_result", _fake_record_execution_result)
+    monkeypatch.setattr(syslog_manager, "run_workflow", _fake_run_workflow)
+
+    manager._queues[workflow_id] = queue
+    manager._abort_events[workflow_id] = abort
+    generation_cancel_event = threading.Event()
+    manager._generation_cancel_events[workflow_id] = generation_cancel_event
+    queue.put_nowait({"message": "demo"})
+    worker = asyncio.create_task(
+        manager._worker_loop(
+            workflow_id,
+            {},
+            trigger,
+            queue,
+            abort,
+            generation_cancel_event,
+        ),
+        name="running-stop-worker",
+    )
+    manager._worker_pools[workflow_id] = [worker]
+
+    assert await asyncio.wait_for(asyncio.to_thread(started.wait, 1.0), timeout=2.0)
+    await manager.stop_workflow(workflow_id)
+
+    assert stopped.is_set()
+    assert worker.done()
+    assert workflow_id not in manager._generation_cancel_events
+
+
+@pytest.mark.asyncio
+async def test_stop_cancels_run_that_is_still_creating_execution_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    manager = syslog_manager.SyslogManager()
+    workflow_id = "test-wf-late-run-registration"
+    queue: asyncio.Queue = asyncio.Queue(maxsize=1)
+    abort = asyncio.Event()
+    generation_cancel_event = threading.Event()
+    create_started = asyncio.Event()
+    allow_create = asyncio.Event()
+    cancel_state_seen: list[bool] = []
+    trigger = TriggerDefinition.model_validate(
+        {"id": "syslog-default", "type": "syslog", "mapping": {"message": "$.body"}}
+    )
+
+    async def _slow_create(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        create_started.set()
+        await allow_create.wait()
+        return {"id": "exec-late-run"}
+
+    async def _record(*args, **kwargs):  # noqa: ANN001, ANN002, ANN003
+        return None
+
+    def _run_workflow(**kwargs):  # noqa: ANN003
+        cancel_state_seen.append(kwargs["cancel"]())
+        return SimpleNamespace(
+            status="CANCELLED",
+            error=None,
+            outputs={},
+            history=[],
+            last_node_id=None,
+            steps=0,
+        )
+
+    monkeypatch.setattr(syslog_manager, "create_execution_record", _slow_create)
+    monkeypatch.setattr(syslog_manager, "record_execution_result", _record)
+    monkeypatch.setattr(syslog_manager, "run_workflow", _run_workflow)
+    manager._queues[workflow_id] = queue
+    manager._abort_events[workflow_id] = abort
+    manager._generation_cancel_events[workflow_id] = generation_cancel_event
+    queue.put_nowait({"message": "demo"})
+    worker = asyncio.create_task(
+        manager._worker_loop(
+            workflow_id,
+            {},
+            trigger,
+            queue,
+            abort,
+            generation_cancel_event,
+        )
+    )
+    manager._worker_pools[workflow_id] = [worker]
+
+    await create_started.wait()
+    stop_task = asyncio.create_task(manager.stop_workflow(workflow_id))
+    await asyncio.sleep(0)
+    allow_create.set()
+    await stop_task
+
+    assert cancel_state_seen == [True]
+    assert worker.done()
+
+
+@pytest.mark.asyncio
+async def test_restart_refuses_to_overlap_draining_generation() -> None:
+    manager = syslog_manager.SyslogManager()
+    workflow_id = "test-wf-draining-restart"
+    release = asyncio.Event()
+    draining = asyncio.create_task(release.wait())
+    manager._draining_workers[workflow_id] = {draining}
+    try:
+        status = await manager.restart_workflow(workflow_id)
+        assert status == {"state": "failed", "error": "previous_workers_still_draining"}
+    finally:
+        release.set()
+        await draining
 
 
 @pytest.mark.asyncio
@@ -252,6 +422,8 @@ async def test_trigger_workflow_applies_mapping_and_filter(
     assert captured_run_kwargs["run_id"] == "exec-syslog"
     assert captured_run_kwargs["execution_profile"] == "high_frequency"
     assert captured_run_kwargs["tool_context"] is trigger_tool_context.context
+    assert callable(captured_run_kwargs["cancel"])
+    assert captured_run_kwargs["cancel"]() is False
     assert callable(captured_run_kwargs["on_step_complete"])
     trigger_tool_context.builder.assert_awaited_once_with(
         workflow_id="wf-syslog",

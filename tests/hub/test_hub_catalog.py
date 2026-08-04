@@ -296,17 +296,17 @@ def test_catalog_uses_webui_workspace_version_for_inferred_installs(
 
     entry = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
-    assert entry.version == "1.1.4"
+    assert entry.version == "1.1.5"
     assert entry.state == "updateAvailable"
     assert entry.installedVersion == "1.0.0"
 
-    workspace["version"] = "1.1.4"
+    workspace["version"] = "1.1.5"
     workspace_path.write_text(json.dumps(workspace), encoding="utf-8")
 
     refreshed = {item.id: item for item in list_catalog(plugin_type="webui")}["soc_ui"]
 
     assert refreshed.state == "installed"
-    assert refreshed.installedVersion == "1.1.4"
+    assert refreshed.installedVersion == "1.1.5"
 
 
 def test_pentest_agents_are_listed_in_agent_catalog():
@@ -520,7 +520,11 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
         "threat_level": "high",
         "threat_phase": "exploit",
         "threat_type": "exploit",
-        "threat_result": "failed",
+        "threat_result": "success",
+        "attack_verdict": "attack_success",
+        "attack_success": True,
+        "triage_attack_verdict": "attack_failed",
+        "triage_attack_success": False,
         "_source_type": "tdp",
         "is_duplicate": False,
     }
@@ -587,6 +591,11 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     assert response.body["summary"]["totalRaw"] == 1
     assert response.body["summary"]["attackFailed"] == 1
     assert response.body["incidents"][0]["id"] == "alert-1"
+    assert response.body["incidents"][0]["triageAttackVerdict"] == "attack"
+    assert response.body["incidents"][0]["triageAttackSuccess"] == "failed"
+    assert response.body["incidents"][0]["conclusion"]["verdict"] == "attack"
+    assert response.body["incidents"][0]["tableCells"]["threat_result"]["value"] == "success"
+    assert response.body["incidents"][0]["tableCells"]["attack_success"]["value"] == "true"
     assert response.body["incidents"][0]["tableCells"]["_source_type"]["value"] == "tdp"
     assert response.body["incidents"][0]["tableCells"]["threat_severity"]["value"] == "critical"
     assert response.body["incidents"][0]["tableCells"]["threat_level"]["value"] == "high"
@@ -610,6 +619,25 @@ async def test_hub_installed_soc_webui_serves_alert_access_operation(
     assert filtered.status_code == 200
     assert filtered.body["summary"]["representativeCount"] == 1
     assert [incident["id"] for incident in filtered.body["incidents"]] == ["alert-1"]
+
+    filtered_by_model_result = runtime.execute(
+        page_id="soc-alerts",
+        contract_id="soc.alerts.operations",
+        operation_name="list",
+        payload={
+            "params": {
+                "filters": {
+                    "triage_attack_verdict": ["attack"],
+                    "triage_attack_success": ["failed"],
+                },
+                "limit": 10,
+            }
+        },
+        principal=AuthUser(id="u1", username="admin", role="admin"),
+    )
+
+    assert filtered_by_model_result.status_code == 200
+    assert [incident["id"] for incident in filtered_by_model_result.body["incidents"]] == ["alert-1"]
 
     for filters in (
         {"threat_severity": ["low"]},

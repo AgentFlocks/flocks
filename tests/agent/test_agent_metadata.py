@@ -49,9 +49,28 @@ class TestAgentMetadata:
         assert is_delegatable("rex-junior") is False
 
     def test_is_delegatable_unknown_agent(self):
-        """未知 agent 应该返回 True（保守策略，允许插件 agent 委派）"""
-        assert is_delegatable("unknown-agent") is True
-        assert is_delegatable("custom-agent-123") is True
+        """Unknown agents must be rejected instead of falling back at runtime."""
+        assert is_delegatable("unknown-agent") is False
+        assert is_delegatable("custom-agent-123") is False
+
+    def test_is_delegatable_hidden_agent(self, monkeypatch):
+        """Hidden agents must not be exposed as delegation targets."""
+        from flocks.agent import registry
+        from flocks.agent.agent import AgentInfo
+
+        hidden_agent = AgentInfo(
+            name="hidden-agent",
+            mode="subagent",
+            hidden=True,
+            delegatable=True,
+        )
+        monkeypatch.setattr(registry, "_agents_ref", {"hidden-agent": hidden_agent})
+
+        assert is_delegatable("hidden-agent") is False
+
+    def test_is_delegatable_resolves_legacy_aliases(self):
+        """Known aliases should use the target agent's delegation policy."""
+        assert is_delegatable("sisyphus") is False
 
     def test_get_agent_mode(self):
         """测试获取 agent 模式"""

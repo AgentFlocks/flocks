@@ -421,7 +421,7 @@ class TestInjectDynamicPrompts:
             (helper_path.parent / "__init__.py").touch()
 
         agents = {"dyn": agent}
-        inject_dynamic_prompts(agents, [], [], [], [])
+        inject_dynamic_prompts(agents, [], [], [])
         assert agent.prompt == "injected"
 
     def test_inject_handles_import_error_gracefully(self):
@@ -429,13 +429,13 @@ class TestInjectDynamicPrompts:
         agent = AgentInfo(name="broken", mode="subagent", native=False)
         agent.prompt_builder = "nonexistent.module.path:inject"
         agents = {"broken": agent}
-        inject_dynamic_prompts(agents, [], [], [], [])  # Should not raise
+        inject_dynamic_prompts(agents, [], [], [])  # Should not raise
         assert agent.prompt is None
 
     def test_inject_skips_agents_without_builder(self):
         agent = AgentInfo(name="static", mode="subagent", native=False, prompt="static prompt")
         agents = {"static": agent}
-        inject_dynamic_prompts(agents, [], [], [], [])
+        inject_dynamic_prompts(agents, [], [], [])
         assert agent.prompt == "static prompt"
 
     @pytest.mark.asyncio
@@ -471,6 +471,9 @@ class TestInjectDynamicPrompts:
         assert jr is not None
         assert jr.prompt is not None
         assert len(jr.prompt) > 50
+        assert "Execute implementation tasks directly." in jr.prompt
+        assert "NEVER delegate or spawn other agents" not in jr.prompt
+        assert "for read-only research only" in jr.prompt
 
     @pytest.mark.asyncio
     async def test_static_prompt_agents(self):

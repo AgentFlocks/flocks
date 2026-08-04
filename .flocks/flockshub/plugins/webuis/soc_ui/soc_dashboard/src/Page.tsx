@@ -74,6 +74,7 @@ const EMPTY_STATS = {
   },
   sources: [],
   closedLoop: { autoClosed: 0, resolved: 0, manualDecision: 0, pending: 0, resolutionRate: 0 },
+  tokenUsage: { totalTokens: 0, todayTokens: 0, todayRequests: 0, dailySeries: [], dailyLabels: [], source: '' },
   verdicts: [],
   attackProfile: [],
   topThreatTypes: [],
@@ -87,7 +88,18 @@ const EVENT_RAIL_TASK_LIMIT = 10;
 const ACTIVITY_POLL_MS = 3000;
 const ACTIVITY_REPLAY_WINDOW_MS = 10 * 60 * 1000;
 const ACTIVITY_SEEN_KEY = 'soc-dashboard-seen-activity-v1';
+const EVENT_RAIL_DEFAULT_WIDTH = 330;
+const EVENT_RAIL_MIN_WIDTH = 280;
+const EVENT_RAIL_MAX_WIDTH = 560;
+const EVENT_RAIL_COMPACT_WIDTH = 292;
 const DEFAULT_TIME_RANGE = '7d';
+const DEFAULT_COMMAND_TITLE = 'Flocks AI 智能告警态势中心';
+const CUSTOM_COMMAND_TITLE_KEY = 'soc-dashboard-custom-title-v1';
+const CUSTOM_COMMAND_TITLE_CHANGED_EVENT = 'soc-dashboard:title-changed';
+const SOC_MOCK_ACTIVITY_KEY = 'soc-dashboard-mock-activity-v1';
+const SOC_MOCK_TASK_CENTER_KEY = 'soc-dashboard-mock-task-center-v1';
+const SOC_MOCK_DASHBOARD_KEY = 'soc-dashboard-mock-v1';
+const SOC_MOCK_TRUE_VALUES = ['1', 'true', 'yes', 'on'];
 const TIME_RANGE_OPTIONS = [
   { value: '15m', label: '最近15分钟' },
   { value: '2h', label: '最近2小时' },
@@ -112,6 +124,44 @@ const REFRESH_INTERVAL_MS = {
   '5m': 300000,
   '1h': 3600000,
 };
+
+function readCustomCommandTitle() {
+  if (typeof window === 'undefined') return '';
+  try {
+    return window.localStorage.getItem(CUSTOM_COMMAND_TITLE_KEY)?.trim() || '';
+  } catch {
+    return '';
+  }
+}
+
+function isMockSwitchEnabled(value) {
+  return SOC_MOCK_TRUE_VALUES.includes(String(value || '').trim().toLowerCase());
+}
+
+function readMockDashboardEnabled() {
+  if (typeof window === 'undefined') return false;
+  try {
+    const params = new URLSearchParams(window.location.search || '');
+    for (const key of ['mockActivity', 'mockTaskCenter', 'mockDashboard']) {
+      const queryValue = params.get(key);
+      if (queryValue !== null) return isMockSwitchEnabled(queryValue);
+    }
+    return [
+      SOC_MOCK_ACTIVITY_KEY,
+      SOC_MOCK_TASK_CENTER_KEY,
+      SOC_MOCK_DASHBOARD_KEY,
+    ].some((key) => isMockSwitchEnabled(window.localStorage.getItem(key)));
+  } catch {
+    return false;
+  }
+}
+
+function defaultEventRailWidth() {
+  if (typeof window === 'undefined') return EVENT_RAIL_DEFAULT_WIDTH;
+  if (window.innerWidth <= 1120) return EVENT_RAIL_MIN_WIDTH;
+  if (window.innerWidth <= 1360) return EVENT_RAIL_COMPACT_WIDTH;
+  return EVENT_RAIL_DEFAULT_WIDTH;
+}
 
 function emptyActivityBatch() {
   return {
@@ -142,6 +192,291 @@ function createActivityState() {
   };
 }
 
+function createMockActivityEvent(overrides) {
+  const now = new Date();
+  return {
+    eventId: overrides.eventId || `mock-${overrides.stage}-${overrides.alert?.id || Math.random().toString(36).slice(2)}`,
+    stage: overrides.stage,
+    status: overrides.status || 'running',
+    occurredAt: overrides.occurredAt || now.toISOString(),
+    triggerSource: overrides.triggerSource || 'mock',
+    playbackMode: overrides.playbackMode || 'normal',
+    playbackStartedAt: overrides.playbackStartedAt || Date.now() - 4200,
+    sampleCount: overrides.sampleCount || 1,
+    alert: {
+      id: overrides.alert?.id || `mock-alert-${overrides.stage}`,
+      threatName: overrides.alert?.threatName || '模拟告警',
+      sourceType: overrides.alert?.sourceType || 'mock',
+      srcIp: overrides.alert?.srcIp || '10.24.8.16',
+      dstIp: overrides.alert?.dstIp || '172.16.32.20',
+      requestUri: overrides.alert?.requestUri || '/api/admin/export',
+    },
+    result: {
+      isDuplicate: false,
+      clusterId: 'MOCK-03',
+      riskLevel: 'high',
+      verdictLabel: '待确认',
+      durationMs: 18000,
+      rawCount: 8,
+      normalizedCount: 8,
+      reducedCount: 3,
+      uniqueCount: 5,
+      filterRemovedCount: 2,
+      duplicateCount: 1,
+      reductionRate: 0.375,
+      ...(overrides.result || {}),
+    },
+    hiddenFromQueue: Boolean(overrides.hiddenFromQueue),
+  };
+}
+
+function createMockActivityState() {
+  const now = Date.now();
+  const denoiseCurrent = createMockActivityEvent({
+    stage: 'denoise',
+    eventId: 'mock-denoise-current',
+    playbackMode: 'burst',
+    playbackStartedAt: now - 3600,
+    sampleCount: 6,
+    alert: {
+      id: 'mock-alert-login-burst',
+      threatName: '异常登录爆发（Mock）',
+      sourceType: 'skyeye',
+      srcIp: '10.23.18.44',
+      dstIp: '172.16.8.21',
+      requestUri: '/login',
+    },
+    result: {
+      clusterId: 'MOCK-LOGIN-07',
+      rawCount: 18,
+      normalizedCount: 18,
+      reducedCount: 11,
+      uniqueCount: 7,
+      duplicateCount: 7,
+      filterRemovedCount: 0,
+      reductionRate: 0.6111,
+    },
+  });
+  const triageCurrent = createMockActivityEvent({
+    stage: 'triage',
+    eventId: 'mock-triage-current',
+    playbackStartedAt: now - 6200,
+    alert: {
+      id: 'mock-alert-rce',
+      threatName: '远程命令执行攻击（Mock）',
+      sourceType: 'tdp',
+      srcIp: '203.0.113.41',
+      dstIp: '10.12.4.18',
+      requestUri: '/cgi-bin/luci/;stok=/locale',
+    },
+    result: {
+      riskLevel: 'high',
+      verdictLabel: '待确认',
+      triageSource: 'llm',
+      durationMs: 22000,
+      threatSeverity: 'high',
+    },
+  });
+  const triageWaiting = createMockActivityEvent({
+    stage: 'triage',
+    status: 'queued',
+    eventId: 'mock-triage-waiting',
+    occurredAt: new Date(now - 18000).toISOString(),
+    playbackStartedAt: now - 18000,
+    alert: {
+      id: 'mock-alert-sql',
+      threatName: 'SQL 注入探测（Mock）',
+      sourceType: 'onesec',
+      srcIp: '198.51.100.12',
+      dstIp: '10.12.4.32',
+      requestUri: '/search?q=1%27',
+    },
+    result: {
+      riskLevel: 'medium',
+      verdictLabel: '待确认',
+      durationMs: 0,
+    },
+  });
+  const denoiseWaiting = createMockActivityEvent({
+    stage: 'denoise',
+    status: 'queued',
+    eventId: 'mock-denoise-waiting',
+    occurredAt: new Date(now - 26000).toISOString(),
+    playbackStartedAt: now - 26000,
+    sampleCount: 4,
+    alert: {
+      id: 'mock-alert-scan',
+      threatName: '端口扫描聚类（Mock）',
+      sourceType: 'qingteng',
+      srcIp: '192.0.2.88',
+      dstIp: '10.12.5.10',
+      requestUri: 'TCP/22,80,443',
+    },
+    result: {
+      clusterId: 'MOCK-SCAN-02',
+      rawCount: 12,
+      normalizedCount: 12,
+      reducedCount: 8,
+      uniqueCount: 4,
+      reductionRate: 0.6667,
+    },
+  });
+  return {
+    ...createActivityState(),
+    connection: 'online',
+    mode: 'burst',
+    denoise: { current: denoiseCurrent, queue: [denoiseWaiting], last: null },
+    triage: { current: triageCurrent, queue: [triageWaiting], last: null },
+    recent: [denoiseCurrent, triageCurrent, triageWaiting, denoiseWaiting],
+    batch: {
+      mode: 'burst',
+      windowMs: ACTIVITY_POLL_MS,
+      receivedCount: 22,
+      duplicateCount: 8,
+      uniqueCount: 14,
+      clusterCount: 5,
+      triageUpdatedCount: 3,
+      sampledCount: 10,
+      suppressedCount: 2,
+      ratePerSecond: 7.3,
+    },
+    batchUpdatedAt: now,
+    generatedAt: new Date(now).toISOString(),
+    mock: true,
+  };
+}
+
+function activityHasVisibleEvents(activity) {
+  return Boolean(
+    activity?.denoise?.current
+    || activity?.denoise?.last
+    || activity?.denoise?.queue?.length
+    || activity?.triage?.current
+    || activity?.triage?.last
+    || activity?.triage?.queue?.length
+    || activity?.recent?.length
+  );
+}
+
+function createTaskCenterState() {
+  return {
+    connection: 'initializing',
+    generatedAt: '',
+    sessionCount: 0,
+    scheduledExecutionCount: 0,
+    scheduledTodayExecutionCount: 0,
+    workflowExecutionCount: 0,
+    workflowTodayExecutionCount: 0,
+    scheduledTasks: [],
+    workflows: [],
+    error: '',
+  };
+}
+
+function createMockTaskCenterState() {
+  const now = Date.now();
+  const startedAt = now - 7 * 60 * 1000;
+  const nextRunAt = new Date(now + 18 * 60 * 1000).toISOString();
+  const lastRunAt = new Date(now - 11 * 60 * 1000).toISOString();
+  return {
+    ...createTaskCenterState(),
+    connection: 'online',
+    generatedAt: new Date(now).toISOString(),
+    sessionCount: 6,
+    scheduledExecutionCount: 18,
+    scheduledTodayExecutionCount: 5,
+    workflowExecutionCount: 42,
+    workflowTodayExecutionCount: 9,
+    scheduledTasks: [
+      {
+        id: 'mock-soc-scheduler-patrol',
+        name: 'SOC 告警自动巡检（Mock）',
+        mode: 'cron',
+        status: 'active',
+        executionMode: 'workflow',
+        workflowId: 'stream_alert_denoise',
+        executionCount: 12,
+        todayExecutionCount: 4,
+        successCount: 10,
+        successRate: 0.8333,
+        activeCount: 1,
+        lastStatus: 'running',
+        lastRunAt,
+        nextRunAt,
+        cron: '*/15 * * * *',
+        cronDescription: '每 15 分钟',
+      },
+      {
+        id: 'mock-soc-scheduler-triage',
+        name: '高危告警智能研判（Mock）',
+        mode: 'cron',
+        status: 'active',
+        executionMode: 'workflow',
+        workflowId: 'stream_alert_triage',
+        executionCount: 6,
+        todayExecutionCount: 1,
+        successCount: 5,
+        successRate: 0.8333,
+        activeCount: 0,
+        lastStatus: 'completed',
+        lastRunAt: new Date(now - 42 * 60 * 1000).toISOString(),
+        nextRunAt: new Date(now + 36 * 60 * 1000).toISOString(),
+        cron: '*/30 * * * *',
+        cronDescription: '每 30 分钟',
+      },
+    ],
+    workflows: [
+      {
+        id: 'stream_alert_denoise',
+        name: '告警降噪工作流（Mock）',
+        executionCount: 24,
+        todayExecutionCount: 6,
+        successCount: 21,
+        successRate: 0.875,
+        activeCount: 1,
+        lastStatus: 'running',
+        lastRunAt: startedAt,
+        latestExecutionHash: 'mock-denoise-run-001',
+        latestAlertName: '异常登录爆发（Mock）',
+        progressPercent: 0.58,
+        progressLabel: '第 4/7 步',
+        currentPhase: '聚类降噪',
+        sessionId: '',
+        messageId: '',
+      },
+      {
+        id: 'stream_alert_triage',
+        name: '告警研判工作流（Mock）',
+        executionCount: 18,
+        todayExecutionCount: 3,
+        successCount: 15,
+        successRate: 0.8333,
+        activeCount: 1,
+        lastStatus: 'running',
+        lastRunAt: now - 4 * 60 * 1000,
+        latestExecutionHash: 'mock-triage-run-002',
+        latestAlertName: '远程命令执行攻击（Mock）',
+        progressPercent: 0.67,
+        progressLabel: '第 2/3 步',
+        currentPhase: '证据汇总',
+        sessionId: '',
+        messageId: '',
+      },
+    ],
+    mock: true,
+  };
+}
+
+function taskCenterHasVisibleRows(taskCenter) {
+  return Boolean(
+    taskCenter?.scheduledTasks?.length
+    || taskCenter?.workflows?.length
+    || taskCenter?.sessionCount
+    || taskCenter?.scheduledExecutionCount
+    || taskCenter?.workflowExecutionCount
+  );
+}
+
 function activityDuration(event) {
   if (!event) return 0;
   if (event.stage === 'denoise') {
@@ -152,6 +487,11 @@ function activityDuration(event) {
   if (event.status === 'failed') return 6000;
   if (['cache', 'cached', 'follower', 'follower_reused'].includes(event.result?.triageSource)) return 8000;
   return 30000;
+}
+
+function isRunningWorkflowEvent(event) {
+  return event?.triggerSource === 'workflow_execution'
+    && ['running', 'queued', 'pending'].includes(String(event?.status || '').toLowerCase());
 }
 
 function normalizeActivityBatch(raw) {
@@ -205,8 +545,17 @@ function enqueueActivity(previous, events, generatedAt, recentEvents, rawBatch) 
       ? { ...event, playbackMode: batch.mode, batch }
       : event;
     const lane = next[enriched.stage];
-    const known = [lane.current, lane.last, ...lane.queue].some((item) => item?.eventId === enriched.eventId);
-    if (!known) lane.queue.push(enriched);
+    if (lane.current?.eventId === enriched.eventId) {
+      lane.current = { ...lane.current, ...enriched, playbackStartedAt: lane.current.playbackStartedAt };
+      continue;
+    }
+    const queuedIndex = lane.queue.findIndex((item) => item?.eventId === enriched.eventId);
+    if (queuedIndex >= 0) {
+      lane.queue[queuedIndex] = { ...lane.queue[queuedIndex], ...enriched };
+      continue;
+    }
+    const knownLast = lane.last?.eventId === enriched.eventId;
+    if (!knownLast || isRunningWorkflowEvent(enriched)) lane.queue.push(enriched);
   }
   for (const kind of ['denoise', 'triage']) {
     const lane = next[kind];
@@ -365,6 +714,7 @@ function mergeStats(raw) {
     triage: { ...EMPTY_STATS.triage, ...((raw || {}).triage || {}) },
     pipeline: { ...EMPTY_STATS.pipeline, ...((raw || {}).pipeline || {}) },
     closedLoop: { ...EMPTY_STATS.closedLoop, ...((raw || {}).closedLoop || {}) },
+    tokenUsage: { ...EMPTY_STATS.tokenUsage, ...((raw || {}).tokenUsage || {}) },
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
     timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
@@ -416,6 +766,12 @@ function compactNumber(value) {
   if (Math.abs(n) >= 100000000) return `${trim(n / 100000000)}亿`;
   if (Math.abs(n) >= 10000) return `${trim(n / 10000)}万`;
   return fullNumber(n);
+}
+
+function formatTokenVolume(value) {
+  const n = Math.max(Number(value || 0), 0);
+  if (n >= 1000000000) return `${(n / 1000000000).toFixed(2)}B`;
+  return `${(n / 1000000).toFixed(2)}M`;
 }
 
 function AnimatedNumber({ value, format, tag = 'span', className, duration = 900 }) {
@@ -913,6 +1269,22 @@ function Sparkline({ values, color }) {
   ]);
 }
 
+function TokenSparkline({ values, color }) {
+  const nums = (values || []).map((v) => Math.max(Number(v || 0), 0));
+  const series = nums.length > 1 ? nums : [0, nums[0] || 0];
+  const max = Math.max(...series, 1);
+  const min = Math.min(...series);
+  const span = Math.max(max - min, 1);
+  const points = series.map((value, index) => {
+    const x = series.length === 1 ? 0 : (index / (series.length - 1)) * 300;
+    const y = 80 - ((value - min) / span) * 52;
+    return `${x},${y}`;
+  }).join(' ');
+  return h('svg', { className: 'token-chart', viewBox: '0 0 300 92', role: 'img' }, [
+    h('polyline', { key: 'line', className: 'token-chart-line', points, fill: 'none', stroke: color || '#ff674d', strokeWidth: 4, strokeLinecap: 'round', strokeLinejoin: 'round' }),
+  ]);
+}
+
 function polarPoint(cx, cy, radius, angle) {
   const radians = (angle - 90) * Math.PI / 180;
   return {
@@ -1240,7 +1612,7 @@ function TimeRefreshPopover({ value, refreshValue, open, onToggle, onApply, onCl
   ]);
 }
 
-function CommandHeader({ timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
+function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }) {
   const active = activity.denoise.current || activity.triage.current;
   const loadActive = activity.mode !== 'normal' && activity.batch?.receivedCount > 0;
   const status = activity.connection === 'error'
@@ -1252,7 +1624,7 @@ function CommandHeader({ timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, 
     h('div', { className: 'command-brand', key: 'brand' }, [
       h('div', { className: 'command-logo', key: 'logo' }, 'AI'),
       h('div', { key: 'copy' }, [
-        h('strong', { key: 'title' }, 'Flocks AI 智能告警态势中心'),
+        h('strong', { key: 'title', title }, title),
         h('span', { key: 'sub' }, '告警汇聚 · 智能降噪 · 自动研判 · 风险聚合'),
       ]),
     ]),
@@ -1417,15 +1789,15 @@ function CommandGraph({ stats, activity }) {
           h('em', { key: 'text' }, triageActive ? '处理中' : '安全事件'),
         ]),
       ]),
-      h('div', { title: 'AI 研判结论为良性的事件数量', key: 'benign' }, [
+      h('div', { title: 'AI 研判结论为非攻击或良性的事件数量', key: 'benign' }, [
         h(AnimatedNumber, { tag: 'b', value: stats.triage.benign, key: 'value' }),
         h('span', { className: 'outcome-label', key: 'label' }, [
           h('i', { key: 'ai' }, 'AI判定'),
           h('em', { key: 'text' }, '非安全事件'),
         ]),
       ]),
-      h('div', { title: 'AI 判定需要进入人工复核的事件数量', key: 'manual' }, [
-        h(AnimatedNumber, { tag: 'b', value: stats.closedLoop.pending, key: 'value' }),
+      h('div', { title: 'AI 研判结论为未知、需要进入人工复核的事件数量', key: 'manual' }, [
+        h(AnimatedNumber, { tag: 'b', value: stats.triage.unknown, key: 'value' }),
         h('span', { className: 'outcome-label', key: 'label' }, [
           h('i', { key: 'ai' }, 'AI判定'),
           h('em', { key: 'text' }, '待人工复核'),
@@ -1455,12 +1827,34 @@ function CommandMetric({ label, value, format, sub, values, color }) {
   ]);
 }
 
+function TokenUsageMetric({ tokenUsage }) {
+  return h('div', { className: 'command-metric token-usage-metric', style: { '--metric-color': '#ff674d' } }, [
+    h('span', { className: 'token-title', key: 'label' }, 'Token 消耗'),
+    h('div', { className: 'token-summary-row', key: 'summary' }, [
+      h(AnimatedNumber, {
+        tag: 'b',
+        className: 'token-value',
+        value: tokenUsage.todayTokens,
+        format: formatTokenVolume,
+        duration: 1200,
+        key: 'value',
+      }),
+      h('small', { className: 'token-sub', key: 'sub' }, [
+        h('span', { className: 'token-sub-line', key: 'total' }, `累计 ${formatTokenVolume(tokenUsage.totalTokens)}`),
+        h('span', { className: 'token-sub-line', key: 'today' }, `今日调用 ${compactNumber(tokenUsage.todayRequests)} 次`),
+      ]),
+    ]),
+    h(TokenSparkline, { values: tokenUsage.dailySeries, color: '#ff674d', key: 'chart' }),
+  ]);
+}
+
 function CommandMetrics({ stats }) {
+  const tokenUsage = stats.tokenUsage || EMPTY_STATS.tokenUsage;
   return h('section', { className: 'command-metrics' }, [
     h(CommandMetric, { label: '原始告警量', value: stats.denoise.totalRaw, sub: `${compactNumber(stats.denoise.totalUnique)} 条进入研判`, values: stats.timeline.denoiseRaw, color: '#2e72ff', key: 'raw' }),
     h(CommandMetric, { label: '安全事件量', value: stats.triage.attackTotal, sub: `${compactNumber(stats.triage.attackSuccess)} 条攻击成功`, values: stats.timeline.triageAttack, color: '#23ca8e', key: 'events' }),
     h(CommandMetric, { label: '降噪率', value: stats.denoise.duplicateRate * 100, format: (value) => `${trim(value)}%`, sub: `${compactNumber(stats.denoise.duplicates)} 条告警已过滤/收敛`, values: stats.timeline.denoiseUnique, color: '#21d8a3', key: 'rate' }),
-    h(CommandMetric, { label: '平均研判时间', value: stats.triage.avgTriageMs, format: (value) => formatDurationMs(value), sub: `${compactNumber(stats.triage.totalRecords)} 条已完成研判`, values: stats.timeline.triageTotal, color: '#ff674d', key: 'mtta' }),
+    h(TokenUsageMetric, { tokenUsage, key: 'tokens' }),
   ]);
 }
 
@@ -1657,7 +2051,253 @@ function EventQueueProgress({ event }) {
   ]);
 }
 
-function CommandEventRail({ activity, timeFilter, collapsed, onToggle }) {
+function taskCenterPercent(value) {
+  return `${Math.round(Math.max(Math.min(Number(value || 0), 1), 0) * 100)}%`;
+}
+
+function taskCenterTimeLabel(value) {
+  if (!value) return '暂无记录';
+  const raw = Number(value);
+  const date = Number.isFinite(raw) && raw > 0 ? new Date(raw) : new Date(value);
+  if (Number.isNaN(date.getTime())) return '暂无记录';
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function taskCenterStatusLabel(status) {
+  const value = String(status || '').toLowerCase();
+  if (['running', 'queued', 'pending'].includes(value)) return '执行中';
+  if (['completed', 'success'].includes(value)) return '成功';
+  if (['failed', 'error', 'timeout'].includes(value)) return '失败';
+  if (['disabled', 'stopped'].includes(value)) return '已关闭';
+  if (value === 'stale') return '已停止';
+  if (value === 'cancelled') return '取消';
+  return '待执行';
+}
+
+function taskCenterHashLabel(value) {
+  const text = String(value || '').trim();
+  if (!text) return '--';
+  if (text.length <= 12) return text;
+  return `${text.slice(0, 6)}...${text.slice(-4)}`;
+}
+
+function taskCenterHashValue(value) {
+  const text = String(value || '').trim();
+  return text || '--';
+}
+
+function taskCenterWorkflowName(item) {
+  const name = String(item?.name || item?.id || '').trim();
+  const id = String(item?.id || '').trim();
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(name)) {
+    return `动态工作流 ${taskCenterHashLabel(name)}`;
+  }
+  return name || id || '未命名工作流';
+}
+
+function taskCenterProgressValue(item) {
+  return Math.max(Math.min(Number(item?.progressPercent || 0), 1), 0);
+}
+
+function taskCenterProgressLabel(item) {
+  return String(item?.progressLabel || '').trim() || '待执行';
+}
+
+function openTaskCenterConversation(item) {
+  const sessionId = String(item?.sessionId || item?.sessionID || '').trim();
+  if (!sessionId || typeof window === 'undefined') return false;
+  const messageId = String(item?.messageId || item?.messageID || '').trim();
+  const params = new URLSearchParams({ session: sessionId });
+  if (messageId) params.set('focusMessage', messageId);
+  window.location.href = `/sessions?${params.toString()}`;
+  return true;
+}
+
+function openConversationFromEvent(event) {
+  const sessionId = String(event?.sessionId || event?.sessionID || '').trim();
+  if (!sessionId || typeof window === 'undefined') return false;
+  const messageId = String(event?.messageId || event?.messageID || '').trim();
+  const params = new URLSearchParams({ session: sessionId });
+  if (messageId) params.set('focusMessage', messageId);
+  window.location.href = `/sessions?${params.toString()}`;
+  return true;
+}
+
+function TaskCenterSummary({ taskCenter }) {
+  const scheduledTasks = taskCenter.scheduledTasks || [];
+  const workflows = taskCenter.workflows || [];
+  const activeCount = [
+    ...scheduledTasks,
+    ...workflows,
+  ].filter((item) => Number(item.activeCount || 0) > 0).length;
+  const summaryMetric = (key, label, value, sub, className = '') => h('div', { className, key }, [
+    h('span', { key: 'label' }, label),
+    h(AnimatedNumber, { tag: 'b', value: value || 0, duration: 800, key: 'value' }),
+    sub ? h('small', { key: 'sub' }, sub) : null,
+  ]);
+  return h('div', { className: 'task-center-summary' }, [
+    summaryMetric('sessions', '会话次数', taskCenter.sessionCount, ''),
+    summaryMetric('active', '执行中', activeCount, '', activeCount ? 'active' : ''),
+    summaryMetric('scheduledRuns', '定时执行', taskCenter.scheduledExecutionCount, `今日 ${taskCenter.scheduledTodayExecutionCount || 0}`),
+    summaryMetric('workflowRuns', '工作流执行', taskCenter.workflowExecutionCount, `今日 ${taskCenter.workflowTodayExecutionCount || 0}`),
+  ]);
+}
+
+function TaskCenterItem({ item, kind }) {
+  const successRate = Math.max(Math.min(Number(item.successRate || 0), 1), 0);
+  const progressValue = taskCenterProgressValue(item);
+  const progressLabel = taskCenterProgressLabel(item);
+  const active = Number(item.activeCount || 0) > 0;
+  const status = taskCenterStatusLabel(item.lastStatus);
+  const statusClass = String(item.lastStatus || '').toLowerCase();
+  const latestTime = taskCenterTimeLabel(item.lastRunAt);
+  const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
+  const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
+  const alertName = String(item.latestAlertName || '').trim();
+  const hasConversation = kind === 'workflow' && Boolean(String(item.sessionId || item.sessionID || '').trim());
+  const sub = kind === 'scheduled'
+    ? item.nextRunAt
+      ? `下次 ${taskCenterTimeLabel(item.nextRunAt)}`
+      : item.cronDescription || item.cron || taskCenterTimeLabel(item.lastRunAt)
+    : `最近执行 ${latestTime}`;
+  const stats = kind === 'workflow'
+    ? [
+        h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'progress' }, ['进度 ', h('b', { key: 'value' }, progressLabel)]),
+        h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
+      ]
+    : [
+        h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'success' }, ['成功 ', h(AnimatedNumber, { tag: 'b', value: item.successCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
+      ];
+  const handleOpen = () => {
+    if (hasConversation) openTaskCenterConversation(item);
+  };
+  const handleKeyDown = (event) => {
+    if (!hasConversation) return;
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      openTaskCenterConversation(item);
+    }
+  };
+  return h('article', {
+    className: cx('task-center-item', active && 'active', hasConversation && 'clickable'),
+    role: hasConversation ? 'button' : undefined,
+    tabIndex: hasConversation ? 0 : undefined,
+    title: hasConversation ? '打开对应对话' : undefined,
+    onClick: handleOpen,
+    onKeyDown: handleKeyDown,
+  }, [
+    h('div', { className: 'task-center-item-head', key: 'head' }, [
+      h('strong', { title: item.name || item.id, key: 'name' }, itemName),
+      h('span', { className: cx('task-center-status', active && 'active', statusClass), key: 'status' }, active ? '执行中' : status),
+    ]),
+    h('div', { className: 'task-center-item-sub', title: sub, key: 'sub' }, sub),
+    kind === 'workflow' ? h('div', {
+      className: cx('task-center-alert', alertName && 'has-alert'),
+      title: alertName || '暂无告警名称',
+      key: 'alert',
+    }, [
+      h('span', { key: 'label' }, '研判告警'),
+      h('b', { key: 'value' }, alertName || '暂无告警名称'),
+    ]) : null,
+    kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
+      h('span', { key: 'label' }, '执行哈希'),
+      h('code', { key: 'value' }, latestExecutionHash),
+      h('span', { key: 'link-label' }, '更多信息'),
+      h('code', { className: cx('task-center-jump', hasConversation && 'enabled'), key: 'link' }, hasConversation ? '查看对话' : '暂无关联对话'),
+    ]) : null,
+    h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
+    h('div', {
+      className: cx('task-center-rate', kind === 'workflow' && 'progress-rate'),
+      style: { '--task-center-rate': kind === 'workflow' ? progressValue : successRate },
+      key: 'rateBar',
+    }, [
+      h('i', { key: 'fill' }),
+    ]),
+  ]);
+}
+
+function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onToggle, collapsed, onCollapseToggle }) {
+  const hasOverflow = items.length > 3;
+  const visibleItems = expanded || !hasOverflow ? items : items.slice(0, 3);
+  return h('section', { className: 'task-center-section' }, [
+    h('div', { className: 'task-center-section-title', key: 'title' }, [
+      h('button', {
+        className: 'task-center-section-toggle',
+        type: 'button',
+        'aria-expanded': !collapsed,
+        onClick: onCollapseToggle,
+        key: 'toggle',
+      }, [
+        h('i', { key: 'chevron' }, collapsed ? '›' : '⌄'),
+        h('strong', { key: 'label' }, title),
+      ]),
+      h('span', { key: 'count' }, collapsed ? `${count} 项` : expanded || !hasOverflow ? `${count} 项` : `显示 3/${count}`),
+    ]),
+    collapsed ? null : h('div', { className: 'task-center-section-list', key: 'list' }, visibleItems.length
+      ? visibleItems.map((item) => h(TaskCenterItem, { item, kind, key: `${kind}-${item.id}` }))
+      : h('div', { className: 'event-rail-empty' }, emptyText)),
+    !collapsed && hasOverflow ? h('button', {
+      className: 'task-center-expand',
+      type: 'button',
+      onClick: onToggle,
+      key: 'expand',
+    }, expanded ? '收起' : `展开全部 ${count} 项`) : null,
+  ]);
+}
+
+function CommandTaskCenterPanel({ taskCenter }) {
+  const { useState } = getReact();
+  const [scheduledExpanded, setScheduledExpanded] = useState(false);
+  const [workflowExpanded, setWorkflowExpanded] = useState(false);
+  const [scheduledCollapsed, setScheduledCollapsed] = useState(false);
+  const [workflowCollapsed, setWorkflowCollapsed] = useState(false);
+  const scheduledTasks = taskCenter.scheduledTasks || [];
+  const workflows = taskCenter.workflows || [];
+  return h('div', { className: 'task-center-panel', key: 'taskCenterPanel' }, [
+    taskCenter.connection === 'error' ? h('div', {
+      className: 'task-center-inline-warn',
+      key: 'warn',
+    }, `任务中心连接异常：${taskCenter.error || '正在重试'}`) : null,
+    h(TaskCenterSummary, { taskCenter, key: 'summary' }),
+    h(TaskCenterSection, {
+      title: '定时执行',
+      count: scheduledTasks.length,
+      items: scheduledTasks,
+      kind: 'scheduled',
+      emptyText: '暂无定时任务执行记录',
+      expanded: scheduledExpanded,
+      onToggle: () => setScheduledExpanded((current) => !current),
+      collapsed: scheduledCollapsed,
+      onCollapseToggle: () => setScheduledCollapsed((current) => !current),
+      key: 'scheduled',
+    }),
+    h(TaskCenterSection, {
+      title: '工作流执行',
+      count: workflows.length,
+      items: workflows,
+      kind: 'workflow',
+      emptyText: '暂无工作流执行记录',
+      expanded: workflowExpanded,
+      onToggle: () => setWorkflowExpanded((current) => !current),
+      collapsed: workflowCollapsed,
+      onCollapseToggle: () => setWorkflowCollapsed((current) => !current),
+      key: 'workflows',
+    }),
+  ]);
+}
+
+function CommandAiTaskPanel({ activity, timeFilter }) {
   const tasks = buildEventQueueTasks(activity, timeFilter);
   const filterTransitionKey = [timeFilter.mode, timeFilter.range, timeFilter.start, timeFilter.end].join('|');
   const visibleTasks = useAnimatedTaskWindow(
@@ -1674,11 +2314,7 @@ function CommandEventRail({ activity, timeFilter, collapsed, onToggle }) {
     : counts.processing
       ? `AI 正在并行处理 ${counts.processing} 个任务`
       : counts.waiting ? '最新 10 条待处理任务' : '等待新的降噪或研判任务';
-  const content = collapsed ? [] : [
-    h('div', { className: 'event-rail-head', key: 'head' }, [
-      h('div', { key: 'title' }, [h('strong', { key: 'label' }, 'AI处理任务'), h('span', { key: 'sub' }, '最新 10 条待处理任务')]),
-      h(AnimatedNumber, { tag: 'b', value: queueCount, duration: 600, key: 'count' }),
-    ]),
+  return [
     h('div', { className: cx('event-update-banner', activity.connection === 'error' && 'warn'), key: 'banner' }, banner),
     h('div', { className: 'event-rail-list', key: 'list' }, visibleTasks.length ? visibleTasks.map((task) => {
       const event = task.event;
@@ -1691,13 +2327,31 @@ function CommandEventRail({ activity, timeFilter, collapsed, onToggle }) {
         ? '处理中'
         : '等待处理';
       const detail = event?.triggerSource === 'workflow_execution'
-        ? event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
+        ? task.stage === 'triage'
+          ? task.state === 'processing' ? '研判工作流处理中' : '研判工作流待处理'
+          : event.result?.isDuplicate ? '重复告警已收敛' : '降噪处理完成'
         : task.state === 'processing'
           ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
           : '等待 AI 处理';
+      const hasConversation = Boolean(String(event?.sessionId || event?.sessionID || '').trim());
+      const handleOpen = () => {
+        if (hasConversation) openConversationFromEvent(event);
+      };
+      const handleKeyDown = (keyboardEvent) => {
+        if (!hasConversation) return;
+        if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
+          keyboardEvent.preventDefault();
+          openConversationFromEvent(event);
+        }
+      };
       return h('article', {
-        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`),
+        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasConversation && 'clickable'),
         key: task.key,
+        role: hasConversation ? 'button' : undefined,
+        tabIndex: hasConversation ? 0 : undefined,
+        title: hasConversation ? '打开对应对话' : undefined,
+        onClick: handleOpen,
+        onKeyDown: handleKeyDown,
       }, [
         h('div', { className: 'event-rail-meta', key: 'meta' }, [
           h('span', { className: cx('event-queue-kind', `kind-${task.stage}`), key: 'kind' }, stageLabel),
@@ -1706,38 +2360,161 @@ function CommandEventRail({ activity, timeFilter, collapsed, onToggle }) {
         ]),
         h('strong', { title, key: 'title' }, title),
         h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)),
-        h('small', { key: 'result' }, detail),
+        h('small', { key: 'result' }, hasConversation ? `${detail} · 查看对话` : detail),
         task.state === 'processing' ? h(EventQueueProgress, { event, key: 'progress' }) : null,
       ]);
     }) : h('div', { className: 'event-rail-empty' }, '等待新的降噪或研判任务')),
   ];
+}
+
+function CommandEventRail({ activity, timeFilter, taskCenter, view, onViewChange, collapsed, onToggle, railWidth, onResizeStart, onResizeKeyDown }) {
+  const tasks = buildEventQueueTasks(activity, timeFilter);
+  const queueCount = tasks.filter((task) => task.state !== 'completed').length;
+  const taskCenterCount = Number(taskCenter.sessionCount || 0);
+  const content = collapsed ? [] : [
+    h('div', { className: 'event-rail-head rail-view-head', key: 'head' }, [
+      h('div', { className: 'rail-view-tabs', role: 'tablist', key: 'tabs' }, [
+        h('button', {
+          className: cx(view === 'aiTasks' && 'active'),
+          type: 'button',
+          role: 'tab',
+          'aria-selected': view === 'aiTasks',
+          onClick: () => onViewChange('aiTasks'),
+          key: 'aiTasks',
+        }, 'AI处理任务'),
+        h('button', {
+          className: cx(view === 'taskCenter' && 'active'),
+          type: 'button',
+          role: 'tab',
+          'aria-selected': view === 'taskCenter',
+          onClick: () => onViewChange('taskCenter'),
+          key: 'taskCenter',
+        }, '任务中心'),
+      ]),
+      h(AnimatedNumber, { tag: 'b', value: view === 'aiTasks' ? queueCount : taskCenterCount, duration: 600, key: 'count' }),
+    ]),
+    view === 'taskCenter'
+      ? h(CommandTaskCenterPanel, { taskCenter, key: 'taskCenterContent' })
+      : h(CommandAiTaskPanel, { activity, timeFilter, key: 'aiTaskContent' }),
+  ];
   return h('aside', { className: cx('command-event-rail', collapsed && 'collapsed') }, [
+    collapsed ? null : h('div', {
+      className: 'event-rail-resize',
+      role: 'separator',
+      tabIndex: 0,
+      'aria-label': '调整任务面板宽度',
+      'aria-orientation': 'vertical',
+      'aria-valuemin': EVENT_RAIL_MIN_WIDTH,
+      'aria-valuemax': EVENT_RAIL_MAX_WIDTH,
+      'aria-valuenow': railWidth,
+      onPointerDown: onResizeStart,
+      onKeyDown: onResizeKeyDown,
+      key: 'resize',
+    }),
     h('button', {
       className: 'event-rail-toggle',
       type: 'button',
-      title: collapsed ? '展开 AI处理任务' : '向右折叠',
-      'aria-label': collapsed ? '展开 AI处理任务' : '向右折叠 AI处理任务',
+      title: collapsed ? '展开任务面板' : '向右折叠',
+      'aria-label': collapsed ? '展开任务面板' : '向右折叠任务面板',
       onClick: onToggle,
       key: 'toggle',
-    }, collapsed ? h('span', { key: 'label' }, ['任', '务', '面', '板'].map((text) => h('i', { key: text }, text))) : '›'),
+    }, collapsed ? '展开' : '收起'),
     ...content,
   ]);
 }
 
 export default function Page() {
-  const { useCallback, useEffect, useRef, useState } = getReact();
+  const { useCallback, useEffect, useMemo, useRef, useState } = getReact();
   const [timeFilter, setTimeFilter] = useState(() => createRelativeTimeFilter());
   const [refreshKey, setRefreshKey] = useState('off');
   const [timeMenuOpen, setTimeMenuOpen] = useState(false);
   const [eventRailCollapsed, setEventRailCollapsed] = useState(false);
+  const [eventRailWidth, setEventRailWidth] = useState(defaultEventRailWidth);
+  const [rightRailView, setRightRailView] = useState('aiTasks');
+  const [customCommandTitle, setCustomCommandTitle] = useState(readCustomCommandTitle);
+  const [mockDashboardEnabled, setMockDashboardEnabled] = useState(readMockDashboardEnabled);
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [activity, setActivity] = useState(createActivityState);
+  const [taskCenter, setTaskCenter] = useState(createTaskCenterState);
   const activityCursor = useRef('');
   const workflowProgressByFilter = useRef(new Map());
   const statsRequestId = useRef(0);
   const statsPending = useRef(0);
+
+  const clampEventRailWidth = useCallback((value) => {
+    const viewportLimit = typeof window === 'undefined'
+      ? EVENT_RAIL_MAX_WIDTH
+      : Math.max(EVENT_RAIL_MIN_WIDTH, Math.min(EVENT_RAIL_MAX_WIDTH, window.innerWidth - 760));
+    return Math.max(EVENT_RAIL_MIN_WIDTH, Math.min(viewportLimit, Math.round(value)));
+  }, []);
+
+  const startEventRailResize = useCallback((event) => {
+    if (eventRailCollapsed) return;
+    const startX = event.clientX;
+    const startWidth = eventRailWidth;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+
+    const move = (moveEvent) => {
+      setEventRailWidth(clampEventRailWidth(startWidth + startX - moveEvent.clientX));
+    };
+    const stop = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', stop);
+      window.removeEventListener('pointercancel', stop);
+    };
+
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', stop);
+    window.addEventListener('pointercancel', stop);
+    event.preventDefault();
+  }, [clampEventRailWidth, eventRailCollapsed, eventRailWidth]);
+
+  const adjustEventRailWidth = useCallback((event) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    const delta = event.shiftKey ? 48 : 16;
+    setEventRailWidth((current) => clampEventRailWidth(current + (event.key === 'ArrowLeft' ? delta : -delta)));
+    event.preventDefault();
+  }, [clampEventRailWidth]);
+
+  useEffect(() => {
+    const handleResize = () => setEventRailWidth((current) => clampEventRailWidth(current));
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [clampEventRailWidth]);
+
+  useEffect(() => {
+    const refreshTitle = (event) => {
+      const nextTitle = event?.detail && typeof event.detail.title === 'string'
+        ? event.detail.title
+        : readCustomCommandTitle();
+      setCustomCommandTitle(nextTitle.trim());
+    };
+    const handleStorage = (event) => {
+      if (event.key === CUSTOM_COMMAND_TITLE_KEY) {
+        setCustomCommandTitle((event.newValue || '').trim());
+      } else if (
+        event.key === null
+        || event.key === SOC_MOCK_ACTIVITY_KEY
+        || event.key === SOC_MOCK_TASK_CENTER_KEY
+        || event.key === SOC_MOCK_DASHBOARD_KEY
+      ) {
+        setMockDashboardEnabled(readMockDashboardEnabled());
+      }
+    };
+    window.addEventListener(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, refreshTitle);
+    window.addEventListener('storage', handleStorage);
+    return () => {
+      window.removeEventListener(CUSTOM_COMMAND_TITLE_CHANGED_EVENT, refreshTitle);
+      window.removeEventListener('storage', handleStorage);
+    };
+  }, []);
 
   const loadStats = useCallback(async (filter, options = {}) => {
     if (options.skipIfBusy && statsPending.current > 0) return;
@@ -1797,6 +2574,54 @@ export default function Page() {
   useEffect(() => {
     let stopped = false;
     let timer = 0;
+
+    const schedule = (delay) => {
+      if (!stopped) timer = window.setTimeout(() => void poll(), delay);
+    };
+
+    const poll = async () => {
+      if (stopped) return;
+      try {
+        const params = mockDashboardEnabled ? { mockActivity: '1' } : {};
+        const response = await getApi().page.get('/task-center', { params });
+        const payload = response.data || {};
+        if (!stopped) {
+          setTaskCenter({
+            ...createTaskCenterState(),
+            ...payload,
+            scheduledTasks: Array.isArray(payload.scheduledTasks) ? payload.scheduledTasks : [],
+            workflows: Array.isArray(payload.workflows) ? payload.workflows : [],
+            sessionCount: Math.max(Number(payload.sessionCount || 0), 0),
+            scheduledExecutionCount: Math.max(Number(payload.scheduledExecutionCount || 0), 0),
+            scheduledTodayExecutionCount: Math.max(Number(payload.scheduledTodayExecutionCount || 0), 0),
+            workflowExecutionCount: Math.max(Number(payload.workflowExecutionCount || 0), 0),
+            workflowTodayExecutionCount: Math.max(Number(payload.workflowTodayExecutionCount || 0), 0),
+            connection: 'online',
+            error: '',
+          });
+        }
+      } catch (taskCenterError) {
+        if (!stopped) {
+          setTaskCenter((previous) => ({
+            ...previous,
+            connection: 'error',
+            error: taskCenterError instanceof Error ? taskCenterError.message : 'task center api failed',
+          }));
+        }
+      }
+      schedule(ACTIVITY_POLL_MS);
+    };
+
+    void poll();
+    return () => {
+      stopped = true;
+      window.clearTimeout(timer);
+    };
+  }, [mockDashboardEnabled]);
+
+  useEffect(() => {
+    let stopped = false;
+    let timer = 0;
     let statsTimer = 0;
     let lastStatsRefreshAt = 0;
     let retryDelay = ACTIVITY_POLL_MS;
@@ -1833,11 +2658,20 @@ export default function Page() {
         if (payload.error) throw new Error(payload.error);
         activityCursor.current = payload.cursor || activityCursor.current;
         if (!stopped) {
+          if (payload.tokenUsage) {
+            setStats((previous) => mergeStats({ ...previous, tokenUsage: payload.tokenUsage }));
+          }
           const rawIncomingEvents = bootstrap
             ? recentUnseenActivity(payload.recentEvents)
             : (payload.events || []);
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
+          for (const workflowEvent of workflowEvents) {
+            const hasConversation = Boolean(String(workflowEvent?.sessionId || workflowEvent?.sessionID || '').trim());
+            if (hasConversation) {
+              incomingEvents.push(workflowEvent);
+            }
+          }
           const rawCallCount = payload.workflowStats?.callCount;
           const hasWorkflowCount = rawCallCount !== null
             && rawCallCount !== undefined
@@ -1924,20 +2758,22 @@ export default function Page() {
   useEffect(() => {
     const event = activity.denoise.current;
     if (!event) return undefined;
+    if (isRunningWorkflowEvent(event)) return undefined;
     const id = window.setTimeout(() => {
       setActivity((previous) => completeActivity(previous, 'denoise', event));
     }, activityDuration(event));
     return () => window.clearTimeout(id);
-  }, [activity.denoise.current?.eventId]);
+  }, [activity.denoise.current?.eventId, activity.denoise.current?.status]);
 
   useEffect(() => {
     const event = activity.triage.current;
     if (!event) return undefined;
+    if (isRunningWorkflowEvent(event)) return undefined;
     const id = window.setTimeout(() => {
       setActivity((previous) => completeActivity(previous, 'triage', event));
     }, activityDuration(event));
     return () => window.clearTimeout(id);
-  }, [activity.triage.current?.eventId]);
+  }, [activity.triage.current?.eventId, activity.triage.current?.status]);
 
   useEffect(() => {
     if (!activity.batchUpdatedAt) return undefined;
@@ -1951,28 +2787,72 @@ export default function Page() {
     return () => window.clearTimeout(id);
   }, [activity.batchUpdatedAt]);
 
-  const activityBusy = Boolean(
-    activity.denoise.current
-    || activity.triage.current
-    || activity.denoise.queue.length
-    || activity.triage.queue.length
-    || activity.batch?.receivedCount
-    || activity.batch?.triageUpdatedCount
+  const displayActivity = useMemo(
+    () => (
+      !activityHasVisibleEvents(activity) && mockDashboardEnabled
+        ? createMockActivityState()
+        : activity
+    ),
+    [activity, mockDashboardEnabled],
+  );
+  const displayTaskCenter = useMemo(
+    () => (
+      !taskCenterHasVisibleRows(taskCenter) && mockDashboardEnabled
+        ? createMockTaskCenterState()
+        : taskCenter
+    ),
+    [mockDashboardEnabled, taskCenter],
+  );
+  const displayActivityBusy = Boolean(
+    displayActivity.denoise.current
+    || displayActivity.triage.current
+    || displayActivity.denoise.queue.length
+    || displayActivity.triage.queue.length
+    || displayActivity.batch?.receivedCount
+    || displayActivity.batch?.triageUpdatedCount
   );
 
   return h('div', {
-    className: cx('adtd-root command-root', activityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
+    className: cx('adtd-root command-root', displayActivityBusy && 'command-is-processing', eventRailCollapsed && 'event-rail-is-collapsed'),
     'data-animations': 'on',
+    style: { '--event-rail-width': `${eventRailWidth}px` },
   }, [
     h('style', { key: 'style' }, CSS),
-    h(CommandHeader, { key: 'header', timeFilter, refreshKey, timeMenuOpen, setTimeMenuOpen, applyTimeRefresh, stats, loading, refresh, activity }),
+    h(CommandHeader, {
+      key: 'header',
+      title: customCommandTitle || DEFAULT_COMMAND_TITLE,
+      timeFilter,
+      refreshKey,
+      timeMenuOpen,
+      setTimeMenuOpen,
+      applyTimeRefresh,
+      stats,
+      loading,
+      refresh,
+      activity: displayActivity,
+    }),
     error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
-    h('main', { className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'), key: 'main' }, [
+    h('main', {
+      className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
+      key: 'main',
+    }, [
       h('div', { className: 'command-main', key: 'workspace' }, [
-        h(CommandGraph, { key: 'graph', stats, activity }),
+        h(CommandGraph, { key: 'graph', stats, activity: displayActivity }),
         h(CommandMetrics, { key: 'metrics', stats }),
       ]),
-      h(CommandEventRail, { key: 'events', activity, timeFilter, collapsed: eventRailCollapsed, onToggle: () => setEventRailCollapsed((current) => !current) }),
+      h(CommandEventRail, {
+        key: 'events',
+        activity: displayActivity,
+        timeFilter,
+        taskCenter: displayTaskCenter,
+        view: rightRailView,
+        onViewChange: setRightRailView,
+        collapsed: eventRailCollapsed,
+        onToggle: () => setEventRailCollapsed((current) => !current),
+        railWidth: eventRailWidth,
+        onResizeStart: startEventRailResize,
+        onResizeKeyDown: adjustEventRailWidth,
+      }),
     ]),
   ]);
 }
@@ -3310,7 +4190,7 @@ const CSS = `
 .command-root:before {
   content: "";
   position: absolute;
-  inset: 68px 330px 142px 0;
+  inset: 68px var(--event-rail-width, 330px) 142px 0;
   pointer-events: none;
   opacity: .16;
   background-image:
@@ -3514,7 +4394,7 @@ const CSS = `
   position: relative;
   z-index: 2;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 330px;
+  grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 330px);
   height: calc(100vh - 68px);
   min-height: 652px;
   transition: grid-template-columns .24s ease;
@@ -4010,6 +4890,62 @@ const CSS = `
 .command-metric .sparkline { width: 100%; height: 43px; margin-top: 6px; opacity: .75; }
 .command-metric .spark-grid { opacity: 0; }
 .command-metric .spark-line { stroke-width: 4; filter: drop-shadow(0 0 5px var(--metric-color)); }
+.token-usage-metric {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  row-gap: 7px;
+  padding-bottom: 8px;
+}
+.token-title {
+  display: block;
+  color: #b6bdbb;
+  font-size: 12px;
+}
+.token-summary-row {
+  display: grid;
+  grid-template-columns: minmax(96px, 48%) minmax(0, 1fr);
+  align-items: center;
+  column-gap: 8px;
+  min-width: 0;
+}
+.token-value {
+  display: block;
+  min-width: 0;
+  min-height: 30px;
+  overflow: hidden;
+  color: #f1f4f3;
+  font-size: 25px;
+  font-weight: 700;
+  line-height: 1;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.token-sub {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--metric-color);
+  font-size: 9px;
+  line-height: 13.5px;
+}
+.token-chart {
+  display: block;
+  width: 100%;
+  height: 42px;
+  margin: 0;
+  overflow: visible;
+}
+.token-chart-line {
+  filter: drop-shadow(0 0 5px var(--metric-color));
+  animation: commandMetricGlow 2.8s ease-in-out infinite;
+}
+.token-sub-line {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .command-event-rail {
   position: relative;
   z-index: 6;
@@ -4026,56 +4962,86 @@ const CSS = `
   background: transparent;
   overflow: visible;
 }
+.event-rail-resize {
+  position: absolute;
+  z-index: 14;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 10px;
+  cursor: col-resize;
+  outline: none;
+  touch-action: none;
+}
+.event-rail-resize:before {
+  content: "";
+  position: absolute;
+  top: 12px;
+  bottom: 12px;
+  left: 4px;
+  width: 2px;
+  border-radius: 999px;
+  background: rgba(43,231,255,.16);
+  opacity: 0;
+  transition: opacity .16s ease, background .16s ease, box-shadow .16s ease;
+}
+.event-rail-resize:hover:before,
+.event-rail-resize:focus-visible:before {
+  background: rgba(43,231,255,.58);
+  box-shadow: 0 0 12px rgba(43,231,255,.32);
+  opacity: 1;
+}
 .event-rail-toggle {
   position: absolute;
   z-index: 12;
   top: 50%;
-  left: -14px;
-  width: 28px;
-  height: 44px;
-  border: 0;
-  color: #6ee8ff;
-  background: transparent;
+  left: -25px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 64px;
+  border: 1px solid rgba(43,231,255,.34);
+  border-right: 0;
+  border-radius: 7px 0 0 7px;
+  color: #8df0ff;
+  background: linear-gradient(180deg, rgba(8,34,53,.96), rgba(5,22,38,.96));
   transform: translateY(-50%);
-  opacity: .72;
+  opacity: .9;
   padding: 0;
-  font-size: 28px;
-  line-height: 1;
-  text-shadow: 0 0 9px rgba(43,231,255,.48);
+  font-size: 12px;
+  font-weight: 700;
+  line-height: 1.15;
+  text-orientation: upright;
+  writing-mode: vertical-rl;
+  box-shadow: -4px 0 14px rgba(0,0,0,.28), 0 0 12px rgba(43,231,255,.1);
   cursor: pointer;
-  transition: color .16s ease, opacity .16s ease, transform .16s ease;
+  transition: border-color .1s ease, color .1s ease, background .1s ease, box-shadow .1s ease, transform .1s ease;
 }
-.event-rail-toggle:hover {
+.event-rail-toggle:hover,
+.event-rail-toggle:focus-visible {
+  border-color: rgba(70,240,255,.72);
   color: #fff;
-  opacity: 1;
-  transform: translate(2px, -50%);
+  background: rgba(7,39,62,.98);
+  box-shadow: -5px 0 16px rgba(0,0,0,.32), 0 0 16px rgba(43,231,255,.24);
+  outline: none;
+  transform: translate(-1px, -50%);
+}
+.event-rail-toggle:active {
+  transform: translate(0, -50%) scale(.98);
 }
 .command-event-rail.collapsed .event-rail-toggle {
-  left: -40px;
-  width: 40px;
-  height: 104px;
-  border-radius: 12px 0 0 12px;
-  color: #f4f7f9;
-  background: rgba(65, 73, 82, .96);
-  box-shadow: -5px 0 16px rgba(0,0,0,.22);
-  opacity: .96;
-  text-shadow: none;
+  left: -26px;
+  width: 26px;
+  height: 64px;
+  color: #dffcff;
+  background: linear-gradient(180deg, rgba(8,34,53,.96), rgba(5,22,38,.96));
 }
-.command-event-rail.collapsed .event-rail-toggle:hover {
+.command-event-rail.collapsed .event-rail-toggle:hover,
+.command-event-rail.collapsed .event-rail-toggle:focus-visible {
   color: #fff;
-  background: rgba(78, 88, 98, .98);
-  transform: translate(-2px, -50%);
-}
-.command-event-rail.collapsed .event-rail-toggle span {
-  display: grid;
-  place-items: center;
-  gap: 2px;
-}
-.command-event-rail.collapsed .event-rail-toggle i {
-  font-style: normal;
-  font-size: 14px;
-  font-weight: 700;
-  line-height: 1.12;
+  background: rgba(11,52,78,.98);
+  transform: translate(-1px, -50%);
 }
 .event-rail-head {
   display: flex;
@@ -4096,6 +5062,38 @@ const CSS = `
   text-align: center;
   font-size: 11px;
 }
+.rail-view-head { padding: 0 14px; }
+.rail-view-head .rail-view-tabs {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  border: 1px solid rgba(88,166,255,.18);
+  border-radius: 6px;
+  background: rgba(3,14,26,.72);
+  padding: 3px;
+}
+.rail-view-tabs button {
+  height: 28px;
+  min-width: 0;
+  border: 0;
+  border-radius: 4px;
+  color: #7e8f99;
+  background: transparent;
+  padding: 0 9px;
+  font: inherit;
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.rail-view-tabs button:hover { color: #d9f7ff; background: rgba(43,231,255,.08); }
+.rail-view-tabs button.active {
+  color: #061725;
+  background: linear-gradient(135deg, #35d4ff, #40e1bd);
+  box-shadow: 0 0 13px rgba(43,231,255,.14);
+}
 .event-update-banner {
   margin: 10px 14px 4px;
   padding: 10px 12px;
@@ -4107,6 +5105,322 @@ const CSS = `
 }
 .event-update-banner:before { content: "ⓘ"; margin-right: 7px; color: #6ba4fb; }
 .event-update-banner.warn { border-color: rgba(255,174,52,.42); color: #f1c67d; background: rgba(139,88,22,.2); }
+.task-center-panel {
+  min-height: 0;
+  padding: 8px 14px 18px;
+  overflow: auto;
+  scrollbar-width: thin;
+  scrollbar-color: #3a403e transparent;
+}
+.task-center-inline-warn {
+  margin-bottom: 10px;
+  border: 1px solid rgba(255,174,52,.42);
+  border-radius: 6px;
+  color: #f1c67d;
+  background: rgba(139,88,22,.2);
+  padding: 9px 11px;
+  font-size: 11px;
+}
+.task-center-summary {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.task-center-summary > div {
+  min-width: 0;
+  min-height: 64px;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 5px;
+  border: 1px solid rgba(43,231,255,.14);
+  border-radius: 6px;
+  background: rgba(10,33,51,.46);
+  padding: 10px 11px;
+}
+.task-center-summary > div.active {
+  border-color: rgba(46,230,166,.32);
+  background: rgba(20,75,57,.32);
+  animation: commandEventActive 1.8s ease-in-out infinite;
+}
+.task-center-summary span {
+  overflow: hidden;
+  color: #7f8e99;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-summary b {
+  color: #e9edeb;
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.task-center-summary small {
+  overflow: hidden;
+  color: #49e4c8;
+  font-size: 10px;
+  font-weight: 800;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-section { margin-top: 12px; }
+.task-center-section-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 28px;
+  border-bottom: 1px solid rgba(43,231,255,.12);
+  margin-bottom: 3px;
+}
+.task-center-section-toggle {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  gap: 6px;
+  border: 0;
+  color: #dce1df;
+  background: transparent;
+  padding: 0;
+  font: inherit;
+  cursor: pointer;
+}
+.task-center-section-toggle:hover,
+.task-center-section-toggle:focus-visible { color: #66e6d6; outline: none; }
+.task-center-section-toggle i {
+  display: grid;
+  place-items: center;
+  width: 14px;
+  height: 14px;
+  color: #53e9c4;
+  font-style: normal;
+  font-size: 15px;
+  line-height: 1;
+}
+.task-center-section-title strong { color: currentColor; font-size: 12px; }
+.task-center-section-title span { color: #66716d; font-size: 10px; }
+.task-center-section-list { display: grid; gap: 0; }
+.task-center-item {
+  position: relative;
+  min-height: 118px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  border-bottom: 1px solid rgba(255,255,255,.09);
+  padding: 13px 2px 13px 12px;
+}
+.task-center-item:before {
+  content: "";
+  position: absolute;
+  top: 16px;
+  bottom: 16px;
+  left: 1px;
+  width: 1px;
+  background: rgba(105,129,143,.25);
+}
+.task-center-item:after {
+  content: "";
+  position: absolute;
+  top: 20px;
+  left: -2px;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2be7ff;
+  box-shadow: 0 0 9px rgba(43,231,255,.54);
+}
+.task-center-item.active {
+  background: linear-gradient(90deg, rgba(43,231,255,.06), transparent 64%);
+  animation: commandEventActive 1.8s ease-in-out infinite;
+}
+.task-center-item.clickable {
+  cursor: pointer;
+}
+.task-center-item.clickable:hover {
+  background: linear-gradient(90deg, rgba(43,231,255,.085), rgba(43,231,255,.025) 58%, transparent);
+}
+.task-center-item.clickable:focus-visible {
+  outline: 1px solid rgba(85,232,255,.68);
+  outline-offset: -2px;
+}
+.task-center-item.active:after {
+  background: #46e4af;
+  box-shadow: 0 0 10px rgba(70,228,175,.78);
+}
+.task-center-item-head,
+.task-center-stats {
+  display: flex;
+  align-items: center;
+  min-width: 0;
+}
+.task-center-item-head { gap: 8px; }
+.task-center-item-head strong {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: #dce1df;
+  font-size: 12px;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-status {
+  flex: 0 0 auto;
+  max-width: 74px;
+  overflow: hidden;
+  border-radius: 4px;
+  color: #83aef1;
+  background: rgba(52,86,143,.5);
+  padding: 4px 7px;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-status.active,
+.task-center-status.running { color: #57e1b5; background: rgba(23,111,83,.48); }
+.task-center-status.failed,
+.task-center-status.error,
+.task-center-status.timeout { color: #ff9a76; background: rgba(133,57,33,.42); }
+.task-center-status.disabled,
+.task-center-status.stopped,
+.task-center-status.stale { color: #9aa7a3; background: rgba(73,86,95,.42); }
+.task-center-item-sub {
+  min-width: 0;
+  overflow: hidden;
+  color: #7b8581;
+  font-size: 10px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-alert {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  color: #74827d;
+  font-size: 10px;
+}
+.task-center-alert span {
+  white-space: nowrap;
+}
+.task-center-alert b {
+  min-width: 0;
+  overflow: hidden;
+  color: #dce1df;
+  font-size: 11px;
+  font-weight: 700;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-alert.has-alert b {
+  color: #f0f6f4;
+}
+.task-center-hash {
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  overflow: hidden;
+  border: 1px solid rgba(43,231,255,.16);
+  border-radius: 5px;
+  background: rgba(4,22,36,.64);
+  padding: 5px 6px;
+}
+.task-center-hash:after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -38%;
+  width: 32%;
+  background: linear-gradient(90deg, transparent, rgba(43,231,255,.18), transparent);
+  animation: commandBannerSweep 3.6s ease-in-out infinite;
+}
+.task-center-hash span {
+  color: #66716d;
+  font-size: 9px;
+  line-height: 1.2;
+  white-space: nowrap;
+}
+.task-center-hash code {
+  display: block;
+  min-width: 0;
+  overflow: hidden;
+  color: #77e8ff;
+  font: 700 10px/1.2 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  user-select: text;
+}
+.task-center-hash .task-center-jump {
+  color: #7b8581;
+  user-select: none;
+}
+.task-center-hash .task-center-jump.enabled {
+  color: #57e1b5;
+}
+.task-center-stats {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 6px;
+  color: #7f8e99;
+  font-size: 10px;
+}
+.task-center-stats.workflow-stats {
+  grid-template-columns: .7fr .7fr 1.05fr .85fr;
+  gap: 6px;
+}
+.task-center-stats span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.task-center-stats b {
+  color: #4dcfa7;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.task-center-rate {
+  position: relative;
+  height: 3px;
+  overflow: hidden;
+  border-radius: 3px;
+  background: rgba(127,111,255,.14);
+  box-shadow: inset 0 0 0 1px rgba(155,140,255,.11);
+}
+.task-center-rate i {
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #38d39f 0%, #55e8ff 100%);
+  box-shadow: 0 0 8px rgba(43,231,255,.55);
+  transform: scaleX(var(--task-center-rate, 0));
+  transform-origin: left center;
+  transition: transform .5s ease;
+}
+.task-center-rate.progress-rate {
+  background: rgba(43,231,255,.12);
+}
+.task-center-expand {
+  width: 100%;
+  height: 30px;
+  margin-top: 8px;
+  border: 1px solid rgba(43,231,255,.2);
+  border-radius: 5px;
+  color: #73e7ff;
+  background: rgba(10,31,51,.52);
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+.task-center-expand:hover {
+  border-color: rgba(43,231,255,.46);
+  background: rgba(20,57,82,.62);
+}
 .event-rail-list {
   min-height: 0;
   padding: 4px 16px 18px 20px;
@@ -4148,6 +5462,16 @@ const CSS = `
 .event-rail-item.kind-triage:after { background: #9b8cff; box-shadow: 0 0 9px rgba(155,140,255,.75); }
 .event-rail-item.state-processing {
   background: linear-gradient(90deg, rgba(35,214,157,.07), transparent 72%);
+}
+.event-rail-item.clickable {
+  cursor: pointer;
+}
+.event-rail-item.clickable:hover {
+  background: linear-gradient(90deg, rgba(155,140,255,.12), rgba(43,231,255,.04) 60%, transparent);
+}
+.event-rail-item.clickable:focus-visible {
+  outline: 1px solid rgba(155,140,255,.72);
+  outline-offset: -2px;
 }
 .event-rail-meta { display: flex; align-items: center; width: 100%; gap: 7px; }
 .event-rail-meta time { margin-left: auto; color: #646d69; font-size: 10px; }
@@ -4237,8 +5561,8 @@ const CSS = `
 @keyframes laneResult { to { opacity: 1; } }
 @media (max-width: 1360px) {
   .command-header { grid-template-columns: minmax(330px, 1fr) auto minmax(500px, 1fr); gap: 12px; padding: 0 14px; }
-  .command-shell { grid-template-columns: minmax(0, 1fr) 292px; }
-  .command-root:before { right: 292px; }
+  .command-shell { grid-template-columns: minmax(0, 1fr) var(--event-rail-width, 292px); }
+  .command-root:before { right: var(--event-rail-width, 292px); }
   .command-core { width: 288px; height: 288px; min-width: 288px; min-height: 288px; }
   .command-time-trigger { max-width: 320px; }
   .command-clock { min-width: 92px; }
@@ -4249,7 +5573,7 @@ const CSS = `
   .command-root { padding: 0; }
   .command-header { grid-template-columns: 330px 1fr; }
   .command-live { display: none; }
-  .command-shell { grid-template-columns: minmax(850px, 1fr) 280px; }
+  .command-shell { grid-template-columns: minmax(850px, 1fr) var(--event-rail-width, 280px); }
   .command-core { width: 270px; height: 270px; min-width: 270px; min-height: 270px; }
   .agent-badge { min-width: 96px; padding: 7px 8px; }
   .command-lanes { right: 12%; left: 12%; }

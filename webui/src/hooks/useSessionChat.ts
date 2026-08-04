@@ -1,6 +1,8 @@
 import { useState, useCallback, useRef, useEffect } from 'react';
 import client from '@/api/client';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
+import { createMessageId } from '@/utils/messageId';
+import type { Message } from '@/types';
 import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
 export interface UseSessionChatOptions {
@@ -42,13 +44,14 @@ export function useSessionChat({
   const [sessionId, setSessionId] = useState<string | null>(initialSessionId);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
 
   const sessionIdRef = useRef<string | null>(initialSessionId);
   const createPromiseRef = useRef<Promise<string> | null>(null);
   const optionsRef = useRef({ title, category, modelAuto, contextMessage, welcomeMessage });
   optionsRef.current = { title, category, modelAuto, contextMessage, welcomeMessage };
 
-  const create = useCallback(
+  const ensureSession = useCallback(
     async (overrides?: Partial<UseSessionChatOptions>): Promise<string> => {
       if (sessionIdRef.current) return sessionIdRef.current;
       // Reuse in-flight creation promise to prevent duplicates (e.g. React StrictMode double-mount)
@@ -83,10 +86,7 @@ export function useSessionChat({
       createPromiseRef.current = promise;
 
       try {
-        const sid = await promise;
-        sessionIdRef.current = sid;
-        setSessionId(sid);
-        return sid;
+        return await promise;
       } catch (err: unknown) {
         createPromiseRef.current = null;
         setError(
@@ -100,11 +100,22 @@ export function useSessionChat({
     [],
   );
 
+  const create = useCallback(
+    async (overrides?: Partial<UseSessionChatOptions>): Promise<string> => {
+      const sid = await ensureSession(overrides);
+      sessionIdRef.current = sid;
+      setSessionId(sid);
+      return sid;
+    },
+    [ensureSession],
+  );
+
   useEffect(() => {
     if (initialSessionId === sessionIdRef.current) return;
     sessionIdRef.current = initialSessionId;
     createPromiseRef.current = null;
     setSessionId(initialSessionId);
+    setPendingOptimisticMessage(null);
     setLoading(false);
     setError(null);
   }, [initialSessionId]);
@@ -118,6 +129,7 @@ export function useSessionChat({
     sessionIdRef.current = null;
     createPromiseRef.current = null;
     setSessionId(null);
+    setPendingOptimisticMessage(null);
     setLoading(false);
     setError(null);
   }, []);
@@ -136,7 +148,7 @@ export function useSessionChat({
       const effectiveModelAuto = typeof createModelAuto === 'boolean'
         ? createModelAuto
         : optionsRef.current.modelAuto;
-      const sid = await create(
+      const sid = await ensureSession(
         typeof createModelAuto === 'boolean' ? { modelAuto: createModelAuto } : undefined,
       );
       if (resumedExistingSession && effectiveModelAuto) {
@@ -148,19 +160,70 @@ export function useSessionChat({
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
       };
+      const messageId = createMessageId();
+      payload.messageID = messageId;
       if (agent) payload.agent = agent;
       if (model) payload.model = model;
       if (displayText) payload.displayText = displayText;
       payload.executionMode = executionMode;
-      client.post(`/api/session/${sid}/prompt_async`, payload).catch(() => {});
+      await client.post(`/api/session/${sid}/prompt_async`, payload);
+
+      if (!resumedExistingSession) {
+        const visibleText = displayText || text;
+        const optimisticParts: Message['parts'] = [];
+        if (visibleText) {
+          optimisticParts.push({
+            id: `temp-${messageId}-text`,
+            type: 'text',
+            text: visibleText,
+          });
+        }
+        imageParts?.forEach((image, index) => {
+          optimisticParts.push({
+            id: `temp-${messageId}-img-${index}`,
+            type: 'file',
+            url: image.url,
+            mime: image.mime,
+            filename: image.filename,
+          });
+        });
+        setPendingOptimisticMessage({
+          id: messageId,
+          sessionID: sid,
+          role: 'user',
+          parts: optimisticParts.length > 0
+            ? optimisticParts
+            : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+          timestamp: Date.now(),
+          agent,
+        });
+        sessionIdRef.current = sid;
+        setSessionId(sid);
+      }
       return sid;
     },
-    [create],
+    [ensureSession],
   );
+
+  const consumePendingOptimisticMessage = useCallback((messageId: string) => {
+    setPendingOptimisticMessage((message) => (
+      message?.id === messageId ? null : message
+    ));
+  }, []);
 
   useEffect(() => {
     if (autoCreate) create().catch(() => {});
   }, []);
 
-  return { sessionId, loading, error, create, createAndSend, retry, reset };
+  return {
+    sessionId,
+    loading,
+    error,
+    pendingOptimisticMessage,
+    create,
+    createAndSend,
+    consumePendingOptimisticMessage,
+    retry,
+    reset,
+  };
 }

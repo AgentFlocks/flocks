@@ -16,7 +16,7 @@ import { sessionApi } from '@/api/session';
 import { providerAPI } from '@/api/provider';
 import { deviceAPI, type DeviceIntegration, type DeviceGroup, type DeviceTemplate, type DeviceToolInfo } from '@/api/device';
 import { hubAPI } from '@/api/hub';
-import type { APIServiceCredentialField, Tool } from '@/types';
+import type { APIServiceCredentialField, Message, Tool } from '@/types';
 import { toolAPI } from '@/api/tool';
 import ToolDetailModal from '../Tool/components/ToolDetailModal';
 import { buildCustomDeviceModeRoutingPrompt } from './customDevice';
@@ -539,6 +539,8 @@ function buildDeviceConfigRexAssistPrompt(input: DeviceConfigRexAssistInput): Cr
 function DeviceAddRexPanel({
   templates,
   sessionId,
+  initialOptimisticMessage,
+  onInitialOptimisticMessageConsumed,
   showBuiltInTemplates,
   setShowBuiltInTemplates,
   workbenchResetToken,
@@ -550,6 +552,8 @@ function DeviceAddRexPanel({
 }: {
   templates: DeviceTemplate[];
   sessionId: string | null;
+  initialOptimisticMessage: Message | null;
+  onInitialOptimisticMessageConsumed: (messageId: string) => void;
   showBuiltInTemplates: boolean;
   setShowBuiltInTemplates: (show: boolean) => void;
   workbenchResetToken: number;
@@ -710,6 +714,8 @@ function DeviceAddRexPanel({
         <LazySessionChat
           sessionId={sessionId}
           live={!!sessionId}
+          initialOptimisticMessage={initialOptimisticMessage}
+          onInitialOptimisticMessageConsumed={onInitialOptimisticMessageConsumed}
           className="flex-1 min-h-0"
           display={{
             compact: true,
@@ -956,6 +962,8 @@ function AddDeviceWizardPanel({
   templates,
   instanceCounts,
   sessionId,
+  initialOptimisticMessage,
+  onInitialOptimisticMessageConsumed,
   createAndSend,
   rexComposerControls,
   onApplyRexDraft,
@@ -966,6 +974,8 @@ function AddDeviceWizardPanel({
   templates: DeviceTemplate[];
   instanceCounts: Record<string, number>;
   sessionId: string | null;
+  initialOptimisticMessage: Message | null;
+  onInitialOptimisticMessageConsumed: (messageId: string) => void;
   createAndSend: (options: CreateAndSendOptions) => Promise<string>;
   rexComposerControls: ReturnType<typeof useRexComposerControls>;
   onApplyRexDraft: (draft: DeviceAddDraft) => void;
@@ -1024,6 +1034,8 @@ function AddDeviceWizardPanel({
             templates={templates}
             instanceCounts={instanceCounts}
             sessionId={sessionId}
+            initialOptimisticMessage={initialOptimisticMessage}
+            onInitialOptimisticMessageConsumed={onInitialOptimisticMessageConsumed}
             showBuiltInTemplates={showBuiltInTemplates}
             setShowBuiltInTemplates={setShowBuiltInTemplates}
             workbenchResetToken={workbenchResetToken}
@@ -1983,7 +1995,9 @@ export default function DeviceIntegrationPage() {
   const rexContextMessage = useMemo(() => buildDeviceAddSessionContext(templates), [templates]);
   const {
     sessionId: rexSessionId,
+    pendingOptimisticMessage: pendingRexOptimisticMessage,
     createAndSend: createAndSendRex,
+    consumePendingOptimisticMessage: consumePendingRexOptimisticMessage,
     reset: resetRexSession,
   } = useSessionChat({
     title: t('wizard.rex.title'),
@@ -2606,6 +2620,8 @@ export default function DeviceIntegrationPage() {
           templates={templates}
           instanceCounts={instanceCounts}
           sessionId={rexSessionId}
+          initialOptimisticMessage={pendingRexOptimisticMessage}
+          onInitialOptimisticMessageConsumed={consumePendingRexOptimisticMessage}
           createAndSend={createAndSendRex}
           rexComposerControls={rexComposerControls}
           onApplyRexDraft={handleApplyRexDraft}

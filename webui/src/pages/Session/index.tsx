@@ -6,12 +6,13 @@ import {
   Workflow as WorkflowIcon, Settings2, CheckSquare,
   MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X, Check,
   FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive, BookOpen,
-  Hammer, ClipboardList, Target,
+  Hammer, ClipboardList, Target, UserRound, UsersRound,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import { useSSE } from '@/hooks/useSSE';
@@ -39,7 +40,9 @@ import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
 import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
-import type { ModelDefinitionV2, Session } from '@/types';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import type { Message, ModelDefinitionV2, Session } from '@/types';
+import { createMessageId } from '@/utils/messageId';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   DEFAULT_SESSION_EXECUTION_MODE,
@@ -60,11 +63,43 @@ function sanitizeSessionExportName(value: string) {
     .replace(/^-|-$/g, '') || 'session';
 }
 
+function getSessionDisplayTitle(session: Pick<Session, 'title' | 'channelID'>): string {
+  if (!session.channelID) return session.title;
+  const prefix = `[${session.channelID}]`;
+  if (session.title.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {
+    return session.title;
+  }
+  return session.title.slice(prefix.length).trim() || session.title;
+}
+
+function ChannelChatTypeBadge({
+  chatType,
+  label,
+}: {
+  chatType: NonNullable<Session['channelChatType']>;
+  label: string;
+}) {
+  const Icon = chatType === 'direct' ? UserRound : UsersRound;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      data-channel-chat-type={chatType}
+      className={`absolute -bottom-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-white ring-1 ring-white dark:bg-[#252c35] dark:ring-[#252c35] ${
+        chatType === 'direct' ? 'text-zinc-500' : 'text-blue-500'
+      }`}
+    >
+      <Icon aria-hidden="true" className="h-2 w-2 stroke-[2.5]" />
+    </span>
+  );
+}
+
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
+const RECENT_SEARCH_SESSION_LIMIT = 5;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
@@ -161,7 +196,7 @@ function ComposerResourcePicker({
         aria-haspopup="menu"
         aria-expanded={open}
       >
-        <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+        <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
           <Icon className="h-3.5 w-3.5" />
         </span>
         <span className="min-w-0 flex-1 truncate">{label}</span>
@@ -384,6 +419,12 @@ function SessionSidebarItemInner({
   onCancelRename,
   onToggleMenu,
 }: SessionSidebarItemProps) {
+  const channelChatLabel = !session.channelChatType
+    ? session.channelID
+    : session.channelChatType === 'direct'
+      ? t('channelDirectChat')
+      : t('channelGroupChat');
+
   return (
     <div
       onClick={() => onSelect(session.id)}
@@ -406,6 +447,20 @@ function SessionSidebarItemInner({
             onClick={(e) => e.stopPropagation()}
             className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
           />
+        )}
+        {session.channelID && (
+          <span
+            title={channelChatLabel}
+            className="relative inline-flex h-3.5 w-3.5 flex-shrink-0"
+          >
+            <ChannelIcon channelId={session.channelID} size="xs" />
+            {session.channelChatType && (
+              <ChannelChatTypeBadge
+                chatType={session.channelChatType}
+                label={channelChatLabel || session.channelID}
+              />
+            )}
+          </span>
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
@@ -436,7 +491,7 @@ function SessionSidebarItemInner({
           />
         ) : (
           <h3 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium">
-            <span className="truncate">{session.title}</span>
+            <span className="truncate">{getSessionDisplayTitle(session)}</span>
             {session.isShared && (
               <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
                 {t('sharedTag')}
@@ -498,6 +553,8 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.nested === next.nested &&
   prev.session.title === next.session.title &&
   prev.session.category === next.session.category &&
+  prev.session.channelID === next.session.channelID &&
+  prev.session.channelChatType === next.session.channelChatType &&
   prev.session.isShared === next.session.isShared &&
   prev.session.time?.updated === next.session.time?.updated &&
   prev.selected === next.selected &&
@@ -597,6 +654,7 @@ export default function SessionPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
@@ -626,6 +684,7 @@ export default function SessionPage() {
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
+  const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -669,6 +728,7 @@ export default function SessionPage() {
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
@@ -715,6 +775,14 @@ export default function SessionPage() {
     projectIds: sessionProjectIds,
     pageSize: sessionListPageSize,
   });
+  const searchPanelSessions = useMemo(() => {
+    const sortedSessions = [...sessions].sort(
+      (left, right) => (right.time?.updated ?? 0) - (left.time?.updated ?? 0),
+    );
+    return searchQuery.trim()
+      ? sortedSessions
+      : sortedSessions.slice(0, RECENT_SEARCH_SESSION_LIMIT);
+  }, [searchQuery, sessions]);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const {
@@ -778,9 +846,8 @@ export default function SessionPage() {
 
     const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
       if (!pricing) return t('modelPicker.noCost');
-      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
-      const currencySymbol = pricing.currency === 'CNY' ? '¥' : '$';
-      return `${currencySymbol}${pricing.input}/${currencySymbol}${pricing.output}/M`;
+      if (isPricingFree(pricing)) return t('modelPicker.free');
+      return formatPricingPerMillion(pricing);
     };
 
     const formatContextWindow = (contextWindow?: number): string => {
@@ -985,6 +1052,7 @@ export default function SessionPage() {
     [projects, sessions, t],
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
+  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
   const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
   const visibleTaskSessions = taskSessionsCollapsedToFirstPage
     ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
@@ -1193,6 +1261,7 @@ export default function SessionPage() {
   useEffect(() => {
     const sessionParam = searchParams.get('session');
     const messageParam = searchParams.get('message');
+    const focusMessageParam = searchParams.get('focusMessage');
     const displayParam = searchParams.get('display');
     if (!sessionParam) return;
 
@@ -1207,6 +1276,7 @@ export default function SessionPage() {
         setPendingInitialMessage(null);
         setPendingInitialDisplayText(null);
       }
+      setPendingFocusMessageId(focusMessageParam || null);
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
@@ -1488,6 +1558,10 @@ export default function SessionPage() {
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
+  const handleCreateSessionInProject = useCallback((projectId: string) => {
+    void handleCreateSession(projectId);
+  }, [handleCreateSession]);
+
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     const previousModelKey = selectedModelKey;
     setSelectedModelKey(option.key);
@@ -1543,9 +1617,39 @@ export default function SessionPage() {
         ...(selectedModelAuto ? { model_auto: true } : {}),
       });
       const newSessionId = response.data.id;
+      const messageId = createMessageId();
+      const visibleText = options?.displayText || text;
+      const effectiveAgent = agentOverride || selectedAgent || 'rex';
+      const optimisticParts: Message['parts'] = [];
+      if (visibleText) {
+        optimisticParts.push({
+          id: `temp-${messageId}-text`,
+          type: 'text',
+          text: visibleText,
+        });
+      }
+      imageParts?.forEach((image, index) => {
+        optimisticParts.push({
+          id: `temp-${messageId}-img-${index}`,
+          type: 'file',
+          url: image.url,
+          mime: image.mime,
+          filename: image.filename,
+        });
+      });
+
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, imageParts),
+        messageID: messageId,
+      };
+      if (effectiveAgent) payload.agent = effectiveAgent;
+      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
+      if (options?.displayText) payload.displayText = options.displayText;
+      payload.executionMode = effectiveExecutionMode;
+      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
       addSession(response.data);
-      await fetchProjects(undefined, searchQuery);
+      void fetchProjects(undefined, searchQuery).catch(() => {});
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1564,17 +1668,17 @@ export default function SessionPage() {
         );
       }
       setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
+      setPendingOptimisticMessage({
+        id: messageId,
+        sessionID: newSessionId,
+        role: 'user',
+        parts: optimisticParts.length > 0
+          ? optimisticParts
+          : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+        timestamp: Date.now(),
+        agent: effectiveAgent,
+      });
       setSelectedSessionId(newSessionId);
-
-      const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
-      };
-      const effectiveAgent = agentOverride || selectedAgent || 'rex';
-      if (effectiveAgent) payload.agent = effectiveAgent;
-      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
-      if (options?.displayText) payload.displayText = options.displayText;
-      payload.executionMode = effectiveExecutionMode;
-      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
       if (effectiveExecutionMode === 'goal') {
         setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
         writeSessionExecutionMode(
@@ -2033,6 +2137,14 @@ export default function SessionPage() {
       setSelectedSessionId(sessionId);
     }
   }, [handleToggleCheck, selectMode]);
+  const handleCloseSessionSearch = useCallback(() => {
+    setSessionSearchOpen(false);
+    setSearchQuery('');
+  }, []);
+  const handleSelectSearchResult = useCallback((sessionId: string) => {
+    handleSelectSessionRow(sessionId);
+    handleCloseSessionSearch();
+  }, [handleCloseSessionSearch, handleSelectSessionRow]);
   const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
     setMovePickerSessionId(null);
     setOpenMenuSessionId((current) => {
@@ -2197,14 +2309,14 @@ export default function SessionPage() {
     <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
+        className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
           sidebarCollapsed
             ? 'w-0 border-transparent opacity-0'
             : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
         }`}
         aria-label={t('managementTitle')}
       >
-        {/* Header：始终显示标题、新建与搜索 */}
+        {/* Header */}
         <div className="flex-shrink-0 px-3 pb-2 pt-3.5">
           <div className="mb-2 flex h-8 items-center justify-between px-1">
             <div className="min-w-0">
@@ -2215,9 +2327,19 @@ export default function SessionPage() {
                 {t('sessionCount', { count: sessions.length })}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => setSessionSearchOpen(true)}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.07] dark:hover:text-white"
+              title={t('openTaskSearch')}
+              aria-label={t('openTaskSearch')}
+              aria-expanded={sessionSearchOpen}
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
           </div>
 
-          <div className="space-y-0.5">
+          <div>
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
                 ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
@@ -2230,29 +2352,76 @@ export default function SessionPage() {
                 {t('newSession')}
               </button>
             </div>
-
-            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t('filterConversations', 'Search tasks')}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-1.5 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-md text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
-                  title={t('clearSearch')}
-                  aria-label={t('clearSearch')}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
           </div>
         </div>
+
+        {sessionSearchOpen && (
+          <div
+            role="dialog"
+            aria-label={t('taskSearchDialog')}
+            aria-modal="true"
+            onClick={handleCloseSessionSearch}
+            className="fixed inset-0 z-[80] flex items-start justify-center bg-black/20 px-4 pt-[18vh] backdrop-blur-[1px] dark:bg-black/45"
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              className="w-full max-w-[620px] overflow-hidden rounded-2xl border border-black/[0.12] bg-[#fdfdfc] shadow-[0_24px_70px_rgba(22,27,34,0.24)] dark:border-white/[0.11] dark:bg-[#303030] dark:shadow-[0_28px_80px_rgba(0,0,0,0.55)]"
+            >
+              <div className="relative h-[52px] border-b border-black/[0.07] dark:border-white/[0.08]">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[#7b8087] dark:text-[#a7adb5]" />
+                <input
+                  autoFocus
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      handleCloseSessionSearch();
+                    }
+                  }}
+                  placeholder={t('filterConversations', 'Search tasks')}
+                  className="h-full w-full border-0 bg-transparent pl-12 pr-12 text-[15px] font-medium text-[#3f444a] outline-none placeholder:text-[#858a91] dark:text-[#e1e5ea] dark:placeholder:text-[#9298a0]"
+                />
+                <button
+                  type="button"
+                  onClick={handleCloseSessionSearch}
+                  className="absolute right-3 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.06] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                  title={t('closeTaskSearch')}
+                  aria-label={t('closeTaskSearch')}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="max-h-[420px] overflow-y-auto p-2">
+                <div className="px-2 pb-1.5 pt-1 text-[11px] font-medium text-[#969aa0] dark:text-[#8f9ba8]">
+                  {t(searchQuery.trim() ? 'searchResults' : 'recentTasks')}
+                </div>
+                {searchPanelSessions.length > 0 ? (
+                  <div className="space-y-0.5">
+                    {searchPanelSessions.map((session) => (
+                      <button
+                        key={session.id}
+                        type="button"
+                        onClick={() => handleSelectSearchResult(session.id)}
+                        className="flex h-10 w-full min-w-0 items-center gap-2.5 rounded-xl px-3 text-left text-sm text-[#4e5359] transition-colors hover:bg-black/[0.055] hover:text-[#202328] focus:bg-black/[0.055] focus:outline-none dark:text-[#d1d5da] dark:hover:bg-white/[0.09] dark:hover:text-white dark:focus:bg-white/[0.09]"
+                      >
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#6aa7ee]" />
+                        <span className="min-w-0 flex-1 truncate font-medium">{session.title}</span>
+                        <span className="max-w-[110px] shrink-0 truncate text-xs text-[#969aa0] dark:text-[#8f9ba8]">
+                          {session.projectName || getPathBasename(session.directory)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-10 text-center text-sm text-[#969aa0] dark:text-[#8f9ba8]">
+                    {t('noResults')}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Session list */}
         <div
@@ -2360,6 +2529,23 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleCreateSessionInProject(group.id);
+                          }}
+                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
+                          className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                            isSelectedProject ? 'opacity-100' : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
+                          }`}
+                          title={t('createSessionInProject', { project: group.label })}
+                          aria-label={t('createSessionInProject', { project: group.label })}
+                        >
+                          {creating && isSelectedProject
+                            ? <Loader2 className="h-3 w-3 animate-spin" />
+                            : <Plus className="h-3 w-3" />}
+                        </button>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
@@ -2506,6 +2692,21 @@ export default function SessionPage() {
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleCreateSession(TASK_SESSION_GROUP_ID);
+                      }}
+                      disabled={creating}
+                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] opacity-0 transition-all hover:bg-black/[0.04] hover:text-[#474b51] group-hover/tasks-section:opacity-100 group-focus-within/tasks-section:opacity-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      title={t('createTaskSession')}
+                      aria-label={t('createTaskSession')}
+                    >
+                      {creating && taskGroupSelected
+                        ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : <Plus className="h-3 w-3" />}
                     </button>
                   </div>
                   {!taskGroupCollapsed && (
@@ -2671,9 +2872,17 @@ export default function SessionPage() {
           composerTextareaMinHeight={56}
           initialMessage={pendingInitialMessage}
           initialDisplayText={pendingInitialDisplayText}
+          initialOptimisticMessage={pendingOptimisticMessage}
+          focusMessageId={pendingFocusMessageId}
+          onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
+          }}
+          onInitialOptimisticMessageConsumed={(messageId) => {
+            setPendingOptimisticMessage((message) => (
+              message?.id === messageId ? null : message
+            ));
           }}
           onSseStatusChange={activeChatSessionId ? setSseStatus : undefined}
           onSSEEvent={handleSSEEvent}
@@ -2721,7 +2930,7 @@ export default function SessionPage() {
                 aria-haspopup="menu"
                 aria-expanded={showAgentOptions}
               >
-                <span className="grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-zinc-200/80 bg-white text-zinc-500 shadow-[0_1px_2px_rgba(22,27,34,0.04)] transition-colors group-hover:text-zinc-800 dark:border-white/[0.10] dark:bg-white/[0.05] dark:text-zinc-400 dark:group-hover:text-white">
+                <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
                   <Bot className="h-3.5 w-3.5" />
                 </span>
                 <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>

@@ -4,12 +4,15 @@ import ast
 import datetime as datetime_module
 import json
 import os
+import pickle
 import re
 import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+
+import pytest
 
 
 WORKFLOW_PATH = (
@@ -45,8 +48,10 @@ def _load_functions(*names: str) -> dict[str, object]:
         "inputs": {"loaded_files": []},
         "json": json,
         "os": os,
+        "pickle": pickle,
         "re": re,
         "time": time,
+        "MAX_TRIAGE_CACHE_BYTES": 128 * 1024 * 1024,
     }
     exec(compile(ast.Module(body=body, type_ignores=[]), str(WORKFLOW_PATH), "exec"), namespace)
     return namespace
@@ -108,6 +113,90 @@ def test_llm_calls_share_the_run_concurrency_budget() -> None:
     )
 
 
+def test_triage_does_not_truncate_content_or_limit_output_tokens() -> None:
+    code = _concurrent_triage_code()
+
+    for forbidden in (
+        "MAX_HTTP_FIELD_CHARS",
+        "MAX_LOG_TEXT_CHARS",
+        "MAX_LLM_PROMPT_CHARS",
+        "MAX_LLM_RESPONSE_CHARS",
+        "MAX_TRIAGE_REPORT_CHARS",
+        "LLM_CALL_MAX_TOKENS",
+        "_clip_prompt_text",
+        "'max_tokens':",
+    ):
+        assert forbidden not in code
+
+
+def test_cache_eviction_enforces_serialized_byte_budget() -> None:
+    evict = _load_functions("_evict_lru")["_evict_lru"]
+    cache = {f"key-{index}": {"report": chr(65 + index) * 2048} for index in range(3)}
+
+    evicted = evict(cache, max_keys=100, max_bytes=2500)
+
+    assert evicted == 2
+    assert list(cache) == ["key-2"]
+    assert len(pickle.dumps(cache, protocol=pickle.HIGHEST_PROTOCOL)) <= 2500
+
+
+def test_oversized_cache_is_quarantined_before_unpickling(tmp_path: Path) -> None:
+    functions = _load_functions("_load_cache")
+    cache_path = tmp_path / "triage_cache.pkl"
+    cache_path.write_bytes(b"x" * 9)
+
+    class FailIfLoaded:
+        @staticmethod
+        def load(_stream: object) -> object:
+            raise AssertionError("oversized cache must not be deserialized")
+
+    functions["pickle"] = FailIfLoaded
+    functions["MAX_TRIAGE_CACHE_BYTES"] = 8
+
+    assert functions["_load_cache"](str(cache_path)) == {}
+    assert not cache_path.exists()
+    assert len(list(tmp_path.glob("triage_cache.pkl.*.oversized"))) == 1
+
+
+def test_cache_is_loaded_once_while_batch_lock_is_held() -> None:
+    code = _concurrent_triage_code()
+    tree = ast.parse(code)
+    cache_path_loads = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Name)
+        and node.func.id == "_load_cache"
+        and len(node.args) == 1
+        and isinstance(node.args[0], ast.Name)
+        and node.args[0].id == "cache_path"
+    ]
+
+    assert len(cache_path_loads) == 1
+    assert "if new_results or evicted:" in code
+    assert "MAX_TRIAGE_CACHE_BYTES if new_results else None" in code
+
+
+def test_memory_heavy_triage_node_uses_fatal_process_isolation() -> None:
+    workflow = json.loads(WORKFLOW_PATH.read_text(encoding="utf-8"))
+    node = next(item for item in workflow["nodes"] if item["id"] == "concurrent_triage")
+
+    assert node["processIsolated"] is True
+    assert node["processRetainFdKeys"] == ["_batch_lease_fd"]
+    assert "processInheritFdKeys" not in node
+    assert node["timeoutFatal"] is True
+    assert "outputs['enriched_alerts_with_triage']" not in node["code"]
+    assert "top_triage_result['triage_report'] = a.get('triage_report', '')" in node["code"]
+
+
+def test_triage_work_units_are_submitted_in_small_batches() -> None:
+    code = _concurrent_triage_code()
+
+    assert "TRIAGE_SUB_BATCH_SIZE = 3" in code
+    assert "range(0, len(work_units), TRIAGE_SUB_BATCH_SIZE)" in code
+    assert "pool.submit(_process_unit, *u) for u in work_batch" in code
+
+
 def test_soc_db_selects_only_verified_first_seen_unique_alerts() -> None:
     functions = _load_functions("_input_bool", "_select_first_seen_soc_alerts")
     select_alerts = functions["_select_first_seen_soc_alerts"]
@@ -149,6 +238,40 @@ def test_soc_db_persistence_uses_filtered_first_seen_alerts() -> None:
     assert write_calls[0].args[1].id == "first_seen_soc_alerts"
 
 
+def test_apply_triage_fields_preserves_original_alert_fields() -> None:
+    apply_triage_fields = _load_functions("_apply_triage_fields")["_apply_triage_fields"]
+    record = {
+        "attack_verdict": "raw-verdict",
+        "attack_success": True,
+        "threat_result": "raw-result",
+    }
+
+    apply_triage_fields(
+        record,
+        {
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "failed",
+            "risk_level": "High",
+            "report_title": "Model report",
+            "triage_report": "# Model report",
+            "attack_verdict": "model-verdict",
+            "attack_success": False,
+            "threat_result": "model-result",
+        },
+    )
+
+    assert record == {
+        "attack_verdict": "raw-verdict",
+        "attack_success": True,
+        "threat_result": "raw-result",
+        "triage_attack_verdict": "attack",
+        "triage_attack_success": "failed",
+        "risk_level": "High",
+        "report_title": "Model report",
+        "triage_report": "# Model report",
+    }
+
+
 def test_soc_db_persistence_failure_is_reraised() -> None:
     tree = ast.parse(_concurrent_triage_code())
     persistence_try = next(
@@ -167,6 +290,138 @@ def test_soc_db_persistence_failure_is_reraised() -> None:
         isinstance(child, ast.Raise)
         for handler in persistence_try.handlers
         for child in ast.walk(handler)
+    )
+
+
+def test_cache_save_failure_is_reraised_and_cleans_unique_temp_file(tmp_path: Path) -> None:
+    functions = _load_functions("_save_cache_atomic")
+    functions["pickle"] = pickle
+    functions["threading"] = threading
+    cache_path = tmp_path / "cache-target"
+    cache_path.mkdir()
+
+    with pytest.raises(RuntimeError, match="failed to save triage cache"):
+        functions["_save_cache_atomic"](str(cache_path), {"key": {"value": 1}})
+
+    assert not list(tmp_path.glob("cache-target.*.tmp"))
+
+
+def test_soc_db_merge_preserves_original_attack_fields_and_updates_triage_fields() -> None:
+    merge_record = _load_functions("_merge_triage_record")["_merge_triage_record"]
+
+    merged = merge_record(
+        {
+            "attack_success": True,
+            "attack_verdict": "attack_success",
+            "threat_result": "success",
+        },
+        {"triage_attack_success": "unknown", "triage_attack_verdict": "non_attack"},
+    )
+
+    assert merged["attack_success"] is True
+    assert merged["attack_verdict"] == "attack_success"
+    assert merged["threat_result"] == "success"
+    assert merged["triage_attack_success"] == "unknown"
+    assert merged["triage_attack_verdict"] == "non_attack"
+
+
+def test_apply_triage_fields_namespaces_model_attack_fields() -> None:
+    apply_fields = _load_functions("_apply_triage_fields")["_apply_triage_fields"]
+    record = {"attack_success": True, "attack_verdict": "attack_success"}
+
+    apply_fields(
+        record,
+        {
+            "triage_attack_success": "unknown",
+            "triage_attack_verdict": "non_attack",
+            "risk_level": "Low",
+        },
+    )
+
+    assert record["attack_success"] is True
+    assert record["attack_verdict"] == "attack_success"
+    assert record["triage_attack_success"] == "unknown"
+    assert record["triage_attack_verdict"] == "non_attack"
+    assert record["risk_level"] == "Low"
+
+
+def test_apply_triage_fields_validates_direct_model_dimensions() -> None:
+    apply_fields = _load_functions("_apply_triage_fields")["_apply_triage_fields"]
+    cases = [
+        (("attack", "success"), ("attack", "success")),
+        (("attack", "failed"), ("attack", "failed")),
+        (("attack", "unknown"), ("attack", "unknown")),
+        (("non_attack", "success"), ("non_attack", "unknown")),
+        (("unknown", "failed"), ("unknown", "unknown")),
+        (("invalid", "invalid"), ("unknown", "unknown")),
+    ]
+
+    for (model_verdict, model_success), (attack_verdict, attack_success) in cases:
+        record: dict[str, object] = {}
+        apply_fields(
+            record,
+            {
+                "triage_attack_verdict": model_verdict,
+                "triage_attack_success": model_success,
+            },
+        )
+        assert record["triage_attack_verdict"] == attack_verdict
+        assert record["triage_attack_success"] == attack_success
+
+
+def test_llm_attack_outcome_generates_the_two_persisted_fields_directly() -> None:
+    functions = _load_functions("_normalize_triage_outcome", "_llm_attack_outcome")
+    functions.update(
+        {
+            "_strip_think": lambda value: value,
+            "_ask_llm": lambda _prompt: json.dumps(
+                {
+                    "triage_attack_verdict": "attack",
+                    "triage_attack_success": "failed",
+                }
+            ),
+        }
+    )
+
+    assert functions["_llm_attack_outcome"]("analysis") == {
+        "triage_attack_verdict": "attack",
+        "triage_attack_success": "failed",
+    }
+
+
+def test_current_triage_cache_requires_the_two_field_schema() -> None:
+    functions = _load_functions("_normalize_triage_outcome", "_is_current_triage_fields")
+    functions.update(
+        {
+            "TRIAGE_FIELDS": (
+                "triage_attack_verdict",
+                "triage_attack_success",
+                "risk_level",
+                "report_title",
+                "triage_report",
+            ),
+            "_is_valid_triage_report": lambda value: value == "valid-report",
+        }
+    )
+    is_current = functions["_is_current_triage_fields"]
+
+    assert is_current(
+        {
+            "triage_attack_verdict": "attack",
+            "triage_attack_success": "success",
+            "risk_level": "High",
+            "report_title": "title",
+            "triage_report": "valid-report",
+        }
+    )
+    assert not is_current(
+        {
+            "attack_verdict": "attack_success",
+            "attack_success": True,
+            "risk_level": "High",
+            "report_title": "title",
+            "triage_report": "valid-report",
+        }
     )
 
 

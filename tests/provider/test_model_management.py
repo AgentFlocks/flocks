@@ -279,6 +279,43 @@ class TestBaseProviderExtensions:
         assert overridden.capabilities.supports_reasoning is False
         assert ModelFeature.REASONING not in overridden.capabilities.features
 
+    def test_config_override_preserves_cache_read_pricing(self):
+        from flocks.provider.provider import BaseProvider, ModelCapabilities, ModelInfo
+
+        catalog_def = ModelDefinition(
+            id="dummy-model",
+            name="Dummy Model",
+            provider_id="dummy",
+            pricing=PriceConfig(input=1.0, output=2.0),
+        )
+        model = ModelInfo(
+            id="dummy-model",
+            name="Dummy Model",
+            provider_id="dummy",
+            capabilities=ModelCapabilities(),
+            pricing={
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.2,
+                "currency": "CNY",
+            },
+        )
+        model._explicit_keys = {
+            "input_price",
+            "output_price",
+            "cache_read_price",
+            "currency",
+        }
+
+        overridden = BaseProvider("dummy", "Dummy")._apply_config_overrides(
+            catalog_def,
+            model,
+        )
+
+        assert overridden.pricing is not None
+        assert overridden.pricing.cache_read == 0.2
+        assert overridden.pricing.currency == "CNY"
+
     def test_configure_from_credential(self):
         from flocks.provider.provider import BaseProvider
 

@@ -65,8 +65,10 @@ interface Stats {
     attackSuccess?: number;
     attack?: number;
     attackFailed?: number;
+    benign?: number;
     unknown?: number;
   };
+  verdicts?: CounterItem[];
   topThreats?: CounterItem[];
   fieldStats?: FieldStats;
 }
@@ -101,10 +103,19 @@ const EMPTY_STATS: Required<Stats> = {
   eventRange: { label: '', start: '', end: '' },
   generatedAt: '',
   denoise: { totalRaw: 0, totalUnique: 0, duplicates: 0, duplicateRate: 0 },
-  triage: { totalRecords: 0, attackSuccess: 0, attack: 0, attackFailed: 0, unknown: 0 },
+  triage: { totalRecords: 0, attackSuccess: 0, attack: 0, attackFailed: 0, benign: 0, unknown: 0 },
+  verdicts: [],
   topThreats: [],
   fieldStats: EMPTY_FIELD_STATS,
 };
+
+const VERDICT_CLASSES = [
+  { key: 'attack_success', label: '攻击成功' },
+  { key: 'attack', label: '攻击' },
+  { key: 'attack_failed', label: '攻击失败' },
+  { key: 'non_attack', label: '非攻击' },
+  { key: 'unknown', label: '待人工审核' },
+] as const;
 
 const PHASE_LABELS: Record<string, string> = {
   exploit: '漏洞利用',
@@ -182,6 +193,7 @@ function mergeStats(raw: Stats | undefined): Required<Stats> {
     eventRange: { ...EMPTY_STATS.eventRange, ...(value.eventRange || {}) },
     denoise: { ...EMPTY_STATS.denoise, ...(value.denoise || {}) },
     triage: { ...EMPTY_STATS.triage, ...(value.triage || {}) },
+    verdicts: list(value.verdicts),
     topThreats: list(value.topThreats),
     fieldStats: mergeFieldStats(value.fieldStats),
   };
@@ -274,10 +286,6 @@ function truncate(value: string, max = 34) {
   return value.length > max ? `${value.slice(0, max)}...` : value;
 }
 
-function count(items: CounterItem[], key: string) {
-  return items.find((item) => item.key === key || item.label === key)?.value || 0;
-}
-
 export default function SocOverviewPage() {
   const [stats, setStats] = useState(EMPTY_STATS);
   const [loading, setLoading] = useState(true);
@@ -349,10 +357,13 @@ export default function SocOverviewPage() {
     { label: '目标端口', value: stats.fieldStats.uniqueDestinationPorts, hint: '字段 dport' },
   ], [stats]);
 
-  const resultTotal = Math.max(stats.denoise.totalUnique, 1);
-  const success = stats.triage.attackSuccess || count(stats.fieldStats.threatResults, 'success');
-  const failed = stats.triage.attackFailed || count(stats.fieldStats.threatResults, 'failed');
-  const unknown = Math.max(0, stats.denoise.totalUnique - success - failed) || count(stats.fieldStats.threatResults, 'unknown');
+  const verdicts = VERDICT_CLASSES.map((verdictClass) => {
+    const backendVerdict = stats.verdicts.find((item) => item.key === verdictClass.key);
+    const value = Number(backendVerdict?.value || 0);
+    return { ...verdictClass, value: Number.isFinite(value) && value > 0 ? value : 0 };
+  });
+  const resultTotal = verdicts.reduce((total, item) => total + item.value, 0);
+  const resultDenominator = Math.max(resultTotal, 1);
 
   return (
     <div className="soc-overview-root">
@@ -391,19 +402,26 @@ export default function SocOverviewPage() {
         <div className="section-head">
           <div>
             <h2>告警研判结果</h2>
-            <p>按 threat_result 与研判结论聚合。</p>
+            <p>按模型研判的是否攻击与攻击结果字段聚合。</p>
           </div>
           <b>{formatNumber(resultTotal)} 条有效告警</b>
         </div>
         <div className="result-bar">
-          <span className="success" style={{ width: `${(success / resultTotal) * 100}%` }} />
-          <span className="unknown" style={{ width: `${(unknown / resultTotal) * 100}%` }} />
-          <span className="failed" style={{ width: `${(failed / resultTotal) * 100}%` }} />
+          {verdicts.map((item) => (
+            <span
+              key={item.key}
+              className={`verdict-${item.key}`}
+              style={{ width: `${(item.value / resultDenominator) * 100}%` }}
+            />
+          ))}
         </div>
         <div className="result-legend">
-          <span><i className="success" />攻击成功 {formatNumber(success)}</span>
-          <span><i className="unknown" />待确认 {formatNumber(unknown)}</span>
-          <span><i className="failed" />攻击失败 {formatNumber(failed)}</span>
+          {verdicts.map((item) => (
+            <span key={item.key}>
+              <i className={`verdict-${item.key}`} />
+              {item.label} {formatNumber(item.value)}
+            </span>
+          ))}
         </div>
       </section>
 
@@ -777,15 +795,19 @@ const CSS = `
 .section-head p { margin: 6px 0 0; color: #667085; font-size: 13px; }
 .section-head > b { color: #475467; font-size: 13px; }
 .result-bar { display: flex; height: 14px; overflow: hidden; margin-top: 18px; border-radius: 999px; background: #edf2f7; }
-.result-bar .success { background: #ef4444; }
-.result-bar .unknown { background: #f59e0b; }
-.result-bar .failed { background: #cbd5e1; }
+.result-bar .verdict-attack_success { background: #ff4d6d; }
+.result-bar .verdict-attack { background: #ffb020; }
+.result-bar .verdict-attack_failed { background: #2ee6a6; }
+.result-bar .verdict-non_attack { background: #58a6ff; }
+.result-bar .verdict-unknown { background: #9b8cff; }
 .result-legend { display: flex; flex-wrap: wrap; gap: 18px; margin-top: 12px; color: #667085; font-size: 13px; }
 .result-legend span { display: inline-flex; align-items: center; gap: 7px; }
 .result-legend i { width: 9px; height: 9px; border-radius: 50%; }
-.result-legend .success { background: #ef4444; }
-.result-legend .unknown { background: #f59e0b; }
-.result-legend .failed { background: #cbd5e1; }
+.result-legend .verdict-attack_success { background: #ff4d6d; }
+.result-legend .verdict-attack { background: #ffb020; }
+.result-legend .verdict-attack_failed { background: #2ee6a6; }
+.result-legend .verdict-non_attack { background: #58a6ff; }
+.result-legend .verdict-unknown { background: #9b8cff; }
 .panel-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
 .panel-card { min-height: 288px; padding: 0 16px 16px; }
 .panel-head { height: 48px; display: flex; align-items: center; border-bottom: 1px solid #edf2f7; margin-bottom: 14px; }

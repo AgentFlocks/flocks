@@ -101,7 +101,7 @@ class TestInjectDynamicPromptsWorkflows:
         """inject() receives the workflows list."""
         received: list = []
         builder_code = """
-def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+def inject(agent_info, available_agents, tools, skills, workflows=None):
     agent_info.prompt = "injected"
     import builtins
     builtins._test_received_workflows = workflows
@@ -119,7 +119,7 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
                 prompt_builder=f"{tmp_path.name}.cap_builder:inject",
             )
             workflows = _simple_workflows()
-            inject_dynamic_prompts({"cap_agent": agent}, [], [], [], [], workflows)
+            inject_dynamic_prompts({"cap_agent": agent}, [], [], [], workflows)
             import builtins
             result = getattr(builtins, "_test_received_workflows", None)
             assert result is not None
@@ -134,7 +134,7 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
     def test_workflows_defaults_to_empty_list_when_none(self, tmp_path):
         """inject() receives [] when workflows=None."""
         builder_code = """
-def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+def inject(agent_info, available_agents, tools, skills, workflows=None):
     agent_info.prompt = repr(workflows)
 """
         builder_path = tmp_path / "none_builder.py"
@@ -149,15 +149,76 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
                 native=False,
                 prompt_builder=f"{tmp_path.name}.none_builder:inject",
             )
-            inject_dynamic_prompts({"none_agent": agent}, [], [], [], [], None)
+            inject_dynamic_prompts({"none_agent": agent}, [], [], [], None)
             assert agent.prompt == "[]"
+        finally:
+            sys.path.pop(0)
+
+    def test_legacy_builder_receives_empty_categories_and_workflows(self, tmp_path):
+        """Legacy inject() signatures keep workflows in the correct argument."""
+        builder_code = """
+def inject(agent_info, available_agents, tools, skills, category_context, workflows=None):
+    workflow_names = [workflow.name for workflow in (workflows or [])]
+    agent_info.prompt = repr((category_context, workflow_names))
+"""
+        builder_path = tmp_path / "legacy_builder.py"
+        builder_path.write_text(textwrap.dedent(builder_code), encoding="utf-8")
+
+        import sys
+        sys.path.insert(0, str(tmp_path.parent))
+        try:
+            agent = AgentInfo(
+                name="legacy_agent",
+                mode="subagent",
+                native=False,
+                prompt_builder=f"{tmp_path.name}.legacy_builder:inject",
+            )
+            inject_dynamic_prompts(
+                {"legacy_agent": agent},
+                [],
+                [],
+                [],
+                _simple_workflows(),
+            )
+            assert agent.prompt == "([], ['ndr_triage', 'global_scan'])"
+        finally:
+            sys.path.pop(0)
+
+    def test_legacy_variadic_builder_receives_both_compatibility_arguments(self, tmp_path):
+        """Variadic legacy builders receive categories before workflows."""
+        builder_code = """
+def inject(agent_info, available_agents, tools, skills, *args):
+    categories, workflows = args
+    workflow_names = [workflow.name for workflow in workflows]
+    agent_info.prompt = repr((categories, workflow_names))
+"""
+        builder_path = tmp_path / "legacy_variadic_builder.py"
+        builder_path.write_text(textwrap.dedent(builder_code), encoding="utf-8")
+
+        import sys
+        sys.path.insert(0, str(tmp_path.parent))
+        try:
+            agent = AgentInfo(
+                name="legacy_variadic_agent",
+                mode="subagent",
+                native=False,
+                prompt_builder=f"{tmp_path.name}.legacy_variadic_builder:inject",
+            )
+            inject_dynamic_prompts(
+                {"legacy_variadic_agent": agent},
+                [],
+                [],
+                [],
+                _simple_workflows(),
+            )
+            assert agent.prompt == "([], ['ndr_triage', 'global_scan'])"
         finally:
             sys.path.pop(0)
 
     def test_inject_sets_prompt_on_agent(self, tmp_path):
         """inject() is expected to set agent_info.prompt."""
         builder_code = """
-def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+def inject(agent_info, available_agents, tools, skills, workflows=None):
     wf_names = ", ".join(w.name for w in (workflows or []))
     agent_info.prompt = f"I know these workflows: {wf_names}"
 """
@@ -174,7 +235,7 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
                 prompt_builder=f"{tmp_path.name}.prompt_builder:inject",
             )
             workflows = _simple_workflows()
-            inject_dynamic_prompts({"wf_agent": agent}, [], [], [], [], workflows)
+            inject_dynamic_prompts({"wf_agent": agent}, [], [], [], workflows)
             assert "ndr_triage" in agent.prompt
             assert "global_scan" in agent.prompt
         finally:
@@ -188,14 +249,14 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
             native=False,
             prompt="Static prompt",
         )
-        inject_dynamic_prompts({"static_agent": agent}, [], [], [], [], _simple_workflows())
+        inject_dynamic_prompts({"static_agent": agent}, [], [], [], _simple_workflows())
         # Prompt should remain unchanged
         assert agent.prompt == "Static prompt"
 
     def test_builder_error_logged_not_raised(self, tmp_path):
         """A broken inject function logs the error but does not raise."""
         builder_code = """
-def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+def inject(agent_info, available_agents, tools, skills, workflows=None):
     raise RuntimeError("inject exploded")
 """
         builder_path = tmp_path / "broken_builder.py"
@@ -211,14 +272,14 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
                 prompt_builder=f"{tmp_path.name}.broken_builder:inject",
             )
             # Must not raise
-            inject_dynamic_prompts({"broken_agent": agent}, [], [], [], [], [])
+            inject_dynamic_prompts({"broken_agent": agent}, [], [], [], [])
         finally:
             sys.path.pop(0)
 
     def test_multiple_agents_all_injected(self, tmp_path):
         """All agents with a builder receive the workflows."""
         builder_code = """
-def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+def inject(agent_info, available_agents, tools, skills, workflows=None):
     agent_info.prompt = str(len(workflows or []))
 """
         for i in range(3):
@@ -236,7 +297,7 @@ def inject(agent_info, available_agents, tools, skills, categories, workflows=No
                 )
                 for i in range(3)
             }
-            inject_dynamic_prompts(agents, [], [], [], [], _simple_workflows())
+            inject_dynamic_prompts(agents, [], [], [], _simple_workflows())
             for agent in agents.values():
                 assert agent.prompt == "2"  # 2 workflows in _simple_workflows()
         finally:

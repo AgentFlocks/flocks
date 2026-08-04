@@ -116,7 +116,6 @@ def test_plan_delegation_only_allows_explore_and_librarian(tool_name) -> None:
 
     for arguments in (
         {"subagent_type": "general"},
-        {"category": "quick"},
         {"session_id": "child-session"},
         {},
     ):

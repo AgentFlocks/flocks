@@ -7,7 +7,7 @@ import sqlite3
 import time
 from collections import Counter, OrderedDict
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from threading import RLock
 
@@ -21,7 +21,7 @@ DEFAULT_SQLITE_EVENT_TIME_COLUMN = "event_time"
 FACTS_TABLE = "soc_dashboard_alert_facts"
 ACTIVITY_TABLE = "soc_dashboard_activity"
 META_TABLE = "soc_dashboard_meta"
-SCHEMA_VERSION = "3"
+SCHEMA_VERSION = "4"
 ACTIVITY_DEFAULT_LIMIT = 20
 ACTIVITY_MAX_LIMIT = 50
 ACTIVITY_WINDOW_MS = 3000
@@ -32,6 +32,37 @@ ACTIVITY_PRUNE_INTERVAL = 3600.0
 
 WORKFLOW_DB = Path.home() / ".flocks" / "data" / "workflow.db"
 WORKFLOW_SNAPSHOT_TABLE = "soc_dashboard_workflow_stats_samples"
+TASK_DB = Path.home() / ".flocks" / "data" / "tasks.db"
+USAGE_DB = Path.home() / ".flocks" / "data" / "flocks.db"
+SOC_PINNED_WORKFLOW_NAMES = {
+    "stream_alert_denoise": "告警降噪工作流",
+    "stream_alert_triage": "告警研判工作流",
+}
+TRIAGE_WORKFLOW_IDS = {
+    "stream_alert_triage",
+    "onesec_kafka_investigation",
+    "tdp_alert_triage",
+    "sec_alert_unified_ops",
+}
+WORKFLOW_DISPLAY_NAMES = {
+    **SOC_PINNED_WORKFLOW_NAMES,
+    "onesec_kafka_investigation": "OneSEC Kafka 告警研判工作流",
+    "tdp_alert_triage": "TDP 告警研判工作流",
+    "sec_alert_unified_ops": "统一告警运营工作流",
+}
+WORKFLOW_RUNNING_STATUSES = {"running", "queued", "pending"}
+WORKFLOW_SUCCESS_STATUSES = {"success", "completed"}
+WORKFLOW_TRIGGER_CONFIG_KINDS = {
+    "workflow_kafka_config",
+    "workflow_poller_config",
+    "workflow_syslog_config",
+}
+WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS = 7200
+WORKFLOW_MIN_ACTIVE_TIMEOUT_SECONDS = 60
+UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
+    re.IGNORECASE,
+)
 
 _workflow_stats_cache: OrderedDict = OrderedDict()
 _CACHE_TTL: float = 30.0
@@ -42,6 +73,8 @@ _DENOISE_DETAIL_CACHE_MAX = 64
 _stats_response_cache: OrderedDict = OrderedDict()
 _STATS_RESPONSE_CACHE_TTL = 300.0
 _STATS_RESPONSE_CACHE_MAX = 32
+_token_usage_cache = {"updatedAt": 0.0, "mtimeNs": 0, "value": None}
+_TOKEN_USAGE_CACHE_TTL = 30.0
 _cache_lock = RLock()
 _schema_lock = RLock()
 _schema_ready: set = set()
@@ -79,10 +112,10 @@ _FACT_COLUMNS = (
     "triage_persisted_at",
     "triage_status",
     "triage_source",
-    "verdict",
+    "triage_attack_verdict",
     "risk_level",
     "triage_ms",
-    "attack_success",
+    "triage_attack_success",
 )
 
 
@@ -104,8 +137,31 @@ def _fact_expressions(prefix):
     kill_chain = _json_value(prefix, "kill_chain_phase")
     direction = _json_value(prefix, "direction")
     traffic_direction = _json_value(prefix, "traffic_direction")
-    result = _json_value(prefix, "threat_result")
-    verdict = _json_value(prefix, "attack_verdict")
+    raw_result = _json_value(prefix, "threat_result")
+    raw_verdict = _json_value(prefix, "attack_verdict")
+    triage_attack_verdict = _json_value(prefix, "triage_attack_verdict")
+    triage_attack_success = _json_value(prefix, "triage_attack_success")
+    normalized_triage_verdict = (
+        f"CASE WHEN LOWER(COALESCE({triage_attack_verdict}, '')) "
+        "IN ('attack', 'non_attack', 'unknown') "
+        f"THEN LOWER({triage_attack_verdict}) "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) "
+        "IN ('attack_success', 'attack_failed') THEN 'attack' "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) = 'benign' "
+        "THEN 'non_attack' ELSE 'unknown' END"
+    )
+    normalized_triage_success = (
+        f"CASE WHEN {normalized_triage_verdict} != 'attack' THEN 'unknown' "
+        f"WHEN LOWER(COALESCE({triage_attack_success}, '')) "
+        "IN ('success', 'failed', 'unknown') "
+        f"THEN LOWER({triage_attack_success}) "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) = 'attack_success' "
+        "THEN 'success' "
+        f"WHEN LOWER(COALESCE({triage_attack_verdict}, '')) = 'attack_failed' "
+        "THEN 'failed' "
+        f"WHEN LOWER(COALESCE({triage_attack_success}, '')) IN ('1', 'true') "
+        "THEN 'success' ELSE 'unknown' END"
+    )
     protocol = _json_value(prefix, "net_type")
     app_protocol = _json_value(prefix, "net_app_proto")
     protocol_fallback = _json_value(prefix, "protocol")
@@ -121,7 +177,6 @@ def _fact_expressions(prefix):
     triage_source = _json_value(prefix, "triage_source")
     triage_report = _json_value(prefix, "triage_report")
     triage_ms = _json_value(prefix, "triage_ms")
-    attack_success = _json_value(prefix, "attack_success")
     has_triage = (
         "CASE WHEN "
         f"NULLIF({triage_status}, '') IS NOT NULL "
@@ -140,7 +195,9 @@ def _fact_expressions(prefix):
         f"COALESCE({prefix}.is_duplicate, 0)",
         f"COALESCE(NULLIF({phase}, ''), NULLIF({attack_phase}, ''), NULLIF({kill_chain}, ''), 'unknown')",
         f"COALESCE(NULLIF({direction}, ''), NULLIF({traffic_direction}, ''), 'unknown')",
-        f"COALESCE(NULLIF({result}, ''), NULLIF({verdict}, ''), 'unknown')",
+        f"CASE WHEN {has_triage} = 1 "
+        f"THEN {normalized_triage_success} "
+        f"ELSE COALESCE(NULLIF({raw_result}, ''), NULLIF({raw_verdict}, ''), 'unknown') END",
         f"COALESCE(NULLIF({protocol}, ''), NULLIF({app_protocol}, ''), "
         f"NULLIF({protocol_fallback}, ''), 'unknown')",
         f"COALESCE(NULLIF({severity}, ''), 'unknown')",
@@ -151,10 +208,10 @@ def _fact_expressions(prefix):
         f"COALESCE({triage_persisted_at}, '')",
         f"COALESCE({triage_status}, '')",
         f"COALESCE({triage_source}, '')",
-        f"COALESCE({verdict}, 'unknown')",
+        normalized_triage_verdict,
         f"COALESCE(NULLIF({risk_level}, ''), 'unknown')",
         f"COALESCE(CAST({triage_ms} AS INTEGER), 0)",
-        f"CASE WHEN {attack_success} IN (1, '1', 'true') THEN 1 ELSE 0 END",
+        normalized_triage_success,
     )
 
 
@@ -374,10 +431,10 @@ def _ensure_sqlite_schema():
                     triage_persisted_at TEXT,
                     triage_status TEXT,
                     triage_source TEXT,
-                    verdict TEXT,
+                    triage_attack_verdict TEXT,
                     risk_level TEXT,
                     triage_ms INTEGER NOT NULL DEFAULT 0,
-                    attack_success INTEGER NOT NULL DEFAULT 0
+                    triage_attack_success TEXT NOT NULL DEFAULT 'unknown'
                 )
                 """
             )
@@ -475,6 +532,89 @@ def _safe_json_object(value):
     except Exception:
         return {}
     return parsed if isinstance(parsed, dict) else {}
+
+
+def _usage_iso(dt):
+    return dt.astimezone(timezone.utc).isoformat()
+
+
+def _read_token_usage():
+    empty = {
+        "totalTokens": 0,
+        "todayTokens": 0,
+        "todayRequests": 0,
+        "dailySeries": [],
+        "dailyLabels": [],
+        "source": "usage_records",
+    }
+    if not USAGE_DB.is_file():
+        return empty
+
+    try:
+        mtime_ns = USAGE_DB.stat().st_mtime_ns
+    except Exception:
+        mtime_ns = 0
+    now_monotonic = time.monotonic()
+    with _cache_lock:
+        cached_value = _token_usage_cache.get("value")
+        if (
+            cached_value is not None
+            and _token_usage_cache.get("mtimeNs") == mtime_ns
+            and now_monotonic - float(_token_usage_cache.get("updatedAt") or 0) < _TOKEN_USAGE_CACHE_TTL
+        ):
+            return cached_value
+
+    now_local = datetime.now().astimezone()
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    tomorrow_start = today_start + timedelta(days=1)
+    first_day = today_start - timedelta(days=6)
+    labels = [(first_day + timedelta(days=index)).strftime("%m/%d") for index in range(7)]
+    series_by_date = {
+        (first_day + timedelta(days=index)).date().isoformat(): 0
+        for index in range(7)
+    }
+
+    try:
+        with sqlite3.connect(f"file:{USAGE_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.execute("PRAGMA query_only = ON")
+            if not _table_exists(conn, "usage_records"):
+                return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
+            total_tokens = _safe_int(
+                conn.execute(
+                    "SELECT COALESCE(SUM(total_tokens), 0) FROM usage_records"
+                ).fetchone()[0]
+            )
+            today_row = conn.execute(
+                "SELECT COALESCE(SUM(total_tokens), 0), COUNT(*) "
+                "FROM usage_records WHERE created_at >= ? AND created_at < ?",
+                (_usage_iso(today_start), _usage_iso(tomorrow_start)),
+            ).fetchone()
+            series_rows = conn.execute(
+                "SELECT date(created_at, 'localtime') AS usage_day, "
+                "COALESCE(SUM(total_tokens), 0) AS token_count "
+                "FROM usage_records WHERE created_at >= ? AND created_at < ? "
+                "GROUP BY usage_day",
+                (_usage_iso(first_day), _usage_iso(tomorrow_start)),
+            ).fetchall()
+    except Exception:
+        return {**empty, "dailyLabels": labels, "dailySeries": [0] * 7}
+
+    for usage_day, total in series_rows:
+        key = str(usage_day or "")
+        if key in series_by_date:
+            series_by_date[key] += max(_safe_int(total), 0)
+
+    result = {
+        **empty,
+        "totalTokens": max(total_tokens, 0),
+        "todayTokens": max(_safe_int(today_row[0]), 0) if today_row else 0,
+        "todayRequests": max(_safe_int(today_row[1]), 0) if today_row else 0,
+        "dailySeries": list(series_by_date.values()),
+        "dailyLabels": labels,
+    }
+    with _cache_lock:
+        _token_usage_cache.update({"updatedAt": now_monotonic, "mtimeNs": mtime_ns, "value": result})
+    return result
 
 
 def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0):
@@ -890,11 +1030,27 @@ def _get_workflow_recent_events(
 ) -> list:
     if not WORKFLOW_DB.is_file():
         return []
-    query = (
-        "SELECT id, status, started_at, output_results, input_params "
-        "FROM workflow_executions WHERE workflow_id = ?"
-    )
+    workflow_stage = "triage" if workflow_name in TRIAGE_WORKFLOW_IDS else "denoise"
     query_params = [workflow_name]
+    try:
+        with sqlite3.connect(WORKFLOW_DB) as conn:
+            execution_columns = {
+                row[1]
+                for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
+            }
+    except Exception:
+        return []
+    latest_select = ", ".join(
+        [
+            "id",
+            "status",
+            "started_at",
+            _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
+            _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
+            _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
+        ]
+    )
+    query = f"SELECT {latest_select} FROM workflow_executions WHERE workflow_id = ?"
     if start_time > 0 and end_time > 0:
         query += " AND started_at >= ? AND started_at <= ?"
         query_params.extend((int(start_time * 1000), int(end_time * 1000)))
@@ -902,28 +1058,59 @@ def _get_workflow_recent_events(
     query_params.append(max(1, min(_safe_int(limit), 10)))
     try:
         with sqlite3.connect(WORKFLOW_DB) as conn:
+            conn.row_factory = sqlite3.Row
             rows = conn.execute(query, query_params).fetchall()
     except Exception:
         return []
 
     events = []
-    for execution_id, status, started_at, output_text, input_text in rows:
+    for row in rows:
+        execution_id = row["id"]
+        status = row["status"]
+        started_at = row["started_at"]
+        output_text = row["output_results"]
+        input_text = row["input_params"]
+        payload_text = row["payload"]
         metrics = _workflow_execution_metrics(output_text, input_text)
         preview = metrics["preview"]
         raw_count = metrics["rawCount"]
         unique_count = metrics["uniqueCount"]
-        threat_name = str(
-            preview.get("threat_name") or f"降噪批次 · 原始 {raw_count} 条"
+        threat_name = ""
+        if workflow_stage == "triage":
+            threat_name = _workflow_latest_alert_name(workflow_name, output_text, input_text)
+        if not threat_name:
+            threat_name = str(
+                preview.get("threat_name")
+                or preview.get("_threat_type")
+                or preview.get("threat_type")
+                or f"降噪批次 · 原始 {raw_count} 条"
+            )
+        normalized_status = str(status or "").lower()
+        event_status = (
+            "completed"
+            if normalized_status in {"success", "completed"}
+            else "running"
+            if normalized_status in {"running", "queued", "pending"}
+            else "failed"
+        )
+        session_id, message_id = _workflow_link_context(
+            {
+                "payload": payload_text,
+                "input_params": input_text,
+            }
         )
         events.append(
             {
                 "eventId": f"workflow-execution:{execution_id}",
-                "stage": "denoise",
-                "status": "completed" if str(status).lower() == "success" else "failed",
+                "stage": workflow_stage,
+                "status": event_status,
                 "occurredAt": datetime.fromtimestamp(
                     _safe_int(started_at) / 1000
                 ).astimezone().isoformat(timespec="seconds"),
                 "triggerSource": "workflow_execution",
+                "workflowId": workflow_name,
+                "sessionId": session_id,
+                "messageId": message_id,
                 "sampleCount": max(unique_count, 1),
                 "alert": {
                     "id": str(preview.get("id") or execution_id),
@@ -972,21 +1159,681 @@ DIRECTION_LABELS = {
 }
 
 RESULT_LABELS = {
-    "success": "攻击成功",
-    "succeeded": "攻击成功",
-    "failed": "攻击失败",
-    "blocked": "已阻断",
     "attack_success": "攻击成功",
     "attack": "攻击行为",
     "attack_failed": "攻击失败",
-    "benign": "良性",
+    "non_attack": "非攻击",
     "unknown": "待确认",
 }
+
+
+def _triage_outcome_key(record):
+    verdict = _triage_attack_verdict_value(record)
+    result = _triage_attack_success_value(record)
+    if verdict == "attack":
+        if result == "success":
+            return "attack_success"
+        if result == "failed":
+            return "attack_failed"
+        return "attack"
+    if verdict == "non_attack":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_verdict_value(record):
+    verdict = _norm(record.get("triage_attack_verdict") or "unknown")
+    if verdict in {"attack", "non_attack", "unknown"}:
+        return verdict
+    if verdict in {"attack_success", "attack_failed"}:
+        return "attack"
+    if verdict == "benign":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_success_value(record):
+    raw_verdict = _norm(record.get("triage_attack_verdict") or "unknown")
+    verdict = _triage_attack_verdict_value(record)
+    result = _norm(record.get("triage_attack_success") or "unknown")
+    if verdict == "attack" and result in {"success", "failed", "unknown"}:
+        return result
+    if verdict != "attack":
+        return "unknown"
+    if raw_verdict == "attack_success" or record.get("triage_attack_success") is True:
+        return "success"
+    if raw_verdict == "attack_failed":
+        return "failed"
+    return "unknown"
 
 
 async def get_activity(ctx, request):
     params = dict(request.query_params)
     return await asyncio.to_thread(_get_activity, params)
+
+
+async def get_task_center(ctx, request):
+    params = dict(request.query_params)
+    include_mock = _truthy(params.get("mockActivity")) or _truthy(params.get("mockTaskCenter"))
+    return await asyncio.to_thread(_get_task_center, include_mock)
+
+
+def _table_exists(conn, table_name):
+    return bool(
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+            (table_name,),
+        ).fetchone()
+    )
+
+
+def _task_center_empty():
+    return {
+        "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "sessionCount": 0,
+        "scheduledTasks": [],
+        "workflows": [],
+        "sourceStatus": {
+            "tasksDb": str(TASK_DB),
+            "workflowDb": str(WORKFLOW_DB),
+            "tasksAvailable": TASK_DB.is_file(),
+            "workflowAvailable": WORKFLOW_DB.is_file(),
+        },
+    }
+
+
+def _truthy(value):
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _task_trigger_value(trigger, key):
+    if not isinstance(trigger, dict):
+        return ""
+    return trigger.get(key) or trigger.get(key[0].lower() + key[1:]) or ""
+
+
+def _today_bounds():
+    now_local = datetime.now().astimezone()
+    today_start = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    return today_start, today_start + timedelta(days=1)
+
+
+def _task_center_task_rows(limit=12):
+    if not TASK_DB.is_file():
+        return 0, [], 0, 0
+    try:
+        with sqlite3.connect(f"file:{TASK_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON")
+            if not (
+                _table_exists(conn, "task_schedulers")
+                and _table_exists(conn, "task_executions")
+            ):
+                return 0, [], 0, 0
+            today_start, tomorrow_start = _today_bounds()
+            today_start_iso = today_start.isoformat(timespec="seconds")
+            tomorrow_start_iso = tomorrow_start.isoformat(timespec="seconds")
+            session_count = _safe_int(
+                conn.execute(
+                    "SELECT COUNT(DISTINCT session_id) FROM task_executions "
+                    "WHERE session_id IS NOT NULL AND session_id <> ''"
+                ).fetchone()[0]
+            )
+            scheduler_rows = conn.execute(
+                "SELECT id, title, mode, status, trigger, execution_mode, workflow_id, updated_at "
+                "FROM task_schedulers WHERE status <> 'archived' "
+                "ORDER BY updated_at DESC"
+            ).fetchall()
+            tasks = []
+            for scheduler in scheduler_rows:
+                summary = conn.execute(
+                    "SELECT COUNT(*) AS execution_count, "
+                    "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS success_count, "
+                    "SUM(CASE WHEN status IN ('pending', 'queued', 'running') THEN 1 ELSE 0 END) AS active_count, "
+                    "SUM(CASE WHEN "
+                    "julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) >= julianday(?) "
+                    "AND julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) < julianday(?) "
+                    "THEN 1 ELSE 0 END) AS today_execution_count "
+                    "FROM task_executions WHERE scheduler_id = ?",
+                    (today_start_iso, tomorrow_start_iso, scheduler["id"]),
+                ).fetchone()
+                latest = conn.execute(
+                    "SELECT status, queued_at, started_at, completed_at, updated_at "
+                    "FROM task_executions WHERE scheduler_id = ? "
+                    "ORDER BY julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) DESC "
+                    "LIMIT 1",
+                    (scheduler["id"],),
+                ).fetchone()
+                trigger = _safe_json_object(scheduler["trigger"])
+                execution_count = max(_safe_int(summary["execution_count"]), 0)
+                success_count = max(_safe_int(summary["success_count"]), 0)
+                active_count = max(_safe_int(summary["active_count"]), 0)
+                today_execution_count = max(_safe_int(summary["today_execution_count"]), 0)
+                last_run_at = ""
+                if latest:
+                    last_run_at = latest["completed_at"] or latest["updated_at"] or latest["started_at"] or latest["queued_at"] or ""
+                tasks.append(
+                    {
+                        "id": scheduler["id"],
+                        "name": scheduler["title"] or scheduler["id"],
+                        "mode": scheduler["mode"] or "once",
+                        "status": scheduler["status"] or "active",
+                        "executionMode": scheduler["execution_mode"] or "agent",
+                        "workflowId": scheduler["workflow_id"] or "",
+                        "executionCount": execution_count,
+                        "todayExecutionCount": today_execution_count,
+                        "successCount": success_count,
+                        "successRate": _ratio(success_count, execution_count),
+                        "activeCount": active_count,
+                        "lastStatus": latest["status"] if latest else "",
+                        "lastRunAt": last_run_at,
+                        "nextRunAt": _task_trigger_value(trigger, "nextRun"),
+                        "cron": _task_trigger_value(trigger, "cron"),
+                        "cronDescription": _task_trigger_value(trigger, "cronDescription"),
+                    }
+                )
+            tasks.sort(
+                key=lambda item: (
+                    item["activeCount"] > 0,
+                    item["lastRunAt"] or "",
+                    item["executionCount"],
+                ),
+                reverse=True,
+            )
+            return (
+                session_count,
+                tasks[:limit],
+                sum(task["executionCount"] for task in tasks),
+                sum(task["todayExecutionCount"] for task in tasks),
+            )
+    except Exception:
+        return 0, [], 0, 0
+
+
+def _workflow_manifest_name_map():
+    roots = [
+        Path.home() / ".flocks" / "plugins" / "workflows",
+        Path.home() / ".flocks" / "workspace" / "workflows",
+        Path(__file__).resolve().parents[4] / "workflows",
+    ]
+    names = {}
+    for root in roots:
+        if not root.is_dir():
+            continue
+        for manifest_path in root.glob("*/manifest.json"):
+            workflow_id = manifest_path.parent.name
+            try:
+                manifest = _safe_json_object(manifest_path.read_text(encoding="utf-8"))
+            except Exception:
+                manifest = {}
+            name = (
+                manifest.get("nameCn")
+                or manifest.get("name")
+                or manifest.get("title")
+                or workflow_id
+            )
+            name_i18n = manifest.get("nameI18n")
+            if isinstance(name_i18n, dict):
+                name = name_i18n.get("zh-CN") or name_i18n.get("zh") or name
+            names.setdefault(workflow_id, str(name))
+    return names
+
+
+def _workflow_config_name_map(conn):
+    if not _table_exists(conn, "workflow_configs"):
+        return {}
+    names = {}
+    for row in conn.execute(
+        "SELECT workflow_id, config FROM workflow_configs WHERE kind = ?",
+        ("workflow.integration-config",),
+    ).fetchall():
+        workflow_id = row["workflow_id"] if isinstance(row, sqlite3.Row) else row[0]
+        config_raw = row["config"] if isinstance(row, sqlite3.Row) else row[1]
+        if not workflow_id:
+            continue
+        config = _safe_json_object(config_raw)
+        workflow = config.get("workflow")
+        if not isinstance(workflow, dict):
+            continue
+        name = workflow.get("name") or workflow.get("title") or workflow.get("id")
+        if name:
+            names.setdefault(str(workflow_id), str(name))
+    return names
+
+
+def _truthy_config_value(value):
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value != 0
+    text = str(value or "").strip().lower()
+    if not text:
+        return False
+    return text in {"1", "true", "yes", "on", "enabled"}
+
+
+def _workflow_trigger_state(conn, workflow_id):
+    state = {
+        "hasConfig": False,
+        "enabled": True,
+        "timeoutSeconds": WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS,
+    }
+    if not _table_exists(conn, "workflow_configs"):
+        return state
+
+    placeholders = ",".join("?" for _ in WORKFLOW_TRIGGER_CONFIG_KINDS)
+    rows = conn.execute(
+        "SELECT kind, config FROM workflow_configs WHERE workflow_id = ? "
+        f"AND (kind IN ({placeholders}) OR kind LIKE ? OR kind LIKE ? OR kind LIKE ?)",
+        (
+            workflow_id,
+            *WORKFLOW_TRIGGER_CONFIG_KINDS,
+            "workflow_kafka_config/%",
+            "workflow_poller_config/%",
+            "workflow_syslog_config/%",
+        ),
+    ).fetchall()
+    if not rows:
+        return state
+
+    enabled = False
+    timeout_seconds = WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS
+    for row in rows:
+        config = _safe_json_object(row["config"] if isinstance(row, sqlite3.Row) else row[1])
+        if "enabled" not in config or _truthy_config_value(config.get("enabled")):
+            enabled = True
+        timeout_seconds = max(
+            timeout_seconds,
+            _safe_int(config.get("timeoutSeconds") or config.get("timeout_seconds")),
+        )
+    state["hasConfig"] = True
+    state["enabled"] = enabled
+    state["timeoutSeconds"] = max(timeout_seconds, WORKFLOW_MIN_ACTIVE_TIMEOUT_SECONDS)
+    return state
+
+
+def _workflow_effective_status(latest, active_count, trigger_state):
+    if not latest:
+        return ""
+    status = str(latest["status"] or "").lower()
+    if status not in WORKFLOW_RUNNING_STATUSES:
+        return status
+    if active_count > 0:
+        return status
+    if trigger_state.get("hasConfig") and not trigger_state.get("enabled"):
+        return "disabled"
+    return "stale"
+
+
+def _workflow_execution_column_expr(columns, column_name, fallback):
+    return column_name if column_name in columns else f"{fallback} AS {column_name}"
+
+
+def _workflow_node_count(workflow_id):
+    roots = [
+        Path.home() / ".flocks" / "plugins" / "workflows",
+        Path.home() / ".flocks" / "workspace" / "workflows",
+        Path(__file__).resolve().parents[4] / "workflows",
+    ]
+    for root in roots:
+        workflow_path = root / str(workflow_id) / "workflow.json"
+        if not workflow_path.is_file():
+            continue
+        try:
+            workflow_json = _safe_json_object(workflow_path.read_text(encoding="utf-8"))
+            nodes = workflow_json.get("nodes")
+            if isinstance(nodes, list):
+                return max(len(nodes), 0)
+        except Exception:
+            continue
+    return 0
+
+
+def _first_text(*values):
+    for value in values:
+        text = str(value or "").strip()
+        if text and text.lower() not in {"unknown", "none", "null", "--"}:
+            return text
+    return ""
+
+
+def _alert_name_from_record(record):
+    if not isinstance(record, dict):
+        return ""
+    return _first_text(
+        record.get("threat_name"),
+        record.get("_threat_type"),
+        record.get("threat_type"),
+        record.get("alert_name"),
+        record.get("name"),
+        record.get("report_title"),
+        record.get("title"),
+    )
+
+
+def _workflow_latest_alert_name(workflow_id, output_text="", input_text=""):
+    output = _safe_json_object(output_text)
+    inputs = _safe_json_object(input_text)
+    preview = _workflow_alert_preview(output) or _workflow_input_preview(inputs)
+    name = _alert_name_from_record(preview)
+    if name:
+        return name
+    for key in (
+        "enriched_alerts_with_triage",
+        "triage_results",
+        "unique_alerts",
+        "enriched_alerts",
+    ):
+        value = output.get(key)
+        if isinstance(value, dict):
+            value = value.get("preview")
+        if isinstance(value, list):
+            for item in value:
+                name = _alert_name_from_record(item)
+                if name:
+                    return name
+    name = _first_text(
+        output.get("top_report_title"),
+        output.get("report_title"),
+        output.get("title"),
+    )
+    if name:
+        return name
+    if workflow_id in TRIAGE_WORKFLOW_IDS:
+        input_date = _first_text(inputs.get("input_date"))
+        return f"研判批次 {input_date}" if input_date else "研判批次"
+    if workflow_id == "stream_alert_denoise":
+        return "降噪批次"
+    return ""
+
+
+def _workflow_progress(status, current_step_index, completed_steps, total_steps):
+    normalized = str(status or "").lower()
+    current = max(_safe_int(current_step_index), _safe_int(completed_steps), 0)
+    total = max(_safe_int(total_steps), current, 1)
+    if normalized == "disabled":
+        return 0, "已关闭"
+    if normalized == "stale":
+        return 0, "已停止"
+    if normalized in WORKFLOW_SUCCESS_STATUSES:
+        return 1, "已完成"
+    if normalized in {"error", "failed", "timeout"}:
+        percent = _ratio(current or total, total)
+        return percent, f"失败于 {current or total}/{total} 步"
+    if normalized == "cancelled":
+        percent = _ratio(current or total, total)
+        return percent, f"已取消 {current or total}/{total} 步"
+    if normalized in WORKFLOW_RUNNING_STATUSES:
+        visible_current = current if current > 0 else 1
+        return max(_ratio(visible_current, total), 0.03), f"第 {visible_current}/{total} 步"
+    return 0, "待执行"
+
+
+def _workflow_link_context(latest):
+    payload = _safe_json_object(latest["payload"] if latest and "payload" in latest.keys() else "")
+    input_params = _safe_json_object(latest["input_params"] if latest and "input_params" in latest.keys() else "")
+    session_id = _first_text(
+        payload.get("sessionId"),
+        payload.get("sessionID"),
+        payload.get("session_id"),
+        input_params.get("sessionId"),
+        input_params.get("sessionID"),
+        input_params.get("session_id"),
+    )
+    message_id = _first_text(
+        payload.get("messageId"),
+        payload.get("messageID"),
+        payload.get("message_id"),
+        input_params.get("messageId"),
+        input_params.get("messageID"),
+        input_params.get("message_id"),
+    )
+    return session_id, message_id
+
+
+def _task_center_workflow_rows(limit=12, include_mock=False):
+    if not WORKFLOW_DB.is_file():
+        return [], 0, 0
+    try:
+        with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("PRAGMA query_only = ON")
+            if not (
+                _table_exists(conn, "workflow_stats")
+                or _table_exists(conn, "workflow_executions")
+            ):
+                return [], 0, 0
+            today_start, tomorrow_start = _today_bounds()
+            today_start_ms = int(today_start.timestamp() * 1000)
+            tomorrow_start_ms = int(tomorrow_start.timestamp() * 1000)
+            workflow_ids = set()
+            if _table_exists(conn, "workflow_stats"):
+                workflow_ids.update(
+                    row[0]
+                    for row in conn.execute("SELECT workflow_id FROM workflow_stats").fetchall()
+                    if row[0]
+                )
+            if _table_exists(conn, "workflow_executions"):
+                workflow_ids.update(
+                    row[0]
+                    for row in conn.execute(
+                        "SELECT DISTINCT workflow_id FROM workflow_executions"
+                    ).fetchall()
+                    if row[0]
+                )
+            names = {
+                **_workflow_manifest_name_map(),
+                **_workflow_config_name_map(conn),
+                **WORKFLOW_DISPLAY_NAMES,
+            }
+            if include_mock:
+                workflow_ids.update(SOC_PINNED_WORKFLOW_NAMES)
+            stats_columns = (
+                {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(workflow_stats)").fetchall()
+                }
+                if _table_exists(conn, "workflow_stats")
+                else set()
+            )
+            stats_success_expr = "success_count" if "success_count" in stats_columns else "0"
+            stats_error_expr = "error_count" if "error_count" in stats_columns else "0"
+            stats_updated_expr = "updated_at" if "updated_at" in stats_columns else "0"
+            execution_columns = (
+                {
+                    row[1]
+                    for row in conn.execute("PRAGMA table_info(workflow_executions)").fetchall()
+                }
+                if _table_exists(conn, "workflow_executions")
+                else set()
+            )
+            finished_at_expr = "finished_at" if "finished_at" in execution_columns else "NULL"
+            updated_at_expr = "updated_at" if "updated_at" in execution_columns else "NULL"
+            execution_time_expr = f"COALESCE({finished_at_expr}, {updated_at_expr}, started_at, 0)"
+            active_time_expr = f"COALESCE({updated_at_expr}, started_at, 0)"
+            latest_select = ", ".join(
+                [
+                    "id",
+                    "status",
+                    "started_at",
+                    _workflow_execution_column_expr(execution_columns, "finished_at", "NULL"),
+                    _workflow_execution_column_expr(execution_columns, "updated_at", "0"),
+                    _workflow_execution_column_expr(execution_columns, "current_phase", "''"),
+                    _workflow_execution_column_expr(execution_columns, "current_step_index", "0"),
+                    _workflow_execution_column_expr(execution_columns, "step_count", "0"),
+                    _workflow_execution_column_expr(execution_columns, "input_params", "'{}'"),
+                    _workflow_execution_column_expr(execution_columns, "output_results", "'{}'"),
+                    _workflow_execution_column_expr(execution_columns, "payload", "'{}'"),
+                    _workflow_execution_column_expr(execution_columns, "error_message", "''"),
+                ]
+            )
+            workflows = []
+            now_ms = int(time.time() * 1000)
+            for workflow_id in workflow_ids:
+                workflow_name = names.get(workflow_id, workflow_id)
+                if UUID_RE.match(str(workflow_id)) and workflow_name == workflow_id:
+                    continue
+                trigger_state = _workflow_trigger_state(conn, workflow_id)
+                stats = None
+                if _table_exists(conn, "workflow_stats"):
+                    stats = conn.execute(
+                        f"SELECT call_count, {stats_success_expr}, {stats_error_expr}, {stats_updated_expr} "
+                        "FROM workflow_stats WHERE workflow_id = ?",
+                        (workflow_id,),
+                    ).fetchone()
+                latest = None
+                exec_summary = None
+                if _table_exists(conn, "workflow_executions"):
+                    exec_summary = conn.execute(
+                        "SELECT COUNT(*) AS execution_count, "
+                        "SUM(CASE WHEN status IN ('success', 'completed') THEN 1 ELSE 0 END) AS success_count, "
+                        f"SUM(CASE WHEN {execution_time_expr} >= ? "
+                        f"AND {execution_time_expr} < ? THEN 1 ELSE 0 END) "
+                        "AS today_execution_count "
+                        "FROM workflow_executions WHERE workflow_id = ?",
+                        (today_start_ms, tomorrow_start_ms, workflow_id),
+                    ).fetchone()
+                    latest = conn.execute(
+                        f"SELECT {latest_select} "
+                        "FROM workflow_executions WHERE workflow_id = ? "
+                        f"ORDER BY {execution_time_expr} DESC LIMIT 1",
+                        (workflow_id,),
+                    ).fetchone()
+                active_count = 0
+                if _table_exists(conn, "workflow_executions"):
+                    if trigger_state["hasConfig"] and trigger_state["enabled"]:
+                        active_since_ms = now_ms - trigger_state["timeoutSeconds"] * 1000
+                        active_summary = conn.execute(
+                            "SELECT COUNT(*) AS active_count "
+                            "FROM workflow_executions WHERE workflow_id = ? "
+                            "AND status IN ('running', 'queued', 'pending') "
+                            f"AND {active_time_expr} >= ?",
+                            (workflow_id, active_since_ms),
+                        ).fetchone()
+                    elif not trigger_state["hasConfig"] and "updated_at" in execution_columns:
+                        active_since_ms = now_ms - WORKFLOW_DEFAULT_ACTIVE_TIMEOUT_SECONDS * 1000
+                        active_summary = conn.execute(
+                            "SELECT COUNT(*) AS active_count "
+                            "FROM workflow_executions WHERE workflow_id = ? "
+                            "AND status IN ('running', 'queued', 'pending') "
+                            f"AND {active_time_expr} >= ?",
+                            (workflow_id, active_since_ms),
+                        ).fetchone()
+                    elif not trigger_state["hasConfig"]:
+                        active_summary = conn.execute(
+                            "SELECT COUNT(*) AS active_count "
+                            "FROM workflow_executions WHERE workflow_id = ? "
+                            "AND status IN ('running', 'queued', 'pending')",
+                            (workflow_id,),
+                        ).fetchone()
+                    else:
+                        active_summary = None
+                    active_count = max(
+                        _safe_int(active_summary["active_count"] if active_summary else 0),
+                        0,
+                    )
+                execution_count = max(
+                    _safe_int(stats["call_count"] if stats else 0),
+                    _safe_int(exec_summary["execution_count"] if exec_summary else 0),
+                )
+                success_count = max(
+                    _safe_int(stats["success_count"] if stats else 0),
+                    _safe_int(exec_summary["success_count"] if exec_summary else 0),
+                )
+                today_execution_count = max(
+                    _safe_int(exec_summary["today_execution_count"] if exec_summary else 0),
+                    0,
+                )
+                last_run_at = 0
+                if latest:
+                    last_run_at = (
+                        _safe_int(latest["finished_at"])
+                        or _safe_int(latest["updated_at"])
+                        or _safe_int(latest["started_at"])
+                    )
+                workflow_total_steps = _workflow_node_count(workflow_id)
+                latest_alert_name = ""
+                progress_percent = 0
+                progress_label = "待执行"
+                current_phase = ""
+                session_id = ""
+                message_id = ""
+                effective_status = _workflow_effective_status(latest, active_count, trigger_state)
+                if latest:
+                    workflow_total_steps = max(workflow_total_steps, _safe_int(latest["step_count"]))
+                    latest_alert_name = _workflow_latest_alert_name(
+                        workflow_id,
+                        latest["output_results"],
+                        latest["input_params"],
+                    )
+                    progress_percent, progress_label = _workflow_progress(
+                        effective_status,
+                        latest["current_step_index"],
+                        latest["step_count"],
+                        workflow_total_steps,
+                    )
+                    current_phase = str(latest["current_phase"] or "")
+                    session_id, message_id = _workflow_link_context(latest)
+                workflows.append(
+                    {
+                        "id": workflow_id,
+                        "name": workflow_name,
+                        "executionCount": execution_count,
+                        "todayExecutionCount": today_execution_count,
+                        "successCount": success_count,
+                        "successRate": _ratio(success_count, execution_count),
+                        "activeCount": active_count,
+                        "lastStatus": effective_status,
+                        "lastRunAt": last_run_at,
+                        "latestExecutionHash": str(latest["id"] if latest else ""),
+                        "latestAlertName": latest_alert_name,
+                        "progressPercent": progress_percent,
+                        "progressLabel": progress_label,
+                        "currentPhase": current_phase,
+                        "sessionId": session_id,
+                        "messageId": message_id,
+                    }
+                )
+            soc_order = {
+                "stream_alert_denoise": 3,
+                "stream_alert_triage": 2,
+                "onesec_kafka_investigation": 1,
+                "tdp_alert_triage": 1,
+                "sec_alert_unified_ops": 1,
+            }
+            workflows.sort(
+                key=lambda item: (
+                    item["activeCount"] > 0,
+                    item["lastRunAt"],
+                    item["executionCount"],
+                    soc_order.get(item["id"], 0),
+                ),
+                reverse=True,
+            )
+            return (
+                workflows[:limit],
+                sum(workflow["executionCount"] for workflow in workflows),
+                sum(workflow["todayExecutionCount"] for workflow in workflows),
+            )
+    except Exception:
+        return [], 0, 0
+
+
+def _get_task_center(include_mock=False):
+    session_count, tasks, scheduled_execution_count, scheduled_today_execution_count = _task_center_task_rows()
+    workflows, workflow_execution_count, workflow_today_execution_count = _task_center_workflow_rows(
+        include_mock=include_mock,
+    )
+    return {
+        **_task_center_empty(),
+        "sessionCount": session_count,
+        "scheduledTasks": tasks,
+        "scheduledExecutionCount": scheduled_execution_count,
+        "scheduledTodayExecutionCount": scheduled_today_execution_count,
+        "workflowExecutionCount": workflow_execution_count,
+        "workflowTodayExecutionCount": workflow_today_execution_count,
+        "workflows": workflows,
+    }
 
 
 def _get_activity(params):
@@ -1004,11 +1851,10 @@ def _get_activity(params):
         start_time,
         end_time,
     )
-    workflow_events = _get_workflow_recent_events(
-        "stream_alert_denoise",
-        start_time,
-        end_time,
-    )
+    workflow_events = [
+        *_get_workflow_recent_events("stream_alert_denoise", start_time, end_time),
+        *_get_workflow_recent_events("stream_alert_triage", start_time, end_time),
+    ]
     raw_cursor = str(params.get("cursor") or "").strip()
     bootstrap = str(params.get("bootstrap") or "").strip().lower() == "latest"
     limit = max(1, min(_safe_int(params.get("limit") or ACTIVITY_DEFAULT_LIMIT), ACTIVITY_MAX_LIMIT))
@@ -1030,6 +1876,18 @@ def _get_activity(params):
         with sqlite3.connect(db_path) as conn:
             conn.row_factory = sqlite3.Row
             conn.execute("PRAGMA query_only = ON")
+            if not (
+                _table_exists(conn, DEFAULT_SQLITE_TABLE)
+                and _table_exists(conn, ACTIVITY_TABLE)
+            ):
+                return _activity_response(
+                    [],
+                    0,
+                    0,
+                    cursor_reset=cursor_reset,
+                    workflow_stats=workflow_stats,
+                    workflow_events=workflow_events,
+                )
             latest_row_id, latest_activity_id = _activity_latest_cursor(conn, settings)
 
             if bootstrap or cursor is None:
@@ -1121,6 +1979,7 @@ def _activity_response(
         "cursorReset": cursor_reset,
         "workflowStats": workflow_stats or {"callCount": None, "latestStartedAt": None},
         "workflowEvents": workflow_events or [],
+        "tokenUsage": _read_token_usage(),
     }
 
 
@@ -1388,13 +2247,16 @@ def _activity_event(row):
             "dedupKey": _first_activity_text(record, "dedup_key"),
         }
     else:
-        verdict = _norm(record.get("attack_verdict") or "unknown")
+        verdict = _triage_attack_verdict_value(record)
+        attack_success = _triage_attack_success_value(record)
+        outcome = _triage_outcome_key(record)
         event["result"] = {
             "triageStatus": triage_status or "completed",
             "triageSource": str(record.get("triage_source") or "").strip().lower() or "triaged",
             "durationMs": _safe_int(record.get("triage_ms")),
             "verdict": verdict,
-            "verdictLabel": RESULT_LABELS.get(verdict, "待确认"),
+            "attackSuccess": attack_success,
+            "verdictLabel": RESULT_LABELS.get(outcome, "待确认"),
             "threatSeverity": _first_activity_text(record, "threat_severity"),
             "riskLevel": _first_activity_text(record, "risk_level"),
             "reportTitle": _first_activity_text(record, "report_title"),
@@ -1505,6 +2367,7 @@ def _get_stats(params):
     if cached is not None:
         return {
             **cached,
+            "tokenUsage": _read_token_usage(),
             "generatedAt": datetime.now().isoformat(timespec="seconds"),
             "latencyMs": round((time.time() - started) * 1000),
             "cacheHit": True,
@@ -1584,6 +2447,7 @@ def _get_stats(params):
                 "allowedDatabases": [
                     _display_path(DEFAULT_SQLITE_DB),
                     _display_path(WORKFLOW_DB),
+                    _display_path(USAGE_DB),
                 ],
             },
             "workflowStatsDb": _display_path(WORKFLOW_DB),
@@ -1620,7 +2484,7 @@ def _get_stats(params):
             {"key": "attack_success", "label": "攻击成功", "value": triage["attackSuccess"], "color": "#ff4d6d"},
             {"key": "attack", "label": "攻击行为", "value": triage["attack"], "color": "#ffb020"},
             {"key": "attack_failed", "label": "攻击失败", "value": triage["attackFailed"], "color": "#2ee6a6"},
-            {"key": "benign", "label": "良性", "value": triage["benign"], "color": "#58a6ff"},
+            {"key": "non_attack", "label": "非攻击", "value": triage["benign"], "color": "#58a6ff"},
             {"key": "unknown", "label": "未知", "value": triage["unknown"], "color": "#9b8cff"},
         ],
         "topThreatTypes": _counter_items(
@@ -1632,6 +2496,7 @@ def _get_stats(params):
             8,
         ),
         "riskLevels": _counter_items(triage["riskCounter"], 5),
+        "tokenUsage": _read_token_usage(),
         "timeline": {
             "labels": denoise.get("_timelineLabels")
             or _series_labels(max(len(denoise["seriesRaw"]), len(triage["seriesTotal"]))),
@@ -2034,9 +2899,7 @@ def _sqlite_timeline(conn, settings, where_clause, query_params, dates, start_ti
         f"COALESCE(SUM(has_triage), 0) AS triage_count, "
         f"COALESCE(SUM(CASE WHEN has_triage = 1 "
         f"AND LOWER(triage_status) NOT IN ('failed', 'error') "
-        f"AND (LOWER(verdict) IN ('attack_success', 'attack', 'attack_failed') "
-        f"OR (attack_success = 1 AND LOWER(verdict) NOT IN "
-        f"('attack_success', 'attack', 'attack_failed', 'benign'))) "
+        f"AND LOWER(triage_attack_verdict) = 'attack' "
         f"THEN 1 ELSE 0 END), 0) AS attack_count "
         f"FROM {settings['facts_table']} WHERE {where_clause} AND event_time IS NOT NULL "
         f"GROUP BY bucket_index ORDER BY bucket_index",
@@ -2152,7 +3015,6 @@ def _read_sqlite_triage(paths):
         "OR LOWER(triage_status) = 'follower_reused')"
     )
     failed_condition = "LOWER(triage_status) IN ('failed', 'error')"
-    resolved_condition = f"NOT ({failed_condition})"
     new_triage_condition = (
         f"NOT {cache_condition} AND NOT {follower_condition} AND NOT ({failed_condition})"
     )
@@ -2166,17 +3028,18 @@ def _read_sqlite_triage(paths):
                 f"THEN 1 ELSE 0 END), 0), "
                 f"COALESCE(SUM(CASE WHEN {new_triage_condition} "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND "
-                f"(LOWER(verdict) = 'attack_success' OR (attack_success = 1 AND LOWER(verdict) NOT IN "
-                f"('attack_success', 'attack', 'attack_failed', 'benign'))) THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack' "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'attack' "
+                f"AND LOWER(triage_attack_success) = 'success' THEN 1 ELSE 0 END), 0), "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'attack' "
+                f"AND LOWER(triage_attack_success) NOT IN ('success', 'failed') "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'attack_failed' "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'attack' "
+                f"AND LOWER(triage_attack_success) = 'failed' "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) = 'benign' "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) = 'non_attack' "
                 f"THEN 1 ELSE 0 END), 0), "
-                f"COALESCE(SUM(CASE WHEN {resolved_condition} AND LOWER(verdict) NOT IN "
-                f"('attack_success', 'attack', 'attack_failed', 'benign') AND attack_success <> 1 "
+                f"COALESCE(SUM(CASE WHEN LOWER(triage_attack_verdict) "
+                f"NOT IN ('attack', 'non_attack') "
                 f"THEN 1 ELSE 0 END), 0), MIN(event_time), MAX(event_time), "
                 f"COALESCE(ROUND(AVG(CASE WHEN triage_ms > 0 THEN triage_ms END)), 0) "
                 f"FROM {settings['facts_table']} WHERE {triage_where}",
@@ -2321,9 +3184,8 @@ def _read_triage(paths):
 
             total_records += 1
             file_total += 1
-            verdict = _norm(obj.get("attack_verdict") or "unknown")
-            if verdict not in {"attack_success", "attack", "attack_failed", "benign", "unknown"}:
-                verdict = "unknown"
+            verdict = _triage_attack_verdict_value(obj)
+            outcome = _triage_outcome_key(obj)
             source = _norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))
             source_counter[source] += 1
             threat_type_counter[_norm(obj.get("_threat_type") or obj.get("threat_type"))] += 1
@@ -2332,7 +3194,7 @@ def _read_triage(paths):
             if triage_ms > 0:
                 triage_ms_total += triage_ms
                 triage_ms_count += 1
-            _update_profile_counters(obj, profile_counters)
+            _update_profile_counters(obj, profile_counters, triage_result=True)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
             triage_source = _norm(obj.get("triage_source"))
             triage_status = _norm(obj.get("triage_status"))
@@ -2340,10 +3202,8 @@ def _read_triage(paths):
             triage_failed = triage_status in {"failed", "error"}
 
             if not triage_failed:
-                if verdict == "unknown" and obj.get("attack_success") is True:
-                    verdict = "attack_success"
-                verdict_counter[verdict] += 1
-                if verdict in {"attack_success", "attack", "attack_failed"}:
+                verdict_counter[outcome] += 1
+                if verdict == "attack":
                     file_attack += 1
             else:
                 fallback_failed += 1
@@ -2371,7 +3231,7 @@ def _read_triage(paths):
     attack = verdict_counter["attack"]
     attack_failed = verdict_counter["attack_failed"]
     attack_total = attack_success + attack + attack_failed
-    benign = verdict_counter["benign"]
+    benign = verdict_counter["non_attack"]
     unknown = verdict_counter["unknown"]
 
     series_total = _expand_series(series_total, total_records, seed=23)
@@ -2422,10 +3282,15 @@ def _new_profile_counters():
     }
 
 
-def _update_profile_counters(obj, counters):
+def _update_profile_counters(obj, counters, *, triage_result=False):
     counters["phaseCounter"][_norm(obj.get("threat_phase") or obj.get("attack_phase") or obj.get("kill_chain_phase"))] += 1
     counters["directionCounter"][_norm(obj.get("direction") or obj.get("traffic_direction"))] += 1
-    counters["resultCounter"][_norm(obj.get("threat_result") or obj.get("attack_verdict"))] += 1
+    result = (
+        _triage_attack_success_value(obj)
+        if triage_result
+        else obj.get("threat_result") or obj.get("attack_verdict")
+    )
+    counters["resultCounter"][_norm(result)] += 1
     counters["protocolCounter"][_norm(obj.get("net_type") or obj.get("net_app_proto") or obj.get("protocol"))] += 1
     counters["severityCounter"][_norm(obj.get("threat_severity"))] += 1
     counters["responseCounter"][_norm(obj.get("rsp_status_code") or obj.get("status_code"))] += 1
@@ -2476,7 +3341,7 @@ def _build_closed_loop(triage):
     total = triage["totalRecords"]
     auto_closed = triage["attackFailed"] + triage["benign"]
     manual = triage["unknown"]
-    pending = triage["triageFailed"] + triage["unknown"]
+    pending = triage["unknown"]
     resolved = max(total - pending, 0)
     return {
         "autoClosed": auto_closed,

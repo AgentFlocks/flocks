@@ -24,6 +24,8 @@ from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.message import (
     Message,
     MessageRole,
+    PartTime,
+    ReasoningPart,
     ToolPart,
     ToolStateError,
     ToolStateRunning,
@@ -405,6 +407,8 @@ class TestSessionCRUD:
             "title",
             "time",
             "category",
+            "channelID",
+            "channelChatType",
             "status",
             "parentID",
             "provider",
@@ -422,6 +426,157 @@ class TestSessionCRUD:
         assert "ownerUsername" in row
         assert "goal" not in row
         assert "summary" not in row
+
+    @pytest.mark.asyncio
+    async def test_manager_list_includes_channel_metadata_and_legacy_title(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post("/api/session", json={"title": "[Wecom] room-1"})
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        list_bindings_mock = AsyncMock(return_value=[SimpleNamespace(
+            session_id=session_id,
+            channel_id="wecom",
+            chat_id="room-1",
+            chat_type="group",
+        )])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == session_id)
+        assert row["channelID"] == "wecom"
+        assert row["channelChatType"] == "group"
+        assert row["title"] == "[Wecom] 你是谁"
+        assert session_id in list_bindings_mock.await_args.kwargs["session_ids"]
+
+    @pytest.mark.asyncio
+    async def test_manager_list_recognizes_legacy_direct_title_with_sender_name(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "[Telegram] DM — Alice"},
+        )
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            AsyncMock(return_value=[SimpleNamespace(
+                session_id=session_id,
+                channel_id="telegram",
+                chat_id="12345",
+                chat_type="direct",
+            )]),
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == session_id)
+        assert row["title"] == "[Telegram] 你是谁"
+
+    @pytest.mark.asyncio
+    async def test_manager_search_matches_derived_channel_title_before_pagination(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post("/api/session", json={"title": "[Wecom] room-1"})
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        decoy_resp = await client.post(
+            "/api/session",
+            json={"title": "Unrelated newer session"},
+        )
+        decoy_id = decoy_resp.json()["id"]
+        list_bindings_mock = AsyncMock(return_value=[SimpleNamespace(
+            session_id=session_id,
+            channel_id="wecom",
+            chat_id="room-1",
+            chat_type="group",
+        )])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={
+                "view": "list",
+                "manager": "true",
+                "roots": "true",
+                "search": "你是谁",
+                "limit": "1",
+                "offset": "0",
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert [item["id"] for item in response.json()] == [session_id]
+        assert response.json()[0]["title"] == "[Wecom] 你是谁"
+        queried_session_ids = list_bindings_mock.await_args.kwargs["session_ids"]
+        assert session_id in queried_session_ids
+        assert decoy_id in queried_session_ids
+
+    @pytest.mark.asyncio
+    async def test_channel_binding_lookup_batches_large_session_lists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+        from flocks.server.routes.session import _latest_channel_bindings
+
+        list_bindings_mock = AsyncMock(return_value=[])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        await _latest_channel_bindings([f"ses-{index}" for index in range(1001)])
+
+        assert list_bindings_mock.await_count == 3
+        assert all(
+            len(call.kwargs["session_ids"]) <= 500
+            for call in list_bindings_mock.await_args_list
+        )
 
     @pytest.mark.asyncio
     async def test_archive_hides_session_preserves_history_and_restores_tree(self, client: AsyncClient):
@@ -1225,6 +1380,32 @@ class TestSessionMessages:
             any(p.get("text") == "Hello!" for p in m.get("parts", []))
             for m in messages
         )
+
+    @pytest.mark.asyncio
+    async def test_list_messages_preserves_reasoning_part_time(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        """Reloaded message history retains timing needed by the process summary."""
+        message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ReasoningPart(
+            id="part_timed_reasoning",
+            sessionID=session_id,
+            messageID=message.id,
+            text="Inspect the request.",
+            time=PartTime(start=1_000, end=4_500),
+        )
+        await Message.store_part(session_id, message.id, part)
+
+        response = await client.get(f"/api/session/{session_id}/message")
+
+        assert response.status_code == status.HTTP_200_OK
+        messages = response.json()
+        reloaded_message = next(item for item in messages if item["info"]["id"] == message.id)
+        reloaded_part = next(item for item in reloaded_message["parts"] if item["id"] == part.id)
+        assert reloaded_part["time"]["start"] == 1_000
+        assert reloaded_part["time"]["end"] == 4_500
 
     @pytest.mark.asyncio
     async def test_list_messages_keeps_running_tool_when_session_busy(

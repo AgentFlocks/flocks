@@ -12,14 +12,6 @@ connectivity:
 # `label` is the default (English) display string; `label_cn` is the
 # optional Chinese override picked when the WebUI runs in zh-CN.
 fixtures:
-  qingteng_login:
-    - label: "Login and retrieve session token"
-      label_cn: "登录并获取会话 Token"
-      tags: [smoke]
-      params: {}
-      assert:
-        success: true
-
   qingteng_system_audit:
     - label: "List audit logs (page 1)"
       label_cn: "查询系统审计日志（第 1 页）"

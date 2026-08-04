@@ -1218,6 +1218,73 @@ def test_backup_current_version_excludes_all_dist_directories(
     assert "flocks/dist/ignored.txt" not in names
 
 
+def test_backup_current_version_uses_filtered_snapshot_after_direct_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    (install_root / "source.py").write_text("print('ok')", encoding="utf-8")
+    venv_dir = install_root / ".venv"
+    venv_dir.mkdir()
+    (venv_dir / "dependency.py").write_text("excluded", encoding="utf-8")
+    node_modules = install_root / "webui" / "node_modules"
+    node_modules.mkdir(parents=True)
+    (node_modules / "dependency.js").write_text("excluded", encoding="utf-8")
+    backup_dir = tmp_path / "backups"
+    archive_sources: list[Path] = []
+    original_write_backup_archive = updater._write_backup_archive
+
+    def fail_first_archive(source_root: Path, archive_path: Path) -> None:
+        archive_sources.append(source_root)
+        if len(archive_sources) == 1:
+            archive_path.write_text("partial", encoding="utf-8")
+            raise RuntimeError("unexpected end of data")
+        original_write_backup_archive(source_root, archive_path)
+
+    monkeypatch.setattr(updater, "_BACKUP_DIR", backup_dir)
+    monkeypatch.setattr(updater, "_write_backup_archive", fail_first_archive)
+
+    backup_path = updater._backup_current_version(install_root, "2026.7.29", retain_count=1)
+
+    assert backup_path is not None
+    assert archive_sources[0] == install_root
+    assert archive_sources[1] != install_root
+    assert not archive_sources[1].exists()
+    assert not list(backup_dir.glob("*.partial"))
+    with tarfile.open(backup_path, "r:gz") as tar:
+        names = tar.getnames()
+    assert "flocks/source.py" in names
+    assert "flocks/.venv/dependency.py" not in names
+    assert "flocks/webui/node_modules/dependency.js" not in names
+
+
+def test_backup_current_version_cleans_partial_when_snapshot_fallback_fails(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    install_root = tmp_path / "install"
+    install_root.mkdir()
+    (install_root / "source.py").write_text("print('ok')", encoding="utf-8")
+    backup_dir = tmp_path / "backups"
+    archive_attempts = 0
+
+    def fail_archive(_source_root: Path, archive_path: Path) -> None:
+        nonlocal archive_attempts
+        archive_attempts += 1
+        archive_path.write_text("partial", encoding="utf-8")
+        raise RuntimeError("archive failed")
+
+    monkeypatch.setattr(updater, "_BACKUP_DIR", backup_dir)
+    monkeypatch.setattr(updater, "_write_backup_archive", fail_archive)
+
+    backup_path = updater._backup_current_version(install_root, "2026.7.29", retain_count=1)
+
+    assert backup_path is None
+    assert archive_attempts == 2
+    assert not list(backup_dir.iterdir())
+
+
 @pytest.mark.asyncio
 async def test_build_updated_frontend_uses_current_install_root_and_region_mirror(
     monkeypatch: pytest.MonkeyPatch,

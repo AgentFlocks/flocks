@@ -549,7 +549,14 @@ async def test_build_ws_client_adapter_branch_surfaces_disconnect_error(monkeypa
     assert ws_client.disconnected_error is disconnect_error
 
 
-def test_build_ws_client_falls_back_to_modern_sdk(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "dispatch_method",
+    ["do_without_validation", "_do_without_validation"],
+)
+def test_build_ws_client_falls_back_to_modern_sdk(
+    monkeypatch,
+    dispatch_method: str,
+) -> None:
     dispatched: list[dict] = []
     captured: dict[str, object] = {}
 
@@ -570,7 +577,10 @@ def test_build_ws_client_falls_back_to_modern_sdk(monkeypatch) -> None:
             self._disconnect_called = False
 
         def start(self):
-            captured["event_handler"].do_without_validation(b'{"header":{"event_type":"ping"}}')
+            dispatcher = captured["event_handler"]
+            getattr(dispatcher, dispatch_method)(
+                b'{"header":{"event_type":"ping"}}',
+            )
 
         async def _disconnect(self):
             self._disconnect_called = True

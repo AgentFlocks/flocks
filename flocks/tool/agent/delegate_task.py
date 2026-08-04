@@ -1,6 +1,4 @@
-"""
-delegate_task tool - category or subagent-based delegation (Oh-My-Flocks parity).
-"""
+"""delegate_task tool for direct subagent delegation."""
 
 from __future__ import annotations
 
@@ -16,18 +14,12 @@ from flocks.tool.registry import (
     ToolResult,
     ToolContext,
 )
-from flocks.tool.delegate_task_constants import (
-    DEFAULT_CATEGORIES,
-    CATEGORY_PROMPT_APPENDS,
-    CATEGORY_DESCRIPTIONS,
-)
 from flocks.session.session import Session
 from flocks.session.message import Message, MessageRole
 from flocks.session.session_loop import SessionLoop
 # 使用轻量级元数据查询，避免循环依赖
 from flocks.agent.registry import is_delegatable
 from flocks.skill.skill import Skill
-from flocks.config.config import Config
 from flocks.tool.subagent_result import (
     _extract_message_error,
     format_sync_subagent_result,
@@ -225,62 +217,6 @@ def _parse_model(model: Optional[str]) -> Optional[Dict[str, str]]:
     return {"modelID": model}
 
 
-def _validate_category_model(category_model: Optional[Dict[str, str]], category: Optional[str]) -> Optional[Dict[str, str]]:
-    """Validate that the category model's provider is available and has the model registered.
-
-    Returns the original model dict when valid, or None to signal the caller
-    should fall back to the parent session's model (via _resolve_model priority chain).
-    """
-    if not category_model:
-        return None
-
-    provider_id = category_model.get("providerID")
-    model_id = category_model.get("modelID")
-    if not provider_id or not model_id:
-        return category_model
-
-    try:
-        from flocks.provider.provider import Provider
-        provider = Provider.get(provider_id)
-        if not provider:
-            log.warn("delegate_task.category_model_fallback", {
-                "category": category,
-                "provider": provider_id,
-                "model": model_id,
-                "reason": "provider not registered",
-            })
-            return None
-
-        if not provider.is_configured():
-            log.warn("delegate_task.category_model_fallback", {
-                "category": category,
-                "provider": provider_id,
-                "model": model_id,
-                "reason": "provider not configured",
-            })
-            return None
-
-        registered_ids = {m.id for m in provider.get_models()}
-        if model_id not in registered_ids:
-            log.warn("delegate_task.category_model_fallback", {
-                "category": category,
-                "provider": provider_id,
-                "model": model_id,
-                "reason": "model not found in provider",
-                "available_models": list(registered_ids)[:10],
-            })
-            return None
-
-    except Exception as exc:
-        log.warn("delegate_task.category_model_validate_error", {
-            "category": category,
-            "error": str(exc),
-        })
-        return None
-
-    return category_model
-
-
 async def _find_completed_delegate(
     session_id: str,
     current_message_id: str,
@@ -304,7 +240,7 @@ async def _find_completed_delegate(
                 if getattr(state, "status", None) != "completed":
                     continue
                 inp = getattr(state, "input", {})
-                prev_key = inp.get("subagent_type") or inp.get("category")
+                prev_key = inp.get("subagent_type")
                 if prev_key == agent_key and inp.get("description") == description:
                     output = getattr(state, "output", "")
                     if isinstance(output, dict):
@@ -354,7 +290,6 @@ def _derive_task_description(
     description: Optional[str],
     prompt: str,
     subagent_type: Optional[str] = None,
-    category: Optional[str] = None,
     session_id: Optional[str] = None,
 ) -> str:
     normalized = " ".join((description or "").split())
@@ -367,8 +302,6 @@ def _derive_task_description(
 
     if subagent_type:
         return f"delegate to {subagent_type}"
-    if category:
-        return f"delegate {category} task"
     if session_id:
         return f"continue task {session_id}"
     return "delegate task"
@@ -378,12 +311,16 @@ def _derive_task_description(
 # Tool definition
 # ------------------------------------------------------------------
 
-DESCRIPTION = """Spawn agent task with category-based or direct agent selection. "
+DESCRIPTION = """Spawn a task using a directly selected subagent.
 
 Use this tool when:
-- The task requires multiple steps or research
+- A specialized agent clearly matches the task
 - You need to explore code in parallel
-- The task can be delegated to a specialized agent
+- Independent work can run in parallel
+- Isolating research or noisy intermediate work improves context quality
+
+Do not delegate trivial edits, direct one-tool operations, or tightly coupled
+work that requires continuous coordination in the current context.
 
 Usage notes:
 - Provide a clear description (3-5 words)
@@ -399,7 +336,7 @@ Usage notes:
 REQUIRED: prompt.
 LOAD_SKILLS is optional and defaults to [].
 DESCRIPTION is optional and will be auto-derived when omitted.
-USE EITHER subagent_type OR category — NEVER both simultaneously.
+SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues an existing task.
 """
 
 @ToolRegistry.register_function(
@@ -427,15 +364,9 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
             required=True,
         ),
         ToolParameter(
-            name="category",
-            type=ParameterType.STRING,
-            description="Category name. Mutually exclusive with subagent_type — use ONE or the other, never both.",
-            required=False,
-        ),
-        ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description="Agent name. Mutually exclusive with category — use ONE or the other, never both. Must be a delegatable agent",
+            description="Delegatable agent name. Required for new tasks; omit when continuing with session_id.",
             required=False,
         ),
         ToolParameter(
@@ -447,7 +378,7 @@ USE EITHER subagent_type OR category — NEVER both simultaneously.
         ToolParameter(
             name="command",
             type=ParameterType.STRING,
-            description="Optional command name for tracking",
+            description="Deprecated command name retained for caller compatibility",
             required=False,
         ),
         ToolParameter(
@@ -468,7 +399,6 @@ async def delegate_task_tool(
     # in-process call paths (e.g. `task.py` alias) may still pass it through.
     # This guard is the second line of defense.
     run_in_background: bool = False,
-    category: Optional[str] = None,
     subagent_type: Optional[str] = None,
     session_id: Optional[str] = None,
     command: Optional[str] = None,
@@ -488,23 +418,21 @@ async def delegate_task_tool(
         return ToolResult(success=False, error="prompt is required")
 
     load_skills = [str(name).strip() for name in (load_skills or []) if str(name).strip()]
-    description = _derive_task_description(description, prompt, subagent_type, category, session_id)
-    if category and subagent_type:
-        return ToolResult(success=False, error="Provide EITHER category OR subagent_type, not both.")
-    if not category and not subagent_type and not session_id:
-        return ToolResult(success=False, error="Must provide either category or subagent_type.")
+    description = _derive_task_description(description, prompt, subagent_type, session_id)
+    if not subagent_type and not session_id:
+        return ToolResult(success=False, error="Must provide either subagent_type or session_id.")
 
     await ctx.ask(
         permission="delegate_task",
-        patterns=[category or subagent_type or "continue"],
+        patterns=[subagent_type or "continue"],
         always=["*"],
-        metadata={"description": description, "category": category, "subagent_type": subagent_type},
+        metadata={"description": description, "subagent_type": subagent_type},
     )
 
     # Dedup: if an identical delegate_task already completed in this session,
     # return the previous result to prevent the LLM from re-delegating.
     if not session_id:
-        agent_key = subagent_type or category
+        agent_key = subagent_type
         prev = await _find_completed_delegate(ctx.session_id, ctx.message_id, agent_key, description)
         if prev is not None:
             log.info("delegate_task.dedup_hit", {
@@ -518,10 +446,6 @@ async def delegate_task_tool(
     if skill_result["error"]:
         return ToolResult(success=False, error=skill_result["error"])
 
-    cfg = await Config.get()
-    category_configs = {**DEFAULT_CATEGORIES, **(cfg.categories or {})}
-    category_prompt_append = None
-    category_model = None
     explicit_model = _parse_model(model)
     agent_to_use: Optional[str] = None
 
@@ -558,47 +482,19 @@ async def delegate_task_tool(
             metadata={"sessionId": session.id},
         )
 
-    if category:
-        agent_to_use = "rex-junior"
-        config = category_configs.get(category)
-        if not config:
-            available = ", ".join(category_configs.keys())
-            return ToolResult(success=False, error=f'Unknown category "{category}". Available: {available}')
-        raw_model = explicit_model or _parse_model(config.get("model") if isinstance(config, dict) else getattr(config, "model", None))
-        category_model = _validate_category_model(raw_model, category)
-        if raw_model and not category_model:
-            log.info("delegate_task.using_parent_model", {
-                "category": category,
-                "original_model": raw_model,
-                "reason": "category model unavailable, inheriting parent session model",
-            })
-        category_prompt_append = (
-            (config.get("prompt_append") if isinstance(config, dict) else getattr(config, "prompt_append", None))
-            or CATEGORY_PROMPT_APPENDS.get(category)
-        )
-    elif subagent_type:
+    if subagent_type:
         # 使用轻量级元数据查询，避免循环依赖
         # 不再调用 Agent.get()，而是使用 is_delegatable()
         if not is_delegatable(subagent_type):
-            # 针对特殊 Agent 提供更友好的错误提示
-            if subagent_type.lower() in ["sisyphus-junior", "rex-junior"]:
-                return ToolResult(
-                    success=False,
-                    error=f'Cannot use subagent_type="{subagent_type}" directly. Use category parameter instead.',
-                )
-            else:
-                return ToolResult(
-                    success=False,
-                    error=f'Agent "{subagent_type}" cannot be delegated to (it may be a primary agent or restricted).',
-                )
+            return ToolResult(
+                success=False,
+                error=f'Agent "{subagent_type}" cannot be delegated to (it may be a primary agent or restricted).',
+            )
         agent_to_use = subagent_type
-        category_model = explicit_model
 
     system_parts = []
     if skill_result["content"]:
         system_parts.append(skill_result["content"])
-    if category_prompt_append:
-        system_parts.append(category_prompt_append)
     system_content = "\n\n".join(system_parts) if system_parts else ""
     full_prompt = f"{system_content}\n\n{prompt}" if system_content else prompt
 
@@ -620,11 +516,11 @@ async def delegate_task_tool(
         permission=await _subagent_session_permissions(agent_to_use),
         category="task",
     )
-    if category_model and category_model.get("providerID") and category_model.get("modelID"):
+    if explicit_model and explicit_model.get("providerID") and explicit_model.get("modelID"):
         create_kwargs.update(
-            provider=category_model["providerID"],
-            model=category_model["modelID"],
-            model_pinned=bool(explicit_model),
+            provider=explicit_model["providerID"],
+            model=explicit_model["modelID"],
+            model_pinned=True,
         )
     created = await Session.create(**create_kwargs)
     if ctx.extra.get("workflow_temp_parent") is True:
@@ -651,8 +547,8 @@ async def delegate_task_tool(
         prompt=full_prompt,
         description=description,
         resumed=False,
-        provider_id=(category_model or {}).get("providerID"),
-        model_id=(category_model or {}).get("modelID"),
+        provider_id=(explicit_model or {}).get("providerID"),
+        model_id=(explicit_model or {}).get("modelID"),
         callbacks=forwarder.build_callbacks(
             event_publish_callback=ctx.event_publish_callback,
         ),

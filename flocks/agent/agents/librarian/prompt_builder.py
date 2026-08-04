@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING, Optional
 
 if TYPE_CHECKING:
-    from flocks.agent.agent import AgentInfo, AvailableAgent, AvailableSkill, AvailableCategory, AvailableTool
+    from flocks.agent.agent import AgentInfo
 
 
 def inject(
@@ -17,7 +17,6 @@ def inject(
     available_agents: list,
     tools: list,
     skills: list,
-    categories: list,
     workflows: Optional[list] = None,
 ) -> None:
     """Inject the year-aware prompt into agent_info."""

@@ -43,14 +43,14 @@ class WorkflowExecutionState:
     history: list[StepResult] = field(default_factory=list)
     join_inputs: Dict[str, Dict[str, Dict[str, Any]]] = field(default_factory=dict)
     join_seen_sources: Dict[str, Set[str]] = field(default_factory=dict)
-    vertex_outputs: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    vertex_output_keys: Dict[str, list[str]] = field(default_factory=dict)
 
     def retain_step(self, step: StepResult) -> None:
         if self.retain_history:
             self.history.append(step)
 
-    def record_vertex_output(self, node_id: str, outputs: Dict[str, Any]) -> None:
-        self.vertex_outputs[node_id] = outputs
+    def record_vertex_output_keys(self, node_id: str, outputs: Dict[str, Any]) -> None:
+        self.vertex_output_keys[node_id] = list(outputs)[:_VERTEX_OUTPUT_KEY_LIMIT]
 
     def build_context(self) -> Dict[str, Any]:
         return {
@@ -59,10 +59,7 @@ class WorkflowExecutionState:
             "last_node_id": self.last_node_id,
             "outputs": self.last_outputs,
             "history": self.history,
-            "vertex_output_keys": {
-                node_id: list(outputs.keys())[:_VERTEX_OUTPUT_KEY_LIMIT]
-                for node_id, outputs in self.vertex_outputs.items()
-            },
+            "vertex_output_keys": dict(self.vertex_output_keys),
         }
 
     def to_result(self) -> ExecutionResult:

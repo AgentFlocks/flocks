@@ -3,7 +3,7 @@ import { api } from '@flocks/webui-contract-sdk';
 import { filterOptionText, matchesFilterOptionSearch } from './filterValues';
 
 type Tone = 'red' | 'orange' | 'blue' | 'green' | 'purple' | 'slate';
-type FilterKey = '_source_type' | 'net_type' | 'direction' | 'threat_severity' | 'threat_level' | 'threat_name' | 'threat_type' | 'threat_phase' | 'threat_result' | 'rsp_status_code' | 'sip' | 'dport' | 'dip' | 'req_host' | 'threat_rule_id';
+type FilterKey = '_source_type' | 'net_type' | 'direction' | 'threat_severity' | 'threat_level' | 'threat_name' | 'threat_type' | 'threat_phase' | 'triage_attack_verdict' | 'triage_attack_success' | 'rsp_status_code' | 'sip' | 'dport' | 'dip' | 'req_host' | 'threat_rule_id';
 type TimeRangeKey = '15m' | '1h' | '2h' | '24h' | 'today' | '7d' | '30d';
 type TimeFilterMode = 'relative' | 'custom';
 type TimePanelTab = 'auto' | 'custom';
@@ -50,6 +50,8 @@ interface IncidentCluster {
   rawAlerts?: number;
   confidence?: number;
   priority?: 'P1' | 'P2';
+  triageAttackVerdict?: 'attack' | 'non_attack' | 'unknown';
+  triageAttackSuccess?: 'success' | 'failed' | 'unknown';
   reportTitle?: string;
   reason?: string;
   owner?: string;
@@ -264,6 +266,8 @@ const EN_TEXT: Record<string, string> = {
   '展开趋势图': 'Expand timeline',
   '攻击成功': 'Attack Success',
   '攻击失败': 'Attack Failed',
+  '攻击': 'Attack',
+  '非攻击': 'Non-attack',
   '入站': 'Inbound',
   '出站': 'Outbound',
   '横向': 'Lateral',
@@ -395,7 +399,8 @@ const BASE_FILTER_CONFIGS: FilterConfig[] = [
 const MORE_FILTER_CONFIGS: FilterConfig[] = [
   { key: 'threat_type', label: '威胁类型' },
   { key: 'threat_phase', label: '攻击阶段' },
-  { key: 'threat_result', label: '攻击结果' },
+  { key: 'triage_attack_verdict', label: '攻击行为' },
+  { key: 'triage_attack_success', label: '攻击结果' },
   { key: 'rsp_status_code', label: '响应状态' },
   { key: 'sip', label: '源地址' },
   { key: 'dport', label: '目标端口' },
@@ -415,7 +420,8 @@ const DEFAULT_FILTER_VALUES: Record<FilterKey, string[]> = {
   threat_name: [],
   threat_type: [],
   threat_phase: [],
-  threat_result: [],
+  triage_attack_verdict: [],
+  triage_attack_success: [],
   rsp_status_code: [],
   sip: [],
   dport: [],
@@ -923,15 +929,9 @@ function cellValue(incident: IncidentCluster, key: string, fallback = '') {
   return textValue(incident.tableCells?.[key]?.value, fallback);
 }
 
-function rawAttackResultValue(incident: IncidentCluster) {
-  return cellValue(incident, 'attach_result') || cellValue(incident, 'attack_result') || cellValue(incident, 'threat_result');
-}
-
 function verdictBucket(incident: IncidentCluster): 'success' | 'failed' | 'unknown' {
-  const rawResult = rawAttackResultValue(incident).toLowerCase();
-  const verdict = incident.conclusion?.verdict || '';
-  if (rawResult === 'success' || rawResult === 'succeeded' || verdict.includes('成功')) return 'success';
-  if (rawResult === 'failed' || rawResult === 'blocked' || verdict.includes('失败')) return 'failed';
+  if (incident.triageAttackSuccess === 'success') return 'success';
+  if (incident.triageAttackSuccess === 'failed') return 'failed';
   return 'unknown';
 }
 
@@ -942,17 +942,17 @@ function attackResultLabel(incident: IncidentCluster, tr: Translate) {
   return tr('未知');
 }
 
+function attackVerdictLabel(incident: IncidentCluster, tr: Translate) {
+  if (incident.triageAttackVerdict === 'attack') return tr('攻击');
+  if (incident.triageAttackVerdict === 'non_attack') return tr('非攻击');
+  return tr('未知');
+}
+
 function attackResultTone(incident: IncidentCluster): Tone {
   const bucket = verdictBucket(incident);
   if (bucket === 'success') return 'red';
   if (bucket === 'failed') return 'green';
   return 'slate';
-}
-
-function severityTone(incident: IncidentCluster): Tone {
-  if (incident.priority === 'P1' || incident.conclusion?.verdict?.includes('成功')) return 'red';
-  if (incident.conclusion?.verdict?.includes('失败')) return 'green';
-  return 'orange';
 }
 
 function dateFromIncident(incident: IncidentCluster) {
@@ -1021,6 +1021,8 @@ function niceAxisMax(value: number) {
 }
 
 function readFilterValue(incident: IncidentCluster, key: FilterKey) {
+  if (key === 'triage_attack_verdict') return incident.triageAttackVerdict || 'unknown';
+  if (key === 'triage_attack_success') return incident.triageAttackSuccess || 'unknown';
   return cellValue(incident, key);
 }
 
@@ -1948,7 +1950,7 @@ function IncidentInlineDetail({ incident, onClose, tr }: { incident: IncidentClu
   const [copyDone, setCopyDone] = useState(false);
   const report = parseTaggedReport(incident.triageReport);
   const markdownReport = report ? null : parseMarkdownReport(incident.triageReport);
-  const attackJudgement = incident.conclusion?.verdict || tr('待确认');
+  const attackJudgement = attackVerdictLabel(incident, tr);
   const attackResult = attackResultLabel(incident, tr);
   const attackResultBucket = verdictBucket(incident);
   const srcAddress = incident.srcIp || cellValue(incident, 'sip', '-');
@@ -2065,7 +2067,7 @@ function IncidentInlineDetail({ incident, onClose, tr }: { incident: IncidentClu
         <div className="flex flex-wrap items-start justify-between gap-4 border-b border-slate-200 bg-white px-5 py-4">
           <div className="min-w-0 flex-1">
             <div className="mb-2 flex flex-wrap items-center gap-2">
-              <Badge tone={severityTone(incident)}>{attackJudgement}</Badge>
+              <Badge tone={attackResultTone(incident)}>{attackResult}</Badge>
               <span className="text-xs text-slate-500">{observedAt}</span>
               <span className="text-xs text-slate-300">/</span>
               <span className="max-w-[320px] truncate font-mono text-xs text-slate-500" title={ruleId}>{ruleId}</span>
