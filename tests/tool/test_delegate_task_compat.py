@@ -1,5 +1,5 @@
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -257,3 +257,95 @@ class TestDelegateTaskTolerance:
         assert result.metadata["sessionId"] == "ses-child"
         assert result.metadata["emptyOutput"] is True
         assert "without producing a final assistant message" in (result.output or "")
+
+    @pytest.mark.asyncio
+    async def test_delegate_task_sync_continue_reports_normalized_abort(self):
+        session = SimpleNamespace(
+            id="ses-child-aborted",
+            agent="asset-survey",
+        )
+
+        with (
+            patch(
+                "flocks.tool.agent.delegate_task.Session.get_by_id",
+                AsyncMock(return_value=session),
+            ),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                        metadata={"aborted": True},
+                    )
+                ),
+            ),
+        ):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=_make_ctx(),
+                session_id="ses-child-aborted",
+                prompt="Continue investigating",
+            )
+
+        assert result.success is False
+        assert result.metadata["sessionId"] == "ses-child-aborted"
+        assert result.metadata["status"] == "interrupted"
+        assert "Sub-agent execution was interrupted" in (result.error or "")
+        assert "session_id: ses-child-aborted" in (result.error or "")
+
+    @pytest.mark.asyncio
+    async def test_new_delegate_reports_normalized_abort_to_parent_metadata(self):
+        ctx = _make_ctx()
+        metadata_callback = MagicMock()
+        ctx.metadata = metadata_callback
+        parent_session = SimpleNamespace(
+            id="test-session",
+            project_id="proj",
+            directory="/tmp/project",
+            provider=None,
+            model=None,
+        )
+        child_session = SimpleNamespace(id="ses-new-child-aborted")
+
+        with (
+            patch(
+                "flocks.tool.agent.delegate_task._find_completed_delegate",
+                AsyncMock(return_value=None),
+            ),
+            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch(
+                "flocks.tool.agent.delegate_task.Session.get_by_id",
+                AsyncMock(return_value=parent_session),
+            ),
+            patch(
+                "flocks.tool.agent.delegate_task.Session.create",
+                AsyncMock(return_value=child_session),
+            ),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch(
+                "flocks.tool.agent.delegate_task.SessionLoop.run",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        action="stop",
+                        error=None,
+                        last_message=None,
+                        metadata={"aborted": True},
+                    )
+                ),
+            ),
+        ):
+            result = await ToolRegistry.execute(
+                "delegate_task",
+                ctx=ctx,
+                subagent_type="asset-survey",
+                prompt="Investigate the interruption",
+            )
+
+        assert result.success is False
+        assert result.metadata["sessionId"] == "ses-new-child-aborted"
+        assert result.metadata["status"] == "interrupted"
+        final_parent_metadata = metadata_callback.call_args_list[-1].args[0]
+        assert final_parent_metadata["metadata"]["status"] == "interrupted"

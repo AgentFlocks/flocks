@@ -11,8 +11,10 @@ import pytest
 import flocks.session.runner as runner_mod
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.provider.provider import ChatMessage
+from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.runner import SessionRunner
 from flocks.session.session import SessionInfo
+from flocks.tool.registry import ToolResult
 
 
 def _make_session(session_id: str = "ses_runner_llm_hooks") -> SessionInfo:
@@ -317,3 +319,94 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         )
 
     assert order == ["before", "provider", "after"]
+
+
+@pytest.mark.asyncio
+async def test_call_llm_drains_started_delegate_before_raising_provider_error(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    runner = _make_runner("ses_runner_delegate_provider_error")
+    assistant_msg = SimpleNamespace(id="msg_assistant_delegate_provider_error")
+    agent = SimpleNamespace(name="rex")
+    delegate_started = asyncio.Event()
+    release_delegate = asyncio.Event()
+
+    async def _execute_delegate(tool_name, ctx, **_kwargs):
+        assert tool_name == "delegate_task"
+        assert ctx.call_id == "call-delegate"
+        delegate_started.set()
+        await release_delegate.wait()
+        return ToolResult(success=True, output="child done")
+
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.stream_processor.Message.store_part",
+        AsyncMock(return_value=None),
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.stream_processor.Message.parts",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+        _execute_delegate,
+    )
+    monkeypatch.setattr(
+        StreamProcessor,
+        "_resolve_sandbox_meta",
+        AsyncMock(return_value={"blocked": False, "error": None, "extra": {}}),
+    )
+
+    class _Provider:
+        def chat_stream(self, **_kwargs):
+            async def _gen():
+                yield SimpleNamespace(
+                    delta="",
+                    reasoning=None,
+                    tool_calls=[
+                        {
+                            "index": 0,
+                            "id": "call-delegate",
+                            "function": {
+                                "name": "delegate_task",
+                                "arguments": ('{"subagent_type":"explore","prompt":"inspect the failure"}'),
+                            },
+                        }
+                    ],
+                    event_type=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                await delegate_started.wait()
+                raise RuntimeError("provider stream failed after delegate start")
+
+            return _gen()
+
+    call_task = asyncio.create_task(
+        runner._call_llm(
+            provider=_Provider(),
+            messages=[ChatMessage(role="user", content="delegate the investigation")],
+            tools=[],
+            agent=agent,
+            assistant_msg=assistant_msg,
+        )
+    )
+    await asyncio.wait_for(delegate_started.wait(), timeout=1)
+    await asyncio.sleep(0)
+    provider_error_waited_for_delegate = not call_task.done()
+
+    release_delegate.set()
+    with pytest.raises(RuntimeError, match="provider stream failed after delegate start"):
+        await call_task
+
+    assert provider_error_waited_for_delegate is True
