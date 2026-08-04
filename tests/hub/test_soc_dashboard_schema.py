@@ -708,7 +708,7 @@ def test_soc_dashboard_activity_tolerates_empty_soc_db_with_workflow_events(tmp_
     assert payload["workflowEvents"][0]["sessionId"] == "session-1"
 
 
-def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path):
+def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path, monkeypatch):
     tasks_db = tmp_path / "tasks.db"
     today_at_1100 = datetime.now().astimezone().replace(
         hour=11,
@@ -981,6 +981,11 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     handlers = _load_dashboard_handlers()
     handlers.TASK_DB = tasks_db
     handlers.WORKFLOW_DB = workflow_db
+    monkeypatch.setattr(
+        handlers,
+        "_workflow_node_count",
+        lambda workflow_id: 3 if workflow_id == "stream_alert_triage" else 1,
+    )
 
     payload = handlers._get_task_center()
 
@@ -1007,8 +1012,11 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     ]
     assert payload["scheduledExecutionCount"] == 3
     assert payload["scheduledTodayExecutionCount"] == 1
-    assert payload["workflowExecutionCount"] == 13
+    assert payload["scheduledActiveCount"] == 1
+    assert payload["workflowExecutionCount"] == 14
     assert payload["workflowTodayExecutionCount"] == 1
+    assert payload["workflowActiveCount"] == 1
+    assert payload["activeExecutionCount"] == 2
     assert [workflow["id"] for workflow in payload["workflows"]] == [
         "stream_alert_triage",
         "stream_alert_denoise",
