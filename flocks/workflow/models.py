@@ -26,6 +26,14 @@ class Node(BaseModel):
     join_namespace_key: str = "__by_source__"
     input_schema: Optional[Dict[str, Any]] = Field(None, alias="inputSchema")
     output_schema: Optional[Dict[str, Any]] = Field(None, alias="outputSchema")
+    # Trusted host subprocess isolation for memory-heavy Python nodes. The
+    # child exits after the node, returning its allocator arenas to the OS.
+    process_isolated: bool = Field(False, alias="processIsolated")
+    process_inherit_fd_keys: List[str] = Field(
+        default_factory=list,
+        alias="processInheritFdKeys",
+    )
+    timeout_fatal: bool = Field(False, alias="timeoutFatal")
 
     # tool 节点
     tool_name: Optional[str] = None

@@ -6,12 +6,15 @@ import contextlib
 import io
 import json
 import os
+import queue
 import shlex
+import signal
 import subprocess
 import sys
 import threading
 import traceback
 import uuid
+from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from dataclasses import dataclass, field
 from typing import Any, Callable, ClassVar, Dict, Optional, TextIO, Tuple
@@ -56,6 +59,7 @@ class PythonExecRuntime(Runtime):
     tool_registry: Optional[Any] = None  # FlocksToolAdapter or compatible
     cancel_checker: Optional[Callable[[], bool]] = None
     cleanup_globals_after_execute: bool = False
+    enable_cancel_trace: bool = True
 
     _RUNTIME_GLOBAL_KEYS: ClassVar[frozenset[str]] = frozenset(
         {
@@ -146,7 +150,7 @@ class PythonExecRuntime(Runtime):
 
         try:
             try:
-                if self.cancel_checker is not None:
+                if self.cancel_checker is not None and self.enable_cancel_trace:
                     previous_trace = sys.gettrace()
                     sys.settrace(_cancel_trace)
                 with contextlib.redirect_stdout(buf):
@@ -213,7 +217,7 @@ class PythonExecRuntime(Runtime):
                 raise NodeExecutionError(node_id="<runtime>", message="`outputs` must be a dict")
             return dict(out_obj), buf.getvalue()
         finally:
-            if self.cancel_checker is not None:
+            if self.cancel_checker is not None and self.enable_cancel_trace:
                 sys.settrace(previous_trace)
             if self.cleanup_globals_after_execute:
                 for key in list(g.keys()):
@@ -381,6 +385,9 @@ class SandboxPythonExecRuntime(Runtime):
         *,
         code: str,
         bridge_token: str,
+        rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
+        extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
+        python_executable: str = "python3",
     ) -> str:
         wrapped = f"""
 import contextlib
@@ -388,42 +395,78 @@ import io
 import json
 import os
 import sys
+import threading
 import traceback
 
 outputs = {{}}
-_MAX = {_RPC_MAX_BYTES}
+_MAX = {rpc_max_bytes!r}
 _TOKEN = {json.dumps(bridge_token, ensure_ascii=False)}
 
 def _read_json_line():
     line = sys.stdin.readline()
     if not line:
         raise RuntimeError("Bridge channel closed")
-    if len(line) > _MAX:
+    if _MAX is not None and len(line) > _MAX:
         raise RuntimeError("Bridge payload too large")
     obj = json.loads(line)
     if not isinstance(obj, dict):
         raise RuntimeError("Bridge payload must be an object")
     return obj
 
+def _fail_rpc_waiters(message):
+    with _rpc_waiters_lock:
+        waiters = list(_rpc_waiters.values())
+    for waiter in waiters:
+        waiter["response"] = {{
+            "type": "rpc_result",
+            "ok": False,
+            "error": message,
+        }}
+        waiter["event"].set()
+
+def _read_rpc_responses():
+    try:
+        while True:
+            resp = _read_json_line()
+            req_id = str(resp.get("id") or "")
+            with _rpc_waiters_lock:
+                waiter = _rpc_waiters.get(req_id)
+            if waiter is not None:
+                waiter["response"] = resp
+                waiter["event"].set()
+    except Exception as exc:
+        _fail_rpc_waiters(str(exc))
+
 def _rpc_call(payload):
     global _rpc_seq
-    _rpc_seq += 1
+    with _rpc_seq_lock:
+        _rpc_seq += 1
+        req_id = str(_rpc_seq)
+    waiter = {{"event": threading.Event(), "response": None}}
+    with _rpc_waiters_lock:
+        _rpc_waiters[req_id] = waiter
     req = {{
         "type": "rpc",
         "token": _TOKEN,
-        "id": str(_rpc_seq),
+        "id": req_id,
         "rpc": dict(payload),
     }}
-    # Always use original stdout for RPC control channel.
-    # User code stdout may be redirected for capture.
-    _out = sys.__stdout__ if getattr(sys, "__stdout__", None) is not None else sys.stdout
-    _out.write(json.dumps(req, ensure_ascii=False, default=str) + "\\n")
-    _out.flush()
-    resp = _read_json_line()
+    try:
+        # Serialize complete frames, while allowing multiple requests to be
+        # in flight and responses to arrive out of order.
+        _out = sys.__stdout__ if getattr(sys, "__stdout__", None) is not None else sys.stdout
+        with _rpc_write_lock:
+            _out.write(json.dumps(req, ensure_ascii=False, default=str) + "\\n")
+            _out.flush()
+        waiter["event"].wait()
+        resp = waiter["response"] or {{}}
+    finally:
+        with _rpc_waiters_lock:
+            _rpc_waiters.pop(req_id, None)
     if (
         resp.get("type") != "rpc_result"
         or resp.get("token") != _TOKEN
-        or str(resp.get("id")) != str(_rpc_seq)
+        or str(resp.get("id")) != req_id
     ):
         raise RuntimeError("Invalid RPC response frame")
     if not resp.get("ok", False):
@@ -437,6 +480,12 @@ inputs = init.get("inputs", {{}})
 if not isinstance(inputs, dict):
     raise RuntimeError("inputs must be an object")
 _rpc_seq = 0
+_rpc_seq_lock = threading.Lock()
+_rpc_write_lock = threading.Lock()
+_rpc_waiters_lock = threading.Lock()
+_rpc_waiters = {{}}
+_rpc_reader_thread = threading.Thread(target=_read_rpc_responses, daemon=True)
+_rpc_reader_thread.start()
 
 class _ToolProxy:
     def run(self, name, **kwargs):
@@ -507,7 +556,7 @@ g = {{
     "llm": _LLMProxy(),
 }}
 
-_extra_site = {json.dumps(_WORKFLOW_SITE_PACKAGES, ensure_ascii=False)}
+_extra_site = {json.dumps(extra_site_packages, ensure_ascii=False)}
 if _extra_site and os.path.isdir(_extra_site) and _extra_site not in sys.path:
     sys.path.insert(0, _extra_site)
 
@@ -534,7 +583,7 @@ finally:
 sys.stdout.write(json.dumps({{"type": "final", "token": _TOKEN, "payload": payload}}, ensure_ascii=False) + "\\n")
 sys.stdout.flush()
 """
-        return f"python3 -I -c {shlex.quote(wrapped)}"
+        return f"{shlex.quote(python_executable)} -I -c {shlex.quote(wrapped)}"
 
     def _write_json_line(self, stream: TextIO, payload: Dict[str, Any]) -> None:
         stream.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
@@ -570,6 +619,11 @@ sys.stdout.flush()
                 if not isinstance(kwargs, dict):
                     raise RuntimeError("Tool kwargs must be an object")
                 registry = self.tool_registry or get_tool_registry()
+                if hasattr(registry, "cancel_checker"):
+                    try:
+                        registry.cancel_checker = self.cancel_checker
+                    except Exception:
+                        pass
                 if kind == "tool_safe":
                     output = registry.run_safe(name, **kwargs)
                 else:
@@ -622,6 +676,266 @@ sys.stdout.flush()
             raise RuntimeError(f"Unknown RPC kind: {kind}")
         except Exception as e:
             return {"type": "rpc_result", "token": token, "id": req_id, "ok": False, "error": str(e)}
+
+
+@dataclass
+class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
+    """Run one trusted Python node in a short-lived host subprocess.
+
+    Tool and LLM calls are bridged back to the configured parent registry,
+    while allocations made by node code live in the child and are returned to
+    the OS when it exits. Cancellation terminates the child instead of leaving
+    an unkillable workflow thread behind.
+    """
+
+    sandbox: Dict[str, Any] = field(default_factory=dict)
+    inherited_fd_keys: Tuple[str, ...] = ()
+
+    def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
+        if not isinstance(code, str):
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"Code must be a string, got {type(code).__name__}",
+            )
+        if not code.strip():
+            raise NodeExecutionError(node_id="<runtime>", message="Code cannot be empty or whitespace-only")
+        if not isinstance(inputs, dict):
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"Inputs must be a dict, got {type(inputs).__name__}",
+            )
+
+        inherited_fds = self._resolve_inherited_fds(inputs)
+        if self._cancel_requested():
+            self._close_parent_fds(inherited_fds)
+            raise RunCancelledError("<runtime>")
+        token = uuid.uuid4().hex
+        package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        python_cmd = self._build_python_cmd(
+            code=code,
+            bridge_token=token,
+            rpc_max_bytes=None,
+            extra_site_packages=package_root,
+            python_executable=sys.executable,
+        )
+        popen_kwargs: Dict[str, Any] = {}
+        if inherited_fds:
+            if os.name == "nt":
+                self._close_parent_fds(inherited_fds)
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message="Inherited workflow file descriptors are not supported on Windows",
+                )
+            popen_kwargs["pass_fds"] = inherited_fds
+
+        try:
+            proc = subprocess.Popen(
+                ["sh", "-lc", python_cmd],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                env={**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
+                start_new_session=(os.name != "nt"),
+                **popen_kwargs,
+            )
+        except Exception as exc:
+            self._close_parent_fds(inherited_fds)
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"Isolated host execution failed to start: {exc}",
+            ) from exc
+
+        if proc.stdin is None or proc.stdout is None or proc.stderr is None:
+            self._terminate_process(proc)
+            self._close_parent_fds(inherited_fds)
+            raise NodeExecutionError(node_id="<runtime>", message="Isolated process stdio is unavailable")
+
+        stderr_chunks: list[str] = []
+        stderr_thread = threading.Thread(
+            target=_drain_text_stream,
+            args=(proc.stderr, stderr_chunks),
+            name="wf-process-stderr",
+            daemon=True,
+        )
+        stderr_thread.start()
+
+        stdout_lines: queue.Queue[Optional[str]] = queue.Queue()
+
+        def _read_stdout() -> None:
+            try:
+                while True:
+                    line = proc.stdout.readline()
+                    if line == "":
+                        break
+                    stdout_lines.put(line)
+            finally:
+                stdout_lines.put(None)
+
+        stdout_thread = threading.Thread(
+            target=_read_stdout,
+            name="wf-process-stdout",
+            daemon=True,
+        )
+        stdout_thread.start()
+
+        final_payload: Optional[Dict[str, Any]] = None
+        cancelled = False
+        stdin_lock = threading.Lock()
+        rpc_pool = _ThreadPoolExecutor(max_workers=32, thread_name_prefix="wf-process-rpc")
+
+        def _handle_rpc(message: Dict[str, Any]) -> None:
+            response = self._handle_rpc_request(msg=message, token=token)
+            try:
+                with stdin_lock:
+                    if proc.poll() is None:
+                        self._write_json_line(proc.stdin, response)
+            except (BrokenPipeError, OSError, ValueError):
+                return
+
+        try:
+            self._write_json_line(proc.stdin, {"type": "init", "token": token, "inputs": inputs})
+            while True:
+                if self._cancel_requested():
+                    cancelled = True
+                    self._terminate_process(proc)
+                    break
+                try:
+                    line = stdout_lines.get(timeout=0.05)
+                except queue.Empty:
+                    continue
+                if line is None:
+                    break
+                msg = self._parse_json_line(line)
+                if msg is None:
+                    continue
+                msg_type = str(msg.get("type") or "").strip().lower()
+                if msg_type == "rpc":
+                    rpc_pool.submit(_handle_rpc, msg)
+                elif msg_type == "final" and msg.get("token") == token:
+                    payload = msg.get("payload")
+                    final_payload = payload if isinstance(payload, dict) else {}
+        finally:
+            rpc_pool.shutdown(
+                wait=final_payload is not None and not cancelled,
+                cancel_futures=True,
+            )
+            try:
+                with stdin_lock:
+                    proc.stdin.close()
+            except Exception:
+                pass
+            if proc.poll() is None:
+                self._terminate_process(proc)
+            exit_code = proc.wait()
+            stdout_thread.join(timeout=1.0)
+            stderr_thread.join(timeout=1.0)
+            try:
+                proc.stdout.close()
+            except Exception:
+                pass
+            try:
+                proc.stderr.close()
+            except Exception:
+                pass
+
+        stderr_text = "".join(stderr_chunks)
+        if cancelled:
+            self._close_parent_fds(inherited_fds)
+            raise RunCancelledError("<runtime>")
+        if exit_code != 0:
+            self._close_parent_fds(inherited_fds)
+            message = stderr_text.strip() or f"Isolated command exited with code {exit_code}"
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"Isolated host execution failed: {message}",
+                traceback=stderr_text,
+            )
+        if final_payload is None:
+            self._close_parent_fds(inherited_fds)
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message="Isolated host execution did not produce final payload",
+                traceback=stderr_text,
+            )
+
+        stdout = str(final_payload.get("stdout") or "")
+        error = final_payload.get("error")
+        if error:
+            self._close_parent_fds(inherited_fds)
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"Runtime error ({error.get('type', 'Exception')}): {error.get('message', '')}",
+                stdout=stdout,
+                traceback=str(error.get("traceback") or stderr_text or ""),
+            )
+        outputs = final_payload.get("outputs", {})
+        if outputs is None:
+            outputs = {}
+        if not isinstance(outputs, dict):
+            self._close_parent_fds(inherited_fds)
+            raise NodeExecutionError(node_id="<runtime>", message="`outputs` must be a dict")
+        return outputs, stdout
+
+    def _cancel_requested(self) -> bool:
+        try:
+            return bool(self.cancel_checker and self.cancel_checker())
+        except Exception:
+            return False
+
+    def _resolve_inherited_fds(self, inputs: Dict[str, Any]) -> Tuple[int, ...]:
+        fds: list[int] = []
+        for key in self.inherited_fd_keys:
+            value = inputs.get(key)
+            if value is None or (type(value) is int and value < 0):
+                continue
+            if type(value) is not int:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Process-isolated node requires an integer fd input: {key}",
+                )
+            try:
+                os.fstat(value)
+            except OSError as exc:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Process-isolated node received a closed fd input: {key}",
+                ) from exc
+            if value not in fds:
+                fds.append(value)
+        return tuple(fds)
+
+    @staticmethod
+    def _close_parent_fds(fds: Tuple[int, ...]) -> None:
+        for fd in fds:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+    @staticmethod
+    def _terminate_process(proc: subprocess.Popen[str]) -> None:
+        if proc.poll() is not None:
+            return
+        if os.name != "nt":
+            try:
+                os.killpg(proc.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                return
+        else:
+            proc.terminate()
+        try:
+            proc.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            if os.name != "nt":
+                try:
+                    os.killpg(proc.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+            else:
+                proc.kill()
+            proc.wait()
 
 
 @dataclass
