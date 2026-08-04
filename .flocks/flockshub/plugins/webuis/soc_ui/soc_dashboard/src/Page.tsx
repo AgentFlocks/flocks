@@ -2203,17 +2203,18 @@ function TaskCenterSummary({ taskCenter }) {
   const activeCount = [
     ...scheduledTasks,
     ...workflows,
-  ].filter((item) => Number(item.activeCount || 0) > 0).length;
-  const summaryMetric = (key, label, value, sub, className = '') => h('div', { className, key }, [
+  ].reduce((sum, item) => sum + Math.max(Number(item.activeCount || 0), 0), 0);
+  const workflowCallTooltip = '优先来自 workflow_stats.call_count；今日为当天 call_count 增量，缺少快照时回退执行记录数';
+  const summaryMetric = (key, label, value, sub, className = '', title = '') => h('div', { className, key, title }, [
     h('span', { key: 'label' }, label),
     h(AnimatedNumber, { tag: 'b', value: value || 0, duration: 800, key: 'value' }),
     sub ? h('small', { key: 'sub' }, sub) : null,
   ]);
   return h('div', { className: 'task-center-summary' }, [
-    summaryMetric('sessions', '会话次数', taskCenter.sessionCount, ''),
+    summaryMetric('sessions', '关联会话', taskCenter.sessionCount, ''),
     summaryMetric('active', '执行中', activeCount, '', activeCount ? 'active' : ''),
-    summaryMetric('scheduledRuns', '定时执行', taskCenter.scheduledExecutionCount, `今日 ${taskCenter.scheduledTodayExecutionCount || 0}`),
-    summaryMetric('workflowRuns', '工作流执行', taskCenter.workflowExecutionCount, `今日 ${taskCenter.workflowTodayExecutionCount || 0}`),
+    summaryMetric('scheduledRuns', '定时执行', taskCenter.scheduledExecutionCount, `今日启动 ${taskCenter.scheduledTodayExecutionCount || 0}`),
+    summaryMetric('workflowRuns', '工作流调用', taskCenter.workflowExecutionCount, `今日调用 ${taskCenter.workflowTodayExecutionCount || 0}`, '', workflowCallTooltip),
   ]);
 }
 

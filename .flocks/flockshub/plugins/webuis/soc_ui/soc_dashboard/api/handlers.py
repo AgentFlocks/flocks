@@ -719,6 +719,38 @@ def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0)
     return deltas
 
 
+def _workflow_stats_call_delta_from_samples(conn, workflow_name, start_ms, end_ms):
+    if not _table_exists(conn, WORKFLOW_SNAPSHOT_TABLE):
+        return None
+    previous = conn.execute(
+        f"SELECT call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at < ? "
+        "ORDER BY sampled_at DESC LIMIT 1",
+        (workflow_name, start_ms),
+    ).fetchone()
+    if previous is None:
+        return None
+    rows = conn.execute(
+        f"SELECT sampled_at, call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at < ? "
+        "ORDER BY sampled_at",
+        (workflow_name, start_ms, end_ms),
+    ).fetchall()
+    if not rows:
+        return None
+    total = 0
+    previous_count = max(_safe_int(previous[0]), 0)
+    for _, call_count in rows:
+        current_count = max(_safe_int(call_count), 0)
+        total += (
+            current_count - previous_count
+            if current_count >= previous_count
+            else current_count
+        )
+        previous_count = current_count
+    return max(total, 0)
+
+
 def _workflow_metric_value(stats, key, fallback=0):
     value = stats.get(key)
     return max(_safe_int(fallback if value is None else value), 0)
@@ -1291,8 +1323,8 @@ def _task_center_task_rows(limit=12):
                     "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS success_count, "
                     "SUM(CASE WHEN status IN ('pending', 'queued', 'running') THEN 1 ELSE 0 END) AS active_count, "
                     "SUM(CASE WHEN "
-                    "julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) >= julianday(?) "
-                    "AND julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) < julianday(?) "
+                    "julianday(COALESCE(started_at, queued_at, created_at)) >= julianday(?) "
+                    "AND julianday(COALESCE(started_at, queued_at, created_at)) < julianday(?) "
                     "THEN 1 ELSE 0 END) AS today_execution_count "
                     "FROM task_executions WHERE scheduler_id = ?",
                     (today_start_iso, tomorrow_start_iso, scheduler["id"]),
@@ -1650,6 +1682,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
             finished_at_expr = "finished_at" if "finished_at" in execution_columns else "NULL"
             updated_at_expr = "updated_at" if "updated_at" in execution_columns else "NULL"
             execution_time_expr = f"COALESCE({finished_at_expr}, {updated_at_expr}, started_at, 0)"
+            execution_start_expr = "started_at"
             active_time_expr = f"COALESCE({updated_at_expr}, started_at, 0)"
             latest_select = ", ".join(
                 [
@@ -1687,8 +1720,8 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                     exec_summary = conn.execute(
                         "SELECT COUNT(*) AS execution_count, "
                         "SUM(CASE WHEN status IN ('success', 'completed') THEN 1 ELSE 0 END) AS success_count, "
-                        f"SUM(CASE WHEN {execution_time_expr} >= ? "
-                        f"AND {execution_time_expr} < ? THEN 1 ELSE 0 END) "
+                        f"SUM(CASE WHEN {execution_start_expr} >= ? "
+                        f"AND {execution_start_expr} < ? THEN 1 ELSE 0 END) "
                         "AS today_execution_count "
                         "FROM workflow_executions WHERE workflow_id = ?",
                         (today_start_ms, tomorrow_start_ms, workflow_id),
@@ -1732,18 +1765,35 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                         _safe_int(active_summary["active_count"] if active_summary else 0),
                         0,
                     )
-                execution_count = max(
-                    _safe_int(stats["call_count"] if stats else 0),
+                exec_execution_count = max(
                     _safe_int(exec_summary["execution_count"] if exec_summary else 0),
+                    0,
                 )
-                success_count = max(
-                    _safe_int(stats["success_count"] if stats else 0),
-                    _safe_int(exec_summary["success_count"] if exec_summary else 0),
-                )
-                today_execution_count = max(
+                exec_today_execution_count = max(
                     _safe_int(exec_summary["today_execution_count"] if exec_summary else 0),
                     0,
                 )
+                if stats is not None:
+                    execution_count = max(_safe_int(stats["call_count"]), 0)
+                    stats_today_count = _workflow_stats_call_delta_from_samples(
+                        conn,
+                        workflow_id,
+                        today_start_ms,
+                        tomorrow_start_ms,
+                    )
+                    today_execution_count = (
+                        max(_safe_int(stats_today_count), 0)
+                        if stats_today_count is not None
+                        else exec_today_execution_count
+                    )
+                    success_count = max(_safe_int(stats["success_count"]), 0)
+                else:
+                    execution_count = exec_execution_count
+                    today_execution_count = exec_today_execution_count
+                    success_count = max(
+                        _safe_int(exec_summary["success_count"] if exec_summary else 0),
+                        0,
+                    )
                 last_run_at = 0
                 if latest:
                     last_run_at = (
