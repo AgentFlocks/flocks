@@ -370,7 +370,8 @@ class TestParallelToolExecution:
 class TestParallelDedup:
     """Dedup still works correctly with batch draining."""
 
-    def test_dedup_with_parallel_batch(self):
+    @pytest.mark.parametrize("history_mode", ["full", "summary"])
+    def test_dedup_with_parallel_batch(self, history_mode):
         """Identical inputs to the same node are deduped within a batch."""
         wf = Workflow.from_dict({
             "name": "dedup_par",
@@ -388,7 +389,7 @@ class TestParallelDedup:
             wf,
             runtime=PythonExecRuntime(),
             max_parallel_workers=4,
-            history_mode="full",
+            history_mode=history_mode,
         )
         result = engine.run(retain_history=True)
         b_steps = [s for s in result.history if s.node_id == "b"]

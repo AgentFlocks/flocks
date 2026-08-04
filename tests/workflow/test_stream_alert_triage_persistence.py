@@ -182,7 +182,8 @@ def test_memory_heavy_triage_node_uses_fatal_process_isolation() -> None:
     node = next(item for item in workflow["nodes"] if item["id"] == "concurrent_triage")
 
     assert node["processIsolated"] is True
-    assert node["processInheritFdKeys"] == ["_batch_lease_fd"]
+    assert node["processRetainFdKeys"] == ["_batch_lease_fd"]
+    assert "processInheritFdKeys" not in node
     assert node["timeoutFatal"] is True
     assert "outputs['enriched_alerts_with_triage']" not in node["code"]
     assert "top_triage_result['triage_report'] = a.get('triage_report', '')" in node["code"]

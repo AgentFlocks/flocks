@@ -6,8 +6,9 @@ import time
 
 import pytest
 
-from flocks.workflow import NodeTimeoutError, Workflow, WorkflowEngine, run_workflow
-from flocks.workflow.repl_runtime import PythonExecRuntime
+import flocks.workflow.repl_runtime as repl_runtime_module
+from flocks.workflow import NodeExecutionError, NodeTimeoutError, Workflow, WorkflowEngine, run_workflow
+from flocks.workflow.repl_runtime import HostProcessPythonExecRuntime, PythonExecRuntime
 
 
 def test_node_timeout_aborts_run_without_orphan_thread_or_downstream():
@@ -167,6 +168,142 @@ def test_process_rpc_bridge_matches_concurrent_responses_by_request_id():
 
     assert result.outputs["values"] == list(range(8))
     assert registry.peak > 1
+
+
+def test_process_isolated_runtime_exposes_cooperative_cancel_hooks():
+    workflow = Workflow.from_dict({
+        "start": "check_cancel",
+        "nodes": [
+            {
+                "id": "check_cancel",
+                "type": "python",
+                "processIsolated": True,
+                "code": (
+                    "outputs['cancelled'] = cancelled()\n"
+                    "outputs['is_cancelled'] = is_cancelled()"
+                ),
+            }
+        ],
+        "edges": [],
+    })
+
+    result = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(),
+        node_timeout_s=3,
+    ).run()
+
+    assert result.outputs == {"cancelled": False, "is_cancelled": False}
+
+
+def test_process_isolated_system_exit_preserves_outputs():
+    workflow = Workflow.from_dict({
+        "start": "early_return",
+        "nodes": [
+            {
+                "id": "early_return",
+                "type": "python",
+                "processIsolated": True,
+                "code": "outputs['x'] = 1\nraise SystemExit(0)",
+            }
+        ],
+        "edges": [],
+    })
+
+    result = WorkflowEngine(
+        workflow,
+        runtime=PythonExecRuntime(),
+        node_timeout_s=3,
+    ).run()
+
+    assert result.outputs == {"x": 1}
+
+
+def test_process_retained_fd_stays_in_parent_and_crosses_node_boundary(tmp_path):
+    lease_fd = os.open(tmp_path / "lease.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    workflow = Workflow.from_dict({
+        "start": "passthrough",
+        "nodes": [
+            {
+                "id": "passthrough",
+                "type": "python",
+                "processIsolated": True,
+                "processRetainFdKeys": ["lease_fd"],
+                "code": (
+                    "outputs['child_fd'] = inputs.get('lease_fd')\n"
+                    "outputs['lease_fd'] = inputs.get('lease_fd')"
+                ),
+            }
+        ],
+        "edges": [],
+    })
+
+    try:
+        result = WorkflowEngine(
+            workflow,
+            runtime=PythonExecRuntime(),
+            node_timeout_s=3,
+        ).run({"lease_fd": lease_fd})
+
+        # The child sees a harmless placeholder descriptor, while the parent
+        # restores and continues owning the actual lease descriptor.
+        assert isinstance(result.outputs["child_fd"], int)
+        assert result.outputs["lease_fd"] == lease_fd
+        os.fstat(lease_fd)
+    finally:
+        try:
+            os.close(lease_fd)
+        except OSError:
+            pass
+
+
+def test_process_retained_fd_is_closed_when_child_fails(tmp_path):
+    lease_fd = os.open(tmp_path / "lease.lock", os.O_RDWR | os.O_CREAT, 0o600)
+    workflow = Workflow.from_dict({
+        "start": "fail",
+        "nodes": [
+            {
+                "id": "fail",
+                "type": "python",
+                "processIsolated": True,
+                "processRetainFdKeys": ["lease_fd"],
+                "code": "raise RuntimeError('boom')",
+            }
+        ],
+        "edges": [],
+    })
+
+    with pytest.raises(NodeExecutionError, match="boom"):
+        WorkflowEngine(
+            workflow,
+            runtime=PythonExecRuntime(),
+            node_timeout_s=3,
+        ).run({"lease_fd": lease_fd})
+
+    with pytest.raises(OSError):
+        os.fstat(lease_fd)
+
+
+def test_host_process_windows_launch_does_not_require_posix_shell(monkeypatch):
+    real_popen = repl_runtime_module.subprocess.Popen
+    script_paths = []
+
+    def checking_popen(args, *popen_args, **popen_kwargs):
+        assert args[0] != "sh"
+        script_paths.append(args[-1])
+        return real_popen(args, *popen_args, **popen_kwargs)
+
+    monkeypatch.setattr(repl_runtime_module.sys, "platform", "win32")
+    monkeypatch.setattr(repl_runtime_module.subprocess, "Popen", checking_popen)
+
+    outputs, _stdout = HostProcessPythonExecRuntime().execute(
+        "outputs['ok'] = True",
+        {},
+    )
+
+    assert outputs == {"ok": True}
+    assert script_paths
+    assert all(not os.path.exists(path) for path in script_paths)
 
 
 def test_node_timeout_none_disabled():

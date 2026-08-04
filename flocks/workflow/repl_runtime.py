@@ -11,6 +11,7 @@ import shlex
 import signal
 import subprocess
 import sys
+import tempfile
 import threading
 import traceback
 import uuid
@@ -380,14 +381,13 @@ class SandboxPythonExecRuntime(Runtime):
         # Stateless runtime; each execute call runs isolated command.
         return
 
-    def _build_python_cmd(
+    def _build_python_source(
         self,
         *,
         code: str,
         bridge_token: str,
         rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
         extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
-        python_executable: str = "python3",
     ) -> str:
         wrapped = f"""
 import contextlib
@@ -473,12 +473,21 @@ def _rpc_call(payload):
         raise RuntimeError(str(resp.get("error") or "Bridge request failed"))
     return resp.get("output")
 
+def _cancel_requested():
+    return bool(_rpc_call({{"kind": "cancelled"}}))
+
 init = _read_json_line()
 if init.get("type") != "init" or init.get("token") != _TOKEN:
     raise RuntimeError("Invalid init frame")
 inputs = init.get("inputs", {{}})
 if not isinstance(inputs, dict):
     raise RuntimeError("inputs must be an object")
+_retained_fd_keys = inputs.pop("_process_retained_fd_keys", [])
+if not isinstance(_retained_fd_keys, list):
+    raise RuntimeError("retained fd keys must be a list")
+for _retained_fd_key in _retained_fd_keys:
+    if isinstance(_retained_fd_key, str) and _retained_fd_key in inputs:
+        inputs[_retained_fd_key] = os.open(os.devnull, os.O_RDWR)
 _rpc_seq = 0
 _rpc_seq_lock = threading.Lock()
 _rpc_write_lock = threading.Lock()
@@ -551,6 +560,8 @@ def get_path(path, data=None):
 g = {{
     "inputs": inputs,
     "outputs": outputs,
+    "cancelled": _cancel_requested,
+    "is_cancelled": _cancel_requested,
     "get_path": get_path,
     "tool": _ToolProxy(),
     "llm": _LLMProxy(),
@@ -563,8 +574,11 @@ if _extra_site and os.path.isdir(_extra_site) and _extra_site not in sys.path:
 buf = io.StringIO()
 payload = {{"outputs": {{}}, "stdout": "", "error": None}}
 try:
-    with contextlib.redirect_stdout(buf):
-        exec({json.dumps(code, ensure_ascii=False)}, g, g)
+    try:
+        with contextlib.redirect_stdout(buf):
+            exec({json.dumps(code, ensure_ascii=False)}, g, g)
+    except SystemExit:
+        pass
     out = g.get("outputs", {{}})
     if out is None:
         out = {{}}
@@ -583,6 +597,23 @@ finally:
 sys.stdout.write(json.dumps({{"type": "final", "token": _TOKEN, "payload": payload}}, ensure_ascii=False) + "\\n")
 sys.stdout.flush()
 """
+        return wrapped
+
+    def _build_python_cmd(
+        self,
+        *,
+        code: str,
+        bridge_token: str,
+        rpc_max_bytes: Optional[int] = _RPC_MAX_BYTES,
+        extra_site_packages: str = _WORKFLOW_SITE_PACKAGES,
+        python_executable: str = "python3",
+    ) -> str:
+        wrapped = self._build_python_source(
+            code=code,
+            bridge_token=bridge_token,
+            rpc_max_bytes=rpc_max_bytes,
+            extra_site_packages=extra_site_packages,
+        )
         return f"{shlex.quote(python_executable)} -I -c {shlex.quote(wrapped)}"
 
     def _write_json_line(self, stream: TextIO, payload: Dict[str, Any]) -> None:
@@ -609,6 +640,10 @@ sys.stdout.flush()
 
         kind = str(rpc.get("kind") or "").strip().lower()
         try:
+            if kind == "cancelled":
+                output = bool(self.cancel_checker and self.cancel_checker())
+                return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
+
             if kind in ("tool", "tool_safe"):
                 name = str(rpc.get("name") or "").strip()
                 if not name:
@@ -690,6 +725,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
 
     sandbox: Dict[str, Any] = field(default_factory=dict)
     inherited_fd_keys: Tuple[str, ...] = ()
+    retained_fd_keys: Tuple[str, ...] = ()
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
@@ -706,31 +742,56 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
             )
 
         inherited_fds = self._resolve_inherited_fds(inputs)
+        retained_fds = self._resolve_retained_fds(inputs)
+        managed_fds = tuple(dict.fromkeys((*inherited_fds, *retained_fds.values())))
+        child_inputs = dict(inputs)
+        if retained_fds:
+            child_inputs["_process_retained_fd_keys"] = list(retained_fds)
         if self._cancel_requested():
-            self._close_parent_fds(inherited_fds)
+            self._close_parent_fds(managed_fds)
             raise RunCancelledError("<runtime>")
         token = uuid.uuid4().hex
         package_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-        python_cmd = self._build_python_cmd(
-            code=code,
-            bridge_token=token,
-            rpc_max_bytes=None,
-            extra_site_packages=package_root,
-            python_executable=sys.executable,
-        )
         popen_kwargs: Dict[str, Any] = {}
         if inherited_fds:
             if os.name == "nt":
-                self._close_parent_fds(inherited_fds)
+                self._close_parent_fds(managed_fds)
                 raise NodeExecutionError(
                     node_id="<runtime>",
                     message="Inherited workflow file descriptors are not supported on Windows",
                 )
             popen_kwargs["pass_fds"] = inherited_fds
 
+        script_path: Optional[str] = None
+        if sys.platform == "win32":
+            python_source = self._build_python_source(
+                code=code,
+                bridge_token=token,
+                rpc_max_bytes=None,
+                extra_site_packages=package_root,
+            )
+            with tempfile.NamedTemporaryFile(
+                mode="w",
+                encoding="utf-8",
+                suffix=".py",
+                delete=False,
+            ) as script:
+                script.write(python_source)
+                script_path = script.name
+            process_args = [sys.executable, "-I", script_path]
+        else:
+            python_cmd = self._build_python_cmd(
+                code=code,
+                bridge_token=token,
+                rpc_max_bytes=None,
+                extra_site_packages=package_root,
+                python_executable=sys.executable,
+            )
+            process_args = ["sh", "-lc", python_cmd]
+
         try:
             proc = subprocess.Popen(
-                ["sh", "-lc", python_cmd],
+                process_args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -741,7 +802,8 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 **popen_kwargs,
             )
         except Exception as exc:
-            self._close_parent_fds(inherited_fds)
+            self._remove_temp_script(script_path)
+            self._close_parent_fds(managed_fds)
             raise NodeExecutionError(
                 node_id="<runtime>",
                 message=f"Isolated host execution failed to start: {exc}",
@@ -749,7 +811,8 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
 
         if proc.stdin is None or proc.stdout is None or proc.stderr is None:
             self._terminate_process(proc)
-            self._close_parent_fds(inherited_fds)
+            self._remove_temp_script(script_path)
+            self._close_parent_fds(managed_fds)
             raise NodeExecutionError(node_id="<runtime>", message="Isolated process stdio is unavailable")
 
         stderr_chunks: list[str] = []
@@ -795,7 +858,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 return
 
         try:
-            self._write_json_line(proc.stdin, {"type": "init", "token": token, "inputs": inputs})
+            self._write_json_line(proc.stdin, {"type": "init", "token": token, "inputs": child_inputs})
             while True:
                 if self._cancel_requested():
                     cancelled = True
@@ -839,13 +902,14 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 proc.stderr.close()
             except Exception:
                 pass
+            self._remove_temp_script(script_path)
 
         stderr_text = "".join(stderr_chunks)
         if cancelled:
-            self._close_parent_fds(inherited_fds)
+            self._close_parent_fds(managed_fds)
             raise RunCancelledError("<runtime>")
         if exit_code != 0:
-            self._close_parent_fds(inherited_fds)
+            self._close_parent_fds(managed_fds)
             message = stderr_text.strip() or f"Isolated command exited with code {exit_code}"
             raise NodeExecutionError(
                 node_id="<runtime>",
@@ -853,7 +917,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 traceback=stderr_text,
             )
         if final_payload is None:
-            self._close_parent_fds(inherited_fds)
+            self._close_parent_fds(managed_fds)
             raise NodeExecutionError(
                 node_id="<runtime>",
                 message="Isolated host execution did not produce final payload",
@@ -863,7 +927,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         stdout = str(final_payload.get("stdout") or "")
         error = final_payload.get("error")
         if error:
-            self._close_parent_fds(inherited_fds)
+            self._close_parent_fds(managed_fds)
             raise NodeExecutionError(
                 node_id="<runtime>",
                 message=f"Runtime error ({error.get('type', 'Exception')}): {error.get('message', '')}",
@@ -874,8 +938,10 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         if outputs is None:
             outputs = {}
         if not isinstance(outputs, dict):
-            self._close_parent_fds(inherited_fds)
+            self._close_parent_fds(managed_fds)
             raise NodeExecutionError(node_id="<runtime>", message="`outputs` must be a dict")
+        for key, fd in retained_fds.items():
+            outputs[key] = fd
         return outputs, stdout
 
     def _cancel_requested(self) -> bool:
@@ -906,6 +972,27 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 fds.append(value)
         return tuple(fds)
 
+    def _resolve_retained_fds(self, inputs: Dict[str, Any]) -> Dict[str, int]:
+        fds: Dict[str, int] = {}
+        for key in self.retained_fd_keys:
+            value = inputs.get(key)
+            if value is None or (type(value) is int and value < 0):
+                continue
+            if type(value) is not int:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Process-isolated node requires an integer retained fd input: {key}",
+                )
+            try:
+                os.fstat(value)
+            except OSError as exc:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message=f"Process-isolated node received a closed retained fd input: {key}",
+                ) from exc
+            fds[key] = value
+        return fds
+
     @staticmethod
     def _close_parent_fds(fds: Tuple[int, ...]) -> None:
         for fd in fds:
@@ -913,6 +1000,15 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 os.close(fd)
             except OSError:
                 pass
+
+    @staticmethod
+    def _remove_temp_script(path: Optional[str]) -> None:
+        if not path:
+            return
+        try:
+            os.remove(path)
+        except OSError:
+            pass
 
     @staticmethod
     def _terminate_process(proc: subprocess.Popen[str]) -> None:

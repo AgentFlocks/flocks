@@ -85,6 +85,23 @@ def _outputs_for_log(outputs: Dict[str, Any], *, max_chars: int = 4000) -> str:
     return text[:max_chars] + f"...[truncated:{len(text) - max_chars}]"
 
 
+def _input_hash_for_dedup(node_id: str, inputs: Dict[str, Any]) -> str:
+    """Hash canonical inputs without retaining one full serialized copy."""
+    try:
+        digest = hashlib.sha256()
+        encoder = json.JSONEncoder(
+            sort_keys=True,
+            ensure_ascii=False,
+            default=str,
+            separators=(",", ":"),
+        )
+        for chunk in encoder.iterencode({"n": node_id, "i": inputs}):
+            digest.update(chunk.encode())
+        return digest.hexdigest()[:16]
+    except Exception:
+        return ""
+
+
 def _default_workflow_loader(workflow_id: str) -> "Workflow":
     """Default loader: resolves workflow by ID from disk, then legacy KV."""
     import asyncio
@@ -308,24 +325,11 @@ class WorkflowEngine:
                         inputs = merged
                         state.join_seen_sources.pop(node_id, None)
 
-                    # Dedup: skip if same node already ran with identical inputs.
-                    # Lightweight history mode is used by high-throughput ingest
-                    # paths with large payloads; hashing full inputs there would
-                    # serialize the same large alert lists we are trying not to
-                    # retain.
-                    if self.history_mode == "summary":
-                        _input_hash = ""
-                    else:
-                        try:
-                            _hash_raw = json.dumps(
-                                {"n": node_id, "i": inputs},
-                                sort_keys=True,
-                                ensure_ascii=False,
-                                default=str,
-                            )
-                            _input_hash = hashlib.sha256(_hash_raw.encode()).hexdigest()[:16]
-                        except Exception:
-                            _input_hash = ""
+                    # History retention is observational and must not alter
+                    # workflow graph semantics. Stream the hash so summary mode
+                    # can still deduplicate large inputs without retaining a
+                    # second complete JSON payload.
+                    _input_hash = _input_hash_for_dedup(node_id, inputs)
                     if _input_hash and node_id in _dedup_hashes and _dedup_hashes[node_id] == _input_hash:
                         _logger.info(
                             "wf.step.dedup_skip node=%s (identical input hash %s)",
@@ -849,6 +853,7 @@ class WorkflowEngine:
                     tool_registry=_rt.tool_registry,
                     cancel_checker=_rt.cancel_checker,
                     inherited_fd_keys=tuple(node.process_inherit_fd_keys),
+                    retained_fd_keys=tuple(node.process_retain_fd_keys),
                 )
             return _rt.execute(node.code, inputs)
         if node.type == "logic":
@@ -869,6 +874,7 @@ class WorkflowEngine:
                     tool_registry=_rt.tool_registry,
                     cancel_checker=_rt.cancel_checker,
                     inherited_fd_keys=tuple(node.process_inherit_fd_keys),
+                    retained_fd_keys=tuple(node.process_retain_fd_keys),
                 )
             return _rt.execute(code, inputs)
         if node.type in {"branch", "loop"}:
