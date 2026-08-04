@@ -14640,7 +14640,7 @@
       "name": "SOC Workspace WebUI",
       "description": "SOC workspace pages for posture, overview, and alert investigation.",
       "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
-      "version": "1.1.4",
+      "version": "1.1.5",
       "category": "workflow-automation",
       "tags": [
         "siem",
