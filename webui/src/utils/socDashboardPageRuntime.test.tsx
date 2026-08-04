@@ -201,13 +201,14 @@ describe('SOC dashboard contract page runtime', () => {
               {
                 id: 'scheduled-1',
                 name: '定时巡检',
-                status: 'active',
+                status: 'disabled',
                 executionCount: 20,
                 todayExecutionCount: 2,
-                activeCount: 2,
+                activeCount: 0,
                 successRate: 0.9,
                 lastStatus: 'completed',
                 lastRunAt: '2026-08-04T08:00:00',
+                nextRunAt: '2026-08-05T01:00:00Z',
               },
             ],
             workflows: [
@@ -220,6 +221,10 @@ describe('SOC dashboard contract page runtime', () => {
                 successRate: 0.98,
                 lastStatus: 'running',
                 lastRunAt: Date.now(),
+                latestExecutionHash: 'workflow-run-1',
+                latestAlertName: '远程命令执行',
+                sessionId: 'session-1',
+                messageId: 'message-1',
                 progressPercent: 0.5,
                 progressLabel: '运行中',
               },
@@ -237,8 +242,20 @@ describe('SOC dashboard contract page runtime', () => {
 
     expect(await screen.findByText('关联会话')).toBeInTheDocument();
     expect(screen.getByText('今日启动 2')).toBeInTheDocument();
-    expect(screen.getByText('工作流调用')).toBeInTheDocument();
+    expect(screen.getAllByText('工作流调用').length).toBeGreaterThanOrEqual(1);
     expect(screen.getByText('今日调用 7')).toBeInTheDocument();
+    expect(screen.getByText('1 个任务')).toBeInTheDocument();
+    expect(screen.getByText('1 个工作流')).toBeInTheDocument();
+    expect(screen.getByText('已关闭')).toBeInTheDocument();
+    expect(screen.getByText(/上次执行/)).toBeInTheDocument();
+    expect(screen.queryByText(/下次/)).not.toBeInTheDocument();
+    expect(screen.getByText('关联告警')).toBeInTheDocument();
+    expect(screen.getByText('远程命令执行')).toBeInTheDocument();
+    expect(screen.getByText('执行ID')).toBeInTheDocument();
+    expect(screen.getByText('workflow-run-1')).toBeInTheDocument();
+    expect(screen.getByText('关联对话')).toBeInTheDocument();
+    expect(screen.getByText('查看对话')).toBeInTheDocument();
+    expect(screen.getByText(/最近调用/)).toBeInTheDocument();
 
     const summary = container.querySelector('.task-center-summary') as HTMLElement;
     expect(summary).toBeTruthy();
@@ -251,6 +268,10 @@ describe('SOC dashboard contract page runtime', () => {
       'title',
       '优先来自 workflow_stats.call_count；今日为当天 call_count 增量，缺少快照时回退执行记录数',
     );
+
+    const workflowStats = container.querySelector('.task-center-stats.workflow-stats') as HTMLElement;
+    expect(within(workflowStats).getByText('调用')).toBeInTheDocument();
+    expect(within(workflowStats).getByText('今日调用')).toBeInTheDocument();
   });
 
   it('reacts to the shared SOC dashboard title change event', async () => {

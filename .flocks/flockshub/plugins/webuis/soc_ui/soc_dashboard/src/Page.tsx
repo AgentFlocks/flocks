@@ -2226,28 +2226,35 @@ function TaskCenterItem({ item, kind }) {
   const progressValue = taskCenterProgressValue(item);
   const progressLabel = taskCenterProgressLabel(item);
   const active = Number(item.activeCount || 0) > 0;
-  const status = taskCenterStatusLabel(item.lastStatus);
-  const statusClass = String(item.lastStatus || '').toLowerCase();
+  const schedulerStatus = String(item.status || '').toLowerCase();
+  const statusValue = kind === 'scheduled' ? schedulerStatus || item.lastStatus : item.lastStatus;
+  const status = taskCenterStatusLabel(statusValue);
+  const statusClass = String(statusValue || '').toLowerCase();
   const latestTime = taskCenterTimeLabel(item.lastRunAt);
   const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
   const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
   const alertName = String(item.latestAlertName || '').trim();
   const hasConversation = kind === 'workflow' && Boolean(String(item.sessionId || item.sessionID || '').trim());
+  const scheduledClosed = kind === 'scheduled' && ['disabled', 'stopped'].includes(schedulerStatus);
   const sub = kind === 'scheduled'
-    ? item.nextRunAt
+    ? scheduledClosed
+      ? item.lastRunAt
+        ? `上次执行 ${latestTime}`
+        : '已关闭'
+      : item.nextRunAt
       ? `下次 ${taskCenterTimeLabel(item.nextRunAt)}`
       : item.cronDescription || item.cron || taskCenterTimeLabel(item.lastRunAt)
-    : `最近执行 ${latestTime}`;
+    : `最近调用 ${latestTime}`;
   const stats = kind === 'workflow'
     ? [
-        h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'total', title: '工作流被调用/运行的次数，不代表处理告警条数' }, ['调用 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'today', title: '当天工作流调用次数' }, ['今日调用 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'progress' }, ['进度 ', h('b', { key: 'value' }, progressLabel)]),
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ]
     : [
         h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'today' }, ['今日启动 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'success' }, ['成功 ', h(AnimatedNumber, { tag: 'b', value: item.successCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ];
@@ -2279,13 +2286,13 @@ function TaskCenterItem({ item, kind }) {
       title: alertName || '暂无告警名称',
       key: 'alert',
     }, [
-      h('span', { key: 'label' }, '研判告警'),
+      h('span', { key: 'label' }, '关联告警'),
       h('b', { key: 'value' }, alertName || '暂无告警名称'),
     ]) : null,
     kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
-      h('span', { key: 'label' }, '执行哈希'),
+      h('span', { key: 'label' }, '执行ID'),
       h('code', { key: 'value' }, latestExecutionHash),
-      h('span', { key: 'link-label' }, '更多信息'),
+      h('span', { key: 'link-label' }, '关联对话'),
       h('code', { className: cx('task-center-jump', hasConversation && 'enabled'), key: 'link' }, hasConversation ? '查看对话' : '暂无关联对话'),
     ]) : null,
     h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
@@ -2302,6 +2309,8 @@ function TaskCenterItem({ item, kind }) {
 function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onToggle, collapsed, onCollapseToggle }) {
   const hasOverflow = items.length > 3;
   const visibleItems = expanded || !hasOverflow ? items : items.slice(0, 3);
+  const countUnit = kind === 'workflow' ? '个工作流' : '个任务';
+  const countText = collapsed || expanded || !hasOverflow ? `${count} ${countUnit}` : `显示 3/${count} ${countUnit}`;
   return h('section', { className: 'task-center-section' }, [
     h('div', { className: 'task-center-section-title', key: 'title' }, [
       h('button', {
@@ -2314,7 +2323,7 @@ function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onT
         h('i', { key: 'chevron' }, collapsed ? '›' : '⌄'),
         h('strong', { key: 'label' }, title),
       ]),
-      h('span', { key: 'count' }, collapsed ? `${count} 项` : expanded || !hasOverflow ? `${count} 项` : `显示 3/${count}`),
+      h('span', { key: 'count' }, countText),
     ]),
     collapsed ? null : h('div', { className: 'task-center-section-list', key: 'list' }, visibleItems.length
       ? visibleItems.map((item) => h(TaskCenterItem, { item, kind, key: `${kind}-${item.id}` }))
@@ -2324,7 +2333,7 @@ function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onT
       type: 'button',
       onClick: onToggle,
       key: 'expand',
-    }, expanded ? '收起' : `展开全部 ${count} 项`) : null,
+    }, expanded ? '收起' : `展开全部 ${count} ${countUnit}`) : null,
   ]);
 }
 
@@ -2355,11 +2364,11 @@ function CommandTaskCenterPanel({ taskCenter }) {
       key: 'scheduled',
     }),
     h(TaskCenterSection, {
-      title: '工作流执行',
+      title: '工作流调用',
       count: workflows.length,
       items: workflows,
       kind: 'workflow',
-      emptyText: '暂无工作流执行记录',
+      emptyText: '暂无工作流调用记录',
       expanded: workflowExpanded,
       onToggle: () => setWorkflowExpanded((current) => !current),
       collapsed: workflowCollapsed,
