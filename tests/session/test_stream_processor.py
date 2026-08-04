@@ -31,7 +31,7 @@ from flocks.session.streaming.stream_events import (
     ToolCallEvent,
     ToolInputStartEvent,
 )
-from flocks.session.message import MessageRole
+from flocks.session.message import MessageRole, ToolStateError
 
 
 # ---------------------------------------------------------------------------
@@ -808,6 +808,57 @@ class TestToolCallExecution:
         })
         await asyncio.sleep(0)
         assert len(event_callback.await_args_list) == baseline_calls
+
+    @pytest.mark.asyncio
+    async def test_cancelled_tool_preserves_running_metadata_in_error_state(self):
+        proc = _make_processor()
+        store_part = AsyncMock()
+
+        async def _cancelled_execute(*, tool_name, ctx, **kwargs):
+            ctx.metadata({
+                "title": "Inspect child",
+                "metadata": {
+                    "sessionId": "ses_child_cancelled",
+                    "status": "running",
+                },
+            })
+            await asyncio.sleep(0)
+            raise asyncio.CancelledError()
+
+        with (
+            patch(
+                "flocks.session.streaming.stream_processor.Message.store_part",
+                new=store_part,
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.Message.update_part",
+                new=AsyncMock(),
+            ),
+            patch(
+                "flocks.session.streaming.stream_processor.ToolRegistry.execute",
+                new=AsyncMock(side_effect=_cancelled_execute),
+            ),
+        ):
+            await proc.process_event(
+                ToolInputStartEvent(id="tc_cancel_metadata", tool_name="run_workflow")
+            )
+            with pytest.raises(asyncio.CancelledError):
+                await proc.process_event(
+                    ToolCallEvent(
+                        tool_call_id="tc_cancel_metadata",
+                        tool_name="run_workflow",
+                        input={"workflow": "wf.json"},
+                    )
+                )
+
+        final_part = store_part.await_args_list[-1].args[2]
+        assert isinstance(final_part.state, ToolStateError)
+        assert final_part.state.metadata == {
+            "title": "Inspect child",
+            "sessionId": "ses_child_cancelled",
+            "status": "interrupted",
+            "interrupted": True,
+        }
 
     @pytest.mark.asyncio
     async def test_completed_tool_cancels_pending_running_metadata_tasks(self):
