@@ -4,6 +4,7 @@ import { renderHook, act, render } from '@testing-library/react';
 import {
   StreamingMarkdown,
   fallbackSplitStreamingGraphemes,
+  normalizeLatexDelimiters,
   splitStreamingGraphemes,
   useStreamingContent,
 } from './StreamingMarkdown';
@@ -311,6 +312,36 @@ describe('useStreamingContent', () => {
 });
 
 describe('StreamingMarkdown', () => {
+  it('normalizes LaTeX delimiters only outside Markdown code', () => {
+    const content = [
+      String.raw`Inline \(x + y\).`,
+      '',
+      String.raw`\[`,
+      'x^2',
+      String.raw`\]`,
+      '',
+      '`\\(inlineCode\\)`',
+      '',
+      '```text',
+      String.raw`\[fencedCode\]`,
+      '```',
+    ].join('\n');
+
+    expect(normalizeLatexDelimiters(content)).toBe([
+      'Inline $x + y$.',
+      '',
+      '$$',
+      'x^2',
+      '$$',
+      '',
+      '`\\(inlineCode\\)`',
+      '',
+      '```text',
+      String.raw`\[fencedCode\]`,
+      '```',
+    ].join('\n'));
+  });
+
   it('constrains rendered Markdown to its message container', () => {
     const { container } = render(
       <StreamingMarkdown content={`\`\`\`text\n${'long-command'.repeat(100)}\n\`\`\``} isStreaming={false} />,
@@ -343,5 +374,23 @@ describe('StreamingMarkdown', () => {
       'text-zinc-700',
     );
     expect(container.querySelector('code')).not.toHaveClass('font-semibold');
+  });
+
+  it('renders LaTeX delimiters used in assistant messages', () => {
+    const { container } = render(
+      <StreamingMarkdown
+        content={String.raw`\[
+W'=(I-rr^\top)W
+\]
+
+Because \(rr^\top\) is a projection.`}
+        isStreaming={false}
+      />,
+    );
+
+    expect(container.querySelector('.katex-display')).not.toBeNull();
+    expect(container.querySelectorAll('.katex')).toHaveLength(2);
+    expect(container.textContent).not.toContain(String.raw`\[`);
+    expect(container.querySelector('.katex-html')?.textContent).toContain('⊤');
   });
 });
