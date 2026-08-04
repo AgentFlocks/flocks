@@ -161,6 +161,10 @@ export interface SessionChatProps {
   initialDisplayText?: string | null;
   /** Called immediately after initialMessage has been consumed (sent) */
   onInitialMessageConsumed?: () => void;
+  /** Optimistic first message created while the parent is creating a session. */
+  initialOptimisticMessage?: Message | null;
+  /** Called after initialOptimisticMessage has been seeded into local history. */
+  onInitialOptimisticMessageConsumed?: (messageId: string) => void;
   /** Scroll to this existing message after messages load. */
   focusMessageId?: string | null;
   /** Called after focusMessageId is consumed. */
@@ -1592,6 +1596,7 @@ export default function SessionChat({
   onStreamingDone,
   initialMessage,
   initialDisplayText,
+  initialOptimisticMessage,
   agentName,
   model,
   executionMode = 'build',
@@ -1606,6 +1611,7 @@ export default function SessionChat({
   onCreateAndSend,
   onCreateNewSession,
   onInitialMessageConsumed,
+  onInitialOptimisticMessageConsumed,
   focusMessageId,
   onFocusMessageConsumed,
   supportsVision,
@@ -1903,6 +1909,24 @@ export default function SessionChat({
     truncateAfterMessage,
   } =
     useSessionMessages(sessionId || undefined);
+
+  const seededOptimisticMessageIdRef = useRef('');
+  useEffect(() => {
+    if (
+      !initialOptimisticMessage
+      || initialOptimisticMessage.sessionID !== sessionId
+      || seededOptimisticMessageIdRef.current === initialOptimisticMessage.id
+    ) return;
+
+    seededOptimisticMessageIdRef.current = initialOptimisticMessage.id;
+    addMessage(initialOptimisticMessage);
+    onInitialOptimisticMessageConsumed?.(initialOptimisticMessage.id);
+  }, [
+    addMessage,
+    initialOptimisticMessage,
+    onInitialOptimisticMessageConsumed,
+    sessionId,
+  ]);
 
   useEffect(() => {
     const targetId = String(focusMessageId || '').trim();

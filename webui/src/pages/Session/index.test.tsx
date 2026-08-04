@@ -155,6 +155,7 @@ vi.mock('@/components/common/SessionChat', () => ({
     welcomeContent,
     initialMessage,
     initialDisplayText,
+    initialOptimisticMessage,
     focusMessageId,
     onCreateAndSend,
     onSSEEvent,
@@ -181,6 +182,11 @@ vi.mock('@/components/common/SessionChat', () => ({
     welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
     initialMessage?: string | null;
     initialDisplayText?: string | null;
+    initialOptimisticMessage?: {
+      id: string;
+      sessionID: string;
+      parts: Array<{ type: string; text?: string }>;
+    } | null;
     focusMessageId?: string | null;
     model?: { providerID: string; modelID: string } | null;
     executionMode?: 'build' | 'plan' | 'goal';
@@ -222,6 +228,8 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-hide-input={String(Boolean(hideInput))}
         data-initial-message={initialMessage ?? ''}
         data-initial-display={initialDisplayText ?? ''}
+        data-optimistic-id={initialOptimisticMessage?.id ?? ''}
+        data-optimistic-text={initialOptimisticMessage?.parts.find((part) => part.type === 'text')?.text ?? ''}
         data-focus-message={focusMessageId ?? ''}
       >
         {sessionId ?? 'no-session'}
@@ -245,14 +253,16 @@ vi.mock('@/components/common/SessionChat', () => ({
         <div data-testid="mock-chat-input">{input}</div>
         <button
           type="button"
-          onClick={() => void onCreateAndSend?.(
-            'hello from empty session',
-            [],
-            agentName,
-            undefined,
-            undefined,
-            executionMode,
-          )}
+          onClick={() => {
+            void Promise.resolve(onCreateAndSend?.(
+              'hello from empty session',
+              [],
+              agentName,
+              undefined,
+              undefined,
+              executionMode,
+            )).catch(() => {});
+          }}
         >
           mock-create-and-send
         </button>
@@ -547,6 +557,50 @@ describe('SessionPage session actions menu', () => {
     });
     expect(localStorage.getItem('flocks:session-execution-mode:session-2')).toBe('plan');
     expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
+  });
+
+  it('keeps the first new-session message optimistic with the persisted message id', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    const promptCall = client.post.mock.calls.find(
+      ([url]) => url === '/api/session/session-2/prompt_async',
+    );
+    const messageId = promptCall?.[1]?.messageID;
+    const chat = screen.getByTestId('session-chat');
+    expect(chat).toHaveAttribute('data-optimistic-id', messageId);
+    expect(chat).toHaveAttribute('data-optimistic-text', 'hello from empty session');
+  });
+
+  it('does not switch sessions or leave an optimistic message when the first send fails', async () => {
+    const user = userEvent.setup();
+    client.post.mockImplementation((url: string) => {
+      if (url === '/api/session') return Promise.resolve({ data: secondSession });
+      if (url === '/api/session/session-2/prompt_async') {
+        return Promise.reject(new Error('prompt rejected'));
+      }
+      return Promise.resolve({ data: {} });
+    });
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('chat.sendFailed', 'prompt rejected');
+    });
+    const chat = screen.getByTestId('session-chat');
+    expect(chat).toHaveTextContent('no-session');
+    expect(chat).toHaveAttribute('data-optimistic-id', '');
+    expect(addSession).not.toHaveBeenCalled();
   });
 
   it('keeps the workbench visible and shows a page refresh state while sessions load', () => {

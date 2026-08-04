@@ -109,7 +109,14 @@ export default function CreateChatTab({
     [...guideActions, ...exampleActions]
   ), [exampleActions, guideActions]);
 
-  const { sessionId, error, createAndSend, retry } = useSessionChat({
+  const {
+    sessionId,
+    error,
+    pendingOptimisticMessage,
+    createAndSend,
+    consumePendingOptimisticMessage,
+    retry,
+  } = useSessionChat({
     title: t('create.chat.sessionTitle'),
     category: 'workflow',
     modelAuto: selectedModelAuto,
@@ -346,6 +353,8 @@ export default function CreateChatTab({
       contextWindowTokens={effectiveModelOption?.contextWindowTokens ?? null}
       model={selectedPromptModel}
       modelAuto={selectedModelAuto}
+      initialOptimisticMessage={pendingOptimisticMessage}
+      onInitialOptimisticMessageConsumed={consumePendingOptimisticMessage}
       onStreamingDone={handleStreamingDone}
       onSSEEvent={handleSSEEvent}
       onCreateAndSend={!sessionId ? handleCreateAndSend : undefined}
