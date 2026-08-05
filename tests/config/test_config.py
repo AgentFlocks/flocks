@@ -103,6 +103,19 @@ async def test_fallback_providers_use_effective_high_priority_config(
     ]
 
 
+@pytest.mark.asyncio
+async def test_shared_jsonc_parser_preserves_comment_markers_in_strings(tmp_path):
+    config = await Config.load_text(
+        """{
+          // Actual comment.
+          "theme": "https://example.com/themes/*literal*/dark"
+        }""",
+        tmp_path / "flocks.jsonc",
+    )
+
+    assert config.theme == "https://example.com/themes/*literal*/dark"
+
+
 def test_local_mcp_config_accepts_legacy_env_alias():
     """Legacy ``env`` should hydrate the canonical ``environment`` field."""
     config = ConfigInfo.model_validate(

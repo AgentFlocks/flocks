@@ -919,6 +919,43 @@ class SessionLoop:
         return resolved_provider, resolved_model
 
     @classmethod
+    async def _reset_auto_turn_candidates(
+        cls,
+        ctx: LoopContext,
+        primary: RuntimeModel,
+        user_message_id: str,
+        config: Any,
+    ) -> int:
+        """Rebuild and activate the configured or automatic chain for one turn."""
+        configured = bool(getattr(config, "fallback_providers", None))
+        if configured:
+            cls.clear_auto_failover_state(ctx.session.id)
+            preferred = None
+        else:
+            preferred = cls._active_cooldown_model(ctx.session.id, primary)
+
+        ctx.model_candidates = await cls._build_model_candidates(
+            primary,
+            route_seed=f"{ctx.session.id}:{user_message_id}",
+            preferred=preferred,
+            config=config,
+        )
+        ctx.model_candidate_policy = (
+            "configured" if configured else "automatic"
+        )
+        ctx.auto_failover = True
+        next_index = (
+            0
+            if configured
+            else cls._cooldown_candidate_index(
+                ctx.session.id,
+                ctx.model_candidates,
+            )
+        )
+        cls._select_candidate(ctx, next_index)
+        return next_index
+
+    @classmethod
     async def _prepare_auto_turn(
         cls,
         ctx: LoopContext,
@@ -943,35 +980,12 @@ class SessionLoop:
 
                 primary = ctx.model_candidates[0]
                 config = await Config.get()
-                configured = bool(
-                    getattr(config, "fallback_providers", None)
-                )
-                if configured:
-                    cls.clear_auto_failover_state(ctx.session.id)
-                    preferred = None
-                else:
-                    preferred = cls._active_cooldown_model(
-                        ctx.session.id,
-                        primary,
-                    )
-                ctx.model_candidates = await cls._build_model_candidates(
+                await cls._reset_auto_turn_candidates(
+                    ctx,
                     primary,
-                    route_seed=f"{ctx.session.id}:{last_user.id}",
-                    preferred=preferred,
+                    last_user.id,
                     config=config,
                 )
-                ctx.model_candidate_policy = (
-                    "configured" if configured else "automatic"
-                )
-                next_index = (
-                    0
-                    if configured
-                    else cls._cooldown_candidate_index(
-                        ctx.session.id,
-                        ctx.model_candidates,
-                    )
-                )
-                cls._select_candidate(ctx, next_index)
             return True
 
         ctx.turn_user_id = last_user.id
@@ -1026,34 +1040,12 @@ class SessionLoop:
             provider_id=(default_llm or {}).get("provider_id") or user_provider_id or ctx.provider_id,
             model_id=(default_llm or {}).get("model_id") or user_model_id or ctx.model_id,
         )
-        # Rebuild once for every real turn. The user message ID makes the
-        # pseudo-random choices stable throughout that turn, while an active
-        # cooldown keeps its valid target in the newly sampled tier.
-        configured = bool(getattr(config, "fallback_providers", None))
-        if configured:
-            cls.clear_auto_failover_state(ctx.session.id)
-            preferred = None
-        else:
-            preferred = cls._active_cooldown_model(ctx.session.id, primary)
-        ctx.model_candidates = await cls._build_model_candidates(
+        next_index = await cls._reset_auto_turn_candidates(
+            ctx,
             primary,
-            route_seed=f"{ctx.session.id}:{last_user.id}",
-            preferred=preferred,
+            last_user.id,
             config=config,
         )
-        ctx.model_candidate_policy = (
-            "configured" if configured else "automatic"
-        )
-        ctx.auto_failover = True
-        next_index = (
-            0
-            if configured
-            else cls._cooldown_candidate_index(
-                ctx.session.id,
-                ctx.model_candidates,
-            )
-        )
-        cls._select_candidate(ctx, next_index)
         active = ctx.model_candidates[next_index]
         log.info("session.model.auto_turn_reset", {
             "session_id": ctx.session.id,

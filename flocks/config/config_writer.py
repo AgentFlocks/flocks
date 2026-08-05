@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from flocks.config.config import Config
+from flocks.config.config import Config, normalize_fallback_provider_entries
 from flocks.utils.log import Log
 
 log = Log.create(service="config.writer")
@@ -29,61 +29,6 @@ _FALLBACK_CONFIG_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "servers": [],
     },
 }
-
-
-def _parse_jsonc(text: str) -> Dict[str, Any]:
-    """Parse JSON with line and block comments without resolving references."""
-    output: List[str] = []
-    index = 0
-    in_string = False
-    escaped = False
-
-    while index < len(text):
-        char = text[index]
-        next_char = text[index + 1] if index + 1 < len(text) else ""
-
-        if in_string:
-            output.append(char)
-            if escaped:
-                escaped = False
-            elif char == "\\":
-                escaped = True
-            elif char == '"':
-                in_string = False
-            index += 1
-            continue
-
-        if char == '"':
-            in_string = True
-            output.append(char)
-            index += 1
-            continue
-
-        if char == "/" and next_char == "/":
-            index += 2
-            while index < len(text) and text[index] not in "\r\n":
-                index += 1
-            continue
-
-        if char == "/" and next_char == "*":
-            index += 2
-            while index + 1 < len(text) and text[index:index + 2] != "*/":
-                if text[index] in "\r\n":
-                    output.append(text[index])
-                index += 1
-            if index + 1 >= len(text):
-                raise ValueError("Unterminated block comment")
-            index += 2
-            continue
-
-        output.append(char)
-        index += 1
-
-    parsed = json.loads("".join(output))
-    if not isinstance(parsed, dict):
-        raise ValueError("Top-level configuration must be a JSON object")
-    return parsed
-
 
 def _get_example_config_dir() -> Path:
     """Return the bundled example directory used for first-run initialization."""
@@ -163,7 +108,7 @@ class ConfigWriter:
             text = path.read_text(encoding="utf-8")
             if not text.strip():
                 return {}
-            return _parse_jsonc(text)
+            return Config.parse_jsonc(text, path)
         except (ValueError, OSError) as exc:
             log.error("config_writer.read_failed", {"path": str(path), "error": str(exc)})
             if strict:
@@ -506,57 +451,9 @@ class ConfigWriter:
     def get_fallback_providers(cls) -> List[Dict[str, str]]:
         """Return ordered, structurally valid runtime fallback models."""
         data = cls._read_raw()
-        raw_fallbacks = data.get("fallback_providers", [])
-        if not isinstance(raw_fallbacks, list):
-            log.warning("config_writer.fallback_providers_invalid", {
-                "reason": "not_a_list",
-            })
-            return []
-
-        fallbacks: List[Dict[str, str]] = []
-        seen: set[tuple[str, str]] = set()
-        for index, raw in enumerate(raw_fallbacks):
-            if not isinstance(raw, dict):
-                log.warning("config_writer.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "not_an_object",
-                })
-                continue
-
-            provider_id = raw.get("provider_id")
-            model_id = raw.get("model_id")
-            if not isinstance(provider_id, str) or not isinstance(model_id, str):
-                log.warning("config_writer.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "invalid_identity",
-                })
-                continue
-
-            provider_id = provider_id.strip()
-            model_id = model_id.strip()
-            if not provider_id or not model_id:
-                log.warning("config_writer.fallback_provider_invalid", {
-                    "index": index,
-                    "reason": "empty_identity",
-                })
-                continue
-
-            identity = (provider_id, model_id)
-            if identity in seen:
-                log.warning("config_writer.fallback_provider_duplicate", {
-                    "index": index,
-                    "provider_id": provider_id,
-                    "model_id": model_id,
-                })
-                continue
-
-            seen.add(identity)
-            fallbacks.append({
-                "provider_id": provider_id,
-                "model_id": model_id,
-            })
-
-        return fallbacks
+        return normalize_fallback_provider_entries(
+            data.get("fallback_providers", [])
+        )
 
     @classmethod
     def set_fallback_providers(

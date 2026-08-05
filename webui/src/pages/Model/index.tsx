@@ -3450,24 +3450,18 @@ function FallbackModelsDialog({
     () => new Set(draft.map(model => `${model.provider_id}\u0000${model.model_id}`)),
     [draft],
   );
-  const selectableGroups = useMemo(() => {
-    const grouped = new Map<string, ModelDefinitionV2[]>();
-    availableModels.forEach(model => {
+  const selectableModels = useMemo(
+    () => availableModels.filter(model => {
       const key = `${model.provider_id}\u0000${model.id}`;
       const isPrimary = primary?.provider_id === model.provider_id && primary.model_id === model.id;
-      if (isPrimary || draftKeys.has(key)) return;
-      const entries = grouped.get(model.provider_id) ?? [];
-      entries.push(model);
-      grouped.set(model.provider_id, entries);
-    });
-    return Array.from(grouped.entries())
-      .map(([providerId, providerModels]) => ({
-        providerId,
-        providerName: providerNames.get(providerId) || providerId,
-        models: providerModels.sort((a, b) => (a.name || a.id).localeCompare(b.name || b.id)),
-      }))
-      .sort((a, b) => a.providerName.localeCompare(b.providerName));
-  }, [availableModels, draftKeys, primary, providerNames]);
+      return !isPrimary && !draftKeys.has(key);
+    }),
+    [availableModels, draftKeys, primary],
+  );
+  const selectableGroups = useMemo(
+    () => groupModelsForSelection(selectableModels, providerNames),
+    [providerNames, selectableModels],
+  );
   const dirty = JSON.stringify(draft) !== JSON.stringify(current);
   const loadFailed = Boolean(currentLoadError || modelsLoadError);
   const routingDataLoading = currentLoading || loading;
@@ -3672,32 +3666,17 @@ function FallbackModelsDialog({
               </button>
 
               {adding && selectableGroups.length > 0 && (
-                <div className="overflow-hidden rounded-lg border border-gray-200">
-                  {selectableGroups.map(group => (
-                    <div key={group.providerId}>
-                      <div className="border-b border-gray-100 bg-gray-50 px-3 py-1.5 text-xs font-semibold uppercase tracking-wide text-gray-500">
-                        {group.providerName}
-                      </div>
-                      {group.models.map(model => (
-                        <button
-                          key={`${model.provider_id}/${model.id}`}
-                          type="button"
-                          onClick={() => {
-                            setDraft(previous => [...previous, {
-                              provider_id: model.provider_id,
-                              model_id: model.id,
-                            }]);
-                            setAdding(false);
-                          }}
-                          className="flex w-full items-center justify-between border-b border-gray-100 px-3 py-2.5 text-left text-sm text-gray-700 transition-colors last:border-0 hover:bg-gray-50"
-                        >
-                          <span className="truncate">{model.name || model.id}</span>
-                          <span className="ml-3 shrink-0 text-xs text-gray-400">{model.id}</span>
-                        </button>
-                      ))}
-                    </div>
-                  ))}
-                </div>
+                <ModelSelectionList
+                  groups={selectableGroups}
+                  disabled={saving}
+                  onSelect={model => {
+                    setDraft(previous => [...previous, {
+                      provider_id: model.provider_id,
+                      model_id: model.id,
+                    }]);
+                    setAdding(false);
+                  }}
+                />
               )}
             </div>
           )}
