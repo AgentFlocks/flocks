@@ -68,6 +68,41 @@ async def test_config_loading():
     assert config.keybinds is not None
 
 
+@pytest.mark.asyncio
+async def test_fallback_providers_use_effective_high_priority_config(
+    isolated_user_config,
+    monkeypatch,
+):
+    isolated_user_config.mkdir(parents=True, exist_ok=True)
+    (isolated_user_config / "flocks.json").write_text(
+        json.dumps({
+            "fallback_providers": [
+                {"provider_id": "global", "model_id": "global-model"},
+            ],
+        }),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "FLOCKS_CONFIG_CONTENT",
+        json.dumps({
+            "fallback_providers": [
+                {"provider_id": "inline", "model_id": "effective-model"},
+            ],
+        }),
+    )
+    Config._global_config = None
+    Config._cached_config = None
+
+    config = await Config.get()
+
+    assert [
+        fallback.model_dump()
+        for fallback in config.fallback_providers or []
+    ] == [
+        {"provider_id": "inline", "model_id": "effective-model"},
+    ]
+
+
 def test_local_mcp_config_accepts_legacy_env_alias():
     """Legacy ``env`` should hydrate the canonical ``environment`` field."""
     config = ConfigInfo.model_validate(
