@@ -55,10 +55,19 @@ class RunTimeoutError(FlocksWorkflowError):
         self.timeout_s = timeout_s
 
 
-class NodeTimeoutError(FlocksWorkflowError):
-    """Raised when a single node execution exceeds its time limit (skipped, workflow continues)."""
+class NodeTimeoutError(NodeExecutionError):
+    """Raised when a node exceeds its time limit and aborts the workflow run."""
 
-    def __init__(self, node_id: str, timeout_s: float):
-        super().__init__(f"节点执行超时 ({timeout_s}s): node_id={node_id}")
-        self.node_id = node_id
+    def __init__(
+        self,
+        node_id: str,
+        timeout_s: float,
+        *,
+        execution_context: Optional[dict] = None,
+    ):
+        super().__init__(
+            node_id=node_id,
+            message=f"节点执行超时 ({timeout_s}s): node_id={node_id}",
+            execution_context=execution_context,
+        )
         self.timeout_s = timeout_s

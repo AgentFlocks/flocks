@@ -240,6 +240,13 @@ class TestConnectivityParsing:
         assert spec.tool == "onesec_threat"
         assert spec.params == {"action": "threat_query_bd_version"}
 
+    def test_qingteng_manifest_uses_system_audit_connectivity_probe(self):
+        spec = get_connectivity_spec("qingteng_v3_4_1_66")
+
+        assert spec is not None
+        assert spec.tool == "qingteng_system_audit"
+        assert spec.params == {}
+
 
 class TestFixtureParsing:
     def setup_method(self):

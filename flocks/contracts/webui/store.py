@@ -288,6 +288,7 @@ class WebUIPagesStore:
                 workspaces.append(
                     WebUIWorkspaceListItem(
                         id=manifest.id,
+                        version=manifest.version,
                         title=manifest.title,
                         titleEn=manifest.titleEn,
                         route=webui_contract_workspace_route(manifest.id),

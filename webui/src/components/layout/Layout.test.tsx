@@ -1,6 +1,6 @@
 import React from 'react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom';
 import Layout from './Layout';
@@ -20,6 +20,7 @@ const {
   getNotificationAckStatus,
   flocksproUsersApi,
   consoleUpgradeApi,
+  productNameContextValue,
   updateModalMock,
   useAuth,
   useStats,
@@ -54,6 +55,18 @@ const {
   },
   consoleUpgradeApi: {
     getProPackageStatus: vi.fn(),
+  },
+  productNameContextValue: {
+    productName: 'Flocks',
+    proProductName: 'Flocks Pro',
+    configuredDisplayName: null as string | null,
+    faviconUrl: '/favicon.svg',
+    hasCustomFavicon: false,
+    loading: false,
+    refreshProductName: vi.fn(),
+    updateProductName: vi.fn(),
+    uploadProductFavicon: vi.fn(),
+    resetProductFavicon: vi.fn(),
   },
   updateModalMock: vi.fn(() => null),
   useAuth: vi.fn(),
@@ -116,6 +129,10 @@ vi.mock('@/api/consoleUpgrade', () => ({
 
 vi.mock('@/contexts/AuthContext', () => ({
   useAuth,
+}));
+
+vi.mock('@/contexts/ProductNameContext', () => ({
+  useProductName: () => productNameContextValue,
 }));
 
 vi.mock('@/hooks/useStats', () => ({
@@ -242,6 +259,9 @@ describe('Layout onboarding entry', () => {
     vi.clearAllMocks();
     vi.useRealTimers();
     localStorage.clear();
+    productNameContextValue.productName = 'Flocks';
+    productNameContextValue.proProductName = 'Flocks Pro';
+    productNameContextValue.configuredDisplayName = null;
 
     checkUpdate.mockResolvedValue({
       has_update: false,
@@ -588,6 +608,61 @@ describe('Layout onboarding entry', () => {
     expect(collapsedUpdateButton).toHaveClass('h-2.5');
     expect(collapsedUpdateButton).toHaveClass('w-2.5');
     expect(screen.queryByText('newVersion')).not.toBeInTheDocument();
+  });
+
+  it('adapts the sidebar for a custom long workbench name and hides the product update mark', async () => {
+    const customName = '超长的威胁研判自动化工作台名称用于验证左侧菜单栏不会溢出';
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    productNameContextValue.productName = customName;
+    productNameContextValue.proProductName = customName;
+    productNameContextValue.configuredDisplayName = customName;
+    checkUpdate.mockResolvedValue({
+      has_update: true,
+      latest_version: '2026.04.29',
+      current_version: '2026.04.28',
+      release_notes: 'Release line',
+      release_url: 'https://example.com/release',
+      error: null,
+    });
+
+    const { container } = renderHomeWithLayout();
+
+    const aside = container.querySelector('aside') as HTMLElement | null;
+    expect(aside).not.toBeNull();
+    await waitFor(() => {
+      expect(Number.parseInt(aside!.style.width, 10)).toBeGreaterThan(208);
+    });
+
+    const sidebarShell = container.querySelector('aside > div');
+    const logoRow = sidebarShell?.firstElementChild as HTMLElement | null;
+    expect(logoRow).not.toBeNull();
+    const productLabel = within(logoRow!).getByText(customName);
+    expect(productLabel.className).toContain('[overflow-wrap:anywhere]');
+    expect(screen.queryByText('newVersion')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'hasNewVersion v2026.04.29' })).not.toBeInTheDocument();
+  });
+
+  it('resizes and persists the expanded desktop sidebar width', async () => {
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+
+    const { container } = renderHomeWithLayout();
+
+    const aside = container.querySelector('aside') as HTMLElement | null;
+    expect(aside).not.toBeNull();
+    const resizeHandle = await screen.findByRole('separator', { name: 'resizeNav' });
+
+    fireEvent.pointerDown(resizeHandle, { pointerId: 1, clientX: 208 });
+    await act(async () => {
+      const pointerMove = new Event('pointermove') as PointerEvent;
+      Object.defineProperty(pointerMove, 'clientX', { value: 320 });
+      window.dispatchEvent(pointerMove);
+    });
+    await act(async () => {
+      window.dispatchEvent(new Event('pointerup'));
+    });
+
+    expect(aside).toHaveStyle({ width: '320px' });
+    expect(localStorage.getItem('flocks_layout_sidebar_width')).toBe('320');
   });
 
   it('opens the account menu with settings and logout actions', async () => {
@@ -1266,5 +1341,79 @@ describe('Layout WebUI contract pages navigation', () => {
     expect(await screen.findByTestId('location-probe')).toHaveTextContent(
       `/sessions?session=session-soc-custom-page&message=${encodeURIComponent('workspace.socCustomPageInitialMessage')}&display=${encodeURIComponent('workspace.socCustomPageDisplayLabel')}`,
     );
+  });
+
+  it('customizes the SOC dashboard title from the SOC workspace menu', async () => {
+    const user = userEvent.setup();
+    localStorage.setItem('flocks_onboarding_dismissed', 'true');
+    const titleChanged = vi.fn();
+    window.addEventListener('soc-dashboard:title-changed', titleChanged);
+
+    const socPages = [
+      {
+        id: 'soc-dashboard',
+        title: '告警态势',
+        route: '/contracts/webui/soc-dashboard',
+        icon: 'Activity',
+        order: 10,
+        enabled: true,
+        placement: 'home.after',
+        buildHash: 'ready',
+        buildStatus: 'ready' as const,
+        workspaceId: 'soc_ui',
+        workspaceTitle: 'SOC 工作区',
+        workspaceRoute: '/contracts/webui/workspaces/soc_ui',
+      },
+    ];
+    useWebUIContractPages.mockReturnValue({
+      pages: socPages,
+      workspaces: [
+        {
+          id: 'soc_ui',
+          title: 'SOC 工作区',
+          route: '/contracts/webui/workspaces/soc_ui',
+          icon: 'ShieldCheck',
+          order: 10,
+          enabled: true,
+          placement: 'sceneWorkspace',
+          defaultPageId: 'soc-dashboard',
+          sections: [
+            {
+              id: 'posture',
+              label: '态势',
+              pageIds: ['soc-dashboard'],
+              defaultPageId: 'soc-dashboard',
+              contentPadding: 'none',
+              themeOverride: 'dark',
+            },
+          ],
+          pages: socPages,
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    try {
+      renderHomeWithLayout();
+
+      await user.click(await screen.findByRole('link', { name: 'SOC 工作区' }));
+      const workspaceMenu = screen.getByRole('navigation', { name: 'workspace.sectionNavigation' });
+      await user.click(within(workspaceMenu).getByRole('button', { name: 'workspace.customTitle' }));
+
+      const input = screen.getByLabelText('workspace.customTitle');
+      await user.clear(input);
+      await user.type(input, '自定义 SOC 态势中心');
+      await user.click(screen.getByRole('button', { name: 'workspace.customTitleSave' }));
+
+      expect(localStorage.getItem('soc-dashboard-custom-title-v1')).toBe('自定义 SOC 态势中心');
+      expect(titleChanged).toHaveBeenCalledTimes(1);
+      expect(titleChanged.mock.calls[0][0]).toMatchObject({
+        detail: { title: '自定义 SOC 态势中心' },
+      });
+    } finally {
+      window.removeEventListener('soc-dashboard:title-changed', titleChanged);
+    }
   });
 });

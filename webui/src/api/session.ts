@@ -8,6 +8,11 @@ export interface SessionMessagePartPayload {
   sessionID: string;
   type: string;
   text?: string;
+  time?: {
+    start: number;
+    end?: number;
+    compacted?: number;
+  };
   synthetic?: boolean;
   tool?: string;
   state?: Record<string, unknown>;
@@ -170,6 +175,14 @@ export const sessionApi = {
     model_auto?: boolean;
   }) => {
     const response = await client.patch(`/api/session/${sessionId}`, data);
+    return response.data;
+  },
+
+  /**
+   * 将任务及其子任务移动到指定项目
+   */
+  moveToProject: async (sessionId: string, projectID: string): Promise<SessionResponse> => {
+    const response = await client.patch(`/api/session/${sessionId}/project`, { projectID });
     return response.data;
   },
 

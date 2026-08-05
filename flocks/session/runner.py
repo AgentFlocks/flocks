@@ -2852,6 +2852,8 @@ class SessionRunner:
                     
                     # Text parts
                     if part.type == "text" and hasattr(part, 'text'):
+                        if getattr(part, "ignored", False):
+                            continue
                         assistant_content_parts.append(part.text)
                     elif part.type == "reasoning" and hasattr(part, 'text'):
                         assistant_reasoning_parts.append(part.text)

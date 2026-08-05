@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -119,7 +119,11 @@ class SqliteJsonDriverExecutor:
             if record.get("is_duplicate") is True:
                 duplicates += 1
                 continue
-            if not self._matches_predicates(record, plan.policy_plan.driver_predicates):
+            if not self._matches_predicates(
+                record,
+                plan.policy_plan.driver_predicates,
+                plan.binding.predicate_value_resolver,
+            ):
                 continue
 
             record_id = _read_string(record.get("id"), "")
@@ -152,8 +156,13 @@ class SqliteJsonDriverExecutor:
     def _assert_allowed(self, path: Path, allowlist_roots: tuple[Path, ...]) -> None:
         JsonlDriverExecutor()._assert_allowed(path, allowlist_roots)
 
-    def _matches_predicates(self, record: dict[str, Any], predicates: tuple[Predicate, ...]) -> bool:
-        return JsonlDriverExecutor()._matches_predicates(record, predicates)
+    def _matches_predicates(
+        self,
+        record: dict[str, Any],
+        predicates: tuple[Predicate, ...],
+        value_resolver: Callable[[dict[str, Any], str], Any] | None = None,
+    ) -> bool:
+        return JsonlDriverExecutor()._matches_predicates(record, predicates, value_resolver)
 
     def _matches_event_time_range(self, record: dict[str, Any], start_time: int | None, end_time: int | None) -> bool:
         return JsonlDriverExecutor()._matches_event_time_range(record, start_time, end_time)
@@ -184,7 +193,11 @@ class JsonlDriverExecutor:
                 if record.get("is_duplicate") is True:
                     duplicates += 1
                     continue
-                if not self._matches_predicates(record, plan.policy_plan.driver_predicates):
+                if not self._matches_predicates(
+                    record,
+                    plan.policy_plan.driver_predicates,
+                    plan.binding.predicate_value_resolver,
+                ):
                     continue
 
                 record_id = _read_string(record.get("id"), "")
@@ -303,9 +316,18 @@ class JsonlDriverExecutor:
                     continue
                 yield value if isinstance(value, dict) else None
 
-    def _matches_predicates(self, record: dict[str, Any], predicates: tuple[Predicate, ...]) -> bool:
+    def _matches_predicates(
+        self,
+        record: dict[str, Any],
+        predicates: tuple[Predicate, ...],
+        value_resolver: Callable[[dict[str, Any], str], Any] | None = None,
+    ) -> bool:
         for predicate in predicates:
-            value = record.get(predicate.field)
+            value = (
+                value_resolver(record, predicate.field)
+                if value_resolver is not None
+                else record.get(predicate.field)
+            )
             if predicate.operator == "in":
                 allowed = {_normalize_compare(item) for item in predicate.values}
                 if _normalize_compare(value) not in allowed:

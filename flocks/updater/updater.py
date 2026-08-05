@@ -1450,6 +1450,42 @@ async def _download_with_fallback(
     raise RuntimeError(summary)
 
 
+def _backup_path_is_excluded(parts: tuple[str, ...]) -> bool:
+    """Return whether a source-relative path should be excluded from backups."""
+    if parts and parts[0] in _ROOT_RUNTIME_NAMES:
+        return True
+    return any(part in _PRESERVE_NAMES or part == "dist" for part in parts)
+
+
+def _write_backup_archive(source_root: Path, archive_path: Path) -> None:
+    """Write a source-only tar archive from *source_root*."""
+
+    def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
+        parts = info.name.split("/")
+        relative_parts = tuple(parts[1:]) if parts and parts[0] == "flocks" else tuple(parts)
+        if _backup_path_is_excluded(relative_parts):
+            return None
+        return info
+
+    with tarfile.open(archive_path, "w:gz") as tar:
+        tar.add(str(source_root), arcname="flocks", filter=_filter)
+
+
+def _copy_backup_snapshot(install_root: Path, snapshot_root: Path) -> None:
+    """Copy backup-eligible source files into a stable temporary snapshot."""
+
+    def _ignore(directory: str, names: list[str]) -> set[str]:
+        relative_dir = Path(directory).relative_to(install_root)
+        return {name for name in names if _backup_path_is_excluded((*relative_dir.parts, name))}
+
+    shutil.copytree(
+        install_root,
+        snapshot_root,
+        ignore=_ignore,
+        ignore_dangling_symlinks=True,
+    )
+
+
 def _backup_current_version(
     install_root: Path,
     current_version: str,
@@ -1457,6 +1493,7 @@ def _backup_current_version(
 ) -> Path | None:
     """
     Compress the current source tree into ~/.flocks/version/ .
+    Falls back to archiving a temporary source snapshot when direct archiving fails.
     Returns the backup path on success, None on failure.
     Preserved runtime/user directories are excluded.
     """
@@ -1464,25 +1501,40 @@ def _backup_current_version(
     ts = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S")
     backup_name = f"flocks-{current_version}-{ts}"
     backup_path = _BACKUP_DIR / f"{backup_name}.tar.gz"
-
-    def _filter(info: tarfile.TarInfo) -> tarfile.TarInfo | None:
-        parts = info.name.split("/")
-        if len(parts) >= 2 and parts[0] == "flocks" and parts[1] in _ROOT_RUNTIME_NAMES:
-            return None
-        for part in parts:
-            if part in _PRESERVE_NAMES:
-                return None
-            if part == "dist":
-                return None
-        return info
+    partial_path = _BACKUP_DIR / f"{backup_name}.tar.gz.partial"
+    partial_path.unlink(missing_ok=True)
 
     try:
-        with tarfile.open(backup_path, "w:gz") as tar:
-            tar.add(str(install_root), arcname="flocks", filter=_filter)
+        _write_backup_archive(install_root, partial_path)
+    except Exception as direct_exc:
+        partial_path.unlink(missing_ok=True)
+        log.warning("updater.backup.direct_failed", {"error": str(direct_exc)})
+        snapshot_dir: Path | None = None
+        try:
+            snapshot_dir = Path(tempfile.mkdtemp(prefix="flocks-backup-"))
+            snapshot_root = snapshot_dir / "flocks"
+            _copy_backup_snapshot(install_root, snapshot_root)
+            _write_backup_archive(snapshot_root, partial_path)
+        except Exception as snapshot_exc:
+            partial_path.unlink(missing_ok=True)
+            log.warning(
+                "updater.backup.failed",
+                {
+                    "direct_error": str(direct_exc),
+                    "snapshot_error": str(snapshot_exc),
+                },
+            )
+            return None
+        finally:
+            if snapshot_dir is not None:
+                shutil.rmtree(snapshot_dir, ignore_errors=True)
+
+    try:
+        partial_path.replace(backup_path)
     except Exception as exc:
+        partial_path.unlink(missing_ok=True)
         log.warning("updater.backup.failed", {"error": str(exc)})
         return None
-
     _cleanup_old_backups(retain_count)
     return backup_path
 

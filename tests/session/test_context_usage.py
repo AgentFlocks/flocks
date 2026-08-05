@@ -186,6 +186,47 @@ async def test_context_usage_does_not_scan_archived_history(context_usage_mocks)
 
 
 @pytest.mark.asyncio
+async def test_context_usage_ignores_ignored_text_parts(context_usage_mocks):
+    msg = _message("command-output", tokens=None)
+    context_usage_mocks["active"] = [msg]
+    context_usage_mocks["all"] = [msg]
+    context_usage_mocks["estimate"] = 0
+    context_usage_mocks["parts"] = {
+        "command-output": [
+            SimpleNamespace(
+                type="text",
+                text="Available Tools\n" + ("x" * 16_000),
+                ignored=True,
+            ),
+        ],
+    }
+
+    snapshot = await context_usage.build_context_usage_snapshot("sess-1")
+
+    assert snapshot.used_tokens == 0
+    assert all(segment.key != "conversation" for segment in snapshot.segments)
+
+
+def test_context_usage_uses_last_real_model_before_builtin_command():
+    real_model = _message(
+        "assistant-1",
+        provider_id="openai",
+        model_id="gpt-5.6-luna",
+    )
+    command_output = _message(
+        "command-output",
+        created=200,
+        provider_id="builtin",
+        model_id="command",
+    )
+
+    assert context_usage._resolve_message_model([real_model, command_output]) == (
+        "openai",
+        "gpt-5.6-luna",
+    )
+
+
+@pytest.mark.asyncio
 async def test_context_usage_splits_tool_parts_from_conversation(context_usage_mocks):
     msg = _message("assistant-1", tokens=None)
     context_usage_mocks["active"] = [msg]

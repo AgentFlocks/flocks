@@ -131,6 +131,7 @@ class CreateModelReq(BaseModel):
     supports_reasoning: bool = True
     input_price: float = Field(0.0, ge=0)
     output_price: float = Field(0.0, ge=0)
+    cache_read_price: Optional[float] = Field(None, ge=0)
     currency: str = "USD"
 
 
@@ -144,6 +145,7 @@ class ModelResp(BaseModel):
     max_output_tokens: int
     input_price: float
     output_price: float
+    cache_read_price: Optional[float] = None
     currency: str
     created_at: str
 
@@ -268,6 +270,7 @@ async def list_models(provider_id: str):
             max_output_tokens=mcfg.get("max_output_tokens", FALLBACK_MAX_OUTPUT_TOKENS),
             input_price=mcfg.get("input_price", 0.0),
             output_price=mcfg.get("output_price", 0.0),
+            cache_read_price=mcfg.get("cache_read_price"),
             currency=mcfg.get("currency", "USD"),
             created_at=mcfg.get("created_at", now_str),
         ))
@@ -284,6 +287,9 @@ async def create_model(provider_id: str, body: CreateModelReq):
     models = raw.get("models", {})
     existing_model = models.get(body.model_id)
     limits = await _resolve_model_limits(provider_id, body, raw)
+    cache_read_price = body.cache_read_price
+    if existing_model and "cache_read_price" not in body.model_fields_set:
+        cache_read_price = existing_model.get("cache_read_price")
 
     now = datetime.now(UTC).isoformat()
     model_config = {
@@ -296,6 +302,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
         "supports_reasoning": body.supports_reasoning,
         "input_price": body.input_price,
         "output_price": body.output_price,
+        "cache_read_price": cache_read_price,
         "currency": body.currency,
         "created_at": existing_model.get("created_at", now) if existing_model else now,
     }
@@ -306,7 +313,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
     # Add/update runtime
     _add_model_to_runtime(
         provider_id,
-        body,
+        body.model_copy(update={"cache_read_price": cache_read_price}),
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
     )
@@ -324,6 +331,7 @@ async def create_model(provider_id: str, body: CreateModelReq):
         context_window=limits.context_window,
         max_output_tokens=limits.max_output_tokens,
         input_price=body.input_price, output_price=body.output_price,
+        cache_read_price=cache_read_price,
         currency=body.currency, created_at=now,
     )
 
@@ -617,12 +625,18 @@ def _add_model_to_runtime(
     / OpenAICompatibleProvider (_config_models).
     """
     _pricing = None
-    if body.input_price is not None or body.output_price is not None:
+    if (
+        body.input_price is not None
+        or body.output_price is not None
+        or body.cache_read_price is not None
+    ):
         _pricing = {
             "input": float(body.input_price or 0.0),
             "output": float(body.output_price or 0.0),
             "currency": body.currency,
         }
+        if body.cache_read_price is not None:
+            _pricing["cache_read"] = float(body.cache_read_price)
     mi = ModelInfo(
         id=body.model_id,
         name=body.name,
@@ -648,7 +662,8 @@ def _add_model_to_runtime(
     mi._explicit_keys = {
         "name", "context_window", "max_output_tokens",
         "supports_streaming", "supports_tools", "supports_vision",
-        "supports_reasoning", "input_price", "output_price", "currency",
+        "supports_reasoning", "input_price", "output_price",
+        "cache_read_price", "currency",
     }
     Provider._models[body.model_id] = mi
     p = Provider.get(provider_id)
@@ -708,13 +723,20 @@ async def load_custom_providers_on_startup():
                 continue
             _input_price = mcfg.get("input_price")
             _output_price = mcfg.get("output_price")
+            _cache_read_price = mcfg.get("cache_read_price")
             _pricing = None
-            if _input_price is not None or _output_price is not None:
+            if (
+                _input_price is not None
+                or _output_price is not None
+                or _cache_read_price is not None
+            ):
                 _pricing = {
                     "input": float(_input_price or 0.0),
                     "output": float(_output_price or 0.0),
                     "currency": mcfg.get("currency", "USD"),
                 }
+                if _cache_read_price is not None:
+                    _pricing["cache_read"] = float(_cache_read_price)
             mi = ModelInfo(
                 id=model_id,
                 name=mcfg.get("name", model_id),

@@ -28,6 +28,8 @@ const {
   defaultModelAPI,
   modelV2API,
   hubAPI,
+  workflowAPI,
+  skillAPI,
   toast,
 } = vi.hoisted(() => ({
   client: {
@@ -41,6 +43,7 @@ const {
     delete: vi.fn(),
     get: vi.fn(),
     getMessages: vi.fn(),
+    moveToProject: vi.fn(),
     update: vi.fn(),
   },
   updateSessionTitle: vi.fn(),
@@ -62,6 +65,12 @@ const {
     install: vi.fn(),
     installStream: vi.fn(),
   },
+  workflowAPI: {
+    listSummaries: vi.fn(),
+  },
+  skillAPI: {
+    status: vi.fn(),
+  },
   toast: {
     error: vi.fn(),
     info: vi.fn(),
@@ -82,6 +91,14 @@ vi.mock('@/api/session', () => ({
 
 vi.mock('@/api/hub', () => ({
   hubAPI,
+}));
+
+vi.mock('@/api/workflow', () => ({
+  workflowAPI,
+}));
+
+vi.mock('@/api/skill', () => ({
+  skillAPI,
 }));
 
 vi.mock('@/hooks/useSessions', () => ({
@@ -132,10 +149,14 @@ vi.mock('@/components/common/SessionChat', () => ({
     sessionId,
     mentionAgents,
     toolbarSlot,
+    composerAddMenuSlot,
+    onComposerAddMenuOpenChange,
     centerToolbarSlot,
     welcomeContent,
     initialMessage,
     initialDisplayText,
+    initialOptimisticMessage,
+    focusMessageId,
     onCreateAndSend,
     onSSEEvent,
     agentName,
@@ -151,10 +172,22 @@ vi.mock('@/components/common/SessionChat', () => ({
     agentName?: string;
     mentionAgents?: Array<{ name: string }>;
     toolbarSlot?: React.ReactNode;
+    composerAddMenuSlot?: React.ReactNode | ((actions: {
+      closeMenu: () => void;
+      insertMention: (agentName: string) => void;
+      insertReference: (value: string, kind: 'workflow' | 'skill') => void;
+    }) => React.ReactNode);
+    onComposerAddMenuOpenChange?: (open: boolean) => void;
     centerToolbarSlot?: React.ReactNode;
     welcomeContent?: React.ReactNode | ((setInput: (text: string) => void) => React.ReactNode);
     initialMessage?: string | null;
     initialDisplayText?: string | null;
+    initialOptimisticMessage?: {
+      id: string;
+      sessionID: string;
+      parts: Array<{ type: string; text?: string }>;
+    } | null;
+    focusMessageId?: string | null;
     model?: { providerID: string; modelID: string } | null;
     executionMode?: 'build' | 'plan' | 'goal';
     onExecutionModeAccepted?: (mode: 'build' | 'plan' | 'goal') => void;
@@ -195,8 +228,23 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-hide-input={String(Boolean(hideInput))}
         data-initial-message={initialMessage ?? ''}
         data-initial-display={initialDisplayText ?? ''}
+        data-optimistic-id={initialOptimisticMessage?.id ?? ''}
+        data-optimistic-text={initialOptimisticMessage?.parts.find((part) => part.type === 'text')?.text ?? ''}
+        data-focus-message={focusMessageId ?? ''}
       >
         {sessionId ?? 'no-session'}
+        <button type="button" onClick={() => onComposerAddMenuOpenChange?.(true)}>
+          mock-open-add-menu
+        </button>
+        {typeof composerAddMenuSlot === 'function'
+          ? composerAddMenuSlot({
+            closeMenu: vi.fn(),
+            insertMention: (agentName) => setInput(`subagent:${agentName} `),
+            insertReference: (value, kind) => {
+              setInput(`${kind}:${value} `);
+            },
+          })
+          : composerAddMenuSlot}
         {toolbarSlot}
         {centerToolbarSlot}
         {!sessionId && welcomeContent ? (
@@ -205,14 +253,16 @@ vi.mock('@/components/common/SessionChat', () => ({
         <div data-testid="mock-chat-input">{input}</div>
         <button
           type="button"
-          onClick={() => void onCreateAndSend?.(
-            'hello from empty session',
-            [],
-            agentName,
-            undefined,
-            undefined,
-            executionMode,
-          )}
+          onClick={() => {
+            void Promise.resolve(onCreateAndSend?.(
+              'hello from empty session',
+              [],
+              agentName,
+              undefined,
+              undefined,
+              executionMode,
+            )).catch(() => {});
+          }}
         >
           mock-create-and-send
         </button>
@@ -376,6 +426,8 @@ describe('SessionPage session actions menu', () => {
     });
     defaultModelAPI.getResolved.mockResolvedValue({ data: { provider_id: '', model_id: '' } });
     modelV2API.listDefinitions.mockResolvedValue({ data: { models: [] } });
+    workflowAPI.listSummaries.mockResolvedValue({ data: [] });
+    skillAPI.status.mockResolvedValue({ data: [] });
     client.get.mockResolvedValue({
       data: [{
         id: 'default',
@@ -393,6 +445,12 @@ describe('SessionPage session actions menu', () => {
     hubAPI.installStream.mockResolvedValue(undefined);
 
     sessionApi.update.mockResolvedValue({ ...session, title: 'Renamed Session' });
+    sessionApi.moveToProject.mockResolvedValue({
+      ...session,
+      projectID: 'prj_labs',
+      effectiveProjectID: 'prj_labs',
+      directory: '/tmp/labs',
+    });
     client.patch.mockResolvedValue({ data: { id: 'prj_project2', worktree: '/tmp/labs', name: 'Renamed Project' } });
     client.post.mockResolvedValue({ data: secondSession });
     sessionApi.get.mockResolvedValue(session);
@@ -413,17 +471,17 @@ describe('SessionPage session actions menu', () => {
     vi.stubGlobal('confirm', vi.fn(() => true));
   });
 
-  it('renders Build before the Agent selector by default', async () => {
+  it('renders Build by default and keeps Agent in the Add menu', async () => {
     renderSessionPage();
 
-    const modeButton = await screen.findByRole('button', { name: 'executionMode.title' });
-    const agentButton = screen.getByRole('button', { name: /Rex/i });
+    await screen.findByRole('button', { name: 'executionMode.title' });
+    const agentButton = screen.getByRole('button', { name: 'chat.addMenu.agent' });
+    const agentIconContainer = agentButton.querySelector('svg')?.parentElement;
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-execution-mode', 'build');
-    expect(
-      modeButton.compareDocumentPosition(agentButton)
-      & Node.DOCUMENT_POSITION_FOLLOWING,
-    ).toBeTruthy();
+    expect(agentButton).toHaveAttribute('aria-haspopup', 'menu');
+    expect(agentIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(agentIconContainer?.className).not.toContain('shadow-');
   });
 
   it('persists Plan per session', async () => {
@@ -501,6 +559,50 @@ describe('SessionPage session actions menu', () => {
     expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
   });
 
+  it('keeps the first new-session message optimistic with the persisted message id', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+
+    const promptCall = client.post.mock.calls.find(
+      ([url]) => url === '/api/session/session-2/prompt_async',
+    );
+    const messageId = promptCall?.[1]?.messageID;
+    const chat = screen.getByTestId('session-chat');
+    expect(chat).toHaveAttribute('data-optimistic-id', messageId);
+    expect(chat).toHaveAttribute('data-optimistic-text', 'hello from empty session');
+  });
+
+  it('does not switch sessions or leave an optimistic message when the first send fails', async () => {
+    const user = userEvent.setup();
+    client.post.mockImplementation((url: string) => {
+      if (url === '/api/session') return Promise.resolve({ data: secondSession });
+      if (url === '/api/session/session-2/prompt_async') {
+        return Promise.reject(new Error('prompt rejected'));
+      }
+      return Promise.resolve({ data: {} });
+    });
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith('chat.sendFailed', 'prompt rejected');
+    });
+    const chat = screen.getByTestId('session-chat');
+    expect(chat).toHaveTextContent('no-session');
+    expect(chat).toHaveAttribute('data-optimistic-id', '');
+    expect(addSession).not.toHaveBeenCalled();
+  });
+
   it('keeps the workbench visible and shows a page refresh state while sessions load', () => {
     useSessions.mockReturnValue({
       sessions: [],
@@ -536,10 +638,18 @@ describe('SessionPage session actions menu', () => {
     const tasksSection = tasksHeading.closest('section');
     const projectsSection = projectsHeading.closest('section');
     const newSessionButton = screen.getByRole('button', { name: 'newSession' });
-    const searchInput = screen.getByPlaceholderText('filterConversations');
+    const searchButton = screen.getByRole('button', { name: 'openTaskSearch' });
+    expect(screen.queryByPlaceholderText('filterConversations')).not.toBeInTheDocument();
+    await user.click(searchButton);
+    const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
+    const searchInput = within(searchDialog).getByPlaceholderText('filterConversations');
+    expect(searchDialog).toHaveClass('fixed', 'inset-0', 'justify-center');
+    expect(searchDialog.firstElementChild).toHaveClass('max-w-[620px]', 'rounded-2xl');
     expect(newSessionButton.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
-    expect(searchInput.previousElementSibling).toHaveClass('left-2', 'h-3.5', 'w-3.5');
-    expect(searchInput).toHaveClass('text-sm', 'font-medium');
+    expect(searchButton.closest('div')).toContainElement(screen.getByText('managementTitle'));
+    expect(searchInput).toHaveFocus();
+    expect(searchInput).toHaveClass('text-[15px]', 'font-medium');
+    await user.click(within(searchDialog).getByRole('button', { name: 'closeTaskSearch' }));
     expect(tasksHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(projectsHeading.closest('div')).toHaveClass('px-2', 'text-xs', 'text-zinc-500');
     expect(tasksHeading.nextElementSibling).toHaveTextContent('(1)');
@@ -561,13 +671,68 @@ describe('SessionPage session actions menu', () => {
     expect(tasksToggle).toContainElement(tasksHeading);
     expect(tasksToggle.querySelector('svg')).toHaveClass('h-3.5', 'w-3.5');
     expect(screen.queryByRole('button', { name: 'selectTasks' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'createTaskSession' })).not.toBeInTheDocument();
+    const createTaskButton = screen.getByRole('button', { name: 'createTaskSession' });
+    expect(createTaskButton).toHaveClass(
+      'opacity-0',
+      'group-hover/tasks-section:opacity-100',
+      'group-focus-within/tasks-section:opacity-100',
+    );
 
     await user.click(tasksToggle);
     expect(screen.queryByText('Original Session')).not.toBeInTheDocument();
 
     await user.click(tasksToggle);
     expect(screen.getByText('Original Session')).toBeInTheDocument();
+  });
+
+  it('shows the five most recently updated sessions when search opens', async () => {
+    const user = userEvent.setup();
+    const recentSessions = Array.from({ length: 6 }, (_, index) => ({
+      ...session,
+      id: `recent-${index + 1}`,
+      slug: `recent-${index + 1}`,
+      title: `Recent ${index + 1}`,
+      time: {
+        ...session.time,
+        updated: session.time.updated + index,
+      },
+    }));
+    useSessions.mockReturnValue({
+      sessions: recentSessions,
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+    await user.click(screen.getByRole('button', { name: 'openTaskSearch' }));
+
+    const searchDialog = screen.getByRole('dialog', { name: 'taskSearchDialog' });
+    expect(within(searchDialog).getAllByRole('button')).toHaveLength(6);
+    expect(within(searchDialog).queryByText('Recent 1')).not.toBeInTheDocument();
+    expect(within(searchDialog).getByText('Recent 6')).toBeInTheDocument();
+    expect(within(searchDialog).getByText('recentTasks')).toBeInTheDocument();
+
+    await user.click(within(searchDialog).getByText('Recent 6'));
+    expect(screen.queryByRole('dialog', { name: 'taskSearchDialog' })).not.toBeInTheDocument();
+  });
+
+  it('creates a new session from the tasks row', async () => {
+    const user = userEvent.setup();
+    renderSessionPage();
+
+    await screen.findByText('tasksSection');
+    await user.click(screen.getByRole('button', { name: 'createTaskSession' }));
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+      });
+    });
   });
 
   it('keeps the workbench canvas, sidebar, selected row, and dark palette classes stable', async () => {
@@ -896,6 +1061,54 @@ describe('SessionPage session actions menu', () => {
     expect(sessionCard).toHaveClass('min-h-[34px]', 'rounded-lg', 'border-transparent');
   });
 
+  it('hides the channel title prefix until the session is renamed', async () => {
+    const user = userEvent.setup();
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        title: '[Wecom] 你能干什么事情',
+        channelID: 'wecom',
+        channelChatType: 'direct',
+      }, {
+        ...session,
+        id: 'session-2',
+        title: '[Wecom] 群聊问题',
+        channelID: 'wecom',
+        channelChatType: 'group',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    const displayTitle = await screen.findByText('你能干什么事情');
+    const sessionRow = displayTitle.closest('div.group');
+    expect(sessionRow).not.toBeNull();
+    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'wecom' }))
+      .toHaveAttribute('src', '/channel-wecom.png');
+    expect(within(sessionRow as HTMLElement).getByRole('img', { name: 'channelDirectChat' }))
+      .toHaveAttribute('data-channel-chat-type', 'direct');
+    expect(screen.queryByText('[Wecom] 你能干什么事情')).not.toBeInTheDocument();
+
+    const groupTitle = screen.getByText('群聊问题');
+    const groupRow = groupTitle.closest('div.group');
+    expect(groupRow).not.toBeNull();
+    expect(within(groupRow as HTMLElement).getByRole('img', { name: 'channelGroupChat' }))
+      .toHaveAttribute('data-channel-chat-type', 'group');
+
+    await user.click(within(sessionRow as HTMLElement).getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'rename' }));
+
+    expect(screen.getByRole('textbox', { name: 'rename' }))
+      .toHaveValue('[Wecom] 你能干什么事情');
+  });
+
   it('groups legacy sessions by the effective project returned by the backend', async () => {
     client.get.mockResolvedValue({
       data: [{
@@ -1160,6 +1373,7 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
+    await user.click(screen.getByRole('button', { name: 'openTaskSearch' }));
     await user.type(screen.getByPlaceholderText('filterConversations'), 'nothing matches');
     await user.click(await screen.findByRole('button', { name: 'projectDialog.createTitle' }));
     const nameInput = screen.getByLabelText('projectDialog.nameLabel');
@@ -1277,7 +1491,7 @@ describe('SessionPage session actions menu', () => {
 
     const projectRow = (await screen.findByText('Shared Labs')).closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
+    expect(within(projectRow as HTMLElement).getByRole('button', { name: 'createSessionInProject' })).toBeDisabled();
     await user.click(within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' }));
     expect(within(projectRow as HTMLElement).getByRole('menuitem', { name: 'projectDialog.copyPathAction' })).toBeInTheDocument();
     expect(within(projectRow as HTMLElement).queryByRole('menuitem', { name: 'shareAction' })).not.toBeInTheDocument();
@@ -1299,6 +1513,7 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
     await screen.findByText('tasksSection');
+    await userEvent.setup().click(screen.getByRole('button', { name: 'openTaskSearch' }));
     const searchInput = screen.getByPlaceholderText('filterConversations');
     fireEvent.change(searchInput, { target: { value: 'a' } });
     fireEvent.change(searchInput, { target: { value: 'ab' } });
@@ -1370,10 +1585,19 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('does not show a create-session button on a project row', async () => {
+  it('creates a session from a specific project row', async () => {
+    const user = userEvent.setup();
     const currentProject = { id: 'default', worktree: '/tmp/project', name: '默认', isDefault: true };
     client.get.mockResolvedValue({
       data: [currentProject, { id: 'prj_project2', worktree: '/tmp/labs', name: 'Labs' }],
+    });
+    client.post.mockResolvedValue({
+      data: {
+        ...secondSession,
+        id: 'session-labs',
+        projectID: 'prj_project2',
+        title: 'New Session',
+      },
     });
 
     renderSessionPage();
@@ -1381,7 +1605,23 @@ describe('SessionPage session actions menu', () => {
     const projectLabel = await screen.findByText('Labs');
     const projectRow = projectLabel.closest('[class*="group/project"]');
     expect(projectRow).not.toBeNull();
-    expect(within(projectRow as HTMLElement).queryByRole('button', { name: 'createSessionInProject' })).not.toBeInTheDocument();
+    const projectActionsButton = within(projectRow as HTMLElement).getByRole('button', { name: 'projectActions' });
+    const createProjectSessionButton = within(projectRow as HTMLElement).getByRole('button', {
+      name: 'createSessionInProject',
+    });
+    expect(projectActionsButton.nextElementSibling).toBe(createProjectSessionButton);
+    await user.click(createProjectSessionButton);
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith('/api/session', {
+        title: 'New Session',
+        projectID: 'prj_project2',
+      });
+    });
+    expect(addSession).toHaveBeenCalledWith(expect.objectContaining({
+      id: 'session-labs',
+      projectID: 'prj_project2',
+    }));
   });
 
   it('opens the actions menu for a session item', async () => {
@@ -1397,7 +1637,150 @@ describe('SessionPage session actions menu', () => {
     expect(menu).not.toHaveClass('w-36', 'rounded-lg');
     expect(screen.getByRole('button', { name: 'rename' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'downloadJson' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'moveToProjectAction' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'archiveAction' })).toBeInTheDocument();
+  });
+
+  it('moves a regular task into a selected project', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Labs' }));
+
+    await waitFor(() => {
+      expect(sessionApi.moveToProject).toHaveBeenCalledWith('session-1', 'prj_labs');
+    });
+    expect(refetchSessions).toHaveBeenCalled();
+    expect(toast.success).toHaveBeenCalledWith('moveToProjectSuccess');
+  });
+
+  it('keeps the project picker inside the viewport near the bottom edge', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    const originalInnerHeight = window.innerHeight;
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 400 });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    const actionsTrigger = screen.getByRole('button', { name: 'moreActions' });
+    vi.spyOn(actionsTrigger, 'getBoundingClientRect').mockReturnValue({
+      bottom: 380,
+      right: 300,
+    } as DOMRect);
+    await user.click(actionsTrigger);
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+
+    const menu = document.querySelector('[data-session-menu-portal]') as HTMLElement;
+    expect(menu.style.top).toBe('300px');
+    expect(menu.style.maxHeight).toBe('calc(100vh - 16px)');
+
+    Object.defineProperty(window, 'innerHeight', {
+      configurable: true,
+      value: originalInnerHeight,
+    });
+  });
+
+  it('shows the backend detail when moving a task fails', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    sessionApi.moveToProject.mockRejectedValue({
+      message: 'Request failed with status code 409',
+      response: { data: { detail: '任务正在运行，请稍后再移动' } },
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    await user.click(screen.getByRole('menuitem', { name: 'Labs' }));
+
+    await waitFor(() => {
+      expect(toast.error).toHaveBeenCalledWith(
+        'moveToProjectFailed',
+        '任务正在运行，请稍后再移动',
+      );
+    });
+  });
+
+  it('shows the move spinner only on the selected target project', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_labs', worktree: '/tmp/labs', name: 'Labs', canWrite: true, pathStatus: 'available' },
+        { id: 'prj_docs', worktree: '/tmp/docs', name: 'Docs', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    sessionApi.moveToProject.mockImplementation(() => new Promise(() => {}));
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    const labsTarget = screen.getByRole('menuitem', { name: 'Labs' });
+    const docsTarget = screen.getByRole('menuitem', { name: 'Docs' });
+    await user.click(labsTarget);
+
+    await waitFor(() => {
+      expect(labsTarget.querySelector('.animate-spin')).not.toBeNull();
+    });
+    expect(docsTarget.querySelector('.animate-spin')).toBeNull();
+  });
+
+  it('moves a project task to a different project and marks its current project', async () => {
+    const user = userEvent.setup();
+    client.get.mockResolvedValue({
+      data: [
+        { id: 'prj_source', worktree: '/tmp/source', name: 'Source', canWrite: true, pathStatus: 'available' },
+        { id: 'prj_target', worktree: '/tmp/target', name: 'Target', canWrite: true, pathStatus: 'available' },
+      ],
+    });
+    useSessions.mockReturnValue({
+      sessions: [{
+        ...session,
+        projectID: 'prj_source',
+        effectiveProjectID: 'prj_source',
+        directory: '/tmp/source',
+      }],
+      loading: false,
+      error: null,
+      refetch: refetchSessions,
+      updateSessionTitle,
+      removeSession,
+      removeSessions,
+      addSession,
+    });
+
+    renderSessionPage();
+
+    await screen.findByText('Original Session');
+    await user.click(screen.getByRole('button', { name: 'moreActions' }));
+    await user.click(screen.getByRole('button', { name: 'moveToProjectAction' }));
+    expect(screen.getByRole('menuitem', { name: 'Source' })).toBeDisabled();
+    await user.click(screen.getByRole('menuitem', { name: 'Target' }));
+
+    await waitFor(() => {
+      expect(sessionApi.moveToProject).toHaveBeenCalledWith('session-1', 'prj_target');
+    });
   });
 
   it('shows a compact relative session timestamp and keeps the actions trigger background-free', async () => {
@@ -1607,6 +1990,15 @@ describe('SessionPage session actions menu', () => {
       'data-initial-display',
       '@@flocks-instruction:创建 SOC 自定义页面',
     );
+  });
+
+  it('passes URL focusMessage to chat without treating it as an initial message', async () => {
+    renderSessionPage('/sessions?session=session-1&focusMessage=message-42');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute('data-focus-message', 'message-42');
+    });
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-initial-message', '');
   });
 
   it('starts SOC alert operations setup when the component is already installed', async () => {
@@ -1992,7 +2384,7 @@ describe('SessionPage session actions menu', () => {
 
     expect(screen.getByTestId('session-chat')).toHaveAttribute('data-mention-agents', 'rex,explore');
 
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
 
     expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /hidden-system/i })).not.toBeInTheDocument();
@@ -2033,9 +2425,10 @@ describe('SessionPage session actions menu', () => {
     await waitFor(() => {
       expect(screen.getByTestId('session-chat')).toHaveTextContent('session-1');
     });
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
     await user.click(screen.getByRole('button', { name: /Explore/i }));
-    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
 
     await user.click(screen.getByRole('button', { name: 'newSession' }));
 
@@ -2043,7 +2436,7 @@ describe('SessionPage session actions menu', () => {
     expect(client.post).not.toHaveBeenCalledWith('/api/session', expect.anything());
     expect(screen.getByRole('button', { name: 'projectPicker.title' })).toHaveAttribute('aria-expanded', 'false');
     expect(screen.queryByRole('menu', { name: 'projectPicker.title' })).not.toBeInTheDocument();
-    expect(screen.getByRole('button', { name: /Rex/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'chat.addMenu.agent' })).toBeInTheDocument();
   });
 
   it('shows the pinned model for the selected session on load', async () => {
@@ -2516,7 +2909,7 @@ describe('SessionPage session actions menu', () => {
     });
   });
 
-  it('uses the selected agent for the first message when an empty session is created by sending', async () => {
+  it('keeps Rex as the default while selecting a one-turn subagent reference', async () => {
     const user = userEvent.setup();
     useAgents.mockReturnValue({
       agents: [
@@ -2547,17 +2940,106 @@ describe('SessionPage session actions menu', () => {
 
     renderSessionPage();
 
-    await user.click(screen.getByRole('button', { name: /Rex/i }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
+    expect(screen.queryByRole('button', { name: /Rex/i })).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: /Explore/i }));
-    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
-    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
+    expect(screen.getByTestId('session-chat')).toHaveAttribute('data-agent-name', 'rex');
+  });
 
-    await waitFor(() => {
-      expect(client.post).toHaveBeenCalledWith(
-        '/api/session/session-2/prompt_async',
-        expect.objectContaining({ agent: 'explore' }),
-      );
+  it('inserts the selected agent as a structured subagent reference', async () => {
+    const user = userEvent.setup();
+    useAgents.mockReturnValue({
+      agents: [
+        {
+          name: 'rex',
+          description: 'Rex',
+          mode: 'primary',
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+        {
+          name: 'explore',
+          description: 'Explore',
+          mode: 'subagent',
+          native: true,
+          permission: [],
+          options: {},
+          skills: [],
+          tools: [],
+        },
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
     });
-    expect(screen.getByRole('button', { name: /Explore/i })).toBeInTheDocument();
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.agent' }));
+    await user.click(screen.getByRole('button', { name: /Explore/i }));
+
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('subagent:explore');
+  });
+
+  it('inserts selected workflows and skills as composer references', async () => {
+    const user = userEvent.setup();
+    workflowAPI.listSummaries.mockResolvedValue({
+      data: [{
+        id: 'alert-triage',
+        name: 'Alert triage',
+        description: 'Investigate security alerts',
+        category: 'security',
+        status: 'active',
+        source: 'project',
+        createdAt: 1,
+        updatedAt: 1,
+        nodeCount: 2,
+        stats: {
+          callCount: 0,
+          successCount: 0,
+          errorCount: 0,
+          totalRuntime: 0,
+          avgRuntime: 0,
+          thumbsUp: 0,
+          thumbsDown: 0,
+        },
+      }],
+    });
+    skillAPI.status.mockResolvedValue({
+      data: [{
+        name: 'diagnose',
+        description: 'Debug difficult failures',
+        location: '/skills/diagnose',
+        source: 'project',
+        eligible: true,
+      }],
+    });
+
+    renderSessionPage();
+
+    await user.click(screen.getByRole('button', { name: 'mock-open-add-menu' }));
+    const skillButton = screen.getByRole('button', { name: 'chat.addMenu.skills' });
+    const workflowButton = screen.getByRole('button', { name: 'chat.addMenu.workflows' });
+    const menuButtons = screen.getAllByRole('button');
+    expect(menuButtons.indexOf(skillButton)).toBeLessThan(menuButtons.indexOf(workflowButton));
+    for (const button of [skillButton, workflowButton]) {
+      const iconContainer = button.querySelector('svg')?.parentElement;
+      expect(iconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+      expect(iconContainer?.className).not.toContain('shadow-');
+    }
+
+    await user.click(workflowButton);
+    expect(screen.queryByText('security')).not.toBeInTheDocument();
+    await user.click(await screen.findByRole('button', { name: /Alert triage/i }));
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('workflow:alert-triage');
+
+    await user.click(screen.getByRole('button', { name: 'mock-open-add-menu' }));
+    await user.click(screen.getByRole('button', { name: 'chat.addMenu.skills' }));
+    await user.click(await screen.findByRole('button', { name: /diagnose/i }));
+    expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('skill:diagnose');
+    expect(screen.getByText('chat.addMenu.selectSkill')).toBeInTheDocument();
   });
 });

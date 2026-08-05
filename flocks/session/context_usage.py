@@ -434,6 +434,8 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> t
         for part in parts:
             part_type = _field_value(part, "type", "")
             if part_type == "text":
+                if bool(_field_value(part, "ignored", False)):
+                    continue
                 tokens_by_key["conversation"] += SessionPrompt.count_tokens(_field_value(part, "text", "") or "")
                 continue
             if part_type in {"reasoning", "thinking"}:
@@ -540,6 +542,8 @@ def _resolve_message_model(messages: List[Any]) -> tuple[Optional[str], Optional
         if role == "assistant":
             provider_id = getattr(message, "providerID", None)
             model_id = getattr(message, "modelID", None)
+            if provider_id == "builtin" and model_id == "command":
+                continue
             if provider_id and model_id:
                 return provider_id, model_id
         if role == "user":

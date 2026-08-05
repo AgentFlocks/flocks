@@ -1,5 +1,5 @@
 import React from 'react';
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
@@ -20,7 +20,9 @@ import {
   getMessageBubbleClassName,
   getMessageErrorText,
   getMessageGroupClassName,
+  getProcessGroupDurationMs,
   getRenderableThinkingText,
+  getThinkingFirstSentence,
   getRenderableFileUrl,
   getRegenerateTruncateTarget,
   getStandaloneThinkingBubbleClassName,
@@ -33,6 +35,7 @@ import {
   shouldForwardSSEEventToParent,
   shouldRefetchFinishedMessage,
   truncateToolDisplayText,
+  formatProcessDuration,
 } from './SessionChat';
 import { areChatMessagePartsRenderEqual } from './sessionChatRenderEquality';
 
@@ -61,6 +64,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
   'chat.process.title': '查看 {{count}} 个步骤',
+  'chat.process.duration': '已处理 {{duration}}',
   'chat.process.deepThinking': '深度思考',
   'chat.process.reasoningCount': '{{count}} 段思考',
   'chat.process.toolCount': '{{count}} 次工具调用',
@@ -87,6 +91,13 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.goal.status.completed': 'Completed',
   'chat.goal.status.blocked': 'Blocked',
   'chat.goal.status.paused': 'Paused',
+  'chat.addMenu.title': '添加',
+  'chat.addMenu.files': '文件和图片',
+  'chat.references.selected': '已选择的资源',
+  'chat.references.subagent': '子智能体',
+  'chat.references.skill': '技能',
+  'chat.references.workflow': '工作流',
+  'chat.references.remove': '移除 {{type}} {{name}}',
   'chat.mention.title': '选择 Agent',
   'chat.mention.navigate': '导航',
   'chat.mention.select': '选择',
@@ -443,6 +454,40 @@ describe('SessionChat message loading state', () => {
     expect(screen.queryByText('暂无消息')).not.toBeInTheDocument();
     await user.click(screen.getByRole('button', { name: '重试' }));
     expect(refetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('SessionChat focused message deep links', () => {
+  it('scrolls to and consumes a rendered focus target', async () => {
+    const onFocusMessageConsumed = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'target-message',
+          parts: [{ id: 'part-1', type: 'text', text: 'target' }],
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      focusMessageId: 'target-message',
+      onFocusMessageConsumed,
+    }));
+
+    await waitFor(() => expect(window.HTMLElement.prototype.scrollIntoView).toHaveBeenCalled());
+    expect(onFocusMessageConsumed).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -1450,6 +1495,101 @@ describe('SessionChat composer controls', () => {
     expect(sendButton?.className).toContain('dark:text-[#b8c2cc]');
     expect(sendButton?.className).toContain('dark:border-[#5a6573]');
   });
+
+  it('groups attachment and injected actions in the Add menu', async () => {
+    const user = userEvent.setup();
+    const onOpenChange = vi.fn();
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      onComposerAddMenuOpenChange: onOpenChange,
+      composerAddMenuSlot: ({ insertMention, insertReference }) => React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertMention('explore') },
+          '智能体',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('diagnose', 'skill') },
+          '技能',
+        ),
+      ),
+    }));
+
+    const addButton = screen.getByRole('button', { name: '添加' });
+    await user.click(addButton);
+
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(addButton).not.toHaveClass('border');
+    expect(addButton.className).not.toContain('shadow-');
+    const filesMenuItem = screen.getByRole('menuitem', { name: '文件和图片' });
+    const filesIconContainer = filesMenuItem.querySelector('svg')?.parentElement;
+    expect(filesIconContainer).not.toHaveClass('rounded-lg', 'border', 'bg-white');
+    expect(filesIconContainer?.className).not.toContain('shadow-');
+    await user.click(screen.getByRole('button', { name: '智能体' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '技能' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('diagnose')).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('');
+    expect(onOpenChange).toHaveBeenLastCalledWith(true);
+
+    await user.keyboard('{Escape}');
+
+    expect(screen.queryByRole('menu', { name: '添加' })).not.toBeInTheDocument();
+    expect(onOpenChange).toHaveBeenLastCalledWith(false);
+  });
+
+  it('keeps a selected subagent reference when the default agent changes', async () => {
+    const user = userEvent.setup();
+    const mentionAgents = [
+      {
+        name: 'rex',
+        description: 'Main orchestrator',
+        mode: 'primary',
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      },
+      {
+        name: 'explore',
+        description: 'Explore the codebase',
+        mode: 'subagent',
+        native: true,
+        permission: [],
+        options: {},
+        skills: [],
+        tools: [],
+      },
+    ];
+    function AgentMenuHarness() {
+      const [agentName, setAgentName] = React.useState('rex');
+      return React.createElement(SessionChat, {
+        sessionId: 'sess-1',
+        agentName,
+        mentionAgents,
+        composerAddMenuSlot: ({ insertMention }) => React.createElement(
+          'button',
+          {
+            type: 'button',
+            onClick: () => {
+              setAgentName('explore');
+              insertMention('explore');
+            },
+          },
+          '选择 Explore',
+        ),
+      });
+    }
+    render(React.createElement(AgentMenuHarness));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+    await user.click(screen.getByRole('button', { name: '选择 Explore' }));
+
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('explore')).toBeInTheDocument();
+  });
 });
 
 describe('shouldRenderMessage', () => {
@@ -1516,6 +1656,73 @@ describe('getRenderableThinkingText', () => {
 
   it('keeps meaningful reasoning text', () => {
     expect(getRenderableThinkingText({ type: 'reasoning', text: '需要更新 todo 状态' } as any)).toBe('需要更新 todo 状态');
+  });
+});
+
+describe('getThinkingFirstSentence', () => {
+  it('extracts the first sentence from the first non-empty line', () => {
+    expect(getThinkingFirstSentence('先检查上下文。再读取文件。')).toBe('先检查上下文。');
+    expect(getThinkingFirstSentence('Inspect the context.\nThen read the file.')).toBe('Inspect the context.');
+    expect(getThinkingFirstSentence('\n用户问了两个问题：\n1. 第一个问题')).toBe('用户问了两个问题：');
+    expect(getThinkingFirstSentence('1. Inspect the context before changing code.')).toBe(
+      '1. Inspect the context before changing code.',
+    );
+    expect(getThinkingFirstSentence('用户问了两个问题： 1. 查询 IP 情报。 2. 查询金价。')).toBe(
+      '用户问了两个问题： 1. 查询 IP 情报。',
+    );
+    expect(getThinkingFirstSentence('Dr. Smith checks the context. Then edits.')).toBe(
+      'Dr. Smith checks the context.',
+    );
+    expect(getThinkingFirstSentence('Check inputs, etc. Then continue.')).toBe(
+      'Check inputs, etc.',
+    );
+  });
+});
+
+describe('process group duration', () => {
+  it('uses the full wall-clock range and the current time for an active step', () => {
+    const parts = [
+      { id: 'reason', type: 'reasoning', time: { start: 1_000, end: 2_000 } },
+      { id: 'tool', type: 'tool', state: { status: 'running', time: { start: 2_500 } } },
+    ] as Message['parts'];
+
+    expect(getProcessGroupDurationMs(parts, 5_000)).toBe(4_000);
+    expect(formatProcessDuration(500)).toBe('1s');
+    expect(formatProcessDuration(7_600)).toBe('7s');
+    expect(formatProcessDuration(260_900)).toBe('4m20s');
+    expect(getProcessGroupDurationMs([{ id: 'legacy', type: 'reasoning' }] as Message['parts']))
+      .toBeNull();
+  });
+
+  it('updates the displayed duration while the last process step is active', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(5_000);
+    try {
+      render(React.createElement(ChatMessageBubble, {
+        message: makeMessage({
+          id: 'assistant-active-duration',
+          role: 'assistant',
+          parts: [{
+            id: 'tool-active-duration',
+            type: 'tool',
+            tool: 'read',
+            state: {
+              status: 'running',
+              input: { filePath: 'workflow.md' },
+              time: { start: 1_000 },
+            },
+          }] as Message['parts'],
+        }),
+        isActive: true,
+        collapseIntermediateSteps: true,
+      }));
+
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 4s');
+      act(() => vi.advanceTimersByTime(1_000));
+      expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('已处理 5s');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
 
@@ -1915,7 +2122,8 @@ describe('SessionChat intermediate process collapse', () => {
               messageID: 'assistant-process',
               sessionID: 'sess-1',
               type: 'reasoning',
-              text: '需要先读取工作流文件',
+              text: '需要先读取工作流文件。然后检查配置。',
+              time: { start: 1_000, end: 2_000 },
             } as any,
             {
               id: 'tool-1',
@@ -1928,6 +2136,7 @@ describe('SessionChat intermediate process collapse', () => {
                 status: 'completed',
                 input: { filePath: 'workflow.md' },
                 output: 'workflow content',
+                time: { start: 2_000, end: 4_500 },
               },
             } as any,
             {
@@ -1957,6 +2166,7 @@ describe('SessionChat intermediate process collapse', () => {
     const processGroup = screen.getByTestId('chat-process-group') as HTMLDetailsElement;
     expect(processGroup.open).toBe(false);
     expect(screen.getByText('查看 2 个步骤')).toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-duration')).toHaveTextContent('· 已处理 3s');
     expect(processGroup.querySelector('summary')).toHaveClass('text-sm', 'font-medium');
     expect(processGroup.querySelector('summary')).not.toHaveClass('font-semibold');
     expect(processGroup.className).not.toContain('rounded-lg');
@@ -1969,7 +2179,33 @@ describe('SessionChat intermediate process collapse', () => {
     expect(screen.getByTestId('chat-process-timeline')).toBeInTheDocument();
     expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('深度思考');
     expect(screen.getByTestId('chat-process-reasoning-step').querySelector('button')).toHaveClass('text-sm');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).toHaveTextContent('需要先读取工作流文件。');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveTextContent('然后检查配置');
+    expect(screen.getByTestId('chat-process-reasoning-preview')).not.toHaveClass('flex-1');
+    expect(screen.getByTestId('chat-process-reasoning-preview').nextElementSibling).toHaveClass('lucide-chevron-down');
     expect(screen.getByTestId('chat-process-tool-step')).toHaveTextContent('读取文件');
+  });
+
+  it('hides the reasoning preview while the reasoning body is expanded', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-expanded-reasoning',
+        role: 'assistant',
+        parts: [{
+          id: 'reason-expanded',
+          messageID: 'assistant-expanded-reasoning',
+          sessionID: 'sess-1',
+          type: 'reasoning',
+          text: '用户问了两个问题：\n1. 第一个问题',
+        } as any],
+      }),
+      isActive: true,
+      collapseIntermediateSteps: true,
+      processGroupsDefaultOpen: true,
+    }));
+
+    expect(screen.queryByTestId('chat-process-reasoning-preview')).not.toBeInTheDocument();
+    expect(screen.getByTestId('chat-process-reasoning-step')).toHaveTextContent('1. 第一个问题');
   });
 
   it('opens process groups while an assistant message is active and collapses after completion', () => {
@@ -2669,6 +2905,43 @@ describe('SessionChat intermediate process collapse', () => {
 });
 
 describe('SessionChat optimistic message identity', () => {
+  it('seeds the optimistic first message before relying on history or SSE', async () => {
+    const addMessage = vi.fn();
+    const onConsumed = vi.fn();
+    const optimisticMessage = makeMessage({
+      id: 'msg_000000000001abcdefghijklmn',
+      sessionID: 'sess-1',
+      role: 'user',
+      parts: [{
+        id: 'temp-msg_000000000001abcdefghijklmn-text',
+        type: 'text',
+        text: 'hello',
+      } as Message['parts'][number]],
+    });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage,
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialOptimisticMessage: optimisticMessage,
+      onInitialOptimisticMessageConsumed: onConsumed,
+    }));
+
+    await waitFor(() => expect(addMessage).toHaveBeenCalledWith(optimisticMessage));
+    expect(onConsumed).toHaveBeenCalledWith(optimisticMessage.id);
+  });
+
   it.each([
     ['prompt', 'message that fails', '/api/session/sess-1/prompt_async'],
     ['slash command', '/tools', '/api/session/sess-1/command'],
@@ -2783,7 +3056,7 @@ describe('SessionChat optimistic message identity', () => {
   });
 });
 
-describe('SessionChat agent mentions', () => {
+describe('SessionChat composer references', () => {
   const mentionAgents = [
     {
       name: 'rex',
@@ -2808,20 +3081,20 @@ describe('SessionChat agent mentions', () => {
     },
   ];
 
-  it('shows matching agents when typing @', async () => {
+  it('opens the same Add menu when typing @', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
       mentionAgents,
     }));
 
-    await user.type(screen.getByPlaceholderText('请输入消息'), '@ex');
+    await user.type(screen.getByPlaceholderText('请输入消息'), '@');
 
-    expect(screen.getByText('@explore')).toBeInTheDocument();
-    expect(screen.getByText('探索代码库')).toBeInTheDocument();
+    expect(screen.getByRole('menu', { name: '添加' })).toBeInTheDocument();
+    expect(screen.getByPlaceholderText('请输入消息')).toHaveValue('');
   });
 
-  it('routes one message to the mentioned agent without changing the default agent', async () => {
+  it('routes one message to a structured subagent reference', async () => {
     const user = userEvent.setup();
     render(React.createElement(SessionChat, {
       sessionId: 'sess-1',
@@ -2829,7 +3102,10 @@ describe('SessionChat agent mentions', () => {
       mentionAgents,
     }));
 
-    await user.type(screen.getByPlaceholderText('请输入消息'), '@explore summarize this file{enter}');
+    await user.type(
+      screen.getByPlaceholderText('请输入消息'),
+      'subagent:explore summarize this file{enter}',
+    );
 
     await waitFor(() => {
       expect(clientPostMock).toHaveBeenCalledWith(
@@ -2838,6 +3114,61 @@ describe('SessionChat agent mentions', () => {
           agent: 'explore',
           parts: expect.any(Array),
         }),
+      );
+    });
+  });
+
+  it('sends selected resources using the unified structured syntax', async () => {
+    const user = userEvent.setup();
+    const onCreateAndSend = vi.fn().mockResolvedValue('sess-created');
+    render(React.createElement(SessionChat, {
+      sessionId: null,
+      agentName: 'rex',
+      mentionAgents,
+      onCreateAndSend,
+      composerAddMenuSlot: ({ insertMention, insertReference }) => React.createElement(
+        React.Fragment,
+        null,
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertMention('explore') },
+          '选择子智能体',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('diagnose', 'skill') },
+          '选择技能',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('code-review', 'skill') },
+          '选择第二个技能',
+        ),
+        React.createElement(
+          'button',
+          { type: 'button', onClick: () => insertReference('triage', 'workflow') },
+          '选择工作流',
+        ),
+      ),
+    }));
+
+    await user.click(screen.getByRole('button', { name: '添加' }));
+    await user.click(screen.getByRole('button', { name: '选择子智能体' }));
+    await user.click(screen.getByRole('button', { name: '选择技能' }));
+    await user.click(screen.getByRole('button', { name: '选择第二个技能' }));
+    await user.click(screen.getByRole('button', { name: '选择工作流' }));
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('diagnose')).toBeInTheDocument();
+    expect(within(screen.getByLabelText('已选择的资源')).getByText('code-review')).toBeInTheDocument();
+    await user.type(screen.getByPlaceholderText('请输入消息'), 'check this{enter}');
+
+    await waitFor(() => {
+      expect(onCreateAndSend).toHaveBeenCalledWith(
+        'workflow:triage skill:code-review skill:diagnose subagent:explore check this',
+        [],
+        'explore',
+        undefined,
+        undefined,
+        'build',
       );
     });
   });
@@ -2883,7 +3214,7 @@ describe('SessionChat agent mentions', () => {
     });
 
     sessionApiEnqueuePromptMock.mockClear();
-    await user.type(screen.getByRole('textbox'), '@explore queued message{enter}');
+    await user.type(screen.getByRole('textbox'), 'subagent:explore queued message{enter}');
 
     await waitFor(() => {
       expect(sessionApiEnqueuePromptMock).toHaveBeenCalledWith(
@@ -3954,6 +4285,126 @@ describe('streaming activity helpers', () => {
     expect(isActiveSessionStatus({ type: 'retry' })).toBe(true);
     expect(isActiveSessionStatus({ type: 'idle' })).toBe(false);
     expect(isActiveSessionStatus(undefined)).toBe(false);
+  });
+});
+
+describe('SessionChat SSE reconnect recovery', () => {
+  async function renderStreamingSession(onStreamingDone = vi.fn()) {
+    const refetch = vi.fn();
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'assistant-1',
+          finish: null,
+          parts: [{
+            id: 'tool-1',
+            type: 'tool',
+            tool: 'bash',
+            state: {
+              status: 'error',
+              error: 'Interrupted by server restart',
+            },
+          }] as Message['parts'],
+        }),
+      ],
+      loading: false,
+      refetch,
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+      onStreamingDone,
+    }));
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    });
+    clientGetMock.mockClear();
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+
+    return { onStreamingDone, refetch };
+  }
+
+  it('clears streaming after reconnect when the restarted server reports the session idle', async () => {
+    const { onStreamingDone, refetch } = await renderStreamingSession();
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+      expect(screen.queryByTitle('chat.stopTitle')).not.toBeInTheDocument();
+    });
+    expect(refetch).toHaveBeenCalled();
+    expect(onStreamingDone).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps streaming after reconnect while a long-running session is still busy', async () => {
+    const { onStreamingDone } = await renderStreamingSession();
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return Promise.resolve({ data: { 'sess-1': { type: 'busy' } } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+
+    await waitFor(() => {
+      expect(clientGetMock).toHaveBeenCalledWith('/api/session/status');
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
+  });
+
+  it('ignores a stale idle response after a newer busy event arrives', async () => {
+    let resolveStatus: ((value: { data: Record<string, unknown> }) => void) | undefined;
+    const { onStreamingDone } = await renderStreamingSession();
+    clientGetMock.mockImplementation((url: string) => {
+      if (url === '/api/session/status') {
+        return new Promise((resolve) => {
+          resolveStatus = resolve;
+        });
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onReconnect();
+    });
+    await waitFor(() => {
+      expect(resolveStatus).toBeDefined();
+    });
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: { sessionID: 'sess-1', status: { type: 'busy' } },
+      });
+      resolveStatus?.({ data: {} });
+    });
+
+    await act(async () => {
+      await Promise.resolve();
+    });
+    expect(screen.getByTitle('chat.stopTitle')).toBeInTheDocument();
+    expect(onStreamingDone).not.toHaveBeenCalled();
   });
 });
 

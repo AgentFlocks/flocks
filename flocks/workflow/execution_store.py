@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from itertools import islice
+import sys
 import time
 import uuid
 from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
@@ -27,16 +28,17 @@ DEFAULT_LARGE_LIST_KEYS: frozenset[str] = frozenset(
         "raw_alerts",
         "normalized_alerts",
         "filtered_alerts",
+        "enriched_alerts_with_triage",
     }
 )
 
-# Lists smaller than this many items are passed through verbatim.  The cap
-# protects against accidentally stripping small metadata lists that happen
-# to share a name with a known large-list key.
+# Lists below the item threshold stay inspectable unless their estimated
+# in-memory footprint exceeds the collection byte cap.
 DEFAULT_COMPACT_SIZE_THRESHOLD: int = 100
 DEFAULT_GENERIC_SEQUENCE_THRESHOLD: int = 1_000
 DEFAULT_MAX_INLINE_STRING_CHARS: int = 20_000
 DEFAULT_MAX_INLINE_DICT_KEYS: int = 200
+DEFAULT_MAX_INLINE_COLLECTION_BYTES: int = 1 * 1024 * 1024
 DEFAULT_PREVIEW_ITEMS: int = 3
 DEFAULT_PREVIEW_CHARS: int = 500
 
@@ -76,6 +78,29 @@ def _summarize_large_value(value: Any, *, depth: int = 0) -> Dict[str, Any]:
     }
 
 
+def _estimated_size_exceeds(value: Any, max_bytes: int) -> bool:
+    """Return whether a bounded recursive size estimate exceeds *max_bytes*."""
+    remaining = max_bytes
+    stack = [value]
+    seen_containers: set[int] = set()
+    while stack:
+        item = stack.pop()
+        if isinstance(item, (dict, list, tuple, set)):
+            item_id = id(item)
+            if item_id in seen_containers:
+                continue
+            seen_containers.add(item_id)
+        remaining -= sys.getsizeof(item)
+        if remaining < 0:
+            return True
+        if isinstance(item, dict):
+            stack.extend(item.keys())
+            stack.extend(item.values())
+        elif isinstance(item, (list, tuple, set)):
+            stack.extend(item)
+    return False
+
+
 def _compact_value_for_storage(
     value: Any,
     *,
@@ -85,12 +110,13 @@ def _compact_value_for_storage(
     generic_sequence_threshold: int,
     max_inline_string_chars: int,
     max_inline_dict_keys: int,
+    max_inline_collection_bytes: int,
     depth: int = 0,
 ) -> Any:
     if (
         key in known_large_keys
         and isinstance(value, (list, tuple))
-        and len(value) > size_threshold
+        and (len(value) > size_threshold or _estimated_size_exceeds(value, max_inline_collection_bytes))
     ):
         return {f"_{key}_count": len(value)}
 
@@ -100,12 +126,18 @@ def _compact_value_for_storage(
         return value
 
     if isinstance(value, (list, tuple, set)):
-        if len(value) > generic_sequence_threshold:
+        if len(value) > generic_sequence_threshold or _estimated_size_exceeds(
+            value,
+            max_inline_collection_bytes,
+        ):
             return _summarize_large_value(value)
         return value
 
     if isinstance(value, dict):
-        if len(value) > max_inline_dict_keys:
+        if len(value) > max_inline_dict_keys or _estimated_size_exceeds(
+            value,
+            max_inline_collection_bytes,
+        ):
             return _summarize_large_value(value)
         if depth >= 2:
             return value
@@ -120,6 +152,7 @@ def _compact_value_for_storage(
                 generic_sequence_threshold=generic_sequence_threshold,
                 max_inline_string_chars=max_inline_string_chars,
                 max_inline_dict_keys=max_inline_dict_keys,
+                max_inline_collection_bytes=max_inline_collection_bytes,
                 depth=depth + 1,
             )
             if isinstance(child_compacted, dict) and len(child_compacted) == 1:
@@ -143,6 +176,7 @@ def compact_outputs_for_storage(
     generic_sequence_threshold: int = DEFAULT_GENERIC_SEQUENCE_THRESHOLD,
     max_inline_string_chars: int = DEFAULT_MAX_INLINE_STRING_CHARS,
     max_inline_dict_keys: int = DEFAULT_MAX_INLINE_DICT_KEYS,
+    max_inline_collection_bytes: int = DEFAULT_MAX_INLINE_COLLECTION_BYTES,
 ) -> Dict[str, Any]:
     """Return a bounded copy of *outputs* safe for execution records.
 
@@ -164,6 +198,7 @@ def compact_outputs_for_storage(
             generic_sequence_threshold=generic_sequence_threshold,
             max_inline_string_chars=max_inline_string_chars,
             max_inline_dict_keys=max_inline_dict_keys,
+            max_inline_collection_bytes=max_inline_collection_bytes,
         )
         if isinstance(value, dict) and len(value) == 1:
             marker_key = next(iter(value))

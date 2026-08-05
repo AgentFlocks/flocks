@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -28,6 +29,14 @@ from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
 log = Log.create(service="channel.binding")
+
+_CHANNEL_TITLE_PLACEHOLDER_RE = re.compile(
+    r"^\[(?:图片消息|文件消息|图片|文件|音频|语音消息|视频|圆形视频|"
+    r"贴纸(?: [^\]]*)?|动图|位置|联系人|Image|Attachment)"
+    r"(?::[^\]]*)?\](?:(?:\s*:\s*|\s+)(.*))?$",
+    re.IGNORECASE,
+)
+_CHANNEL_TITLE_MAX_LENGTH = 50
 
 # Supported group session scope values (mirrors FeishuGroupConfig.group_session_scope)
 GroupSessionScope = Literal["group", "group_sender", "group_topic", "group_topic_sender"]
@@ -455,13 +464,25 @@ class SessionBindingService:
     async def list_bindings(
         self,
         channel_id: Optional[str] = None,
+        session_ids: Optional[list[str]] = None,
     ) -> list[SessionBinding]:
         db = await _get_db()
         sql = "SELECT * FROM channel_bindings"
-        params: tuple = ()
+        conditions: list[str] = []
+        params: list[str] = []
         if channel_id:
-            sql += " WHERE channel_id = ?"
-            params = (channel_id,)
+            conditions.append("channel_id = ?")
+            params.append(channel_id)
+        if session_ids is not None:
+            unique_session_ids = list(dict.fromkeys(session_ids))
+            if not unique_session_ids:
+                return []
+            conditions.append(
+                f"session_id IN ({','.join('?' for _ in unique_session_ids)})"
+            )
+            params.extend(unique_session_ids)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY last_message_at DESC"
 
         cursor = await db.execute(sql, params)
@@ -646,12 +667,55 @@ def _mark_cwd_fallback_warned() -> None:
     _CWD_FALLBACK_WARNED = True
 
 
-def _build_title(msg: InboundMessage) -> str:
+def is_channel_media_placeholder(text: str) -> bool:
+    """Return whether text is only a channel-generated media placeholder."""
+    match = _CHANNEL_TITLE_PLACEHOLDER_RE.fullmatch(text.strip())
+    return bool(match and not (match.group(1) or "").strip())
+
+
+def extract_channel_title_text(raw_text: str) -> str:
+    """Extract the first user-authored title candidate from channel text."""
+    for line in raw_text.splitlines():
+        candidate = line.strip()
+        if not candidate or candidate.startswith("__merge_forward_expand__"):
+            continue
+        if candidate == "[Merged forward message]":
+            continue
+        placeholder = _CHANNEL_TITLE_PLACEHOLDER_RE.fullmatch(candidate)
+        if placeholder:
+            caption = (placeholder.group(1) or "").strip()
+            if caption:
+                return caption
+            continue
+        return candidate
+    return ""
+
+
+def format_channel_title(channel_id: str, title_text: str) -> str:
+    """Add the channel prefix and apply the session-title length limit."""
+    title_text = title_text.strip()
+    if len(title_text) > _CHANNEL_TITLE_MAX_LENGTH:
+        title_text = title_text[:_CHANNEL_TITLE_MAX_LENGTH - 3] + "..."
+    return f"[{channel_id.capitalize()}] {title_text}"
+
+
+def _build_title_fallback(msg: InboundMessage) -> str:
     prefix = msg.channel_id.capitalize()
     if msg.chat_type == ChatType.DIRECT:
         who = msg.sender_name or msg.sender_id
         return f"[{prefix}] DM — {who}"
     return f"[{prefix}] {msg.chat_id}"
+
+
+def _build_title(msg: InboundMessage, text_override: Optional[str] = None) -> str:
+    if text_override is None:
+        raw_text = msg.mention_text or msg.text or ""
+    else:
+        raw_text = text_override
+    title_text = extract_channel_title_text(raw_text)
+    if title_text:
+        return format_channel_title(msg.channel_id, title_text)
+    return _build_title_fallback(msg)
 
 
 def _resolve_session_key(

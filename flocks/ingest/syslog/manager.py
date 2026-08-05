@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 import time
 import uuid
 from typing import Any, Dict, List
@@ -51,6 +52,14 @@ _BIND_WAIT_TIMEOUT_S = 3.0
 # Minimum interval between two ``syslog.queue_full_dropped`` warnings; a
 # sustained queue overflow is aggregated into a single warning per window.
 _DROP_LOG_WINDOW_S = 1.0
+
+
+def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
+    return min(_MAX_CONCURRENT_EXECUTIONS, max(1, int(trigger.concurrency.maxParallel)))
+
+
+def _queue_size_for_trigger(trigger: TriggerDefinition) -> int:
+    return min(_MAX_QUEUE_SIZE, max(1, int(trigger.concurrency.queueSize)))
 
 
 class _DropWarningThrottle:
@@ -135,6 +144,11 @@ class SyslogManager:
         self._queues: dict[str, asyncio.Queue] = {}
         # Per-workflow fixed worker pool draining the queue
         self._worker_pools: dict[str, List[asyncio.Task]] = {}
+        # One cancellation event per listener generation. It is installed
+        # before any worker starts, so stop cannot miss a run that is still
+        # creating its execution record or tool context.
+        self._generation_cancel_events: dict[str, threading.Event] = {}
+        self._draining_workers: dict[str, set[asyncio.Task]] = {}
         # Per-workflow listener runtime status for the syslog-status API.
         # Possible state values: "binding" | "listening" | "failed" | "stopped".
         self._listener_status: dict[str, Dict[str, Any]] = {}
@@ -229,7 +243,40 @@ class SyslogManager:
             status["workerCount"] = sum(1 for t in pool if not t.done())
         return status
 
+    def _track_draining_workers(
+        self,
+        workflow_id: str,
+        workers: set[asyncio.Task],
+    ) -> None:
+        if not workers:
+            return
+        bucket = self._draining_workers.setdefault(workflow_id, set())
+        bucket.update(workers)
+
+        def _discard(done: asyncio.Task) -> None:
+            current = self._draining_workers.get(workflow_id)
+            if current is None:
+                return
+            current.discard(done)
+            if not current:
+                self._draining_workers.pop(workflow_id, None)
+
+        for worker in workers:
+            worker.add_done_callback(_discard)
+
+    def _active_draining_workers(self, workflow_id: str) -> set[asyncio.Task]:
+        workers = self._draining_workers.get(workflow_id, set())
+        active = {worker for worker in workers if not worker.done()}
+        if active:
+            self._draining_workers[workflow_id] = active
+        else:
+            self._draining_workers.pop(workflow_id, None)
+        return active
+
     async def stop_workflow(self, workflow_id: str) -> None:
+        cancel_event = self._generation_cancel_events.pop(workflow_id, None)
+        if cancel_event is not None:
+            cancel_event.set()
         ev = self._abort_events.pop(workflow_id, None)
         if ev is not None:
             ev.set()
@@ -240,20 +287,13 @@ class SyslogManager:
                 await task
             except asyncio.CancelledError:
                 pass
-        # Cancel all worker pool tasks; pop first so callers observing a
-        # stopped listener see an empty pool immediately.
+        # Let workers drain their current ``to_thread`` workflow after the
+        # cooperative cancel signal. Pending workers stay tracked instead of
+        # becoming invisible orphan threads.
         pool = self._worker_pools.pop(workflow_id, None)
         if pool:
-            for w in pool:
-                if not w.done():
-                    w.cancel()
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pool, return_exceptions=True),
-                    timeout=5.0,
-                )
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+            _, pending = await asyncio.wait(pool, timeout=5.0)
+            self._track_draining_workers(workflow_id, pending)
         self._queues.pop(workflow_id, None)
         self._listener_ready.pop(workflow_id, None)
         if workflow_id in self._listener_status:
@@ -274,6 +314,10 @@ class SyslogManager:
         user instead of silently leaving the listener in a failed state.
         """
         await self.stop_workflow(workflow_id)
+        if self._active_draining_workers(workflow_id):
+            error = "previous_workers_still_draining"
+            self._listener_status[workflow_id] = {"state": "failed", "error": error}
+            return {"state": "failed", "error": error}
         try:
             data = await WorkflowStore.get_config(workflow_id, kind="workflow_syslog_config")
         except Exception as exc:
@@ -316,11 +360,15 @@ class SyslogManager:
         host = str(data.get("host") or "0.0.0.0")
         port = int(data.get("port") or 5140)
         protocol = str(data.get("protocol") or "udp").lower()
-        queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
+        queue_capacity = _queue_size_for_trigger(trigger)
+        worker_count = _worker_count_for_trigger(trigger)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=queue_capacity)
         self._queues[workflow_id] = queue
 
         abort = asyncio.Event()
         self._abort_events[workflow_id] = abort
+        generation_cancel_event = threading.Event()
+        self._generation_cancel_events[workflow_id] = generation_cancel_event
 
         ready = asyncio.Event()
         self._listener_ready[workflow_id] = ready
@@ -333,14 +381,19 @@ class SyslogManager:
             "protocol": protocol,
         }
 
-        # Spin up a fixed worker pool: exactly _MAX_CONCURRENT_EXECUTIONS
-        # coroutines drain the queue.  pending tasks cannot exceed this number,
-        # which is the actual backpressure invariant we want.
+        # Spin up the trigger-configured worker pool within service safety caps.
         workers: List[asyncio.Task] = []
-        for i in range(_MAX_CONCURRENT_EXECUTIONS):
+        for i in range(worker_count):
             workers.append(
                 asyncio.create_task(
-                    self._worker_loop(workflow_id, workflow_plan, trigger, queue, abort),
+                    self._worker_loop(
+                        workflow_id,
+                        workflow_plan,
+                        trigger,
+                        queue,
+                        abort,
+                        generation_cancel_event,
+                    ),
                     name=f"syslog-worker-{workflow_id}-{i}",
                 )
             )
@@ -489,6 +542,7 @@ class SyslogManager:
         trigger: TriggerDefinition,
         queue: asyncio.Queue,
         abort: asyncio.Event,
+        generation_cancel_event: Optional[threading.Event] = None,
     ) -> None:
         """One worker drains the queue serially.
 
@@ -496,6 +550,11 @@ class SyslogManager:
         do not spawn additional asyncio.Tasks per message so the total number
         of in-flight workflow runs is exactly ``_MAX_CONCURRENT_EXECUTIONS``.
         """
+        run_cancel_event = (
+            generation_cancel_event
+            or self._generation_cancel_events.get(workflow_id)
+            or threading.Event()
+        )
         while not abort.is_set():
             try:
                 msg = await asyncio.wait_for(queue.get(), timeout=0.5)
@@ -511,6 +570,7 @@ class SyslogManager:
                     next(iter(trigger.mapping or {}), "syslog_message"),
                     trigger=trigger,
                     source=f"{(trigger.source or {}).get('protocol', 'udp')}://{(trigger.source or {}).get('host', '0.0.0.0')}:{(trigger.source or {}).get('port', 5140)}",
+                    generation_cancel_event=run_cancel_event,
                 )
             except asyncio.CancelledError:
                 return
@@ -529,7 +589,9 @@ class SyslogManager:
         *,
         trigger: Optional[TriggerDefinition] = None,
         source: Optional[str] = None,
+        generation_cancel_event: Optional[threading.Event] = None,
     ) -> None:
+        run_cancel_event = generation_cancel_event or threading.Event()
         trigger = trigger or TriggerDefinition.model_validate(
             {
                 "id": "syslog-default",
@@ -578,6 +640,7 @@ class SyslogManager:
                     run_id=exec_id,
                     trace=False,
                     execution_profile="high_frequency",
+                    cancel=run_cancel_event.is_set,
                     on_step_complete=step_recorder.on_step_complete,
                     tool_context=tool_context,
                 )

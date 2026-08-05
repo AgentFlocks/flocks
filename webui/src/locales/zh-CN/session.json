@@ -29,6 +29,13 @@
   "shareEnabled": "会话已共享给本地账号（只读）",
   "shareDisabled": "已取消会话共享",
   "shareUpdateFailed": "更新共享状态失败",
+  "moveToProjectAction": "移动到项目",
+  "moveToProjectTitle": "选择目标项目",
+  "moveToProjectBack": "返回任务操作",
+  "moveToProjectEmpty": "暂无可用项目",
+  "moveToProjectRunning": "任务运行时无法移动",
+  "moveToProjectSuccess": "已移动到项目“{{project}}”",
+  "moveToProjectFailed": "移动任务失败",
   "moreActions": "更多操作",
   "selectMode": "批量选择",
   "cancelSelect": "取消",
@@ -76,6 +83,8 @@
   },
   "workflowSession": "工作流会话",
   "configSession": "配置会话",
+  "channelDirectChat": "私聊",
+  "channelGroupChat": "群聊",
   "showHistory": "显示对话历史",
   "hideHistory": "隐藏对话历史",
   "realTimeOk": "实时连接正常",
@@ -107,7 +116,7 @@
   },
   "agentPicker": {
     "title": "选择对话 Agent",
-    "hint": "新会话首条默认由 Rex 处理；输入 @Agent 可路由单条消息",
+    "hint": "Rex 为默认智能体；选择后以子智能体标签路由当前消息",
     "filter": {
       "all": "全部",
       "builtin": "内置",
@@ -141,7 +150,7 @@
     "alertOperations": "告警运营",
     "threatHunting": "威胁狩猎",
     "incidentResponse": "应急响应",
-    "alertOperationsSuggestion": "请帮助我配置 SOC 工作区的告警运营能力。请按顺序执行：\n\n1. 先确认 FlocksHub 组件 `soc-workspace` 是否已经安装；如果未安装，请询问我是否安装 SOC 工作区组件。若我拒绝则直接结束；若我确认，则安装该组件。\n2. 组件安装完成后，读取 `~/.flocks/plugins/workflows/stream_alert_denoise/guide.md`，按照 guide 引导我配置降噪工作流，重点确认 Syslog 配置、是否开启 Syslog 监听，以及对应安全设备是否已配置并开启 Syslog 数据传输。\n3. 然后读取 `~/.flocks/plugins/workflows/stream_alert_triage/guide.md`，按照 guide 引导我配置研判工作流，重点确认输出方式是写入 DB 还是 JSONL，并询问是否开启定时触发。定时触发默认每 3 分钟执行一次。\n4. 两个工作流配置都确认完成后，告知我 SOC 工作区能力配置完成；如果后续需要调整，可以自行修改工作流配置。\n\n请一次只问一个最关键问题，涉及修改配置前先给出计划和影响说明。",
+    "alertOperationsSuggestion": "请帮助我配置 SOC 工作区的告警运营能力。请按顺序执行：\n\n1. 先确认 FlocksHub 组件 `soc-workspace` 是否已经安装；如果未安装，请询问我是否安装 SOC 工作区组件。若我拒绝则直接结束；若我确认，则安装该组件。\n2. 组件安装完成后，读取 `~/.flocks/plugins/workflows/stream_alert_denoise/guide.md`，按照 guide 引导我配置降噪工作流，重点确认 Syslog 配置、是否开启 Syslog 监听，以及对应安全设备是否已配置并开启 Syslog 数据传输。\n3. 然后读取 `~/.flocks/plugins/workflows/stream_alert_triage/guide.md`，按照 guide 引导我配置研判工作流，重点确认输出方式是写入 DB 还是 JSONL，并询问是否开启定时触发。定时触发默认每 5 分钟执行一次。\n4. 两个工作流配置都确认完成后，告知我 SOC 工作区能力配置完成；如果后续需要调整，可以自行修改工作流配置。\n\n请一次只问一个最关键问题，涉及修改配置前先给出计划和影响说明。",
     "socComponentInstallConfirm": "SOC 工作区组件尚未安装，是否现在安装？",
     "socComponentMissing": "请先确认 FlocksHub 中存在 component:soc-workspace。",
     "socComponentMissingTitle": "未找到 SOC 工作区组件",
@@ -210,6 +219,7 @@
     "streaming": "继续输出中...",
     "process": {
       "title": "查看 {{count}} 个步骤",
+      "duration": "已处理 {{duration}}",
       "deepThinking": "深度思考",
       "reasoningCount": "{{count}} 段思考",
       "toolCount": "{{count}} 次工具调用",
@@ -290,6 +300,24 @@
       "errorGeneric": "上传失败，请重试",
       "imageNotSupported": "当前模型不支持图片分析，请在模型配置中选择支持视觉的模型",
       "imageNotSupportedBanner": "当前模型不支持图片分析"
+    },
+    "addMenu": {
+      "title": "添加",
+      "files": "文件和图片",
+      "agent": "智能体",
+      "workflows": "工作流",
+      "skills": "技能",
+      "selectWorkflow": "选择工作流",
+      "selectSkill": "选择技能",
+      "noWorkflows": "暂无可用工作流",
+      "noSkills": "暂无可用技能"
+    },
+    "references": {
+      "selected": "已选择的资源",
+      "subagent": "子智能体",
+      "skill": "技能",
+      "workflow": "工作流",
+      "remove": "移除 {{type}} {{name}}"
     },
     "tool": {
       "pending": "等待中",
@@ -465,6 +493,11 @@
     "copyPathFailed": "复制项目路径失败",
     "saveFailed": "保存项目失败"
   },
+  "openTaskSearch": "搜索任务",
+  "closeTaskSearch": "关闭任务搜索",
+  "taskSearchDialog": "任务搜索",
+  "recentTasks": "最近任务",
+  "searchResults": "搜索结果",
   "filterConversations": "搜索任务",
   "noResults": "没有匹配的任务",
   "showMore": "显示更多 {{count}} 条",

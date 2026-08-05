@@ -6,6 +6,7 @@ from flocks.provider.model_catalog import (
     get_provider_default_url,
     get_provider_meta,
     get_provider_model_definitions,
+    get_raw_catalog,
     list_catalog_provider_ids,
 )
 
@@ -282,10 +283,11 @@ class TestCuratedCatalogModels:
             "qwen3-max",
             "kimi-k2.6",
             "deepseek-v4-flash",
+            "deepseek-v4-flash-0731",
         }
 
+        assert models[0].id == "deepseek-v4-flash-0731"
         kimi_code = next(m for m in models if m.id == "kimi-k2.7-code")
-        assert models[0].id == "kimi-k2.7-code"
         assert kimi_code.capabilities.supports_vision is True
         assert kimi_code.capabilities.supports_reasoning is True
         assert kimi_code.capabilities.interleaved["field"] == "reasoning_content"
@@ -311,6 +313,19 @@ class TestCuratedCatalogModels:
         assert flash_cn.pricing.currency == "CNY"
         assert flash_cn.limits.context_window == 1000000
         assert flash_cn.limits.max_output_tokens == 384000
+        raw_models = get_raw_catalog()["threatbook-cn-llm"]["models"]
+        assert raw_models["deepseek-v4-flash-0731"] == {
+            **raw_models["deepseek-v4-flash"],
+            "name": "deepseek-v4-flash-0731",
+            "limits": {
+                **raw_models["deepseek-v4-flash"]["limits"],
+                "max_input_tokens": 1000000,
+            },
+            "pricing": {
+                **raw_models["deepseek-v4-flash"]["pricing"],
+                "cache_read": 0.2,
+            },
+        }
 
         kimi = next(m for m in models if m.id == "kimi-k2.6")
         assert kimi.capabilities.supports_vision is True
@@ -339,10 +354,11 @@ class TestCuratedCatalogModels:
             "qwen3.6-plus",
             "qwen3-max",
             "deepseek-v4-flash",
+            "deepseek-v4-flash-0731",
         }
 
+        assert models[0].id == "deepseek-v4-flash-0731"
         kimi_code = next(m for m in models if m.id == "kimi-k2.7-code")
-        assert models[0].id == "kimi-k2.7-code"
         assert kimi_code.capabilities.supports_vision is True
         assert kimi_code.capabilities.supports_reasoning is True
         assert kimi_code.capabilities.interleaved["field"] == "reasoning_content"
@@ -363,6 +379,19 @@ class TestCuratedCatalogModels:
         assert flash_io.pricing.currency == "CNY"
         assert flash_io.limits.context_window == 1000000
         assert flash_io.limits.max_output_tokens == 384000
+        raw_models = get_raw_catalog()["threatbook-io-llm"]["models"]
+        assert raw_models["deepseek-v4-flash-0731"] == {
+            **raw_models["deepseek-v4-flash"],
+            "name": "deepseek-v4-flash-0731",
+            "limits": {
+                **raw_models["deepseek-v4-flash"]["limits"],
+                "max_input_tokens": 1000000,
+            },
+            "pricing": {
+                **raw_models["deepseek-v4-flash"]["pricing"],
+                "cache_read": 0.2,
+            },
+        }
 
         m27 = next(m for m in models if m.id == "minimax-m2.7")
         assert m27.capabilities.interleaved["field"] == "reasoning_details"

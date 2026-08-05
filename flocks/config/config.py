@@ -149,19 +149,6 @@ class AgentConfig(BaseModel):
         return self
 
 
-# ==================== Category Configuration ====================
-
-class CategoryConfig(BaseModel):
-    """Delegate-task category configuration"""
-    model_config = {"extra": "allow", "populate_by_name": True}
-
-    model: Optional[str] = None
-    variant: Optional[str] = None
-    prompt_append: Optional[str] = Field(None, alias="promptAppend")
-    description: Optional[str] = None
-    is_unstable_agent: Optional[bool] = Field(None, alias="isUnstableAgent")
-
-
 # ==================== Command Configuration ====================
 
 class CommandConfig(BaseModel):
@@ -665,7 +652,6 @@ class ConfigInfo(BaseModel):
     mode: Optional[Dict[str, AgentConfig]] = Field(None, description="@deprecated Use 'agent'")
     agent: Optional[Dict[str, AgentConfig]] = None
     provider: Optional[Dict[str, ProviderConfig]] = None
-    categories: Optional[Dict[str, CategoryConfig]] = None
     mcp: Optional[Dict[str, Union[McpConfig, Dict[str, Any]]]] = None
     formatter: Optional[Union[Literal[False], Dict[str, Any]]] = None
     lsp: Optional[Union[Literal[False], Dict[str, Any]]] = None
@@ -741,6 +727,28 @@ class ConfigInfo(BaseModel):
         alias="portalBaseUrl",
         description="Console portal base URL used by OSS console account login redirect.",
     )
+
+    @model_validator(mode="before")
+    @classmethod
+    def remove_legacy_delegate_categories(cls, data):
+        """Drop the removed categories config instead of preserving it as an extra."""
+        if not isinstance(data, dict) or "categories" not in data:
+            return data
+
+        cleaned = dict(data)
+        cleaned.pop("categories", None)
+        from flocks.utils.log import Log
+
+        Log.create(service="config").warn(
+            "config.categories_removed",
+            {
+                "message": (
+                    "The categories configuration is no longer supported; "
+                    "select a delegatable agent with subagent_type."
+                )
+            },
+        )
+        return cleaned
 
     @model_validator(mode='after')
     def post_process(self):

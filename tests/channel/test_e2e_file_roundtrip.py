@@ -47,7 +47,6 @@ from flocks.channel.base import (
 from flocks.channel.inbound.dispatcher import (
     InboundDispatcher,
     _download_channel_media,
-    _is_placeholder_text,
 )
 
 

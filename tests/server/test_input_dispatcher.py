@@ -69,6 +69,92 @@ class TestDispatchUserInput:
         assert not llm
 
     @pytest.mark.asyncio
+    async def test_webui_direct_response_is_excluded_from_model_context(
+        self,
+        monkeypatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        created_messages = AsyncMock()
+        context_usage_update = AsyncMock()
+        published_events = []
+
+        async def fake_persist(
+            _session_id,
+            write,
+            *,
+            expected_generation=None,
+        ):
+            del expected_generation
+            return await write()
+
+        async def fake_dispatch(event, sink):
+            await sink.publish_direct_response(
+                event,
+                "Available Tools\n" + ("x" * 16_000),
+            )
+
+        async def fake_publish(event_type, properties):
+            published_events.append((event_type, properties))
+
+        monkeypatch.setattr(
+            "flocks.input.dispatcher.dispatch_user_input",
+            fake_dispatch,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            created_messages,
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            fake_publish,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_persist_active_session_write",
+            fake_persist,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage_update,
+        )
+        monkeypatch.setattr(
+            session_routes.Session,
+            "lifecycle_generation",
+            lambda _session_id: 0,
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_direct_context",
+            text="/tools",
+            display_text="/tools",
+        )
+
+        await session_routes._dispatch_sse_input(
+            "ses_direct_context",
+            SimpleNamespace(id="ses_direct_context"),
+            event,
+            "/tmp/project",
+        )
+
+        assert created_messages.await_count == 2
+        assert all(
+            call.kwargs["ignored"] is True
+            for call in created_messages.await_args_list
+        )
+        text_part_events = [
+            properties["part"]
+            for event_type, properties in published_events
+            if event_type == "message.part.updated"
+        ]
+        assert len(text_part_events) == 2
+        assert all(part["ignored"] is True for part in text_part_events)
+        context_usage_update.assert_awaited_once()
+        assert "provider_id" not in context_usage_update.await_args.kwargs
+        assert "model_id" not in context_usage_update.await_args.kwargs
+
+    @pytest.mark.asyncio
     async def test_clear_uses_history_callback_without_direct_response(self):
         direct = []
         llm = []

@@ -77,7 +77,7 @@ class MemorySyncConfig(BaseModel):
     )
     on_search: bool = Field(
         True,
-        description="Reconcile filesystem Memory before every search"
+        description="Run incremental filesystem reconciliation before every search"
     )
     watch: bool = Field(
         True,
