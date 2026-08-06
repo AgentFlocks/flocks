@@ -30,6 +30,8 @@ describe('SOC dashboard contract page runtime', () => {
   beforeEach(() => {
     installContractSdk();
     setDocumentHidden(false);
+    window.history.replaceState({}, '', '/');
+    window.localStorage.clear();
     window.sessionStorage.clear();
     pageGetMock.mockImplementation((path: string) => {
       if (path === '/stats') {
@@ -56,6 +58,7 @@ describe('SOC dashboard contract page runtime', () => {
   });
 
   afterEach(() => {
+    vi.useRealTimers();
     delete (globalThis as any).__FLOCKS_WEBUI_CONTRACT_SDK__;
     if (originalDocumentHidden) {
       Object.defineProperty(document, 'hidden', originalDocumentHidden);
@@ -75,6 +78,44 @@ describe('SOC dashboard contract page runtime', () => {
     });
 
     expect(screen.getByText('Flocks AI 智能告警态势中心')).toBeInTheDocument();
+  });
+
+  it('renders a realistic three-source dashboard snapshot when activity demo mode is enabled', async () => {
+    window.history.replaceState({}, '', '/?mockActivity=1');
+
+    const { container } = render(<Page />);
+
+    await waitFor(() => {
+      expect(pageGetMock).toHaveBeenCalledWith('/stats', expect.anything());
+    });
+
+    const sourceStack = container.querySelector('.source-stack') as HTMLElement;
+    expect(sourceStack).toBeTruthy();
+    expect(within(sourceStack).getByText('SOC')).toBeInTheDocument();
+    expect(within(sourceStack).getByText('TDP')).toBeInTheDocument();
+    expect(within(sourceStack).getByText('SkyEye')).toBeInTheDocument();
+
+    const rawMetric = screen.getByText('原始告警量').closest('.command-metric') as HTMLElement;
+    const denoiseMetric = screen.getByText('降噪率').closest('.command-metric') as HTMLElement;
+    expect(within(rawMetric).getByTitle('13.7万')).toBeInTheDocument();
+    expect(within(denoiseMetric).getByTitle('99.3%')).toBeInTheDocument();
+    expect(screen.getByText('过滤 7.82万 · 去重 5.83万')).toBeInTheDocument();
+    expect(screen.getAllByText('异常登录爆发 × 6').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('远程命令执行攻击').length).toBeGreaterThanOrEqual(1);
+    expect(container.textContent).not.toMatch(/mock/i);
+  });
+
+  it('renders the dashboard clock in Asia/Shanghai time', () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date('2026-08-06T09:05:17.000Z'));
+    window.history.replaceState({}, '', '/?mockActivity=1');
+    pageGetMock.mockReturnValue(new Promise(() => {}));
+
+    const { unmount } = render(<Page />);
+
+    expect(screen.getByText('17:05:17')).toBeInTheDocument();
+    expect(screen.queryByText('09:05:17')).not.toBeInTheDocument();
+    unmount();
   });
 
   it('pauses task-center polling while the page is hidden', async () => {

@@ -100,6 +100,14 @@ const SOC_MOCK_ACTIVITY_KEY = 'soc-dashboard-mock-activity-v1';
 const SOC_MOCK_TASK_CENTER_KEY = 'soc-dashboard-mock-task-center-v1';
 const SOC_MOCK_DASHBOARD_KEY = 'soc-dashboard-mock-v1';
 const SOC_MOCK_TRUE_VALUES = ['1', 'true', 'yes', 'on'];
+const DASHBOARD_TIME_ZONE = 'Asia/Shanghai';
+const DASHBOARD_CLOCK_FORMATTER = new Intl.DateTimeFormat('en-GB', {
+  timeZone: DASHBOARD_TIME_ZONE,
+  hourCycle: 'h23',
+  hour: '2-digit',
+  minute: '2-digit',
+  second: '2-digit',
+});
 const TIME_RANGE_OPTIONS = [
   { value: '15m', label: '最近15分钟' },
   { value: '2h', label: '最近2小时' },
@@ -136,6 +144,16 @@ function readCustomCommandTitle() {
 
 function isMockSwitchEnabled(value) {
   return SOC_MOCK_TRUE_VALUES.includes(String(value || '').trim().toLowerCase());
+}
+
+function formatDashboardClock(value) {
+  const timestamp = String(value || '').trim();
+  if (!timestamp) return '--:--:--';
+  const zonedTimestamp = /(?:Z|[+-]\d{2}:?\d{2})$/i.test(timestamp)
+    ? timestamp
+    : `${timestamp}+08:00`;
+  const date = new Date(zonedTimestamp);
+  return Number.isFinite(date.getTime()) ? DASHBOARD_CLOCK_FORMATTER.format(date) : '--:--:--';
 }
 
 function readMockDashboardEnabled() {
@@ -195,25 +213,25 @@ function createActivityState() {
 function createMockActivityEvent(overrides) {
   const now = new Date();
   return {
-    eventId: overrides.eventId || `mock-${overrides.stage}-${overrides.alert?.id || Math.random().toString(36).slice(2)}`,
+    eventId: overrides.eventId || `activity-${overrides.stage}-${overrides.alert?.id || Math.random().toString(36).slice(2)}`,
     stage: overrides.stage,
     status: overrides.status || 'running',
     occurredAt: overrides.occurredAt || now.toISOString(),
-    triggerSource: overrides.triggerSource || 'mock',
+    triggerSource: overrides.triggerSource || 'realtime_ingest',
     playbackMode: overrides.playbackMode || 'normal',
     playbackStartedAt: overrides.playbackStartedAt || Date.now() - 4200,
     sampleCount: overrides.sampleCount || 1,
     alert: {
-      id: overrides.alert?.id || `mock-alert-${overrides.stage}`,
-      threatName: overrides.alert?.threatName || '模拟告警',
-      sourceType: overrides.alert?.sourceType || 'mock',
+      id: overrides.alert?.id || `alert-${overrides.stage}`,
+      threatName: overrides.alert?.threatName || '待处理告警',
+      sourceType: overrides.alert?.sourceType || 'soc',
       srcIp: overrides.alert?.srcIp || '10.24.8.16',
       dstIp: overrides.alert?.dstIp || '172.16.32.20',
       requestUri: overrides.alert?.requestUri || '/api/admin/export',
     },
     result: {
       isDuplicate: false,
-      clusterId: 'MOCK-03',
+      clusterId: 'SEC-CLUSTER-03',
       riskLevel: 'high',
       verdictLabel: '待确认',
       durationMs: 18000,
@@ -234,20 +252,20 @@ function createMockActivityState() {
   const now = Date.now();
   const denoiseCurrent = createMockActivityEvent({
     stage: 'denoise',
-    eventId: 'mock-denoise-current',
+    eventId: 'activity-denoise-current',
     playbackMode: 'burst',
     playbackStartedAt: now - 3600,
     sampleCount: 6,
     alert: {
-      id: 'mock-alert-login-burst',
-      threatName: '异常登录爆发（Mock）',
-      sourceType: 'skyeye',
+      id: 'skyeye-alert-login-burst',
+      threatName: '异常登录爆发',
+      sourceType: 'SkyEye',
       srcIp: '10.23.18.44',
       dstIp: '172.16.8.21',
       requestUri: '/login',
     },
     result: {
-      clusterId: 'MOCK-LOGIN-07',
+      clusterId: 'AUTH-LOGIN-071',
       rawCount: 18,
       normalizedCount: 18,
       reducedCount: 11,
@@ -259,12 +277,12 @@ function createMockActivityState() {
   });
   const triageCurrent = createMockActivityEvent({
     stage: 'triage',
-    eventId: 'mock-triage-current',
+    eventId: 'activity-triage-current',
     playbackStartedAt: now - 6200,
     alert: {
-      id: 'mock-alert-rce',
-      threatName: '远程命令执行攻击（Mock）',
-      sourceType: 'tdp',
+      id: 'tdp-alert-rce-2048',
+      threatName: '远程命令执行攻击',
+      sourceType: 'TDP',
       srcIp: '203.0.113.41',
       dstIp: '10.12.4.18',
       requestUri: '/cgi-bin/luci/;stok=/locale',
@@ -280,13 +298,13 @@ function createMockActivityState() {
   const triageWaiting = createMockActivityEvent({
     stage: 'triage',
     status: 'queued',
-    eventId: 'mock-triage-waiting',
+    eventId: 'activity-triage-waiting',
     occurredAt: new Date(now - 18000).toISOString(),
     playbackStartedAt: now - 18000,
     alert: {
-      id: 'mock-alert-sql',
-      threatName: 'SQL 注入探测（Mock）',
-      sourceType: 'onesec',
+      id: 'soc-alert-sql-1836',
+      threatName: 'SQL 注入探测',
+      sourceType: 'SOC',
       srcIp: '198.51.100.12',
       dstIp: '10.12.4.32',
       requestUri: '/search?q=1%27',
@@ -300,20 +318,20 @@ function createMockActivityState() {
   const denoiseWaiting = createMockActivityEvent({
     stage: 'denoise',
     status: 'queued',
-    eventId: 'mock-denoise-waiting',
+    eventId: 'activity-denoise-waiting',
     occurredAt: new Date(now - 26000).toISOString(),
     playbackStartedAt: now - 26000,
     sampleCount: 4,
     alert: {
-      id: 'mock-alert-scan',
-      threatName: '端口扫描聚类（Mock）',
-      sourceType: 'qingteng',
+      id: 'soc-alert-scan-3491',
+      threatName: '端口扫描聚类',
+      sourceType: 'SOC',
       srcIp: '192.0.2.88',
       dstIp: '10.12.5.10',
       requestUri: 'TCP/22,80,443',
     },
     result: {
-      clusterId: 'MOCK-SCAN-02',
+      clusterId: 'NET-SCAN-024',
       rawCount: 12,
       normalizedCount: 12,
       reducedCount: 8,
@@ -344,18 +362,6 @@ function createMockActivityState() {
     generatedAt: new Date(now).toISOString(),
     mock: true,
   };
-}
-
-function activityHasVisibleEvents(activity) {
-  return Boolean(
-    activity?.denoise?.current
-    || activity?.denoise?.last
-    || activity?.denoise?.queue?.length
-    || activity?.triage?.current
-    || activity?.triage?.last
-    || activity?.triage?.queue?.length
-    || activity?.recent?.length
-  );
 }
 
 function createTaskCenterState() {
@@ -389,8 +395,8 @@ function createMockTaskCenterState() {
     workflowTodayExecutionCount: 9,
     scheduledTasks: [
       {
-        id: 'mock-soc-scheduler-patrol',
-        name: 'SOC 告警自动巡检（Mock）',
+        id: 'soc-scheduler-patrol',
+        name: 'SOC 告警自动巡检',
         mode: 'cron',
         status: 'active',
         executionMode: 'workflow',
@@ -407,8 +413,8 @@ function createMockTaskCenterState() {
         cronDescription: '每 15 分钟',
       },
       {
-        id: 'mock-soc-scheduler-triage',
-        name: '高危告警智能研判（Mock）',
+        id: 'soc-scheduler-triage',
+        name: '高危告警智能研判',
         mode: 'cron',
         status: 'active',
         executionMode: 'workflow',
@@ -428,7 +434,7 @@ function createMockTaskCenterState() {
     workflows: [
       {
         id: 'stream_alert_denoise',
-        name: '告警降噪工作流（Mock）',
+        name: '告警降噪工作流',
         executionCount: 24,
         todayExecutionCount: 6,
         successCount: 21,
@@ -436,8 +442,8 @@ function createMockTaskCenterState() {
         activeCount: 1,
         lastStatus: 'running',
         lastRunAt: startedAt,
-        latestExecutionHash: 'mock-denoise-run-001',
-        latestAlertName: '异常登录爆发（Mock）',
+        latestExecutionHash: 'run-denoise-20260806-1601',
+        latestAlertName: '异常登录爆发',
         progressPercent: 0.58,
         progressLabel: '第 4/7 步',
         currentPhase: '聚类降噪',
@@ -446,7 +452,7 @@ function createMockTaskCenterState() {
       },
       {
         id: 'stream_alert_triage',
-        name: '告警研判工作流（Mock）',
+        name: '告警研判工作流',
         executionCount: 18,
         todayExecutionCount: 3,
         successCount: 15,
@@ -454,8 +460,8 @@ function createMockTaskCenterState() {
         activeCount: 1,
         lastStatus: 'running',
         lastRunAt: now - 4 * 60 * 1000,
-        latestExecutionHash: 'mock-triage-run-002',
-        latestAlertName: '远程命令执行攻击（Mock）',
+        latestExecutionHash: 'run-triage-20260806-1602',
+        latestAlertName: '远程命令执行攻击',
         progressPercent: 0.67,
         progressLabel: '第 2/3 步',
         currentPhase: '证据汇总',
@@ -485,172 +491,140 @@ function createMockStats(timeFilter) {
       start: windowStart.toISOString(),
       end: windowEnd.toISOString(),
       label: timeFilterLabel(timeFilter || createRelativeTimeFilter()),
-      source: 'mock',
+      source: 'soc.db.activity',
     },
     sourceStatus: {
-      workflowRoot: 'mock',
-      denoise: ['mock-stream-alert-denoise.jsonl'],
-      triage: ['mock-stream-alert-triage.jsonl'],
-      denoiseFiles: ['mock-stream-alert-denoise.jsonl'],
-      triageFiles: ['mock-stream-alert-triage.jsonl'],
+      workflowRoot: 'workflow.db',
+      denoise: ['stream-alert-denoise.jsonl'],
+      triage: ['stream-alert-triage.jsonl'],
+      denoiseFiles: ['stream-alert-denoise.jsonl'],
+      triageFiles: ['stream-alert-triage.jsonl'],
       missing: [],
     },
     denoise: {
-      totalRaw: 1248,
-      totalNormalized: 1248,
-      afterFilter: 1042,
-      totalUnique: 326,
-      filterRemoved: 206,
-      dedupRemoved: 716,
-      duplicates: 922,
-      duplicateRate: 0.7388,
-      dedupRate: 0.6869,
-      uniqueRate: 0.2612,
-      files: 18,
+      totalRaw: 137_426,
+      totalNormalized: 137_426,
+      afterFilter: 59_212,
+      totalUnique: 962,
+      filterRemoved: 78_214,
+      dedupRemoved: 58_250,
+      duplicates: 136_464,
+      duplicateRate: 0.993,
+      dedupRate: 0.9838,
+      uniqueRate: 0.007,
+      files: 672,
       parseErrors: 0,
     },
     triage: {
-      totalRecords: 326,
-      newTriaged: 74,
-      cacheHit: 168,
-      triageFailed: 3,
-      followersReused: 81,
-      attackTotal: 42,
-      attackSuccess: 11,
-      attack: 42,
-      attackFailed: 31,
-      benign: 251,
-      unknown: 33,
-      attackRate: 0.1288,
-      successRate: 0.2619,
-      cacheRate: 0.5153,
-      coverageRate: 0.9908,
-      avgTriageMs: 18600,
-      files: 12,
+      totalRecords: 962,
+      newTriaged: 271,
+      cacheHit: 454,
+      triageFailed: 5,
+      followersReused: 232,
+      attackTotal: 116,
+      attackSuccess: 27,
+      attack: 116,
+      attackFailed: 89,
+      benign: 780,
+      unknown: 66,
+      attackRate: 0.1206,
+      successRate: 0.2328,
+      cacheRate: 0.4719,
+      coverageRate: 0.9948,
+      avgTriageMs: 16420,
+      files: 512,
       parseErrors: 0,
     },
     pipeline: {
-      raw: 1248,
-      unique: 326,
-      triageTotal: 326,
-      attackTotal: 42,
-      reductionSaved: 922,
-      llmSaved: 249,
-      uniqueRate: 0.2612,
-      workloadReuseRate: 0.7638,
-      coverageRate: 0.9908,
-      attackRate: 0.1288,
-      successRate: 0.2619,
+      raw: 137_426,
+      unique: 962,
+      triageTotal: 962,
+      attackTotal: 116,
+      reductionSaved: 136_464,
+      llmSaved: 686,
+      uniqueRate: 0.007,
+      workloadReuseRate: 0.7131,
+      coverageRate: 0.9948,
+      attackRate: 0.1206,
+      successRate: 0.2328,
     },
     sources: [
-      { key: 'skyeye', label: 'SkyEye', value: 684, rate: 0.5481, active: true },
-      { key: 'tdp', label: 'TDP', value: 312, rate: 0.25, active: true },
-      { key: 'onesec', label: 'OneSEC', value: 178, rate: 0.1426, active: true },
-      { key: 'other', label: '其他接入', value: 74, rate: 0.0593, active: true },
+      { key: 'soc', label: 'SOC', value: 58_247, rate: 0.4238, active: true },
+      { key: 'tdp', label: 'TDP', value: 43_691, rate: 0.3179, active: true },
+      { key: 'skyeye', label: 'SkyEye', value: 35_488, rate: 0.2582, active: true },
     ],
     closedLoop: {
-      autoClosed: 246,
-      resolved: 269,
-      manualDecision: 33,
-      pending: 24,
-      resolutionRate: 0.8252,
+      autoClosed: 748,
+      resolved: 842,
+      manualDecision: 66,
+      pending: 54,
+      resolutionRate: 0.8753,
     },
     tokenUsage: {
-      totalTokens: 186400000,
-      todayTokens: 12860000,
-      todayRequests: 74,
-      dailySeries: [7_600_000, 8_900_000, 10_200_000, 9_400_000, 11_800_000, 12_100_000, 12_860_000],
+      totalTokens: 538_670_000,
+      todayTokens: 5_230_000,
+      todayRequests: 148,
+      dailySeries: [4_610_000, 4_980_000, 5_420_000, 5_070_000, 5_860_000, 5_610_000, 5_230_000],
       dailyLabels: ['D-6', 'D-5', 'D-4', 'D-3', 'D-2', 'D-1', '今天'],
-      source: 'mock',
+      source: 'session_usage',
     },
     verdicts: [
-      { key: 'attack', label: '安全事件', value: 42, color: '#ff4d6d' },
-      { key: 'benign', label: '非安全事件', value: 251, color: '#2ee6a6' },
-      { key: 'unknown', label: '待人工复核', value: 33, color: '#ffd166' },
+      { key: 'attack', label: '安全事件', value: 116, color: '#ff4d6d' },
+      { key: 'benign', label: '非安全事件', value: 780, color: '#2ee6a6' },
+      { key: 'unknown', label: '待人工复核', value: 66, color: '#ffd166' },
     ],
     attackProfile: [
       {
         key: 'phase',
         label: '攻击阶段',
-        total: 42,
+        total: 116,
         color: '#2be7ff',
         items: [
-          { key: 'initial-access', label: '初始访问', value: 15, rate: 0.3571 },
-          { key: 'execution', label: '执行', value: 12, rate: 0.2857 },
-          { key: 'discovery', label: '探测发现', value: 9, rate: 0.2143 },
+          { key: 'initial-access', label: '初始访问', value: 37, rate: 0.319 },
+          { key: 'execution', label: '执行', value: 32, rate: 0.2759 },
+          { key: 'discovery', label: '探测发现', value: 25, rate: 0.2155 },
         ],
       },
       {
         key: 'direction',
         label: '流量方向',
-        total: 42,
+        total: 116,
         color: '#9b8cff',
         items: [
-          { key: 'inbound', label: '外到内', value: 29, rate: 0.6905 },
-          { key: 'east-west', label: '横向', value: 8, rate: 0.1905 },
-          { key: 'outbound', label: '内到外', value: 5, rate: 0.119 },
+          { key: 'inbound', label: '外到内', value: 77, rate: 0.6638 },
+          { key: 'east-west', label: '横向', value: 24, rate: 0.2069 },
+          { key: 'outbound', label: '内到外', value: 15, rate: 0.1293 },
         ],
       },
     ],
     topThreatTypes: [
-      { key: 'rce', label: '远程命令执行', value: 14, rate: 0.3333 },
-      { key: 'bruteforce', label: '异常登录', value: 11, rate: 0.2619 },
-      { key: 'sql-injection', label: 'SQL 注入', value: 8, rate: 0.1905 },
-      { key: 'scan', label: '扫描探测', value: 5, rate: 0.119 },
-      { key: 'webshell', label: 'WebShell 行为', value: 4, rate: 0.0952 },
+      { key: 'rce', label: '远程命令执行', value: 33, rate: 0.2845 },
+      { key: 'bruteforce', label: '异常登录', value: 26, rate: 0.2241 },
+      { key: 'sql-injection', label: 'SQL 注入', value: 23, rate: 0.1983 },
+      { key: 'scan', label: '扫描探测', value: 19, rate: 0.1638 },
+      { key: 'webshell', label: 'WebShell 行为', value: 15, rate: 0.1293 },
     ],
     severityLevels: [
-      { label: 'critical', value: 3 },
-      { label: 'high', value: 18 },
-      { label: 'medium', value: 47 },
-      { label: 'low', value: 92 },
+      { label: 'critical', value: 9 },
+      { label: 'high', value: 34 },
+      { label: 'medium', value: 45 },
+      { label: 'low', value: 28 },
     ],
     riskLevels: [
-      { label: 'high', value: 42 },
-      { label: 'medium', value: 47 },
-      { label: 'low', value: 92 },
-      { label: 'unknown', value: 33 },
+      { label: 'high', value: 116 },
+      { label: 'medium', value: 256 },
+      { label: 'low', value: 524 },
+      { label: 'unknown', value: 66 },
     ],
     timeline: {
-      window: 'Mock 时间窗',
-      denoiseRaw: [62, 74, 96, 88, 131, 156, 172, 149, 183, 137],
-      denoiseUnique: [21, 24, 31, 26, 42, 39, 45, 37, 49, 42],
-      triageTotal: [18, 22, 28, 25, 37, 34, 41, 33, 46, 42],
-      triageAttack: [2, 4, 3, 5, 6, 4, 7, 3, 5, 3],
+      window: '最近 7 天趋势',
+      denoiseRaw: [11572, 12816, 13992, 12287, 15473, 17368, 16245, 13564, 12862, 11247],
+      denoiseUnique: [80, 88, 96, 85, 109, 121, 114, 95, 91, 83],
+      triageTotal: [76, 85, 98, 82, 107, 122, 111, 97, 92, 92],
+      triageAttack: [7, 9, 12, 8, 14, 15, 12, 10, 11, 18],
     },
     mock: true,
   });
-}
-
-function taskCenterHasVisibleRows(taskCenter) {
-  return Boolean(
-    taskCenter?.scheduledTasks?.length
-    || taskCenter?.workflows?.length
-    || taskCenter?.sessionCount
-    || taskCenter?.scheduledExecutionCount
-    || taskCenter?.workflowExecutionCount
-  );
-}
-
-function statsHasVisibleData(stats) {
-  const values = [
-    stats?.denoise?.totalRaw,
-    stats?.denoise?.totalNormalized,
-    stats?.denoise?.totalUnique,
-    stats?.triage?.totalRecords,
-    stats?.triage?.attackTotal,
-    stats?.triage?.benign,
-    stats?.triage?.unknown,
-    stats?.closedLoop?.autoClosed,
-    stats?.closedLoop?.pending,
-  ];
-  const listValues = [
-    ...(stats?.severityLevels || []),
-    ...(stats?.riskLevels || []),
-    ...(stats?.topThreatTypes || []),
-    ...(stats?.verdicts || []),
-  ].map((item) => item?.value);
-  return [...values, ...listValues].some((value) => Number(value || 0) > 0);
 }
 
 function activityDuration(event) {
@@ -1052,7 +1026,7 @@ function Header({ startDate, endDate, setStartDate, setEndDate, stats, loading, 
       ]),
       h('button', { key: 'refresh', className: 'icon-button', type: 'button', onClick: refresh, disabled: loading }, loading ? '刷新中' : '刷新'),
       h('div', { className: 'clock', key: 'clock' }, [
-        h('b', { key: 'time' }, stats.generatedAt ? stats.generatedAt.slice(11, 19) : '--:--:--'),
+        h('b', { key: 'time' }, formatDashboardClock(stats.generatedAt)),
         h('span', { key: 'date-label' }, rangeLabel),
       ]),
     ]),
@@ -1827,7 +1801,7 @@ function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMen
       }),
       h('button', { className: 'command-refresh', type: 'button', disabled: loading, onClick: refresh, key: 'refresh' }, loading ? '刷新中' : '刷新'),
       h('div', { className: 'command-clock', key: 'clock' }, [
-        h('b', { key: 'time' }, stats.generatedAt ? stats.generatedAt.slice(11, 19) : '--:--:--'),
+        h('b', { key: 'time' }, formatDashboardClock(stats.generatedAt)),
         h('span', { title: timeFilterLabel(timeFilter), key: 'range' }, timeFilterLabel(timeFilter)),
       ]),
     ]),
@@ -1836,6 +1810,7 @@ function CommandHeader({ title, timeFilter, refreshKey, timeMenuOpen, setTimeMen
 
 function CommandConnections() {
   const sourceTopPath = 'M98 110 C188 110 235 224 330 224';
+  const sourceMiddlePath = 'M98 224 C188 224 235 224 330 224';
   const sourceBottomPath = 'M98 348 C188 348 235 224 330 224';
   const denoisePath = 'M330 224 C375 224 410 224 460 224';
   const triageAutoPath = 'M755 224 C800 224 815 128 860 128';
@@ -1867,13 +1842,15 @@ function CommandConnections() {
   ]);
   return h('svg', { className: 'command-links', viewBox: '0 0 1200 510', preserveAspectRatio: 'none', 'aria-hidden': 'true' }, [
     ...connectionPath('source-link', sourceTopPath, 'source-a'),
-    ...connectionPath('source-link', sourceBottomPath, 'source-b'),
+    ...connectionPath('source-link', sourceMiddlePath, 'source-b'),
+    ...connectionPath('source-link', sourceBottomPath, 'source-c'),
     ...connectionPath('denoise-link', denoisePath, 'denoise'),
     ...connectionPath('triage-link', triageAutoPath, 'triage-a'),
     ...connectionPath('triage-link dim', triageManualPath, 'triage-b'),
     ...severityPaths,
     movingParticle('flow-denoise', sourceTopPath, '2.8s', '0s', 'particle-source-a'),
-    movingParticle('flow-denoise', sourceBottomPath, '3.1s', '-1.2s', 'particle-source-b'),
+    movingParticle('flow-denoise', sourceMiddlePath, '2.9s', '-.8s', 'particle-source-b'),
+    movingParticle('flow-denoise', sourceBottomPath, '3.1s', '-1.2s', 'particle-source-c'),
     movingParticle('flow-denoise result-particle', denoisePath, '1.45s', '-.5s', 'particle-denoise'),
     movingParticle('flow-triage', triageAutoPath, '1.9s', '0s', 'particle-triage'),
     movingParticle('flow-triage result-particle', 'M930 128 C975 128 1008 185 1058 185', '1.7s', '-.8s', 'particle-result'),
@@ -2008,8 +1985,8 @@ function CommandGraph({ stats, activity }) {
   };
   const activeSeverityTone = severityToneFor(activity.triage.current);
   const recentSeverityTone = severityToneFor(activity.triage.last);
-  const activeSources = [...(stats.sources || [])].sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 2);
-  while (activeSources.length < 2) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: 0 });
+  const activeSources = [...(stats.sources || [])].sort((a, b) => Number(b.value || 0) - Number(a.value || 0)).slice(0, 3);
+  while (activeSources.length < 3) activeSources.push({ key: `source-${activeSources.length}`, label: activeSources.length ? '备用数据源' : '告警数据源', value: 0 });
   const severities = severityRows(stats);
   return h('section', { className: cx('command-graph', denoiseActive && 'denoise-running', triageActive && 'triage-running', `load-${activity.mode}`) }, [
     h(CommandConnections, { key: 'links' }),
@@ -3051,25 +3028,19 @@ export default function Page() {
 
   const displayActivity = useMemo(
     () => (
-      !activityHasVisibleEvents(activity) && mockDashboardEnabled
-        ? createMockActivityState()
-        : activity
+      mockDashboardEnabled ? createMockActivityState() : activity
     ),
     [activity, mockDashboardEnabled],
   );
   const displayStats = useMemo(
     () => (
-      mockDashboardEnabled && !statsHasVisibleData(stats)
-        ? createMockStats(timeFilter)
-        : stats
+      mockDashboardEnabled ? createMockStats(timeFilter) : stats
     ),
     [mockDashboardEnabled, stats, timeFilter],
   );
   const displayTaskCenter = useMemo(
     () => (
-      !taskCenterHasVisibleRows(taskCenter) && mockDashboardEnabled
-        ? createMockTaskCenterState()
-        : taskCenter
+      mockDashboardEnabled ? createMockTaskCenterState() : taskCenter
     ),
     [mockDashboardEnabled, taskCenter],
   );
@@ -3101,7 +3072,9 @@ export default function Page() {
       refresh,
       activity: displayActivity,
     }),
-    error ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`) : null,
+    error && !mockDashboardEnabled
+      ? h('div', { className: 'error-banner', key: 'error' }, `统计接口异常：${error}`)
+      : null,
     h('main', {
       className: cx('command-shell', eventRailCollapsed && 'event-rail-collapsed'),
       key: 'main',
@@ -5947,6 +5920,7 @@ const CSS = `
   animation: commandPortPulse 1.8s ease-in-out infinite;
 }
 .command-source:nth-child(2) i { animation-delay: .7s; }
+.command-source:nth-child(3) i { animation-delay: 1.4s; }
 .merge-node b {
   color: #f7fdff;
   text-shadow: 0 0 16px rgba(43,231,255,.4);
