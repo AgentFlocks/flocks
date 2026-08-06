@@ -5,9 +5,10 @@ import { MemoryRouter } from 'react-router-dom';
 
 import SecurityConfigPage from './index';
 
-const { getOverview, setRollout, toastSuccess, toastError } = vi.hoisted(() => ({
+const { getOverview, setRollout, setNetworkRules, toastSuccess, toastError } = vi.hoisted(() => ({
   getOverview: vi.fn(),
   setRollout: vi.fn(),
+  setNetworkRules: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
 }));
@@ -15,6 +16,7 @@ const { getOverview, setRollout, toastSuccess, toastError } = vi.hoisted(() => (
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, fallback?: string) => fallback ?? key,
+    i18n: { resolvedLanguage: 'zh-CN' },
   }),
 }));
 
@@ -38,6 +40,7 @@ vi.mock('@/api/flocksproSecurity', () => ({
   flocksproSecurityApi: {
     getOverview,
     setRollout,
+    setNetworkRules,
   },
 }));
 
@@ -52,10 +55,19 @@ describe('SecurityConfigPage', () => {
           ingress: 'disabled',
           visibility: 'shadow',
           filesystem: 'shadow',
+          network: 'shadow',
         },
         source: 'runtime',
       },
       hardDeny: { systemRuleIds: [] },
+      network: {
+        hardDeny: ['127.0.0.0/8'],
+        allowlist: [],
+        blocklist: [],
+        trustedTools: [{ name: 'websearch' }],
+        revision: 1,
+        modeDefaults: {},
+      },
       readonlyCeiling: { denyPatterns: [] },
       audit: { webhookConfigured: false },
       filesystem: {
@@ -114,5 +126,77 @@ describe('SecurityConfigPage', () => {
       expect(screen.queryByRole('dialog', { name: '文件管控配置详情' })).not.toBeInTheDocument();
     });
     expect(document.body.style.overflow).toBe('');
+  });
+
+  it('hides network controls when an older Pro overview omits network', async () => {
+    getOverview.mockResolvedValueOnce({
+      rollout: {
+        effective: {
+          policy: 'shadow',
+          command: 'shadow',
+          ingress: 'disabled',
+          visibility: 'shadow',
+          filesystem: 'shadow',
+        },
+        source: 'runtime',
+      },
+      hardDeny: { systemRuleIds: [] },
+      readonlyCeiling: { denyPatterns: [] },
+      audit: { webhookConfigured: false },
+      filesystem: {
+        excludedTools: [],
+        policyVersion: 'filesystem-v1',
+        decisionMatrix: [],
+        runtimeOverrides: [],
+        hardDenies: {},
+        sharedPermissionMode: { supported: [], default: 'readonly' },
+        permissionDefaults: {},
+        runtimeDefaults: {},
+      },
+    });
+
+    render(
+      <MemoryRouter>
+        <SecurityConfigPage />
+      </MemoryRouter>,
+    );
+
+    expect(await screen.findByText('文件管控')).toBeInTheDocument();
+    expect(screen.queryByText('网络策略')).not.toBeInTheDocument();
+    expect(screen.queryByText('网络管控')).not.toBeInTheDocument();
+  });
+
+  it('accepts ssh allowlist rules supported by backend validation', async () => {
+    const user = userEvent.setup();
+    setNetworkRules.mockResolvedValueOnce({
+      allowlist: ['ssh://example.com:22'],
+      blocklist: [],
+      trustedTools: [{ name: 'websearch' }],
+      revision: 2,
+      hardDeny: ['127.0.0.0/8'],
+    });
+
+    render(
+      <MemoryRouter>
+        <SecurityConfigPage />
+      </MemoryRouter>,
+    );
+
+    const allowlistInput = await screen.findByPlaceholderText(/example\.com/);
+    await user.clear(allowlistInput);
+    await user.type(allowlistInput, 'ssh://example.com:22');
+
+    const saveButton = screen.getByRole('button', { name: '保存网络规则' });
+    expect(saveButton).toBeEnabled();
+    await user.click(saveButton);
+
+    await waitFor(() => {
+      expect(setNetworkRules).toHaveBeenCalledWith({
+        allowlist: ['ssh://example.com:22'],
+        blocklist: [],
+        trustedTools: [{ name: 'websearch' }],
+        revision: 1,
+      });
+    });
   });
 });

@@ -226,7 +226,13 @@ export default function SecurityConfigPage() {
     ingress: IngressRolloutMode;
     visibility: RolloutMode;
     filesystem: RolloutMode;
+    network: RolloutMode;
   } | null>(null);
+  const [savingNetworkRules, setSavingNetworkRules] = useState(false);
+  const [allowlistDraft, setAllowlistDraft] = useState('');
+  const [blocklistDraft, setBlocklistDraft] = useState('');
+  const [trustedToolsDraft, setTrustedToolsDraft] = useState('');
+  const [networkRulesRevision, setNetworkRulesRevision] = useState<number | null>(null);
   const [filesystemDrawerOpen, setFilesystemDrawerOpen] = useState(false);
   const filesystemDrawerTriggerRef = useRef<HTMLButtonElement | null>(null);
   const filesystemDrawerCloseRef = useRef<HTMLButtonElement | null>(null);
@@ -238,7 +244,23 @@ export default function SecurityConfigPage() {
     try {
       const nextOverview = await flocksproSecurityApi.getOverview();
       setOverview(nextOverview);
-      setRolloutDraft(nextOverview.rollout.effective);
+      setRolloutDraft({
+        ...nextOverview.rollout.effective,
+        network: nextOverview.rollout.effective.network ?? 'shadow',
+      });
+      setAllowlistDraft((nextOverview.network?.allowlist || []).join('\n'));
+      setBlocklistDraft((nextOverview.network?.blocklist || []).join('\n'));
+      setTrustedToolsDraft(
+        (nextOverview.network?.trustedTools || [])
+          .map((item) => {
+            const name = String(item.name || '').trim();
+            const source = String(item.source || '').trim();
+            return source ? `${name},${source}` : name;
+          })
+          .filter(Boolean)
+          .join('\n'),
+      );
+      setNetworkRulesRevision(nextOverview.network?.revision ?? null);
     } catch (err: any) {
       toast.error(t('security.errors.loadFailed'), err?.response?.data?.detail || err?.message);
     } finally {
@@ -278,18 +300,62 @@ export default function SecurityConfigPage() {
 
   const rolloutDirty = useMemo(() => {
     if (!overview || !rolloutDraft) return false;
-    return JSON.stringify(rolloutDraft) !== JSON.stringify(overview.rollout.effective);
+    const effective = overview.network
+      ? overview.rollout.effective
+      : { ...overview.rollout.effective, network: 'shadow' };
+    return JSON.stringify(rolloutDraft) !== JSON.stringify(effective);
   }, [overview, rolloutDraft]);
   const runtimeOverrides = useMemo(
     () => (overview ? normalizeRuntimeOverrides(overview.filesystem.runtimeOverrides) : []),
     [overview],
   );
+  const networkRulesDirty = useMemo(() => {
+    if (!overview?.network) return false;
+    const normalizeTextArea = (value: string) => value
+      .split('\n')
+      .map((item) => item.trim().toLowerCase())
+      .filter(Boolean)
+      .join('\n');
+    return (
+      normalizeTextArea(allowlistDraft) !== (overview.network.allowlist || []).join('\n')
+      || normalizeTextArea(blocklistDraft) !== (overview.network.blocklist || []).join('\n')
+      || normalizeTextArea(trustedToolsDraft) !== (overview.network.trustedTools || [])
+        .map((item) => {
+          const name = String(item.name || '').trim().toLowerCase();
+          const source = String(item.source || '').trim().toLowerCase();
+          return source ? `${name},${source}` : name;
+        })
+        .join('\n')
+    );
+  }, [allowlistDraft, blocklistDraft, trustedToolsDraft, overview]);
+  const networkRuleValidation = useMemo(() => {
+    const rows = (value: string) => value
+      .split('\n')
+      .map((item) => item.trim())
+      .filter(Boolean);
+    const domainOrWildcardOrCidr = /^(?:\*\.)?[a-z0-9.-]+(?::\d{1,5})?$|^(?:(?:https?)|(?:ssh)):\/\/(?:\*\.)?[a-z0-9.-]+(?::\d{1,5})?$|^(?:\d{1,3}\.){3}\d{1,3}(?:\/\d{1,2})?$|^[a-f0-9:]+(?:\/\d{1,3})?$/i;
+    const invalidAllowlist = rows(allowlistDraft).filter((rule) => !domainOrWildcardOrCidr.test(rule));
+    const invalidBlocklist = rows(blocklistDraft).filter((rule) => !domainOrWildcardOrCidr.test(rule));
+    const trustedToolPattern = /^[a-z0-9._:-]+(?:\s*,\s*[a-z0-9._:-]+)?$/i;
+    const invalidTrustedTools = rows(trustedToolsDraft).filter((rule) => !trustedToolPattern.test(rule));
+    return {
+      invalidAllowlist,
+      invalidBlocklist,
+      invalidTrustedTools,
+      valid: invalidAllowlist.length === 0
+        && invalidBlocklist.length === 0
+        && invalidTrustedTools.length === 0,
+    };
+  }, [allowlistDraft, blocklistDraft, trustedToolsDraft]);
 
   const saveRollout = async () => {
     if (!rolloutDraft) return;
     setSavingRollout(true);
     try {
-      await flocksproSecurityApi.setRollout(rolloutDraft);
+      const { network: _network, ...legacyCompatibleRollout } = rolloutDraft;
+      await flocksproSecurityApi.setRollout(
+        overview?.network ? rolloutDraft : legacyCompatibleRollout,
+      );
       toast.success(t('security.messages.rolloutSaved'));
       await loadAll();
     } catch (err: any) {
@@ -297,6 +363,69 @@ export default function SecurityConfigPage() {
     } finally {
       setSavingRollout(false);
     }
+  };
+
+  const saveNetworkRules = async () => {
+    if (!overview?.network) return;
+    if (!networkRuleValidation.valid) {
+      toast.error(
+        t('security.errors.invalidNetworkRules', '存在不合法的网络规则，请修正后再保存'),
+      );
+      return;
+    }
+    setSavingNetworkRules(true);
+    try {
+      const toList = (text: string) => text
+        .split('\n')
+        .map((item) => item.trim().toLowerCase())
+        .filter(Boolean);
+      const updated = await flocksproSecurityApi.setNetworkRules({
+        allowlist: toList(allowlistDraft),
+        blocklist: toList(blocklistDraft),
+        trustedTools: toList(trustedToolsDraft).map((item) => {
+          const [namePart, sourcePart] = item.split(',').map((part) => part.trim());
+          return {
+            name: namePart,
+            ...(sourcePart ? { source: sourcePart } : {}),
+          };
+        }),
+        revision: networkRulesRevision ?? undefined,
+      });
+      setAllowlistDraft((updated.allowlist || []).join('\n'));
+      setBlocklistDraft((updated.blocklist || []).join('\n'));
+      setTrustedToolsDraft(
+        (updated.trustedTools || [])
+          .map((item) => {
+            const name = String(item.name || '').trim();
+            const source = String(item.source || '').trim();
+            return source ? `${name},${source}` : name;
+          })
+          .filter(Boolean)
+          .join('\n'),
+      );
+      setNetworkRulesRevision(updated.revision ?? 1);
+      toast.success(t('security.messages.rolloutSaved', '保存成功'));
+      await loadAll();
+    } catch (err: any) {
+      toast.error(t('security.errors.rolloutSaveFailed', '保存失败'), err?.response?.data?.detail || err?.message);
+    } finally {
+      setSavingNetworkRules(false);
+    }
+  };
+  const rollbackNetworkRules = () => {
+    if (!overview?.network) return;
+    setAllowlistDraft((overview.network.allowlist || []).join('\n'));
+    setBlocklistDraft((overview.network.blocklist || []).join('\n'));
+    setTrustedToolsDraft(
+      (overview.network.trustedTools || [])
+        .map((item) => {
+          const name = String(item.name || '').trim();
+          const source = String(item.source || '').trim();
+          return source ? `${name},${source}` : name;
+        })
+        .filter(Boolean)
+        .join('\n'),
+    );
   };
 
   return (
@@ -396,10 +525,114 @@ export default function SecurityConfigPage() {
                     />
                   </div>
                 </ConfigRow>
+                {overview.network && (
+                  <ConfigRow
+                    icon={Shield}
+                    title={t('security.labels.networkRollout', '网络管控')}
+                    description={t('security.hints.networkRollout', '控制网络轴以审计模式或强制模式运行')}
+                  >
+                    <ModeSegmented
+                      value={rolloutDraft.network}
+                      onChange={(value) => setRolloutDraft((prev) => (prev ? { ...prev, network: value as RolloutMode } : prev))}
+                      options={[
+                        { label: t('security.modes.shadow'), value: 'shadow' },
+                        { label: t('security.modes.enforce'), value: 'enforce' },
+                      ]}
+                    />
+                  </ConfigRow>
+                )}
 
               </div>
             )}
           </Card>
+
+          {overview.network && (
+          <Card
+            title={t('security.sections.networkPolicy', '网络策略')}
+            description={t('security.sections.networkPolicyDescription', '配置全局网络白名单与黑名单；hard-deny 基线只读且始终优先。')}
+            action={(
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void saveNetworkRules()}
+                  disabled={!networkRulesDirty || savingNetworkRules || !networkRuleValidation.valid}
+                  className="inline-flex h-9 items-center gap-2 rounded-md bg-zinc-950 px-4 text-sm font-semibold text-white transition-colors hover:bg-zinc-800 disabled:cursor-not-allowed disabled:bg-zinc-200 disabled:text-zinc-500 dark:bg-zinc-100 dark:text-zinc-950 dark:hover:bg-zinc-200 dark:disabled:bg-zinc-800 dark:disabled:text-zinc-500"
+                >
+                  {savingNetworkRules ? <Loader2 className="h-4 w-4 animate-spin" /> : <Save className="h-4 w-4" />}
+                  {t('security.actions.saveNetworkRules', '保存网络规则')}
+                </button>
+                <button
+                  type="button"
+                  onClick={rollbackNetworkRules}
+                  disabled={!networkRulesDirty || savingNetworkRules}
+                  className="inline-flex h-9 items-center gap-2 rounded-md border border-zinc-200 px-4 text-sm font-semibold text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:text-zinc-400 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800 dark:disabled:text-zinc-500"
+                >
+                  {t('security.actions.rollbackNetworkRules', '回滚')}
+                </button>
+              </div>
+            )}
+          >
+            <div className="grid gap-4 md:grid-cols-2">
+              <div>
+                <div className="mb-1 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                  {t('security.labels.networkAllowlist', '网络白名单（每行一条）')}
+                </div>
+                <textarea
+                  value={allowlistDraft}
+                  onChange={(event) => setAllowlistDraft(event.target.value)}
+                  rows={8}
+                  className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+                  placeholder="example.com&#10;*.trusted.example&#10;203.0.113.0/24"
+                />
+              </div>
+              <div>
+                <div className="mb-1 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                  {t('security.labels.networkBlocklist', '网络黑名单（每行一条）')}
+                </div>
+                <textarea
+                  value={blocklistDraft}
+                  onChange={(event) => setBlocklistDraft(event.target.value)}
+                  rows={8}
+                  className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+                  placeholder="bad.example&#10;*.blocked.example&#10;198.51.100.12"
+                />
+              </div>
+            </div>
+            <div className="mt-4">
+              <div className="mb-1 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                {t('security.labels.networkTrustedTools', '信任工具网络访问清单（每行: tool_name 或 tool_name,tool_source）')}
+              </div>
+              <textarea
+                value={trustedToolsDraft}
+                onChange={(event) => setTrustedToolsDraft(event.target.value)}
+                rows={6}
+                className="w-full rounded-md border border-zinc-200 bg-white px-3 py-2 text-xs text-zinc-700 outline-none transition-colors focus:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-200"
+                placeholder="threat_lookup,official&#10;websearch,official&#10;custom_ioc_tool,custom"
+              />
+              <div className="mt-1 text-[11px] text-zinc-500 dark:text-zinc-400">
+                {t('security.hints.networkTrustedTools', '命中该清单后，该工具网络请求不再逐次确认；仍会拦截 hard-deny 与黑名单目标。')}
+              </div>
+            </div>
+            {!networkRuleValidation.valid && (
+              <div className="mt-3 rounded-md border border-red-200 bg-red-50 px-3 py-2 text-xs text-red-700 dark:border-red-900/50 dark:bg-red-950/20 dark:text-red-300">
+                {t('security.errors.invalidNetworkRulesHint', '以下规则格式不合法，请检查：')}
+                {[
+                  ...networkRuleValidation.invalidAllowlist,
+                  ...networkRuleValidation.invalidBlocklist,
+                  ...networkRuleValidation.invalidTrustedTools,
+                ].join(' , ')}
+              </div>
+            )}
+            <div className="mt-4">
+              <div className="mb-1 text-xs font-semibold text-zinc-500 dark:text-zinc-400">
+                {t('security.labels.networkHardDeny', 'hard-deny 基线（只读）')}
+              </div>
+              <div className="rounded-md border border-zinc-200 bg-zinc-50 p-3 text-xs text-zinc-600 dark:border-zinc-700 dark:bg-zinc-950 dark:text-zinc-300">
+                {(overview.network.hardDeny || []).join(' , ')}
+              </div>
+            </div>
+          </Card>
+          )}
 
           {filesystemDrawerOpen && (
             <div className="fixed inset-0 z-50">
