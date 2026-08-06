@@ -15,7 +15,9 @@ const mocks = vi.hoisted(() => ({
   createDir: vi.fn(),
   reveal: vi.fn(),
   listMemory: vi.fn(),
+  listVisibleProjects: vi.fn(),
   readMemoryFile: vi.fn(),
+  writeMemoryFile: vi.fn(),
   confirm: vi.fn(),
   toastSuccess: vi.fn(),
   toastError: vi.fn(),
@@ -95,6 +97,8 @@ const translations: Record<string, string> = {
   'files.toast.deleteSuccess': 'Deleted',
   'files.toast.deleteFailed': 'Delete failed',
   'files.toast.loadDirFailed': 'Load directory failed',
+  'files.toast.saveSuccess': 'Saved successfully',
+  'files.toast.saveFailed': 'Failed to save',
 };
 
 vi.mock('react-i18next', () => ({
@@ -172,7 +176,9 @@ vi.mock('@/api/workspace', async () => {
       createDir: mocks.createDir,
       reveal: mocks.reveal,
       listMemory: mocks.listMemory,
+      listVisibleProjects: mocks.listVisibleProjects,
       readMemoryFile: mocks.readMemoryFile,
+      writeMemoryFile: mocks.writeMemoryFile,
       downloadUrl: (path: string) => `/api/workspace/download?path=${encodeURIComponent(path)}`,
       previewUrl: (path: string) => `/api/workspace/preview?path=${encodeURIComponent(path)}`,
       memoryDownloadUrl: (path: string) => `/api/workspace/memory/download?path=${encodeURIComponent(path)}`,
@@ -213,7 +219,9 @@ describe('WorkspacePage', () => {
     mocks.createDir.mockResolvedValue({ data: { created: true } });
     mocks.reveal.mockResolvedValue({ data: { opened: true } });
     mocks.listMemory.mockResolvedValue({ data: [] });
+    mocks.listVisibleProjects.mockResolvedValue({ data: [] });
     mocks.readMemoryFile.mockResolvedValue({ data: { content: '' } });
+    mocks.writeMemoryFile.mockResolvedValue({ data: { written: true } });
     mocks.confirm.mockResolvedValue(true);
   });
 
@@ -403,39 +411,125 @@ describe('WorkspacePage', () => {
     expect(screen.getAllByRole('heading', { name: 'Memory' })).toHaveLength(2);
   });
 
-  it('Memory PDF 文件使用 memory inline preview 地址展示', async () => {
+  it('Memory Daily 文件复用编辑器并保存到 Memory API', async () => {
     mocks.listMemory.mockResolvedValue({
-      data: [file('profile.pdf', 'nested/profile.pdf', false)],
+      data: [{
+        ...directory('daily', 'daily'),
+        children: [file('2026-08-03.md', 'daily/2026-08-03.md')],
+      }],
+    });
+    mocks.readMemoryFile.mockResolvedValue({
+      data: {
+        path: 'daily/2026-08-03.md',
+        content: '# Daily\n\nOld content',
+        truncated: false,
+      },
     });
 
     const user = userEvent.setup();
     renderWithRouter(<WorkspacePage />);
 
     await user.click(screen.getByRole('button', { name: 'Memory' }));
-    await user.click(await screen.findByText('profile.pdf'));
+    await user.click(await screen.findByText('daily'));
+    await user.click(await screen.findByText('2026-08-03.md'));
+    await user.click(await screen.findByTitle('Edit'));
+
+    const editor = screen.getAllByRole('textbox').find(
+      (element) => element.tagName === 'TEXTAREA',
+    );
+    expect(editor).toHaveValue('# Daily\n\nOld content');
+    if (!editor) throw new Error('Memory editor not found');
+    await user.clear(editor);
+    await user.type(editor, '# Daily\n\nUpdated content');
+    await user.click(screen.getByTitle('Save'));
 
     await waitFor(() => {
-      expect(pdfMocks.getDocument).toHaveBeenCalledWith({
-        url: '/api/workspace/memory/preview?path=nested%2Fprofile.pdf',
-        withCredentials: true,
-      });
+      expect(mocks.writeMemoryFile).toHaveBeenCalledWith(
+        'daily/2026-08-03.md',
+        '# Daily\n\nUpdated content',
+      );
     });
-    expect(mocks.readMemoryFile).not.toHaveBeenCalled();
+    expect(mocks.toastSuccess).toHaveBeenCalledWith('Saved successfully');
   });
 
-  it('Memory SVG 文件使用图片预览展示', async () => {
+  it('Memory 文件按 USER、Global、Project 和 Daily 层级展示', async () => {
+    mocks.listVisibleProjects.mockResolvedValue({
+      data: [{
+        id: 'prj_example',
+        name: 'Flocks Raven',
+        worktree: '/Users/test/workspace/flocks-raven',
+      }],
+    });
     mocks.listMemory.mockResolvedValue({
-      data: [file('logo.svg', 'icons/logo.svg', false)],
+      data: [
+        file('USER.md', 'USER.md'),
+        file('MEMORY.md', 'MEMORY.md'),
+        file('2026-04-07.md', '2026-04-07.md'),
+        file('test.md', 'test.md'),
+        {
+          ...directory('daily', 'daily'),
+          children: [file('2026-08-03.md', 'daily/2026-08-03.md')],
+        },
+        {
+          ...directory('projects', 'projects'),
+          children: [{
+            ...directory('prj_example', 'projects/prj_example'),
+            children: [file('MEMORY.md', 'projects/prj_example/MEMORY.md')],
+          }, {
+            ...directory('prj_stale', 'projects/prj_stale'),
+            children: [file('MEMORY.md', 'projects/prj_stale/MEMORY.md')],
+          }],
+        },
+      ],
     });
 
     const user = userEvent.setup();
     renderWithRouter(<WorkspacePage />);
 
     await user.click(screen.getByRole('button', { name: 'Memory' }));
-    await user.click(await screen.findByText('logo.svg'));
+    expect(await screen.findByText('USER.md')).toBeInTheDocument();
+    expect(screen.getByText('MEMORY.md')).toBeInTheDocument();
+    const projectMemory = screen.getByText('Flocks Raven / MEMORY.md');
+    const daily = screen.getByText('daily');
+    expect(projectMemory).toBeInTheDocument();
+    expect(screen.queryByText('/Users/test/workspace/flocks-raven')).not.toBeInTheDocument();
+    expect(daily).toBeInTheDocument();
+    expect(screen.queryByText('projects')).not.toBeInTheDocument();
+    expect(screen.queryByText('prj_stale/MEMORY.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('2026-04-07.md')).not.toBeInTheDocument();
+    expect(screen.queryByText('test.md')).not.toBeInTheDocument();
+    expect(
+      projectMemory.compareDocumentPosition(daily) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(screen.queryByText('2026-08-03.md')).not.toBeInTheDocument();
 
-    const image = await screen.findByRole('img', { name: 'logo.svg' });
-    expect(image).toHaveAttribute('src', '/api/workspace/memory/preview?path=icons%2Flogo.svg');
+    await user.click(projectMemory);
+    expect(await screen.findByText('/Users/test/workspace/flocks-raven')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('button', { name: /daily/ }));
+    expect(await screen.findByText('2026-08-03.md')).toBeInTheDocument();
+  });
+
+  it('Memory 根目录的非规范文件不显示', async () => {
+    mocks.listMemory.mockResolvedValue({
+      data: [
+        file('profile.pdf', 'profile.pdf', false),
+        file('logo.svg', 'logo.svg', false),
+        file('legacy.md', 'legacy.md'),
+      ],
+    });
+
+    const user = userEvent.setup();
+    renderWithRouter(<WorkspacePage />);
+
+    await user.click(screen.getByRole('button', { name: 'Memory' }));
+    await waitFor(() => {
+      expect(mocks.listMemory).toHaveBeenCalled();
+    });
+    expect(screen.queryByText('profile.pdf')).not.toBeInTheDocument();
+    expect(screen.queryByText('logo.svg')).not.toBeInTheDocument();
+    expect(screen.queryByText('legacy.md')).not.toBeInTheDocument();
+    expect(pdfMocks.getDocument).not.toHaveBeenCalled();
     expect(mocks.readMemoryFile).not.toHaveBeenCalled();
   });
 
@@ -447,17 +541,17 @@ describe('WorkspacePage', () => {
 
     mocks.listMemory.mockResolvedValue({
       data: [
-        file('first.md', 'first.md'),
-        file('second.md', 'second.md'),
+        file('USER.md', 'USER.md'),
+        file('MEMORY.md', 'MEMORY.md'),
       ],
     });
     mocks.readMemoryFile.mockImplementation((path: string) => {
-      if (path === 'first.md') {
+      if (path === 'USER.md') {
         return firstRead;
       }
       return Promise.resolve({
         data: {
-          path: 'second.md',
+          path: 'MEMORY.md',
           content: '# Second',
           truncated: false,
         },
@@ -468,14 +562,14 @@ describe('WorkspacePage', () => {
     renderWithRouter(<WorkspacePage />);
 
     await user.click(screen.getByRole('button', { name: 'Memory' }));
-    await user.click(await screen.findByText('first.md'));
-    await user.click(await screen.findByText('second.md'));
+    await user.click(await screen.findByText('USER.md'));
+    await user.click(await screen.findByText('MEMORY.md'));
 
     expect(await screen.findByRole('heading', { name: 'Second' })).toBeInTheDocument();
 
     resolveFirst({
       data: {
-        path: 'first.md',
+        path: 'USER.md',
         content: '# First',
         truncated: false,
       },

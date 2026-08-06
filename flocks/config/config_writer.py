@@ -76,6 +76,8 @@ def ensure_config_files() -> None:
                 "error": str(e),
             })
 
+    ConfigWriter.ensure_memory_config()
+
 
 class ConfigWriter:
     """Atomic read-modify-write operations on the provider section of flocks.json."""
@@ -149,9 +151,13 @@ class ConfigWriter:
         return None
 
     @classmethod
-    def _write_raw(cls, data: Dict[str, Any]) -> None:
+    def _write_raw(
+        cls,
+        data: Dict[str, Any],
+        path: Optional[Path] = None,
+    ) -> None:
         """Atomic write: write to tmp file then rename, then clear Config cache."""
-        path = cls._get_config_path()
+        path = path or cls._get_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Atomic write via temp file in same directory
@@ -178,6 +184,62 @@ class ConfigWriter:
             pass
 
         log.debug("config_writer.written", {"path": str(path)})
+
+    @classmethod
+    def ensure_memory_config(cls) -> bool:
+        """Persist the editable Memory Search config when absent."""
+        path = Config.get_config_file()
+        try:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            data = json.loads(text) if text.strip() else {}
+        except (json.JSONDecodeError, OSError) as exc:
+            log.error(
+                "config_writer.memory_config_init_failed",
+                {"path": str(path), "error": str(exc)},
+            )
+            return False
+
+        if not isinstance(data, dict):
+            log.error(
+                "config_writer.memory_config_init_failed",
+                {"path": str(path), "error": "top-level config must be an object"},
+            )
+            return False
+        if "memory" in data:
+            return False
+
+        from flocks.memory.config import MemoryConfig
+
+        default_config = MemoryConfig()
+        data["memory"] = {
+            "search": {
+                "embedding": default_config.search.embedding.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
+            },
+        }
+        cls._write_raw(data, path=path)
+        log.info("config_writer.memory_config_initialized", {"path": str(path)})
+        return True
+
+    @classmethod
+    def enable_memory_source(cls, source: str) -> bool:
+        """Persist a Memory source without rewriting unrelated config."""
+        data = cls._read_raw()
+        memory = data.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        sources = memory.get("sources")
+        if not isinstance(sources, list):
+            sources = ["memory"]
+        if source in sources:
+            return False
+        memory["sources"] = [*sources, source]
+        data["memory"] = memory
+        cls._write_raw(data)
+        log.info("config_writer.memory_source_enabled", {"source": source})
+        return True
 
     # ------------------------------------------------------------------
     # Provider-level CRUD

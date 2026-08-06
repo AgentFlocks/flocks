@@ -559,6 +559,6 @@ async def delegate_task_tool(
         loop_result=result,
         metadata=forwarder.final_metadata,
     )
-    result_status = "completed" if tool_result.success else "error"
+    result_status = str((tool_result.metadata or {}).get("status") or ("completed" if tool_result.success else "error"))
     ctx.metadata({"title": description, "metadata": {**forwarder.final_metadata, "status": result_status}})
     return tool_result

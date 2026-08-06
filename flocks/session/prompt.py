@@ -29,8 +29,6 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
-MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory_get", "memory_search", "memory_write"})
-
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
 StringPromptFactory = Callable[[], Optional[str]]
@@ -918,10 +916,18 @@ class SessionPrompt:
         prompt_tool_names: Iterable[str],
         memory_bootstrap_data: Optional[Dict[str, Any]],
     ) -> Optional[str]:
-        """Build memory tool guidance separately from the frozen memory snapshot."""
+        """Build filesystem Memory guidance beside the frozen snapshot."""
         if not memory_bootstrap_data:
             return None
-        if not (set(prompt_tool_names) & MEMORY_GUIDANCE_TOOL_NAMES):
+        required_tools = {
+            "read",
+            "write",
+            "edit",
+            "glob",
+            "grep",
+            "memory_search",
+        }
+        if not required_tools.issubset(set(prompt_tool_names)):
             return None
         instructions = memory_bootstrap_data.get("instructions", "")
         return cls._normalize_prompt_text(instructions)
@@ -938,15 +944,33 @@ class SessionPrompt:
             return []
 
         prompts: List[str] = []
+        user_profile = memory_bootstrap_data.get("user_profile")
+        if user_profile and user_profile.get("inject"):
+            profile_content = user_profile.get("content", "")
+            if profile_content:
+                prompts.append(
+                    f"## {user_profile['path']}\n\n{profile_content}"
+                )
+
         main_memory = memory_bootstrap_data.get("main_memory")
         if main_memory and main_memory.get("inject"):
             memory_content = main_memory.get("content", "")
             if memory_content:
                 prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
 
+        project_memory = memory_bootstrap_data.get("project_memory")
+        if project_memory and project_memory.get("inject"):
+            project_content = project_memory.get("content", "")
+            if project_content:
+                prompts.append(
+                    f"## {project_memory['path']}\n\n{project_content}"
+                )
+
         log.debug("prompt.memory_injected", {
             "session_id": session_id,
+            "has_user_profile": user_profile is not None,
             "has_main": main_memory is not None,
+            "has_project": project_memory is not None,
         })
         return prompts
 
@@ -1024,7 +1048,7 @@ class SessionPrompt:
         session_id: str,
         agent_name: str,
     ) -> bool:
-        """Return true for built-in system subagents running as child sessions."""
+        """Return true when a built-in child uses the minimal prompt profile."""
         try:
             from flocks.agent.registry import Agent
             from flocks.session.session import Session
@@ -1046,6 +1070,9 @@ class SessionPrompt:
                 return False
 
             session = await Session.get_by_id(session_id)
+            metadata = getattr(session, "metadata", {}) if session else {}
+            if metadata.get("evolution"):
+                return False
             return bool(session and session.parent_id)
         except Exception as exc:
             log.debug("prompt.subagent_minimal_check_failed", {

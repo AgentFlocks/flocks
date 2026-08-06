@@ -427,16 +427,7 @@ class Session:
         
         # Default memory_enabled from config if not explicitly set
         if "memory_enabled" not in kwargs:
-            try:
-                from flocks.config import Config
-                cfg = await Config.get()
-                memory_cfg = getattr(cfg, "memory", None)
-                if isinstance(memory_cfg, dict):
-                    kwargs["memory_enabled"] = bool(memory_cfg.get("enabled", False))
-                elif memory_cfg is not None and hasattr(memory_cfg, "enabled"):
-                    kwargs["memory_enabled"] = bool(getattr(memory_cfg, "enabled"))
-            except Exception as e:
-                log.warn("session.memory.default.error", {"error": str(e)})
+            kwargs["memory_enabled"] = True
 
         # Bind root ownership here; children inherit ownership from their parent below.
         if parent_id is None and (
@@ -933,8 +924,15 @@ class Session:
             session_ids = [session.id for session in sessions]
 
             from flocks.permission.next import PermissionNext
+            from flocks.storage.session_search import delete_session_documents
 
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
+
+            async def _delete_search_index(db) -> None:
+                if not Storage.session_search_available():
+                    return
+                await delete_session_documents(db, session_ids)
+
             await Storage.mutate_many(
                 delete_keys=[
                     key
@@ -958,6 +956,7 @@ class Session:
                         f"system_prompts:{session.id}:",
                     )
                 ],
+                transaction_hook=_delete_search_index,
             )
             PermissionNext.clear_session_runtime(session_ids)
 

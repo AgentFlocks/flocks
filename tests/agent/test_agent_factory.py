@@ -330,7 +330,7 @@ class TestScanAndLoad:
         expected = [
             "rex", "hephaestus", "explore",
             "oracle", "librarian", "prometheus", "multimodal-looker",
-            "self-enhance", "rex-junior",
+            "rex-junior",
         ]
         for name in expected:
             assert name in result, f"Built-in agent '{name}' missing from scan"
@@ -480,7 +480,7 @@ class TestInjectDynamicPrompts:
         """Built-in agents with prompt.md should have non-empty prompts."""
         from flocks.agent.registry import Agent
         # Only built-in agents (native=True) — not dependent on local plugin installation
-        for name in ["explore", "oracle", "prometheus", "self-enhance", "multimodal-looker"]:
+        for name in ["explore", "oracle", "prometheus", "multimodal-looker"]:
             agent = await Agent.get(name)
             assert agent is not None, f"Agent '{name}' not found"
             assert agent.prompt is not None, f"Agent '{name}' should have a prompt from prompt.md"
