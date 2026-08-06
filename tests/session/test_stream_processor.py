@@ -502,6 +502,66 @@ class TestToolInputStart:
 
 class TestToolCallExecution:
     @pytest.mark.asyncio
+    async def test_interrupted_tool_persists_and_publishes_metadata(self):
+        events = []
+
+        async def capture_event(event_type, data):
+            events.append((event_type, data))
+
+        proc = _make_processor(event_callback=capture_event)
+        state = ToolCallState(
+            id="tc_interrupted",
+            name="bash",
+            input={"command": "sleep 1"},
+            part_id="part_interrupted",
+            metadata={"title": "Long-running command"},
+        )
+        with patch(
+            "flocks.session.streaming.stream_processor.Message.store_part",
+            new=AsyncMock(),
+        ) as store_part:
+            await proc._finalize_interrupted_tool_call(
+                tool_state=state,
+                tool_name="bash",
+                tool_input=state.input,
+                tool_call_id=state.id,
+                tool_start_time=1,
+            )
+
+        stored_state = store_part.await_args.args[2].state
+        assert isinstance(stored_state, ToolStateError)
+        assert stored_state.metadata["interrupted"] is True
+        assert stored_state.metadata["title"] == "Long-running command"
+        assert events[0][1]["part"]["state"]["metadata"]["interrupted"] is True
+
+    @pytest.mark.asyncio
+    async def test_pre_execution_cancellation_emits_tool_after(self):
+        proc = _make_processor()
+        payload = {"operation": "tool.execute", "tool_execution": {}}
+
+        with (
+            patch(
+                "flocks.session.tool_execution.build_session_tool_execution_payload",
+                new=AsyncMock(return_value=payload),
+            ),
+            patch(
+                "flocks.hooks.pipeline.HookPipeline.run_tool_after",
+                new=AsyncMock(),
+            ) as tool_after,
+        ):
+            await proc._run_pre_execution_tool_after_hook(
+                tool_name="bash",
+                tool_input={"command": "pwd"},
+                tool_call_id="tc_cancelled",
+                tool_start_time=1,
+            )
+
+        tool_after.assert_awaited_once()
+        outcome = tool_after.await_args.args[0]["outcome"]
+        assert outcome["status"] == "cancelled"
+        assert outcome["error_type"] == "CancelledError"
+
+    @pytest.mark.asyncio
     async def test_sandbox_block_skips_registry_execution(self):
         proc = _make_processor()
         execute = AsyncMock()

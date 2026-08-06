@@ -728,6 +728,7 @@ class StreamProcessor:
                 )
             except Exception as exc:
                 log.debug("stream.tool_span.init_failed", {"error": str(exc)})
+        registry_execution_started = False
         try:
             sandbox_meta = await self._resolve_sandbox_meta(tool_name)
             if sandbox_meta["blocked"]:
@@ -884,6 +885,7 @@ class StreamProcessor:
                 )
                 cb = ctx._metadata_callback
                 try:
+                    registry_execution_started = True
                     result = await ToolRegistry.execute(
                         tool_name=tool_name,
                         ctx=ctx,
@@ -995,6 +997,13 @@ class StreamProcessor:
                     log.error("stream.tool_end_callback.error", {"error": str(e)})
             
         except asyncio.CancelledError:
+            if not registry_execution_started:
+                await self._run_pre_execution_tool_after_hook(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_call_id=tool_call_id,
+                    tool_start_time=tool_start_time,
+                )
             await self._finalize_interrupted_tool_call(
                 tool_state=tool_state,
                 tool_name=tool_name,
@@ -1083,6 +1092,64 @@ class StreamProcessor:
                 except Exception as e2:
                     log.error("stream.tool_end_callback.error", {"error": str(e2)})
 
+    async def _run_pre_execution_tool_after_hook(
+        self,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_call_id: str,
+        tool_start_time: int,
+    ) -> None:
+        """Emit the canonical terminal hook when cancellation precedes registry execution."""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            from flocks.session.tool_execution import build_session_tool_execution_payload
+
+            schema = ToolRegistry.get_schema(tool_name)
+            payload = await build_session_tool_execution_payload(
+                session_id=self.session_id,
+                message_id=self.assistant_message.id,
+                agent=self.agent.name,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                validated_input=tool_input,
+                tool_schema=schema.to_json_schema() if schema else {},
+                tool_context_extra={
+                    "tool_call_id": tool_call_id,
+                    "workspace_dir": self._workspace_dir,
+                    "execution_context": {
+                        "trace_id": f"{self.session_id}:{self.assistant_message.id}",
+                        "execution_id": self.assistant_message.id,
+                        "turn_id": self.assistant_message.id,
+                        "step": int(self._step_index or 0),
+                        "attempt": 1,
+                    },
+                },
+            )
+            duration_ms = max(
+                0,
+                int(datetime.now().timestamp() * 1000) - tool_start_time,
+            )
+            await HookPipeline.run_tool_after(
+                {
+                    **payload,
+                    "outcome": {
+                        "status": "cancelled",
+                        "duration_ms": duration_ms,
+                        "error_type": "CancelledError",
+                        "error_message": "Tool execution was interrupted",
+                        "result_summary": None,
+                    },
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error("stream.tool_pre_execution_after_hook.error", {
+                "tool": tool_name,
+                "error": str(exc),
+            })
+
     async def _finalize_interrupted_tool_call(
         self,
         *,
@@ -1126,6 +1193,7 @@ class StreamProcessor:
             status="error",
             input=tool_input,
             error=interrupt_msg,
+            metadata=interrupted_metadata,
             time={"start": tool_start_time, "end": tool_end_time},
         )
         error_part = ToolPart(
@@ -1158,6 +1226,7 @@ class StreamProcessor:
                                 "status": "error",
                                 "input": tool_input,
                                 "error": interrupt_msg,
+                                "metadata": interrupted_metadata,
                                 "time": {
                                     "start": tool_start_time,
                                     "end": tool_end_time,
