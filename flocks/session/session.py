@@ -9,8 +9,8 @@ import asyncio
 import contextvars
 import re
 import weakref
-from contextlib import AsyncExitStack
-from typing import Awaitable, Callable, List, Dict, Any, Optional, TypeVar
+from contextlib import AsyncExitStack, asynccontextmanager
+from typing import AsyncIterator, Awaitable, Callable, List, Dict, Any, Optional, TypeVar
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
 
@@ -23,7 +23,7 @@ from flocks.auth.context import (
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
-from flocks.session.message import Message, MessageInfo, AssistantMessageInfo
+from flocks.session.message import Message, MessageInfo, MessageRole, AssistantMessageInfo
 
 # Sentinel for explicitly setting a field to None via Session.update()
 _UNSET = object()
@@ -175,6 +175,7 @@ class Session:
     )
     _lifecycle_transition_ids: set[str] = set()
     _lifecycle_generations: Dict[str, int] = {}
+    _active_operation_counts: Dict[str, int] = {}
 
     @staticmethod
     def _sort_sessions(sessions: List[SessionInfo]) -> List[SessionInfo]:
@@ -246,6 +247,36 @@ class Session:
         return lock
 
     @classmethod
+    def has_active_operations(cls, session_id: str) -> bool:
+        """Return whether a synchronous operation currently owns this session."""
+
+        return cls._active_operation_counts.get(session_id, 0) > 0
+
+    @classmethod
+    @asynccontextmanager
+    async def active_operation(cls, session_id: str) -> AsyncIterator[SessionInfo]:
+        """Prevent lifecycle transitions while a synchronous operation is running."""
+
+        async with cls.lifecycle_lock(session_id):
+            session = await cls.get_by_id_unfiltered(session_id)
+            if session is None:
+                raise SessionNotFoundError(f"Session {session_id} not found")
+            if session.status != "active" or cls.is_lifecycle_transitioning(session_id):
+                raise SessionInactiveError(f"Session {session_id} is not active")
+            cls._active_operation_counts[session_id] = (
+                cls._active_operation_counts.get(session_id, 0) + 1
+            )
+
+        try:
+            yield session
+        finally:
+            remaining = cls._active_operation_counts.get(session_id, 0) - 1
+            if remaining > 0:
+                cls._active_operation_counts[session_id] = remaining
+            else:
+                cls._active_operation_counts.pop(session_id, None)
+
+    @classmethod
     async def get_by_id_unfiltered(cls, session_id: str) -> Optional[SessionInfo]:
         """Get a session by ID without applying the ambient auth policy."""
 
@@ -280,6 +311,25 @@ class Session:
             ):
                 raise SessionInactiveError(f"Session {session_id} is not active")
             return await operation()
+
+    @classmethod
+    async def _clear_project_move_metadata_locked(cls, session_id: str) -> bool:
+        """Remove a stale replay boundary while the session write lock is held."""
+
+        session = await cls.get_by_id_unfiltered(session_id)
+        if session is None:
+            raise SessionNotFoundError(f"Session {session_id} not found")
+        metadata = dict(getattr(session, "metadata", {}) or {})
+        if "projectMove" not in metadata:
+            return False
+
+        metadata.pop("projectMove")
+        updated_session = session.model_copy(update={"metadata": metadata})
+        storage_key = f"session:{session.project_id}:{session.id}"
+        await Storage.set(storage_key, updated_session, "session")
+        cls._id_index[session.id] = storage_key
+        cls._sync_list_cache(updated_session)
+        return True
 
     @staticmethod
     def has_pinned_model(session: Optional[SessionInfo]) -> bool:
@@ -728,6 +778,111 @@ class Session:
         })
         
         return updated_session
+
+    @classmethod
+    async def move_to_project(
+        cls,
+        source_project_id: str,
+        session_id: str,
+        *,
+        target_project_id: str,
+        target_directory: str,
+        target_owner_id: Optional[str] = None,
+        additional_busy_check: Optional[Callable[[str], bool]] = None,
+    ) -> Optional[SessionInfo]:
+        """Move a complete active root session tree to another project."""
+
+        if source_project_id == target_project_id:
+            return await cls.get(source_project_id, session_id)
+
+        from flocks.project.project import Project
+
+        async with AsyncExitStack() as project_guards:
+            for project_id in sorted({source_project_id, target_project_id}):
+                await project_guards.enter_async_context(Project.lifecycle_guard(project_id))
+
+            if (
+                target_owner_id is not None
+                and Project.registry_state(target_project_id, owner_id=target_owner_id) != "active"
+            ):
+                return None
+
+            sessions = await cls._begin_lifecycle_transition(
+                source_project_id,
+                session_id,
+                require_root=True,
+            )
+            if not sessions:
+                return None
+
+            try:
+                if any(session.status != "active" for session in sessions):
+                    return None
+                if any(session.revert is not None for session in sessions):
+                    return None
+
+                from flocks.session.session_loop import SessionLoop
+
+                if any(
+                    SessionLoop.is_running(session.id)
+                    or (
+                        additional_busy_check is not None
+                        and additional_busy_check(session.id)
+                    )
+                    for session in sessions
+                ):
+                    return None
+
+                updated_at = int(datetime.now().timestamp() * 1000)
+                move_boundaries: Dict[str, Optional[str]] = {}
+                for session in sessions:
+                    messages = await Message.list(session.id, include_archived=True)
+                    move_boundaries[session.id] = messages[-1].id if messages else None
+
+                moved_sessions = [
+                    session.model_copy(update={
+                        "project_id": target_project_id,
+                        "directory": target_directory,
+                        "metadata": {
+                            **(
+                                session.metadata
+                                if isinstance(session.metadata, dict)
+                                else {}
+                            ),
+                            "projectMove": {
+                                "sourceProjectID": source_project_id,
+                                "targetProjectID": target_project_id,
+                                "boundaryMessageID": move_boundaries[session.id],
+                                "movedAt": updated_at,
+                            },
+                        },
+                        "time": session.time.model_copy(update={"updated": updated_at}),
+                    })
+                    for session in sessions
+                ]
+                await Storage.mutate_many(
+                    set_entries=[
+                        (f"session:{target_project_id}:{session.id}", session, "session")
+                        for session in moved_sessions
+                    ],
+                    delete_keys=[
+                        f"session:{source_project_id}:{session.id}"
+                        for session in sessions
+                    ],
+                )
+                for session in moved_sessions:
+                    cls._id_index[session.id] = f"session:{target_project_id}:{session.id}"
+                    cls._sync_list_cache(session)
+
+                log.info("session.project_moved", {
+                    "id": session_id,
+                    "source_project_id": source_project_id,
+                    "target_project_id": target_project_id,
+                    "affected_sessions": len(moved_sessions),
+                })
+                return moved_sessions[0]
+            finally:
+                await cls._end_lifecycle_transition(sessions)
     
     @classmethod
     async def delete(cls, project_id: str, session_id: str) -> bool:
@@ -769,8 +924,15 @@ class Session:
             session_ids = [session.id for session in sessions]
 
             from flocks.permission.next import PermissionNext
+            from flocks.storage.session_search import delete_session_documents
 
             permission_keys = await PermissionNext.deletion_storage_keys(session_ids)
+
+            async def _delete_search_index(db) -> None:
+                if not Storage.session_search_available():
+                    return
+                await delete_session_documents(db, session_ids)
+
             await Storage.mutate_many(
                 delete_keys=[
                     key
@@ -794,6 +956,7 @@ class Session:
                         f"system_prompts:{session.id}:",
                     )
                 ],
+                transaction_hook=_delete_search_index,
             )
             PermissionNext.clear_session_runtime(session_ids)
 
@@ -1009,7 +1172,6 @@ class Session:
                     "status": "archived",
                     "time": session.time.model_copy(update={
                         "archived": session.time.archived or archived_ts,
-                        "updated": archived_ts,
                     }),
                 }))
 
@@ -1092,13 +1254,11 @@ class Session:
         if not sessions:
             return False
         try:
-            restored_ts = int(datetime.now().timestamp() * 1000)
             changed = [
                 session.model_copy(update={
                     "status": "active",
                     "time": session.time.model_copy(update={
                         "archived": None,
-                        "updated": restored_ts,
                     }),
                 })
                 for session in sessions
@@ -1239,7 +1399,11 @@ class Session:
                 # acquired. Re-read under all known keyed locks before claiming.
                 sessions = await cls.collect_tree(project_id, session_id)
                 ids = {session.id for session in sessions}
-                if not sessions or ids & cls._lifecycle_transition_ids:
+                if (
+                    not sessions
+                    or ids & cls._lifecycle_transition_ids
+                    or any(cls.has_active_operations(item_id) for item_id in ids)
+                ):
                     return []
                 cls._lifecycle_transition_ids.update(ids)
                 for item_id in ids:
@@ -1284,70 +1448,92 @@ class Session:
         Returns:
             New forked session
         """
-        # Get original session
-        original = await cls.get(project_id, session_id)
-        if not original:
-            raise ValueError(f"Session {session_id} not found")
-        
-        # Create new session with parent_id set
-        new_session = await cls.create(
-            project_id=project_id,
-            directory=original.directory,
-        )
-        
-        # Update parent_id after creation
-        new_session = await cls.update(
-            project_id=project_id,
-            session_id=new_session.id,
-            parent_id=session_id,
-        )
-        
-        # Copy messages with all parts (include archived so fork preserves full history)
-        messages = await Message.list(session_id, include_archived=True)
-        id_map: Dict[str, str] = {}
-        
-        for msg in messages:
-            if message_id and msg.id >= message_id:
-                break
-            
-            new_id = Identifier.ascending("message")
-            id_map[msg.id] = new_id
-            
-            # Get text content for the initial message creation
-            content = await Message.get_text_content(msg)
-            parent_ref = None
-            if isinstance(msg, AssistantMessageInfo):
-                parent_ref = id_map.get(msg.parentID)
-            
-            # Create the message (this also creates an initial TextPart)
-            await Message.create(
-                session_id=new_session.id,
-                role=msg.role,
-                content=content,
-                id=new_id,
-                parentID=parent_ref or "",
+        from flocks.project.project import Project
+
+        # Keep the parent, new child, and copied history in one project-lifecycle
+        # interval. A concurrent move can only happen before or after the fork.
+        async with Project.lifecycle_guard(project_id):
+            original = await cls.get(project_id, session_id)
+            if not original:
+                raise ValueError(f"Session {session_id} not found")
+
+            messages = await Message.list(session_id, include_archived=True)
+            messages_to_copy: List[MessageInfo] = []
+            for msg in messages:
+                if message_id and msg.id >= message_id:
+                    break
+                messages_to_copy.append(msg)
+            id_map = {
+                msg.id: Identifier.ascending("message")
+                for msg in messages_to_copy
+            }
+
+            fork_move_metadata: Optional[Dict[str, Any]] = None
+            move_metadata = original.metadata.get("projectMove")
+            if isinstance(move_metadata, dict) and move_metadata.get("boundaryMessageID"):
+                original_boundary = move_metadata["boundaryMessageID"]
+                mapped_boundary = id_map.get(original_boundary)
+                if mapped_boundary is None and messages_to_copy:
+                    # A fork ending before the move boundary contains only unsafe
+                    # imported history, so protect the complete copied prefix.
+                    mapped_boundary = id_map[messages_to_copy[-1].id]
+                if mapped_boundary is not None:
+                    fork_move_metadata = {
+                        **move_metadata,
+                        "boundaryMessageID": mapped_boundary,
+                    }
+
+            metadata = (
+                {"projectMove": fork_move_metadata}
+                if fork_move_metadata is not None
+                else None
             )
-            
-            # Copy non-text parts (tool calls, files, patches, etc.)
-            original_parts = await Message.parts(msg.id, session_id)
-            for part in original_parts:
-                if part.type == "text":
-                    continue  # Already created by Message.create above
-                # Clone part with updated session/message IDs
-                part_data = part.model_dump()
-                part_data["id"] = Identifier.ascending("part")
-                part_data["sessionID"] = new_session.id
-                part_data["messageID"] = new_id
-                cloned_part = Message.deserialize_part(part_data)
-                await Message.store_part(new_session.id, new_id, cloned_part)
-        
-        log.info("session.forked", {
-            "from": session_id,
-            "to": new_session.id,
-            "messages": len(id_map),
-        })
-        
-        return new_session
+            new_session = await cls.create(
+                project_id=project_id,
+                directory=original.directory,
+                parent_id=session_id,
+                **({"metadata": metadata} if metadata is not None else {}),
+            )
+
+            # Copy messages with all parts (include archived so fork preserves full history)
+            for msg in messages_to_copy:
+                new_id = id_map[msg.id]
+
+                # Get text content for the initial message creation
+                content = await Message.get_text_content(msg)
+                parent_ref = None
+                if isinstance(msg, AssistantMessageInfo):
+                    parent_ref = id_map.get(msg.parentID)
+
+                # Create the message (this also creates an initial TextPart)
+                await Message.create(
+                    session_id=new_session.id,
+                    role=MessageRole(msg.role),
+                    content=content,
+                    id=new_id,
+                    parentID=parent_ref or "",
+                )
+
+                # Copy non-text parts (tool calls, files, patches, etc.)
+                original_parts = await Message.parts(msg.id, session_id)
+                for part in original_parts:
+                    if part.type == "text":
+                        continue  # Already created by Message.create above
+                    # Clone part with updated session/message IDs
+                    part_data = part.model_dump()
+                    part_data["id"] = Identifier.ascending("part")
+                    part_data["sessionID"] = new_session.id
+                    part_data["messageID"] = new_id
+                    cloned_part = Message.deserialize_part(part_data)
+                    await Message.store_part(new_session.id, new_id, cloned_part)
+
+            log.info("session.forked", {
+                "from": session_id,
+                "to": new_session.id,
+                "messages": len(id_map),
+            })
+
+            return new_session
     
     @classmethod
     async def set_revert(

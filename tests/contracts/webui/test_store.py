@@ -50,6 +50,7 @@ def _write_workspace(
     workspace_id: str,
     title: str,
     order: int = 100,
+    version: str | None = None,
     default_page_id: str | None = None,
     sections: list[dict] | None = None,
 ) -> None:
@@ -63,6 +64,8 @@ def _write_workspace(
         "enabled": True,
         "placement": "sceneWorkspace",
     }
+    if version is not None:
+        payload["version"] = version
     if default_page_id is not None:
         payload["defaultPageId"] = default_page_id
     if sections is not None:
@@ -174,6 +177,7 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
         "scene_workspace",
         "场景工作区",
         order=5,
+        version="2.3.4",
         default_page_id="ops-overview",
         sections=[
             {
@@ -193,6 +197,7 @@ def test_list_workspaces_returns_grouped_pages(tmp_path):
     workspaces = store.list_workspaces()
 
     assert [workspace.id for workspace in workspaces] == ["scene_workspace"]
+    assert workspaces[0].version == "2.3.4"
     assert workspaces[0].title == "场景工作区"
     assert workspaces[0].route == "/contracts/webui/workspaces/scene_workspace"
     assert workspaces[0].placement == "sceneWorkspace"

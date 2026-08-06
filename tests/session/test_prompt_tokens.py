@@ -493,3 +493,33 @@ class TestEstimateFullContextTokens:
             "ses_x", messages,
         )
         assert result == 100
+
+    @pytest.mark.asyncio
+    async def test_ignored_text_part_is_not_counted(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session import message as message_mod
+
+        async def _ignored_parts(message_id, session_id):  # noqa: ARG001
+            return [
+                SimpleNamespace(
+                    type="text",
+                    text="Available Tools\n" + ("x" * 400),
+                    ignored=True,
+                ),
+            ]
+
+        monkeypatch.setattr(
+            message_mod.Message,
+            "parts",
+            staticmethod(_ignored_parts),
+        )
+        messages = [{"id": "ignored-command-output", "content": ""}]
+
+        result = await SessionPrompt.estimate_full_context_tokens(
+            "ses_x",
+            messages,
+        )
+
+        assert result == 0

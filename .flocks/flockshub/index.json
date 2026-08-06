@@ -14640,7 +14640,7 @@
       "name": "SOC Workspace WebUI",
       "description": "SOC workspace pages for posture, overview, and alert investigation.",
       "descriptionCn": "SOC 工作区页面，包含态势、SOC 总览和告警调查。",
-      "version": "1.0.0",
+      "version": "1.1.5",
       "category": "workflow-automation",
       "tags": [
         "siem",
@@ -14708,7 +14708,7 @@
       "nameCn": "HTTP研判工作流",
       "description": "Downstream alert triage workflow that writes triage results to SOC DB by default with optional JSONL output.",
       "descriptionCn": "下游告警研判工作流，默认写入 SOC DB，并保留 JSONL 输出配置。",
-      "version": "1.0.0",
+      "version": "1.1.1",
       "category": "workflow-automation",
       "tags": [
         "siem",

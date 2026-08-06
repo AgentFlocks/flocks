@@ -1678,8 +1678,11 @@ class SessionRunner:
                         and not result.content and not result.tool_calls):
                     empty_attempt += 1
                     unsafe_auto_replay = (
-                        self._defer_step_errors
-                        and not self._attempt_state.replay_safe
+                        self._attempt_state.tool_execution_started
+                        or (
+                            self._defer_step_errors
+                            and not self._attempt_state.replay_safe
+                        )
                     )
                     if empty_attempt <= MAX_EMPTY_RETRIES and not unsafe_auto_replay:
                         # Record usage for this empty attempt even though we are
@@ -1821,7 +1824,15 @@ class SessionRunner:
                         )
                 else:
                     will_retry = retry_message is not None and error_attempt <= retry_limit
-                if self._defer_step_errors and not self._attempt_state.replay_safe:
+                retry_blocked_by_tool_execution = (
+                    self._attempt_state.tool_execution_started
+                )
+                if retry_blocked_by_tool_execution:
+                    # A tool may already have changed external state. Replaying
+                    # the provider request can emit the same call again with a
+                    # new call id, so no retry mode is safe past this boundary.
+                    will_retry = False
+                elif self._defer_step_errors and not self._attempt_state.replay_safe:
                     # Retrying after text/reasoning/tool activity can duplicate
                     # visible output or execute a tool twice.
                     will_retry = False
@@ -1861,7 +1872,13 @@ class SessionRunner:
                     continue
                 else:
                     # Error is not retryable, or retry budget exhausted
-                    if retry_message is not None:
+                    if retry_blocked_by_tool_execution:
+                        log.error("runner.step.retry_suppressed", {
+                            **error_log_context,
+                            "attempt": error_attempt,
+                            "reason": "tool_execution_started",
+                        })
+                    elif retry_message is not None:
                         log.error("runner.step.max_retries_exceeded", {
                             **error_log_context,
                             "attempt": error_attempt,
@@ -2852,6 +2869,8 @@ class SessionRunner:
                     
                     # Text parts
                     if part.type == "text" and hasattr(part, 'text'):
+                        if getattr(part, "ignored", False):
+                            continue
                         assistant_content_parts.append(part.text)
                     elif part.type == "reasoning" and hasattr(part, 'text'):
                         assistant_reasoning_parts.append(part.text)
@@ -3480,7 +3499,16 @@ class SessionRunner:
                     chunk_counts["tool"] += 1
                     for tc in chunk_tool_calls:
                         await tool_accumulator.feed_chunk(tc)
+        except asyncio.CancelledError:
+            # Foreground delegate tasks own child sessions. Let their
+            # cancellation/finalization finish before unwinding this step.
+            await processor.drain_parallel_tool_calls()
+            raise
         except Exception as exc:
+            # A foreground delegate may already be running when the provider
+            # stream fails. Drain first so the retry layer observes the tool
+            # side-effect fence and cannot dispatch the same work twice.
+            await processor.drain_parallel_tool_calls()
             partial_response = _build_llm_response_payload(
                 content=processor.get_text_content(),
                 reasoning=processor.get_reasoning_content(),

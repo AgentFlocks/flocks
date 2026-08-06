@@ -49,7 +49,9 @@ def test_ensure_config_files_creates_from_examples(tmp_path, monkeypatch):
     # Existing example content is preserved and Memory defaults are persisted.
     config_data = json.loads(config_file.read_text(encoding="utf-8"))
     assert config_data["test"] == "config"
-    assert set(config_data["memory"]) == {"dream"}
+    assert set(config_data["memory"]) == {"dream", "search"}
+    assert config_data["memory"]["search"]["embedding"]["provider"] == "auto"
+    assert config_data["memory"]["search"]["embedding"]["enabled"] is False
     assert config_data["memory"]["dream"]["enabled"] is True
     assert set(config_data["memory"]["dream"]) == {
         "enabled",
@@ -94,7 +96,7 @@ def test_ensure_config_files_skips_if_exists(tmp_path, monkeypatch):
     # Existing fields are preserved while the missing Memory config is added.
     config_data = json.loads(config_file.read_text(encoding="utf-8"))
     assert config_data["test"] == "existing"
-    assert set(config_data["memory"]) == {"dream"}
+    assert set(config_data["memory"]) == {"dream", "search"}
     assert mcp_file.read_text() == '{"test": "mcp-existing"}'
 
 
@@ -150,7 +152,7 @@ def test_ensure_memory_config_is_written_to_flocks_json(
     Config._cached_config = None
     assert ConfigWriter.ensure_memory_config() is True
     memory_config = json.loads(flocks_json.read_text(encoding="utf-8"))["memory"]
-    assert set(memory_config) == {"dream"}
+    assert set(memory_config) == {"dream", "search"}
     assert flocks_jsonc.read_text(encoding="utf-8") == '{"test": "jsonc"}'
 
 

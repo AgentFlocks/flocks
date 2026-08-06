@@ -26,6 +26,7 @@ import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import EmptyState from '@/components/common/EmptyState';
+import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import client from '@/api/client';
 
@@ -765,20 +766,6 @@ function Section({
 // Channel Card (left panel)
 // ============================================================================
 
-const CHANNEL_ICON_SRC: Record<string, string> = {
-  feishu: '/channel-feishu.png',
-  wecom: '/channel-wecom.png',
-  telegram: '/channel-telegram.png',
-  email: '/channel-email.png',
-  whatsapp: '/channel-whatsapp.png',
-  slack: '/channel-slack.png',
-};
-
-const CHANNEL_MASK_ICON: Record<string, { src: string; color: string }> = {
-  dingtalk: { src: '/channel-dingtalk-transparent.png', color: '#1677ff' },
-  weixin: { src: '/channel-weixin-transparent.png', color: '#07c160' },
-};
-
 const FEISHU_GUIDE_PDF_URL = '/feishu-bot-guide.pdf';
 const FEISHU_GUIDE_PDF_FILENAME = 'feishu-bot-guide.pdf';
 const WECOM_GUIDE_PDF_URL = '/wecom-bot-guide.pdf';
@@ -786,41 +773,6 @@ const WECOM_GUIDE_PDF_FILENAME = 'wecom-bot-guide.pdf';
 const DINGTALK_GUIDE_PDF_URL = '/dingtalk-channel-guide.pdf';
 const DINGTALK_GUIDE_PDF_FILENAME = 'dingtalk-channel-guide.pdf';
 const SLACK_APPS_URL = 'https://api.slack.com/apps';
-
-function getChannelIcon(id: string, size: 'sm' | 'md' = 'sm') {
-  const dim = size === 'md' ? 'w-10 h-10' : 'w-9 h-9';
-  const imgDim = size === 'md' ? 'w-7 h-7' : 'w-6 h-6';
-  const src = CHANNEL_ICON_SRC[id];
-  const maskIcon = CHANNEL_MASK_ICON[id];
-  return src || maskIcon ? (
-    <div className={`${dim} rounded-xl bg-white border border-gray-100 shadow-sm flex items-center justify-center flex-shrink-0`}>
-      {maskIcon ? (
-        <span
-          role="img"
-          aria-label={id}
-          className={`${imgDim} block`}
-          style={{
-            backgroundColor: maskIcon.color,
-            WebkitMaskImage: `url(${maskIcon.src})`,
-            maskImage: `url(${maskIcon.src})`,
-            WebkitMaskPosition: 'center',
-            maskPosition: 'center',
-            WebkitMaskRepeat: 'no-repeat',
-            maskRepeat: 'no-repeat',
-            WebkitMaskSize: 'contain',
-            maskSize: 'contain',
-          }}
-        />
-      ) : (
-        <img src={src} alt={id} className={`${imgDim} object-contain`} />
-      )}
-    </div>
-  ) : (
-    <div className={`${dim} rounded-xl bg-gray-100 flex items-center justify-center flex-shrink-0`}>
-      <MessageSquare className="w-5 h-5 text-gray-400" />
-    </div>
-  );
-}
 
 function GuideDownloadButton({
   href,
@@ -1072,7 +1024,7 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
           : 'border-gray-200 bg-white hover:border-gray-300 hover:bg-gray-50'
       }`}
     >
-      {getChannelIcon(meta.id)}
+      <ChannelIcon channelId={meta.id} />
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-1.5">
           <span className={`text-sm font-medium ${isSelected ? 'text-red-700' : 'text-gray-800'}`}>
@@ -2905,7 +2857,7 @@ function DetailHeader({
 
   return (
     <div className="px-6 py-4 border-b border-gray-200 flex items-center gap-4">
-      <div className="flex-shrink-0">{getChannelIcon(meta.id, 'md')}</div>
+      <div className="flex-shrink-0"><ChannelIcon channelId={meta.id} size="md" /></div>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold text-gray-900">{t(`channelName.${meta.id}`, { defaultValue: meta.label })}</h2>

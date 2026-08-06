@@ -28,6 +28,7 @@ from flocks.memory.types import (
 from flocks.memory.config import (
     MemoryConfig,
     MemoryEmbeddingConfig,
+    MemorySearchConfig,
     MemoryChunkingConfig,
     MemorySyncConfig,
     MemoryQueryConfig,
@@ -69,6 +70,7 @@ __all__ = [
     # Config
     "MemoryConfig",
     "MemoryEmbeddingConfig",
+    "MemorySearchConfig",
     "MemoryChunkingConfig",
     "MemorySyncConfig",
     "MemoryQueryConfig",

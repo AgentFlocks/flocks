@@ -16,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 from pydantic import BaseModel
 
 from flocks.project.instance import Instance
+from flocks.storage import session_search as session_search_module
 from flocks.storage.storage import Storage
 from flocks.task.store import TaskStore
 from flocks.workflow.store import WorkflowStore
@@ -26,6 +27,49 @@ class StorageTestModel(BaseModel):
     id: str
     name: str
     value: int
+
+
+@pytest.mark.asyncio
+async def test_storage_init_continues_when_session_fts_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        session_search_module,
+        "ensure_session_search_tables",
+        AsyncMock(return_value=False),
+    )
+
+    with patch.object(Storage, "_initialized", False), patch.object(
+        Storage,
+        "_db_path",
+        None,
+    ), patch.object(Storage, "_session_search_available", True):
+        await Storage.init(tmp_path / "fts-unavailable.db")
+
+        assert Storage._initialized
+        assert not Storage.session_search_available()
+
+
+@pytest.mark.asyncio
+async def test_storage_init_propagates_unexpected_session_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = RuntimeError("unexpected schema failure")
+    monkeypatch.setattr(
+        session_search_module,
+        "ensure_session_search_tables",
+        AsyncMock(side_effect=failure),
+    )
+
+    with patch.object(Storage, "_initialized", False), patch.object(
+        Storage,
+        "_db_path",
+        None,
+    ), patch.object(Storage, "_session_search_available", True):
+        with pytest.raises(RuntimeError, match="unexpected schema failure"):
+            await Storage.init(tmp_path / "broken-session-schema.db")
 
 
 def _require_sqlite_recover() -> None:

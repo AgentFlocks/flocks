@@ -133,9 +133,49 @@ RESULT_LABELS = {
     "attack_success": "攻击成功",
     "attack": "攻击行为",
     "attack_failed": "攻击失败",
-    "benign": "良性",
+    "non_attack": "非攻击",
     "unknown": "待确认",
 }
+
+
+def _triage_outcome_key(record):
+    verdict = _triage_attack_verdict_value(record)
+    result = _triage_attack_success_value(record)
+    if verdict == "attack":
+        if result == "success":
+            return "attack_success"
+        if result == "failed":
+            return "attack_failed"
+        return "attack"
+    if verdict == "non_attack":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_verdict_value(record):
+    verdict = _norm(record.get("triage_attack_verdict") or "unknown")
+    if verdict in {"attack", "non_attack", "unknown"}:
+        return verdict
+    if verdict in {"attack_success", "attack_failed"}:
+        return "attack"
+    if verdict == "benign":
+        return "non_attack"
+    return "unknown"
+
+
+def _triage_attack_success_value(record):
+    raw_verdict = _norm(record.get("triage_attack_verdict") or "unknown")
+    verdict = _triage_attack_verdict_value(record)
+    result = _norm(record.get("triage_attack_success") or "unknown")
+    if verdict == "attack" and result in {"success", "failed", "unknown"}:
+        return result
+    if verdict != "attack":
+        return "unknown"
+    if raw_verdict == "attack_success" or record.get("triage_attack_success") is True:
+        return "success"
+    if raw_verdict == "attack_failed":
+        return "failed"
+    return "unknown"
 
 
 def get_stats(ctx, request):
@@ -226,7 +266,7 @@ def get_stats(ctx, request):
             {"key": "attack_success", "label": "攻击成功", "value": triage["attackSuccess"], "color": "#ff4d6d"},
             {"key": "attack", "label": "攻击行为", "value": triage["attack"], "color": "#ffb020"},
             {"key": "attack_failed", "label": "攻击失败", "value": triage["attackFailed"], "color": "#2ee6a6"},
-            {"key": "benign", "label": "良性", "value": triage["benign"], "color": "#58a6ff"},
+            {"key": "non_attack", "label": "非攻击", "value": triage["benign"], "color": "#58a6ff"},
             {"key": "unknown", "label": "未知", "value": triage["unknown"], "color": "#9b8cff"},
         ],
         "topThreats": _counter_items(triage["threatCounter"] or denoise["threatCounter"], 14),
@@ -271,8 +311,8 @@ def _simulate_triage_from_denoise(paths):
             if verdict in {"attack_success", "attack", "attack_failed"}:
                 file_attack += 1
             source_counter[_norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
-            risk_counter[_norm(obj.get("threat_level") or obj.get("threat_severity") or obj.get("risk_level"))] += 1
+            threat_counter[_norm(obj.get("threat_name"))] += 1
+            risk_counter[_norm(obj.get("risk_level"))] += 1
             _update_profile_counters(obj, profile_counters)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
         series_total.append(file_total)
@@ -627,7 +667,7 @@ def _read_denoise(paths, workflow_call_count: int = 0):
             if obj.get("is_duplicate") is True:
                 file_duplicates += 1
             source_counter[_norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
+            threat_counter[_norm(obj.get("threat_name"))] += 1
             _update_profile_counters(obj, profile_counters)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
         total_raw += file_raw
@@ -676,7 +716,6 @@ def _read_triage(paths):
     fallback_cache = 0
     fallback_failed = 0
     fallback_followers = 0
-    extra_success = 0
     series_total = []
     series_attack = []
 
@@ -701,20 +740,17 @@ def _read_triage(paths):
 
             total_records += 1
             file_total += 1
-            verdict = _norm(obj.get("attack_verdict") or "unknown")
-            if verdict not in {"attack_success", "attack", "attack_failed", "benign", "unknown"}:
-                verdict = "unknown"
-            verdict_counter[verdict] += 1
-            if obj.get("attack_success") is True and verdict != "attack_success":
-                extra_success += 1
-            if verdict in {"attack_success", "attack", "attack_failed"}:
+            verdict = _triage_attack_verdict_value(obj)
+            outcome = _triage_outcome_key(obj)
+            verdict_counter[outcome] += 1
+            if verdict == "attack":
                 file_attack += 1
 
             source = _norm(obj.get("_source_type") or obj.get("source_type") or obj.get("device_type"))
             source_counter[source] += 1
-            threat_counter[_norm(obj.get("_threat_type") or obj.get("threat_name") or obj.get("threat_type"))] += 1
-            risk_counter[_norm(obj.get("risk_level") or obj.get("threat_level") or obj.get("threat_severity"))] += 1
-            _update_profile_counters(obj, profile_counters)
+            threat_counter[_norm(obj.get("threat_name"))] += 1
+            risk_counter[_norm(obj.get("risk_level"))] += 1
+            _update_profile_counters(obj, profile_counters, triage_result=True)
             event_start, event_end = _merge_record_time(event_start, event_end, obj)
             triage_source = _norm(obj.get("triage_source"))
             triage_status = _norm(obj.get("triage_status"))
@@ -741,11 +777,11 @@ def _read_triage(paths):
     triage_failed = fallback_failed
     followers_reused = fallback_followers
 
-    attack_success = verdict_counter["attack_success"] + extra_success
+    attack_success = verdict_counter["attack_success"]
     attack = verdict_counter["attack"]
     attack_failed = verdict_counter["attack_failed"]
     attack_total = attack_success + attack + attack_failed
-    benign = verdict_counter["benign"]
+    benign = verdict_counter["non_attack"]
     unknown = verdict_counter["unknown"]
 
     series_total = _expand_series(series_total, total_records, seed=23)
@@ -795,12 +831,17 @@ def _new_profile_counters():
     }
 
 
-def _update_profile_counters(obj, counters):
+def _update_profile_counters(obj, counters, *, triage_result=False):
     counters["phaseCounter"][_norm(obj.get("threat_phase") or obj.get("attack_phase") or obj.get("kill_chain_phase"))] += 1
     counters["directionCounter"][_norm(obj.get("direction") or obj.get("traffic_direction"))] += 1
-    counters["resultCounter"][_norm(obj.get("threat_result") or obj.get("attack_verdict"))] += 1
+    result = (
+        _triage_attack_success_value(obj)
+        if triage_result
+        else obj.get("threat_result") or obj.get("attack_verdict")
+    )
+    counters["resultCounter"][_norm(result)] += 1
     counters["protocolCounter"][_norm(obj.get("net_type") or obj.get("net_app_proto") or obj.get("protocol"))] += 1
-    counters["severityCounter"][_norm(obj.get("threat_severity") or obj.get("threat_level") or obj.get("risk_level"))] += 1
+    counters["severityCounter"][_norm(obj.get("threat_severity"))] += 1
     counters["responseCounter"][_norm(obj.get("rsp_status_code") or obj.get("status_code"))] += 1
 
     port_value = obj.get("dport") or obj.get("dst_port") or obj.get("destination_port")
@@ -892,7 +933,7 @@ def _build_field_stats(paths):
             status_code = _field_text(obj.get("rsp_status_code"))
             direction = _norm(obj.get("direction") or "unknown")
             protocol = _norm(obj.get("net_type") or obj.get("net_app_proto") or "unknown")
-            threat_type = _norm(obj.get("threat_type") or obj.get("_threat_type") or obj.get("threat_name"))
+            threat_type = _norm(obj.get("_threat_type") or obj.get("threat_type"))
             threat_result = _norm(obj.get("threat_result") or "unknown")
             threat_phase = _norm(obj.get("threat_phase") or "unknown")
 

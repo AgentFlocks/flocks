@@ -650,11 +650,8 @@ class TestFeishuNativeCommands:
         assert create_kwargs["title"] == "[Feishu] oc_group"
         assert "session_new" in delivered[0]
         assert "已开始全新对话。" in delivered[0]
-        # The previous session must be archived so it no longer appears in the
-        # active IM session list used for scheduled-task target resolution.
-        update_mock.assert_awaited_once()
-        assert update_mock.await_args.args == ("channel", "session_old")
-        assert update_mock.await_args.kwargs["status"] == "archived"
+        # Starting a new conversation must not archive the previous session.
+        update_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_new_command_inherits_auto_model_mode(self, monkeypatch):
@@ -811,10 +808,10 @@ class TestFeishuNativeCommands:
                 )
             ),
         )
-        monkeypatch.setattr(
-            "flocks.session.session.Session.create",
-            AsyncMock(return_value=SimpleNamespace(id="session_new", agent="rex")),
+        create_mock = AsyncMock(
+            return_value=SimpleNamespace(id="session_new", agent="rex")
         )
+        monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
         monkeypatch.setattr(
             "flocks.session.session.Session.update",
             AsyncMock(return_value=None),
@@ -834,6 +831,7 @@ class TestFeishuNativeCommands:
 
         assert handled is True
         assert "已开始全新对话。" in delivered[0]
+        assert create_mock.await_args.kwargs["title"] == "[Slack] 叫我uuuu"
         append_mock.assert_awaited_once()
         assert append_mock.await_args.args[:3] == ("session_new", "叫我uuuu", msg)
         assert append_mock.await_args.kwargs["agent"] == "rex"
@@ -1917,30 +1915,29 @@ class TestDownloadChannelMediaRouting:
 
 
 # ------------------------------------------------------------------
-# _is_placeholder_text
+# is_channel_media_placeholder
 # ------------------------------------------------------------------
 
-class TestIsPlaceholderText:
+class TestIsChannelMediaPlaceholder:
     def test_recognises_channel_placeholders(self):
-        from flocks.channel.inbound.dispatcher import _is_placeholder_text
-        assert _is_placeholder_text("[图片消息]") is True
-        assert _is_placeholder_text("[图片消息: screenshot.png]") is True
-        assert _is_placeholder_text("[文件消息]") is True
-        assert _is_placeholder_text("[文件消息: report.pdf]") is True
-        assert _is_placeholder_text("[Image]") is True
-        assert _is_placeholder_text("[Attachment]") is True
-        assert _is_placeholder_text("[图片]") is True
-        assert _is_placeholder_text("[文件]") is True
+        from flocks.channel.inbound.session_binding import is_channel_media_placeholder
+        assert is_channel_media_placeholder("[图片消息]") is True
+        assert is_channel_media_placeholder("[图片消息: screenshot.png]") is True
+        assert is_channel_media_placeholder("[文件消息]") is True
+        assert is_channel_media_placeholder("[文件消息: report.pdf]") is True
+        assert is_channel_media_placeholder("[Image]") is True
+        assert is_channel_media_placeholder("[Attachment]") is True
+        assert is_channel_media_placeholder("[图片]") is True
+        assert is_channel_media_placeholder("[文件]") is True
 
     def test_does_not_match_normal_text(self):
-        from flocks.channel.inbound.dispatcher import _is_placeholder_text
-        assert _is_placeholder_text("hello") is False
-        assert _is_placeholder_text("看这个") is False
-        assert _is_placeholder_text("") is False
-        # Suffix beyond the placeholder is fine — the text starts with a
-        # placeholder token, so the dispatcher will still rewrite it.
-        assert _is_placeholder_text("[文件消息: x] extra text") is True
-        assert _is_placeholder_text("not a placeholder [文件消息: x]") is False
+        from flocks.channel.inbound.session_binding import is_channel_media_placeholder
+        assert is_channel_media_placeholder("hello") is False
+        assert is_channel_media_placeholder("看这个") is False
+        assert is_channel_media_placeholder("") is False
+        assert is_channel_media_placeholder("[文件消息: x] extra text") is False
+        assert is_channel_media_placeholder("[图片]\n请分析") is False
+        assert is_channel_media_placeholder("not a placeholder [文件消息: x]") is False
 
 
 # ------------------------------------------------------------------
@@ -1948,6 +1945,61 @@ class TestIsPlaceholderText:
 # ------------------------------------------------------------------
 
 class TestAppendUserMessagePerChannel:
+    @pytest.mark.asyncio
+    async def test_captioned_media_text_is_not_replaced(self, monkeypatch):
+        from flocks.channel.inbound.dispatcher import InboundDispatcher
+        from flocks.session.message import TextPart
+
+        created_message = SimpleNamespace(id="m1")
+        caption = "[图片]: 请识别发票金额"
+        text_part = TextPart(
+            id="part_text",
+            sessionID="s1",
+            messageID="m1",
+            text=caption,
+        )
+        store_part = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            AsyncMock(return_value=created_message),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.store_part",
+            store_part,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.parts",
+            AsyncMock(return_value=[text_part]),
+        )
+
+        import flocks.channel.builtin.telegram.inbound_media as tg_inb
+
+        async def fake_download(msg, config):
+            return SimpleNamespace(
+                filename="invoice.jpg",
+                mime="image/jpeg",
+                url="file:///tmp/invoice.jpg",
+                source={"channel": "telegram"},
+            )
+
+        monkeypatch.setattr(tg_inb, "download_inbound_media", fake_download)
+
+        await InboundDispatcher._append_user_message_unchecked(
+            "s1",
+            caption,
+            InboundMessage(
+                channel_id="telegram",
+                account_id="a",
+                message_id="m1",
+                sender_id="u",
+                media_url="telegram://photo/ABC",
+            ),
+            None,
+        )
+
+        assert store_part.await_count == 1
+        assert store_part.await_args.args[2].type == "file"
+
     @pytest.mark.asyncio
     async def test_wecom_pipeline_stores_file_part(self, monkeypatch):
         from flocks.channel.inbound.dispatcher import InboundDispatcher

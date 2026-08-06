@@ -114,6 +114,7 @@
     "pricing": "Pricing (per 1M tokens)",
     "input": "Input",
     "output": "Output",
+    "cacheRead": "Cache read",
     "currency": "Currency",
     "fillModelId": "Please fill in Model ID and Name",
     "testingConnection": "Testing connection…",

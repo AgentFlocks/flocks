@@ -583,6 +583,8 @@ class SessionPrompt:
             parts = await Message.parts(msg_id or "", session_id)
             for part in parts:
                 if part.type == "text":
+                    if getattr(part, "ignored", False):
+                        continue
                     total += cls.count_tokens(getattr(part, 'text', ''))
                 elif part.type == "tool":
                     state = getattr(part, 'state', None)

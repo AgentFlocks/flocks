@@ -12,6 +12,30 @@ from flocks.server.routes import provider as provider_routes
 
 class TestThreatBookProviderModelBootstrap:
     @pytest.mark.asyncio
+    async def test_catalog_exposes_deepseek_v4_flash_0731_metadata(self):
+        result = await provider_routes.get_provider_catalog()
+        providers = {provider["id"]: provider for provider in result["providers"]}
+
+        for provider_id in ("threatbook-cn-llm", "threatbook-io-llm"):
+            models = {
+                model["id"]: model
+                for model in providers[provider_id]["models"]
+            }
+            model = models["deepseek-v4-flash-0731"]
+            assert model["limits"] == {
+                "context_window": 1000000,
+                "max_input_tokens": 1000000,
+                "max_output_tokens": 384000,
+            }
+            assert model["pricing"] == {
+                "input": 1.0,
+                "output": 2.0,
+                "cache_read": 0.2,
+                "cache_write": None,
+                "currency": "CNY",
+            }
+
+    @pytest.mark.asyncio
     async def test_set_provider_credentials_bootstraps_kimi_k26_from_catalog(
         self, monkeypatch: pytest.MonkeyPatch
     ):

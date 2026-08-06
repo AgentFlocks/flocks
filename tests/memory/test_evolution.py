@@ -66,11 +66,13 @@ def test_memory_config_exposes_one_dream_config() -> None:
     properties = MemoryConfig.model_json_schema()["properties"]
 
     assert "dream" in properties
-    assert "embedding" in properties
+    assert "search" in properties
+    assert "embedding" not in properties
     assert "enabled" not in properties
     assert "evolution" not in properties
     assert "learning" not in properties
     config = MemoryConfig()
+    assert config.search.embedding.enabled is False
     assert config.dream.interval_hours == 24
     assert not hasattr(config.dream, "max_session_messages")
     assert not hasattr(config.dream, "max_input_chars")

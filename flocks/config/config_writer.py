@@ -144,7 +144,7 @@ class ConfigWriter:
 
     @classmethod
     def ensure_memory_config(cls) -> bool:
-        """Persist the editable Dream config when absent."""
+        """Persist editable Memory Search and Dream config when absent."""
         path = Config.get_config_file()
         try:
             text = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -169,6 +169,12 @@ class ConfigWriter:
 
         default_config = MemoryConfig()
         data["memory"] = {
+            "search": {
+                "embedding": default_config.search.embedding.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
+            },
             "dream": default_config.dream.model_dump(
                 mode="json",
                 exclude_none=True,
@@ -176,6 +182,24 @@ class ConfigWriter:
         }
         cls._write_raw(data, path=path)
         log.info("config_writer.memory_config_initialized", {"path": str(path)})
+        return True
+
+    @classmethod
+    def enable_memory_source(cls, source: str) -> bool:
+        """Persist a Memory source without rewriting unrelated config."""
+        data = cls._read_raw()
+        memory = data.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        sources = memory.get("sources")
+        if not isinstance(sources, list):
+            sources = ["memory"]
+        if source in sources:
+            return False
+        memory["sources"] = [*sources, source]
+        data["memory"] = memory
+        cls._write_raw(data)
+        log.info("config_writer.memory_source_enabled", {"source": source})
         return True
 
     # ------------------------------------------------------------------

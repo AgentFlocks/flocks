@@ -10,6 +10,10 @@ from pydantic import BaseModel, Field
 
 class MemoryEmbeddingConfig(BaseModel):
     """Embedding provider configuration"""
+    enabled: bool = Field(
+        False,
+        description="Enable vector embeddings for Memory search",
+    )
     provider: Literal["auto", "openai", "google", "local"] = Field(
         "auto",
         description="Embedding provider (auto=try openai then google)"
@@ -29,6 +33,15 @@ class MemoryEmbeddingConfig(BaseModel):
     timeout_ms: int = Field(
         60000,
         description="Request timeout in milliseconds"
+    )
+
+
+class MemorySearchConfig(BaseModel):
+    """Memory search configuration."""
+
+    embedding: MemoryEmbeddingConfig = Field(
+        default_factory=MemoryEmbeddingConfig,
+        description="Embedding configuration",
     )
 
 
@@ -52,7 +65,7 @@ class MemorySyncSessionConfig(BaseModel):
     )
     delta_messages: int = Field(
         50,
-        description="Number of new messages to trigger sync"
+        description="Batch size for session transcript reconciliation"
     )
 
 
@@ -64,7 +77,7 @@ class MemorySyncConfig(BaseModel):
     )
     on_search: bool = Field(
         True,
-        description="Sync before search if dirty"
+        description="Run incremental filesystem reconciliation before every search"
     )
     watch: bool = Field(
         True,
@@ -314,9 +327,9 @@ class MemoryConfig(BaseModel):
     )
     
     # Sub-configurations
-    embedding: MemoryEmbeddingConfig = Field(
-        default_factory=MemoryEmbeddingConfig,
-        description="Embedding configuration"
+    search: MemorySearchConfig = Field(
+        default_factory=MemorySearchConfig,
+        description="Memory search configuration",
     )
     chunking: MemoryChunkingConfig = Field(
         default_factory=MemoryChunkingConfig,
@@ -353,7 +366,15 @@ class MemoryConfig(BaseModel):
 
 
 def resolve_memory_config(app_config: object) -> MemoryConfig:
-    """Resolve runtime Memory config, using defaults when absent."""
+    """Resolve runtime Memory config, using defaults when absent.
+
+    Args:
+        app_config: Loaded application configuration.
+
+    Returns:
+        Configured Memory settings, or defaults when the application has no
+        Memory section.
+    """
     memory_config = getattr(app_config, "memory", None)
     if isinstance(memory_config, MemoryConfig):
         return memory_config

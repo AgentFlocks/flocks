@@ -52,6 +52,25 @@
       "THREATBOOK_CN_LLM_API_KEY"
     ],
     "models": {
+      "deepseek-v4-flash-0731": {
+        "name": "deepseek-v4-flash-0731",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_input_tokens": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 1.0,
+          "output": 2.0,
+          "cache_read": 0.2,
+          "currency": "CNY"
+        }
+      },
       "kimi-k2.7-code": {
         "name": "kimi-k2.7-code",
         "family": "kimi-k2.7-code",
@@ -289,6 +308,25 @@
       "THREATBOOK_IO_LLM_API_KEY"
     ],
     "models": {
+      "deepseek-v4-flash-0731": {
+        "name": "deepseek-v4-flash-0731",
+        "family": "deepseek-v4",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_input_tokens": 1000000,
+          "max_output_tokens": 384000
+        },
+        "pricing": {
+          "input": 1.0,
+          "output": 2.0,
+          "cache_read": 0.2,
+          "currency": "CNY"
+        }
+      },
       "kimi-k2.7-code": {
         "name": "kimi-k2.7-code",
         "family": "kimi-k2.7-code",

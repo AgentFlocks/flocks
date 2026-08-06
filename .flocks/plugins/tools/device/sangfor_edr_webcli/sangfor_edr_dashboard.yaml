@@ -1,0 +1,46 @@
+name: sangfor_edr_dashboard
+description: >
+  Collect Sangfor EDR home dashboard data through authenticated HTTP APIs.
+  Probes the saved cookie/login_token pair before every collection, skips login
+  when valid, and performs HTTP re-login when missing or expired. API request
+  definitions are implemented in sangfor_edr_dashboard_api.py, which reads the
+  verified pair owned by sangfor_edr_http_login.py.
+description_cn: >
+  通过深信服 EDR HTTP API 采集首页仪表盘。每次采集前探测 Cookie/token，
+  有效时复用，缺失或失效时通过 HTTP 重新登录并更新认证。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_edr
+inputSchema:
+  type: object
+  properties:
+    sections:
+      type: array
+      items:
+        type: string
+        enum:
+          - agent_overview
+          - influenced_agent_overview
+          - vulnerability_overview
+          - ransomware_defense
+          - realtime_virus
+          - top_agents
+          - resource_usage
+      description: Optional dashboard sections. Omit to collect every section.
+    days:
+      type: integer
+      minimum: 1
+      maximum: 90
+      default: 7
+      description: Time range in days for dashboard APIs that accept a range.
+    base_url:
+      type: string
+      description: Optional EDR device URL; its scheme, host, and port become the base URL.
+    auth_state_path:
+      type: string
+      description: Optional auth-state path. Defaults to ~/.flocks/browser/sangfor-edr/auth-state.json.
+handler:
+  type: script
+  script_file: sangfor_edr.handler.py
+  function: handle_dashboard

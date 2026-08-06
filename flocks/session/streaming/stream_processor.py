@@ -11,7 +11,7 @@ import asyncio
 import time as _time
 from datetime import datetime
 from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
@@ -91,6 +91,7 @@ class ToolCallState:
     status: str = "pending"  # "pending", "running", "completed", "error"
     output: Optional[str] = None
     error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class StreamProcessor:
@@ -773,6 +774,7 @@ class StreamProcessor:
                             if _finished[0]:
                                 return
                             snapshot = copy.deepcopy(metadata)
+                            tool_state.metadata = snapshot
                             state_dict = {
                                 "status": "running",
                                 "input": _input,
@@ -1127,6 +1129,12 @@ class StreamProcessor:
     ) -> None:
         """Emit and persist the terminal state for an interrupted tool call."""
         interrupt_msg = "Tool execution was interrupted"
+        interrupted_metadata = {
+            **tool_state.metadata,
+            "status": "interrupted",
+            "interrupted": True,
+        }
+        tool_state.metadata = interrupted_metadata
         log.info("stream.tool_call.cancelled", {
             "tool_call_id": tool_call_id,
             "tool_name": tool_name,
@@ -1136,7 +1144,7 @@ class StreamProcessor:
                 interrupted_result = ToolResult(
                     success=False,
                     error=interrupt_msg,
-                    metadata={"interrupted": True},
+                    metadata=interrupted_metadata,
                 )
                 await self._run_tool_after_hook(
                     tool_name=tool_name,
@@ -1169,6 +1177,7 @@ class StreamProcessor:
                 status="error",
                 input=tool_input,
                 error=interrupt_msg,
+                metadata=interrupted_metadata,
                 time={"start": tool_start_time, "end": tool_end_time},
             )
             error_part = ToolPart(
@@ -1201,6 +1210,7 @@ class StreamProcessor:
                                     "status": "error",
                                     "input": tool_input,
                                     "error": interrupt_msg,
+                                    "metadata": interrupted_metadata,
                                     "time": {
                                         "start": tool_start_time,
                                         "end": tool_end_time,

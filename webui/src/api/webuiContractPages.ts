@@ -29,6 +29,7 @@ export interface WebUIContractWorkspaceSection {
 
 export interface WebUIContractWorkspaceListItem {
   id: string;
+  version?: string;
   title: string;
   titleEn?: string | null;
   route: string;

@@ -21,7 +21,7 @@ vi.mock('@/api/client', () => ({
   },
 }));
 
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useSessionChat } from './useSessionChat';
 import type { ImagePartData } from '@/utils/imageUpload';
 
@@ -142,9 +142,95 @@ describe('useSessionChat.createAndSend — image forwarding', () => {
       '/api/session/existing-session/prompt_async',
       {
         executionMode: 'build',
+        messageID: expect.stringMatching(/^msg_/),
         parts: [{ type: 'text', text: 'continue' }],
       },
     );
+  });
+
+  it('publishes the new session and matching optimistic message only after the prompt is accepted', async () => {
+    let acceptPrompt!: () => void;
+    const promptAccepted = new Promise<void>((resolve) => {
+      acceptPrompt = resolve;
+    });
+    mockPost.mockImplementation((url: string) => {
+      if (url === '/api/session') return Promise.resolve({ data: { id: SESSION_ID } });
+      if (url === `/api/session/${SESSION_ID}/prompt_async`) {
+        return promptAccepted.then(() => ({ data: {} }));
+      }
+      return Promise.resolve({ data: {} });
+    });
+
+    const { result } = renderHook(() => useSessionChat({ title: 'Test' }));
+    let sendPromise!: Promise<string>;
+    act(() => {
+      sendPromise = result.current.createAndSend({
+        text: 'internal prompt',
+        displayText: 'visible prompt',
+        agent: 'rex',
+      });
+    });
+
+    await waitFor(() => {
+      expect(mockPost).toHaveBeenCalledWith(
+        `/api/session/${SESSION_ID}/prompt_async`,
+        expect.objectContaining({ messageID: expect.stringMatching(/^msg_/) }),
+      );
+    });
+    expect(result.current.sessionId).toBeNull();
+    expect(result.current.pendingOptimisticMessage).toBeNull();
+
+    await act(async () => {
+      acceptPrompt();
+      await sendPromise;
+    });
+
+    const promptCall = mockPost.mock.calls.find(
+      ([url]) => url === `/api/session/${SESSION_ID}/prompt_async`,
+    );
+    const messageId = promptCall?.[1]?.messageID;
+    expect(result.current.sessionId).toBe(SESSION_ID);
+    expect(result.current.pendingOptimisticMessage).toMatchObject({
+      id: messageId,
+      sessionID: SESSION_ID,
+      agent: 'rex',
+      parts: [expect.objectContaining({ type: 'text', text: 'visible prompt' })],
+    });
+
+    act(() => {
+      result.current.consumePendingOptimisticMessage(messageId);
+    });
+    expect(result.current.pendingOptimisticMessage).toBeNull();
+  });
+
+  it('keeps the draft session inactive and does not leave an optimistic ghost when sending fails', async () => {
+    const sendError = new Error('prompt rejected');
+    mockPost.mockImplementation((url: string) => {
+      if (url === '/api/session') return Promise.resolve({ data: { id: SESSION_ID } });
+      if (url === `/api/session/${SESSION_ID}/prompt_async`) return Promise.reject(sendError);
+      return Promise.resolve({ data: {} });
+    });
+
+    const { result } = renderHook(() => useSessionChat({ title: 'Test' }));
+
+    await act(async () => {
+      await expect(result.current.createAndSend({ text: 'retry me' })).rejects.toBe(sendError);
+    });
+
+    expect(result.current.sessionId).toBeNull();
+    expect(result.current.pendingOptimisticMessage).toBeNull();
+    expect(mockPost.mock.calls.filter(([url]) => url === '/api/session')).toHaveLength(1);
+
+    mockPost.mockImplementation((url: string) => {
+      if (url === '/api/session') return Promise.resolve({ data: { id: SESSION_ID } });
+      return Promise.resolve({ data: {} });
+    });
+    await act(async () => {
+      await result.current.createAndSend({ text: 'retry me' });
+    });
+
+    expect(result.current.sessionId).toBe(SESSION_ID);
+    expect(mockPost.mock.calls.filter(([url]) => url === '/api/session')).toHaveLength(1);
   });
 });
 
@@ -201,6 +287,7 @@ describe('useSessionChat — Auto session creation', () => {
       `/api/session/${SESSION_ID}/prompt_async`,
       {
         executionMode: 'build',
+        messageID: expect.stringMatching(/^msg_/),
         parts: [{ type: 'text', text: 'hello' }],
       },
     );
@@ -230,6 +317,7 @@ describe('useSessionChat — Auto session creation', () => {
       '/api/session/existing-session/prompt_async',
       {
         executionMode: 'build',
+        messageID: expect.stringMatching(/^msg_/),
         parts: [{ type: 'text', text: 'continue' }],
       },
     );
@@ -251,6 +339,7 @@ describe('useSessionChat — Auto session creation', () => {
       '/api/session/existing-session/prompt_async',
       {
         executionMode: 'plan',
+        messageID: expect.stringMatching(/^msg_/),
         parts: [{ type: 'text', text: 'inspect the implementation' }],
       },
     );

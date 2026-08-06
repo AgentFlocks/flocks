@@ -1,17 +1,18 @@
 import { memo, useState, useEffect, useMemo, useCallback, useRef, type RefObject } from 'react';
 import {
   Plus, Trash2, Archive,
-  ChevronDown, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
+  ChevronDown, ChevronLeft, ChevronRight, Sparkles, Shield, Search, AlertTriangle,
   PanelLeftClose, PanelLeft, Bot, Loader2,
   Workflow as WorkflowIcon, Settings2, CheckSquare,
-  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X,
-  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive,
-  Hammer, ClipboardList, Target, Check,
+  MoreHorizontal, PencilLine, Download, Share2, Cpu, Info, X, Check,
+  FolderGit2, FolderPlus, FolderOpen, Copy, ArrowUp, HardDrive, BookOpen,
+  Hammer, ClipboardList, Target, UserRound, UsersRound,
 } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import { useLocation, useNavigate, useSearchParams } from 'react-router-dom';
 import { getAnchoredMenuLeftOffset } from '@/components/common/ChatPromptSelectors';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
+import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import SessionChat, { buildInstructionDisplayText, type PromptDisplayOptions, type SSEChatEvent, type SSEConnectionStatus } from '@/components/common/SessionChat';
 import { useSSE } from '@/hooks/useSSE';
@@ -23,6 +24,8 @@ import SuiteInstallProgressPanel, {
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
+import { skillAPI, type Skill } from '@/api/skill';
+import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
 import type { Agent } from '@/api/agent';
 import { useSessions } from '@/hooks/useSessions';
 import { useAgents } from '@/hooks/useAgents';
@@ -36,7 +39,10 @@ import { useDefaultModelVision } from '@/hooks/useDefaultModelVision';
 import { buildPromptParts, type ImagePartData } from '@/utils/imageUpload';
 import { getAgentDisplayDescription, getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
 import { formatRelativeTime, formatSessionDate } from '@/utils/time';
-import type { ModelDefinitionV2, Session } from '@/types';
+import { getWorkflowDisplayName } from '@/utils/workflowDisplay';
+import { formatPricingPerMillion, isPricingFree } from '@/utils/modelPricing';
+import type { Message, ModelDefinitionV2, Session } from '@/types';
+import { createMessageId } from '@/utils/messageId';
 import { useAuth } from '@/contexts/AuthContext';
 import {
   DEFAULT_SESSION_EXECUTION_MODE,
@@ -57,11 +63,43 @@ function sanitizeSessionExportName(value: string) {
     .replace(/^-|-$/g, '') || 'session';
 }
 
+function getSessionDisplayTitle(session: Pick<Session, 'title' | 'channelID'>): string {
+  if (!session.channelID) return session.title;
+  const prefix = `[${session.channelID}]`;
+  if (session.title.slice(0, prefix.length).toLowerCase() !== prefix.toLowerCase()) {
+    return session.title;
+  }
+  return session.title.slice(prefix.length).trim() || session.title;
+}
+
+function ChannelChatTypeBadge({
+  chatType,
+  label,
+}: {
+  chatType: NonNullable<Session['channelChatType']>;
+  label: string;
+}) {
+  const Icon = chatType === 'direct' ? UserRound : UsersRound;
+  return (
+    <span
+      role="img"
+      aria-label={label}
+      data-channel-chat-type={chatType}
+      className={`absolute -bottom-1 -right-1 flex h-2.5 w-2.5 items-center justify-center rounded-full bg-white ring-1 ring-white dark:bg-[#252c35] dark:ring-[#252c35] ${
+        chatType === 'direct' ? 'text-zinc-500' : 'text-blue-500'
+      }`}
+    >
+      <Icon aria-hidden="true" className="h-2 w-2 stroke-[2.5]" />
+    </span>
+  );
+}
+
 const LAST_SELECTED_SESSION_STORAGE_KEY = 'flocks:last-selected-session';
 const SESSION_PAGE_VISITED_STORAGE_KEY = 'flocks:sessions:visited';
 const SOC_WORKSPACE_COMPONENT_ID = 'soc-workspace';
 const INSTALLED_HUB_STATES = new Set(['installed', 'localOnly', 'updateAvailable']);
 const SESSION_UPDATE_REFETCH_DEBOUNCE_MS = 500;
+const RECENT_SEARCH_SESSION_LIMIT = 5;
 const AUTO_MODEL_KEY = '__flocks_auto__';
 const TASK_SESSION_GROUP_ID = 'tasks';
 const SESSION_EXECUTION_MODES: SessionExecutionMode[] = ['build', 'plan', 'goal'];
@@ -112,6 +150,124 @@ type FolderBrowserResponse = {
   roots: FolderEntry[];
   entries: FolderEntry[];
 };
+
+type ComposerResourceItem = {
+  id: string;
+  name: string;
+  description?: string;
+  badge?: string;
+  source: 'builtin' | 'custom';
+};
+
+function ComposerResourcePicker({
+  label,
+  title,
+  emptyText,
+  icon: Icon,
+  items,
+  loading,
+  open,
+  onToggle,
+  onSelect,
+}: {
+  label: string;
+  title: string;
+  emptyText: string;
+  icon: React.ComponentType<{ className?: string }>;
+  items: ComposerResourceItem[];
+  loading: boolean;
+  open: boolean;
+  onToggle: () => void;
+  onSelect: (item: ComposerResourceItem) => void;
+}) {
+  const { t } = useTranslation('session');
+  const [sourceFilter, setSourceFilter] = useState<AgentSourceFilter>('all');
+  const filteredItems = items.filter((item) => (
+    sourceFilter === 'all' || item.source === sourceFilter
+  ));
+
+  return (
+    <div className="relative">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+        aria-label={label}
+        aria-haspopup="menu"
+        aria-expanded={open}
+      >
+        <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+        <span className="min-w-0 flex-1 truncate">{label}</span>
+        <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${open ? '-rotate-90' : ''}`} />
+      </button>
+      {open && (
+        <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+          <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+            <span className="min-w-0 truncate text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">
+              {title}
+            </span>
+            <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+              {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
+                <button
+                  key={filter}
+                  type="button"
+                  onClick={() => setSourceFilter(filter)}
+                  className={`rounded-md px-2 py-1 transition-colors ${
+                    sourceFilter === filter
+                      ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
+                      : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                  }`}
+                >
+                  {t(`agentPicker.filter.${filter}`)}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+            {loading ? (
+              <div className="flex h-full items-center justify-center text-zinc-400">
+                <Loader2 className="h-4 w-4 animate-spin" />
+              </div>
+            ) : filteredItems.length > 0 ? (
+              filteredItems.map((item) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  onClick={() => onSelect(item)}
+                  title={item.description}
+                  className="flex w-full min-w-0 items-center gap-2 rounded-lg px-2.5 py-2 text-left text-zinc-700 transition-colors hover:bg-zinc-50 hover:text-zinc-950 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-white"
+                >
+                  <span className="grid h-6 w-6 shrink-0 place-items-center rounded-md bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500">
+                    <Icon className="h-3 w-3" />
+                  </span>
+                  <span className="min-w-0 flex-1 truncate text-xs font-medium">{item.name}</span>
+                  <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                    item.source === 'builtin'
+                      ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                      : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                  }`}>
+                    {t(`agentPicker.badge.${item.source}`)}
+                  </span>
+                  {item.badge && (
+                    <span className="max-w-20 shrink-0 truncate rounded bg-zinc-100 px-1.5 py-0.5 text-[9px] font-medium text-zinc-500 dark:bg-white/[0.07] dark:text-zinc-400">
+                      {item.badge}
+                    </span>
+                  )}
+                </button>
+              ))
+            ) : (
+              <div className="flex h-full items-center justify-center px-4 text-center text-xs text-zinc-400">
+                {emptyText}
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
 const MULTI_PROJECT_SESSION_PAGE_SIZE = 6;
 const SINGLE_PROJECT_SESSION_PAGE_SIZE = 20;
 
@@ -159,10 +315,6 @@ type SelectorTooltip = {
   x: number;
   y: number;
 };
-
-function formatAgentName(name: string): string {
-  return name ? name.charAt(0).toUpperCase() + name.slice(1) : name;
-}
 
 function readLastSelectedSessionId(): string | null {
   try {
@@ -270,6 +422,12 @@ function SessionSidebarItemInner({
   onCancelRename,
   onToggleMenu,
 }: SessionSidebarItemProps) {
+  const channelChatLabel = !session.channelChatType
+    ? session.channelID
+    : session.channelChatType === 'direct'
+      ? t('channelDirectChat')
+      : t('channelGroupChat');
+
   return (
     <div
       onClick={() => onSelect(session.id)}
@@ -292,6 +450,20 @@ function SessionSidebarItemInner({
             onClick={(e) => e.stopPropagation()}
             className="flex-shrink-0 w-3.5 h-3.5 accent-blue-500 cursor-pointer rounded"
           />
+        )}
+        {session.channelID && (
+          <span
+            title={channelChatLabel}
+            className="relative inline-flex h-3.5 w-3.5 flex-shrink-0"
+          >
+            <ChannelIcon channelId={session.channelID} size="xs" />
+            {session.channelChatType && (
+              <ChannelChatTypeBadge
+                chatType={session.channelChatType}
+                label={channelChatLabel || session.channelID}
+              />
+            )}
+          </span>
         )}
         {session.category === 'workflow' && (
           <span title={t('workflowSession')} className="flex-shrink-0">
@@ -322,7 +494,7 @@ function SessionSidebarItemInner({
           />
         ) : (
           <h3 className="flex min-w-0 flex-1 items-center gap-1.5 truncate text-sm font-medium">
-            <span className="truncate">{session.title}</span>
+            <span className="truncate">{getSessionDisplayTitle(session)}</span>
             {session.isShared && (
               <span className="inline-flex shrink-0 items-center rounded-full border border-blue-200 bg-blue-50 px-1.5 py-0.5 text-[10px] font-medium text-blue-700 dark:border-blue-400/35 dark:bg-blue-500/10 dark:text-blue-200">
                 {t('sharedTag')}
@@ -384,6 +556,8 @@ const SessionSidebarItem = memo(SessionSidebarItemInner, (prev, next) => (
   prev.nested === next.nested &&
   prev.session.title === next.session.title &&
   prev.session.category === next.session.category &&
+  prev.session.channelID === next.session.channelID &&
+  prev.session.channelChatType === next.session.channelChatType &&
   prev.session.isShared === next.session.isShared &&
   prev.session.time?.updated === next.session.time?.updated &&
   prev.selected === next.selected &&
@@ -483,9 +657,15 @@ export default function SessionPage() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
+  const [pendingFocusMessageId, setPendingFocusMessageId] = useState<string | null>(null);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [selectedAgent, setSelectedAgent] = useState('rex');
   const [showAgentOptions, setShowAgentOptions] = useState(false);
+  const [showWorkflowOptions, setShowWorkflowOptions] = useState(false);
+  const [showSkillOptions, setShowSkillOptions] = useState(false);
+  const [composerWorkflows, setComposerWorkflows] = useState<WorkflowSummary[]>([]);
+  const [composerSkills, setComposerSkills] = useState<Skill[]>([]);
+  const [loadingComposerResources, setLoadingComposerResources] = useState(false);
   const [selectedExecutionMode, setSelectedExecutionMode] = useState<SessionExecutionMode>(
     () => readSessionExecutionMode(null),
   );
@@ -507,6 +687,7 @@ export default function SessionPage() {
   const [suiteInstallProgress, setSuiteInstallProgress] = useState<SuiteInstallProgressState | null>(null);
   const [pendingInitialMessage, setPendingInitialMessage] = useState<string | null>(null);
   const [pendingInitialDisplayText, setPendingInitialDisplayText] = useState<string | null>(null);
+  const [pendingOptimisticMessage, setPendingOptimisticMessage] = useState<Message | null>(null);
   const [selectMode, setSelectMode] = useState(false);
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -542,11 +723,15 @@ export default function SessionPage() {
   const [batchArchiving, setBatchArchiving] = useState(false);
   const [openMenuSessionId, setOpenMenuSessionId] = useState<string | null>(null);
   const [menuAnchor, setMenuAnchor] = useState<{ top: number; right: number } | null>(null);
+  const [movePickerSessionId, setMovePickerSessionId] = useState<string | null>(null);
+  const [movingSessionId, setMovingSessionId] = useState<string | null>(null);
+  const [movingTargetProjectId, setMovingTargetProjectId] = useState<string | null>(null);
   const [renamingSessionId, setRenamingSessionId] = useState<string | null>(null);
   const [renameValue, setRenameValue] = useState('');
   const [renameSubmitting, setRenameSubmitting] = useState(false);
   const [downloadingSessionId, setDownloadingSessionId] = useState<string | null>(null);
   const supportsVision = useDefaultModelVision();
+  const [sessionSearchOpen, setSessionSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [agentSourceFilter, setAgentSourceFilter] = useState<AgentSourceFilter>('all');
   const [selectedSessionFallback, setSelectedSessionFallback] = useState<Session | null>(null);
@@ -567,6 +752,7 @@ export default function SessionPage() {
   const sessionUpdateRefetchTimerRef = useRef<number | null>(null);
   const sessionStatusEventVersionRef = useRef(0);
   const projectListRequestSeqRef = useRef(0);
+  const composerResourcesLoadedRef = useRef(false);
   const toast = useToast();
 
   const sessionProjectIds = useMemo(
@@ -592,6 +778,14 @@ export default function SessionPage() {
     projectIds: sessionProjectIds,
     pageSize: sessionListPageSize,
   });
+  const searchPanelSessions = useMemo(() => {
+    const sortedSessions = [...sessions].sort(
+      (left, right) => (right.time?.updated ?? 0) - (left.time?.updated ?? 0),
+    );
+    return searchQuery.trim()
+      ? sortedSessions
+      : sortedSessions.slice(0, RECENT_SEARCH_SESSION_LIMIT);
+  }, [searchQuery, sessions]);
   const { agents, loading: loadingAgents } = useAgents();
   const { providers, loading: loadingProviders } = useProviders();
   const {
@@ -606,16 +800,46 @@ export default function SessionPage() {
   const chatAgents = useMemo(() => [...primaryAgents, ...subAgents], [primaryAgents, subAgents]);
   const filteredChatAgents = useMemo(
     () => chatAgents.filter((agent) => {
+      if (agent.name.toLowerCase() === 'rex') return false;
       if (agentSourceFilter === 'builtin') return agent.native;
       if (agentSourceFilter === 'custom') return !agent.native;
       return true;
     }),
     [chatAgents, agentSourceFilter],
   );
-  const selectedAgentInfo = useMemo(
-    () => chatAgents.find((agent) => agent.name === selectedAgent),
-    [chatAgents, selectedAgent],
-  );
+  const loadComposerResources = useCallback(async () => {
+    if (composerResourcesLoadedRef.current || loadingComposerResources) return;
+    setLoadingComposerResources(true);
+    try {
+      const [workflowResult, skillResult] = await Promise.allSettled([
+        workflowAPI.listSummaries({ status: 'active' }),
+        skillAPI.status(),
+      ]);
+      if (workflowResult.status === 'fulfilled') {
+        setComposerWorkflows(
+          workflowResult.value.data
+            .filter((workflow) => workflow.status === 'active')
+            .sort((a, b) => getWorkflowDisplayName(a, i18n.language)
+              .localeCompare(getWorkflowDisplayName(b, i18n.language))),
+        );
+      }
+      if (skillResult.status === 'fulfilled') {
+        setComposerSkills(
+          skillResult.value.data
+            .filter((skill) => (
+              !skill.ui_hidden
+              && !skill.disabled
+              && skill.eligible !== false
+              && skill.category !== 'system'
+            ))
+            .sort((a, b) => a.name.localeCompare(b.name)),
+        );
+      }
+      composerResourcesLoadedRef.current = true;
+    } finally {
+      setLoadingComposerResources(false);
+    }
+  }, [i18n.language, loadingComposerResources]);
   const chatModelOptions = useMemo<ChatModelOption[]>(() => {
     const providerById = new Map(
       providers
@@ -625,9 +849,8 @@ export default function SessionPage() {
 
     const formatPricing = (pricing: ModelDefinitionV2['pricing']): string => {
       if (!pricing) return t('modelPicker.noCost');
-      if (pricing.input === 0 && pricing.output === 0) return t('modelPicker.free');
-      const currencySymbol = pricing.currency === 'CNY' ? '¥' : '$';
-      return `${currencySymbol}${pricing.input}/${currencySymbol}${pricing.output}/M`;
+      if (isPricingFree(pricing)) return t('modelPicker.free');
+      return formatPricingPerMillion(pricing);
     };
 
     const formatContextWindow = (contextWindow?: number): string => {
@@ -832,6 +1055,7 @@ export default function SessionPage() {
     [projects, sessions, t],
   );
   const taskGroupCollapsed = collapsedProjectIds.has(TASK_SESSION_GROUP_ID);
+  const taskGroupSelected = selectedProjectId === TASK_SESSION_GROUP_ID;
   const taskSessionsCollapsedToFirstPage = collapsedLoadedSessionGroupIds.has(TASK_SESSION_GROUP_ID);
   const visibleTaskSessions = taskSessionsCollapsedToFirstPage
     ? taskSessionGroup.sessions.slice(0, sessionListPageSize)
@@ -1040,6 +1264,7 @@ export default function SessionPage() {
   useEffect(() => {
     const sessionParam = searchParams.get('session');
     const messageParam = searchParams.get('message');
+    const focusMessageParam = searchParams.get('focusMessage');
     const displayParam = searchParams.get('display');
     if (!sessionParam) return;
 
@@ -1054,6 +1279,7 @@ export default function SessionPage() {
         setPendingInitialMessage(null);
         setPendingInitialDisplayText(null);
       }
+      setPendingFocusMessageId(focusMessageParam || null);
       setSearchParams({}, { replace: true });
     }
   }, [searchParams, selectedSessionId, setSearchParams]);
@@ -1238,6 +1464,7 @@ export default function SessionPage() {
       if (!target.closest('[data-session-actions]') && !target.closest('[data-session-menu-portal]')) {
         setOpenMenuSessionId(null);
         setMenuAnchor(null);
+        setMovePickerSessionId(null);
       }
     };
     document.addEventListener('mousedown', handle);
@@ -1253,6 +1480,7 @@ export default function SessionPage() {
   useEffect(() => {
     if (!selectMode) return;
     setOpenMenuSessionId(null);
+    setMovePickerSessionId(null);
     setRenamingSessionId(null);
     setRenameValue('');
   }, [selectMode]);
@@ -1333,6 +1561,10 @@ export default function SessionPage() {
     }
   }, [creating, selectedProjectId, selectedSessionId, selectedModelAuto, addSession, fetchProjects, searchQuery, toast, t]);
 
+  const handleCreateSessionInProject = useCallback((projectId: string) => {
+    void handleCreateSession(projectId);
+  }, [handleCreateSession]);
+
   const handleSelectModel = useCallback(async (option: ChatModelOption) => {
     const previousModelKey = selectedModelKey;
     setSelectedModelKey(option.key);
@@ -1388,9 +1620,39 @@ export default function SessionPage() {
         ...(selectedModelAuto ? { model_auto: true } : {}),
       });
       const newSessionId = response.data.id;
+      const messageId = createMessageId();
+      const visibleText = options?.displayText || text;
+      const effectiveAgent = agentOverride || selectedAgent || 'rex';
+      const optimisticParts: Message['parts'] = [];
+      if (visibleText) {
+        optimisticParts.push({
+          id: `temp-${messageId}-text`,
+          type: 'text',
+          text: visibleText,
+        });
+      }
+      imageParts?.forEach((image, index) => {
+        optimisticParts.push({
+          id: `temp-${messageId}-img-${index}`,
+          type: 'file',
+          url: image.url,
+          mime: image.mime,
+          filename: image.filename,
+        });
+      });
+
+      const payload: Record<string, unknown> = {
+        parts: buildPromptParts(text, imageParts),
+        messageID: messageId,
+      };
+      if (effectiveAgent) payload.agent = effectiveAgent;
+      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
+      if (options?.displayText) payload.displayText = options.displayText;
+      payload.executionMode = effectiveExecutionMode;
+      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
       addSession(response.data);
-      await fetchProjects(undefined, searchQuery);
+      void fetchProjects(undefined, searchQuery).catch(() => {});
       setSelectedSessionFallback(response.data);
       executionModeHandoffRef.current = {
         sessionId: newSessionId,
@@ -1409,17 +1671,17 @@ export default function SessionPage() {
         );
       }
       setSelectedModelKey(selectedModelAuto ? AUTO_MODEL_KEY : null);
+      setPendingOptimisticMessage({
+        id: messageId,
+        sessionID: newSessionId,
+        role: 'user',
+        parts: optimisticParts.length > 0
+          ? optimisticParts
+          : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+        timestamp: Date.now(),
+        agent: effectiveAgent,
+      });
       setSelectedSessionId(newSessionId);
-
-      const payload: Record<string, unknown> = {
-        parts: buildPromptParts(text, imageParts),
-      };
-      const effectiveAgent = agentOverride || selectedAgent || 'rex';
-      if (effectiveAgent) payload.agent = effectiveAgent;
-      if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
-      if (options?.displayText) payload.displayText = options.displayText;
-      payload.executionMode = effectiveExecutionMode;
-      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
       if (effectiveExecutionMode === 'goal') {
         setSelectedExecutionMode(DEFAULT_SESSION_EXECUTION_MODE);
         writeSessionExecutionMode(
@@ -1818,6 +2080,41 @@ export default function SessionPage() {
     }
   }, [refetchSessions, t, toast]);
 
+  const handleMoveSessionToProject = useCallback(async (
+    sessionId: string,
+    project: ProjectSummary,
+  ) => {
+    if (movingSessionId) return;
+    setMovingSessionId(sessionId);
+    setMovingTargetProjectId(project.id);
+    try {
+      await sessionApi.moveToProject(sessionId, project.id);
+      setOpenMenuSessionId(null);
+      setMenuAnchor(null);
+      setMovePickerSessionId(null);
+      setProjectsSectionCollapsed(false);
+      setCollapsedProjectIds((current) => {
+        const next = new Set(current);
+        next.delete(project.id);
+        return next;
+      });
+      toast.success(t('moveToProjectSuccess', { project: getProjectLabel(project) }));
+      await Promise.allSettled([
+        refetchSessions(),
+        fetchProjects(undefined, searchQuery),
+      ]);
+    } catch (err: any) {
+      const detail = err?.response?.data?.detail;
+      toast.error(
+        t('moveToProjectFailed'),
+        typeof detail === 'string' ? detail : err?.message,
+      );
+    } finally {
+      setMovingSessionId(null);
+      setMovingTargetProjectId(null);
+    }
+  }, [fetchProjects, movingSessionId, refetchSessions, searchQuery, t, toast]);
+
   const handleEnterSelectMode = useCallback(() => {
     setSelectMode(true);
     setCheckedIds(new Set());
@@ -1843,7 +2140,16 @@ export default function SessionPage() {
       setSelectedSessionId(sessionId);
     }
   }, [handleToggleCheck, selectMode]);
+  const handleCloseSessionSearch = useCallback(() => {
+    setSessionSearchOpen(false);
+    setSearchQuery('');
+  }, []);
+  const handleSelectSearchResult = useCallback((sessionId: string) => {
+    handleSelectSessionRow(sessionId);
+    handleCloseSessionSearch();
+  }, [handleCloseSessionSearch, handleSelectSessionRow]);
   const handleToggleSessionMenu = useCallback((sessionId: string, trigger: HTMLElement) => {
+    setMovePickerSessionId(null);
     setOpenMenuSessionId((current) => {
       if (current === sessionId) {
         setMenuAnchor(null);
@@ -2006,14 +2312,14 @@ export default function SessionPage() {
     <div className="flex h-full w-full overflow-hidden bg-[#fcfcfd] text-[#202328] dark:bg-[#303842] dark:text-[#d7dee8]">
       {/* ── Sidebar ── */}
       <div
-        className={`flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
+        className={`relative flex h-full flex-shrink-0 flex-col overflow-hidden border-r bg-gray-50 transition-[width,opacity] duration-200 dark:bg-[#252c35] ${
           sidebarCollapsed
             ? 'w-0 border-transparent opacity-0'
             : 'w-[282px] border-black/[0.10] opacity-100 dark:border-white/[0.10]'
         }`}
         aria-label={t('managementTitle')}
       >
-        {/* Header：始终显示标题、新建与搜索 */}
+        {/* Header */}
         <div className="flex-shrink-0 px-3 pb-2 pt-3.5">
           <div className="mb-2 flex h-8 items-center justify-between px-1">
             <div className="min-w-0">
@@ -2024,9 +2330,19 @@ export default function SessionPage() {
                 {t('sessionCount', { count: sessions.length })}
               </span>
             </div>
+            <button
+              type="button"
+              onClick={() => setSessionSearchOpen(true)}
+              className="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.07] dark:hover:text-white"
+              title={t('openTaskSearch')}
+              aria-label={t('openTaskSearch')}
+              aria-expanded={sessionSearchOpen}
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
           </div>
 
-          <div className="space-y-0.5">
+          <div>
             <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] dark:hover:bg-white/[0.06]">
               {creating
                 ? <Loader2 className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 animate-spin text-[#7b8087]" />
@@ -2039,29 +2355,76 @@ export default function SessionPage() {
                 {t('newSession')}
               </button>
             </div>
-
-            <div className="relative h-[34px] rounded-lg transition-colors hover:bg-black/[0.04] focus-within:bg-black/[0.04] dark:hover:bg-white/[0.06] dark:focus-within:bg-white/[0.06]">
-              <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-[#7b8087] dark:text-[#9aa7b4]" />
-              <input
-                value={searchQuery}
-                onChange={(e) => setSearchQuery(e.target.value)}
-                placeholder={t('filterConversations', 'Search tasks')}
-                className="h-full w-full rounded-lg border-0 bg-transparent pl-9 pr-8 text-sm font-medium text-[#474b51] outline-none placeholder:text-[#474b51] focus:bg-transparent dark:text-[#c3ccd6] dark:placeholder:text-[#c3ccd6]"
-              />
-              {searchQuery && (
-                <button
-                  type="button"
-                  onClick={() => setSearchQuery('')}
-                  className="absolute right-1.5 top-1/2 grid h-5 w-5 -translate-y-1/2 place-items-center rounded-md text-[#7b8087] transition-colors hover:bg-black/[0.065] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
-                  title={t('clearSearch')}
-                  aria-label={t('clearSearch')}
-                >
-                  <X className="h-3.5 w-3.5" />
-                </button>
-              )}
-            </div>
           </div>
         </div>
+
+        {sessionSearchOpen && (
+          <div
+            role="dialog"
+            aria-label={t('taskSearchDialog')}
+            aria-modal="true"
+            onClick={handleCloseSessionSearch}
+            className="fixed inset-0 z-[80] flex items-start justify-center bg-black/20 px-4 pt-[18vh] backdrop-blur-[1px] dark:bg-black/45"
+          >
+            <div
+              onClick={(event) => event.stopPropagation()}
+              className="w-full max-w-[620px] overflow-hidden rounded-2xl border border-black/[0.12] bg-[#fdfdfc] shadow-[0_24px_70px_rgba(22,27,34,0.24)] dark:border-white/[0.11] dark:bg-[#303030] dark:shadow-[0_28px_80px_rgba(0,0,0,0.55)]"
+            >
+              <div className="relative h-[52px] border-b border-black/[0.07] dark:border-white/[0.08]">
+                <Search className="pointer-events-none absolute left-4 top-1/2 h-[18px] w-[18px] -translate-y-1/2 text-[#7b8087] dark:text-[#a7adb5]" />
+                <input
+                  autoFocus
+                  value={searchQuery}
+                  onChange={(event) => setSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Escape') {
+                      event.preventDefault();
+                      handleCloseSessionSearch();
+                    }
+                  }}
+                  placeholder={t('filterConversations', 'Search tasks')}
+                  className="h-full w-full border-0 bg-transparent pl-12 pr-12 text-[15px] font-medium text-[#3f444a] outline-none placeholder:text-[#858a91] dark:text-[#e1e5ea] dark:placeholder:text-[#9298a0]"
+                />
+                <button
+                  type="button"
+                  onClick={handleCloseSessionSearch}
+                  className="absolute right-3 top-1/2 grid h-7 w-7 -translate-y-1/2 place-items-center rounded-lg text-[#7b8087] transition-colors hover:bg-black/[0.06] hover:text-[#202328] dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white"
+                  title={t('closeTaskSearch')}
+                  aria-label={t('closeTaskSearch')}
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="max-h-[420px] overflow-y-auto p-2">
+                <div className="px-2 pb-1.5 pt-1 text-[11px] font-medium text-[#969aa0] dark:text-[#8f9ba8]">
+                  {t(searchQuery.trim() ? 'searchResults' : 'recentTasks')}
+                </div>
+                {searchPanelSessions.length > 0 ? (
+                  <div className="space-y-0.5">
+                    {searchPanelSessions.map((session) => (
+                      <button
+                        key={session.id}
+                        type="button"
+                        onClick={() => handleSelectSearchResult(session.id)}
+                        className="flex h-10 w-full min-w-0 items-center gap-2.5 rounded-xl px-3 text-left text-sm text-[#4e5359] transition-colors hover:bg-black/[0.055] hover:text-[#202328] focus:bg-black/[0.055] focus:outline-none dark:text-[#d1d5da] dark:hover:bg-white/[0.09] dark:hover:text-white dark:focus:bg-white/[0.09]"
+                      >
+                        <span className="h-1.5 w-1.5 shrink-0 rounded-full bg-[#6aa7ee]" />
+                        <span className="min-w-0 flex-1 truncate font-medium">{session.title}</span>
+                        <span className="max-w-[110px] shrink-0 truncate text-xs text-[#969aa0] dark:text-[#8f9ba8]">
+                          {session.projectName || getPathBasename(session.directory)}
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="px-3 py-10 text-center text-sm text-[#969aa0] dark:text-[#8f9ba8]">
+                    {t('noResults')}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Session list */}
         <div
@@ -2169,6 +2532,23 @@ export default function SessionPage() {
                             <MoreHorizontal className="h-3.5 w-3.5" />
                           </button>
                         )}
+                        <button
+                          type="button"
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            handleCreateSessionInProject(group.id);
+                          }}
+                          disabled={creating || !group.canWrite || group.pathStatus !== 'available'}
+                          className={`grid h-[26px] w-[26px] place-items-center rounded-lg text-[#7b8087] transition-all hover:bg-black/[0.065] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-40 dark:text-[#9aa7b4] dark:hover:bg-white/[0.08] dark:hover:text-white ${
+                            isSelectedProject ? 'opacity-100' : 'opacity-0 group-hover/project:opacity-100 group-focus-within/project:opacity-100'
+                          }`}
+                          title={t('createSessionInProject', { project: group.label })}
+                          aria-label={t('createSessionInProject', { project: group.label })}
+                        >
+                          {creating && isSelectedProject
+                            ? <Loader2 className="h-3 w-3 animate-spin" />
+                            : <Plus className="h-3 w-3" />}
+                        </button>
                       </div>
                       {persistedProject && openProjectMenuId === group.id && (
                         <div
@@ -2315,6 +2695,21 @@ export default function SessionPage() {
                       {taskGroupCollapsed
                         ? <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                         : <ChevronDown className="h-3.5 w-3.5 shrink-0" />}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        void handleCreateSession(TASK_SESSION_GROUP_ID);
+                      }}
+                      disabled={creating}
+                      className="ml-auto grid h-6 w-6 place-items-center rounded-lg text-[#8a8e94] opacity-0 transition-all hover:bg-black/[0.04] hover:text-[#474b51] group-hover/tasks-section:opacity-100 group-focus-within/tasks-section:opacity-100 disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#8f9ba8] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      title={t('createTaskSession')}
+                      aria-label={t('createTaskSession')}
+                    >
+                      {creating && taskGroupSelected
+                        ? <Loader2 className="h-3 w-3 animate-spin" />
+                        : <Plus className="h-3 w-3" />}
                     </button>
                   </div>
                   {!taskGroupCollapsed && (
@@ -2480,9 +2875,17 @@ export default function SessionPage() {
           composerTextareaMinHeight={56}
           initialMessage={pendingInitialMessage}
           initialDisplayText={pendingInitialDisplayText}
+          initialOptimisticMessage={pendingOptimisticMessage}
+          focusMessageId={pendingFocusMessageId}
+          onFocusMessageConsumed={() => setPendingFocusMessageId(null)}
           onInitialMessageConsumed={() => {
             setPendingInitialMessage(null);
             setPendingInitialDisplayText(null);
+          }}
+          onInitialOptimisticMessageConsumed={(messageId) => {
+            setPendingOptimisticMessage((message) => (
+              message?.id === messageId ? null : message
+            ));
           }}
           onSseStatusChange={activeChatSessionId ? setSseStatus : undefined}
           onSSEEvent={handleSSEEvent}
@@ -2502,6 +2905,192 @@ export default function SessionPage() {
               onAlertOperationsSetup={() => void handleAlertOperationsSetup()}
               alertOperationsBusy={installingSocWorkspace}
             />
+          )}
+          onComposerAddMenuOpenChange={(open) => {
+            setShowAgentOptions(false);
+            setShowWorkflowOptions(false);
+            setShowSkillOptions(false);
+            if (!open) return;
+            setShowProjectOptions(false);
+            setShowModelOptions(false);
+            void loadComposerResources();
+          }}
+          composerAddMenuSlot={({ closeMenu, insertMention, insertReference }) => (
+            <>
+            <div className="relative" data-agent-selector>
+              <button
+                type="button"
+                onClick={() => {
+                  setShowAgentOptions((open) => !open);
+                  setShowWorkflowOptions(false);
+                  setShowSkillOptions(false);
+                  setShowProjectOptions(false);
+                  setShowModelOptions(false);
+                }}
+                className="group flex h-10 w-full items-center gap-2.5 rounded-[9px] px-2 text-left text-[13px] font-medium text-zinc-700 transition-colors hover:bg-zinc-100/90 hover:text-zinc-950 dark:text-zinc-200 dark:hover:bg-white/[0.07] dark:hover:text-white"
+                title={t('agentPicker.title')}
+                aria-label={t('chat.addMenu.agent')}
+                aria-haspopup="menu"
+                aria-expanded={showAgentOptions}
+              >
+                <span className="grid h-7 w-7 shrink-0 place-items-center text-zinc-500 transition-colors group-hover:text-zinc-800 dark:text-zinc-400 dark:group-hover:text-white">
+                  <Bot className="h-3.5 w-3.5" />
+                </span>
+                <span className="min-w-0 flex-1 truncate">{t('chat.addMenu.agent')}</span>
+                <ChevronRight className={`h-3.5 w-3.5 shrink-0 text-zinc-400 transition-transform ${showAgentOptions ? '-rotate-90' : ''}`} />
+              </button>
+              {showAgentOptions && (
+                <div className="absolute bottom-0 left-[calc(100%+0.5rem)] z-[60] w-[300px] max-w-[calc(100vw-2rem)] overflow-hidden rounded-[14px] border border-black/[0.09] bg-white/95 shadow-[0_18px_46px_rgba(22,27,34,0.14),0_2px_8px_rgba(22,27,34,0.06)] backdrop-blur-xl dark:border-white/[0.11] dark:bg-[#252c35]/95 dark:shadow-[0_20px_48px_rgba(8,10,13,0.44)]">
+                  <div className="flex min-h-12 items-center justify-between gap-3 border-b border-zinc-100 px-3 py-2 dark:border-white/[0.08]">
+                    <div className="min-w-0">
+                      <div className="text-[12px] font-semibold text-zinc-800 dark:text-zinc-100">{t('agentPicker.title')}</div>
+                      <div
+                        className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
+                        onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
+                        onMouseLeave={() => setSelectorTooltip(null)}
+                        onPointerLeave={() => setSelectorTooltip(null)}
+                      >
+                        {t('agentPicker.hint')}
+                      </div>
+                    </div>
+                    <div className="inline-flex shrink-0 items-center rounded-lg bg-zinc-100 p-0.5 text-[10px] dark:bg-black/15">
+                      {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
+                        <button
+                          key={filter}
+                          type="button"
+                          onClick={() => setAgentSourceFilter(filter)}
+                          className={`rounded-md px-2 py-1 transition-colors ${
+                            agentSourceFilter === filter
+                              ? 'bg-white text-zinc-900 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.12] dark:text-zinc-50'
+                              : 'text-zinc-500 hover:text-zinc-800 dark:text-zinc-400 dark:hover:text-zinc-100'
+                          }`}
+                        >
+                          {t(`agentPicker.filter.${filter}`)}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                  <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
+                    {loadingAgents ? (
+                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
+                    ) : filteredChatAgents.length > 0 ? (
+                      filteredChatAgents.map((agent) => {
+                        const displayName = getAgentDisplayName(agent, i18n.language);
+                        const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
+                        return (
+                          <button
+                            key={agent.name}
+                            type="button"
+                            onClick={() => {
+                              setShowAgentOptions(false);
+                              insertMention(agent.name);
+                              closeMenu();
+                            }}
+                            className={`w-full min-w-0 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                              selectedAgent === agent.name
+                                ? 'bg-zinc-100/90 text-zinc-900 dark:bg-white/[0.09] dark:text-zinc-50'
+                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
+                            }`}
+                          >
+                            <div className="flex min-w-0 items-center gap-2">
+                              <span className={`grid h-6 w-6 shrink-0 place-items-center rounded-md ${
+                                selectedAgent === agent.name
+                                  ? 'bg-white text-zinc-700 shadow-[0_1px_3px_rgba(22,27,34,0.08)] dark:bg-white/[0.10] dark:text-white'
+                                  : 'bg-zinc-100 text-zinc-400 dark:bg-white/[0.05] dark:text-zinc-500'
+                              }`}>
+                                <Bot className="h-3 w-3" />
+                              </span>
+                              <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
+                                {displayName}
+                              </span>
+                              <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
+                                agent.mode === 'primary'
+                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                  : agent.native
+                                    ? 'bg-zinc-100 text-zinc-600 dark:bg-white/[0.08] dark:text-zinc-300'
+                                    : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
+                              }`}>
+                                {agent.mode === 'primary'
+                                  ? t('agentPicker.badge.primary')
+                                  : agent.native
+                                    ? t('agentPicker.badge.builtin')
+                                    : t('agentPicker.badge.custom')}
+                              </span>
+                              {primaryDesc && (
+                                <span
+                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-white/[0.08]"
+                                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
+                                  onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseOver={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
+                                  onMouseLeave={() => setSelectorTooltip(null)}
+                                  onPointerLeave={() => setSelectorTooltip(null)}
+                                >
+                                  <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
+                                </span>
+                              )}
+                            </div>
+                          </button>
+                        );
+                      })
+                    ) : (
+                      <div className="p-3 text-center text-xs text-zinc-500">{t('noAgents')}</div>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+            <ComposerResourcePicker
+              label={t('chat.addMenu.skills')}
+              title={t('chat.addMenu.selectSkill')}
+              emptyText={t('chat.addMenu.noSkills')}
+              icon={BookOpen}
+              items={composerSkills.map((skill) => ({
+                id: skill.name,
+                name: skill.name,
+                description: skill.description,
+                badge: skill.category,
+                source: skill.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showSkillOptions}
+              onToggle={() => {
+                setShowSkillOptions((open) => !open);
+                setShowAgentOptions(false);
+                setShowWorkflowOptions(false);
+              }}
+              onSelect={(skill) => {
+                insertReference(skill.id, 'skill');
+              }}
+            />
+            <ComposerResourcePicker
+              label={t('chat.addMenu.workflows')}
+              title={t('chat.addMenu.selectWorkflow')}
+              emptyText={t('chat.addMenu.noWorkflows')}
+              icon={WorkflowIcon}
+              items={composerWorkflows.map((workflow) => ({
+                id: workflow.id,
+                name: getWorkflowDisplayName(workflow, i18n.language),
+                description: workflow.description,
+                source: workflow.source === 'project' ? 'builtin' : 'custom',
+              }))}
+              loading={loadingComposerResources}
+              open={showWorkflowOptions}
+              onToggle={() => {
+                setShowWorkflowOptions((open) => !open);
+                setShowAgentOptions(false);
+                setShowSkillOptions(false);
+              }}
+              onSelect={(workflow) => {
+                insertReference(workflow.id, 'workflow');
+                setShowWorkflowOptions(false);
+                closeMenu();
+              }}
+            />
+            </>
           )}
           toolbarSlot={
             <div className="flex min-w-0 items-center gap-0.5">
@@ -2652,120 +3241,7 @@ export default function SessionPage() {
                   </div>
                 )}
               </div>
-              )}
-              <div className="relative" data-agent-selector>
-              <button
-                type="button"
-                onClick={() => {
-                  setShowAgentOptions(!showAgentOptions);
-                  setShowExecutionModeOptions(false);
-                  setShowProjectOptions(false);
-                  setShowModelOptions(false);
-                }}
-                className="flex h-7 w-auto max-w-[150px] min-w-0 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
-                title={t('agentPicker.title')}
-              >
-                <Bot className="h-3 w-3 shrink-0" />
-                <span className="truncate font-medium">
-                  {selectedAgentInfo ? getAgentDisplayName(selectedAgentInfo, i18n.language) : formatAgentName(selectedAgent)}
-                </span>
-                <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showAgentOptions ? 'rotate-180' : ''}`} />
-              </button>
-              {showAgentOptions && (
-                <div className="absolute left-0 bottom-full z-50 mb-2 w-80 max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                  <div className="flex items-center justify-between gap-2 border-b border-zinc-100 px-2.5 py-1.5 dark:border-zinc-800">
-                    <div className="min-w-0">
-                      <div className="text-xs font-semibold text-zinc-700 dark:text-zinc-100">{t('agentPicker.title')}</div>
-                      <div
-                        className="truncate text-[10px] text-zinc-400 dark:text-zinc-500"
-                        onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
-                        onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
-                        onMouseOver={(event) => showSelectorTooltip(event.currentTarget, t('agentPicker.title'), [t('agentPicker.hint')])}
-                        onMouseLeave={() => setSelectorTooltip(null)}
-                        onPointerLeave={() => setSelectorTooltip(null)}
-                      >
-                        {t('agentPicker.hint')}
-                      </div>
-                    </div>
-                    <div className="inline-flex shrink-0 items-center rounded-md border border-zinc-200 bg-white p-0.5 text-[10px] dark:border-zinc-800 dark:bg-zinc-950">
-                      {(['all', 'builtin', 'custom'] as AgentSourceFilter[]).map((filter) => (
-                        <button
-                          key={filter}
-                          type="button"
-                          onClick={() => setAgentSourceFilter(filter)}
-                          className={`rounded px-1.5 py-0.5 transition-colors ${
-                            agentSourceFilter === filter
-                              ? 'bg-zinc-100 text-zinc-900 dark:bg-zinc-800 dark:text-zinc-50'
-                              : 'text-zinc-500 hover:bg-zinc-50 hover:text-zinc-800 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100'
-                          }`}
-                        >
-                          {t(`agentPicker.filter.${filter}`)}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                  <div className="h-64 space-y-0.5 overflow-y-auto p-1.5">
-                    {loadingAgents ? (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('loading')}</div>
-                    ) : filteredChatAgents.length > 0 ? (
-                      filteredChatAgents.map((agent) => {
-                        const displayName = getAgentDisplayName(agent, i18n.language);
-                        const primaryDesc = getAgentDisplayDescription(agent, i18n.language) || t('smartAssistant');
-                        return (
-                        <button
-                          key={agent.name}
-                          onClick={() => { setSelectedAgent(agent.name); setShowAgentOptions(false); }}
-                          className={`w-full min-w-0 rounded-md px-2 py-1.5 text-left transition-colors ${
-                            selectedAgent === agent.name
-                              ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                              : 'hover:bg-zinc-50 text-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
-                          }`}
-                        >
-                          <div className="flex min-w-0 items-center gap-2">
-                            <Bot className={`h-3 w-3 shrink-0 ${selectedAgent === agent.name ? 'text-zinc-600 dark:text-zinc-200' : 'text-zinc-400 dark:text-zinc-500'}`} />
-                            <span className="min-w-0 flex-1 truncate text-xs font-medium text-zinc-900 dark:text-zinc-100">
-                              {displayName}
-                            </span>
-                            <span className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-medium ${
-                              agent.mode === 'primary'
-                                ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
-                                : agent.native
-                                  ? 'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300'
-                                  : 'bg-teal-50 text-teal-600 dark:bg-teal-950/40 dark:text-teal-300'
-                            }`}>
-                              {agent.mode === 'primary'
-                                ? t('agentPicker.badge.primary')
-                                : agent.native
-                                  ? t('agentPicker.badge.builtin')
-                                  : t('agentPicker.badge.custom')}
-                            </span>
-                            <div className="ml-auto flex shrink-0 items-center gap-1">
-                              {primaryDesc && (
-                                <span
-                                  className="group relative rounded p-0.5 transition-colors hover:bg-zinc-200 dark:hover:bg-zinc-700"
-                                  onMouseDown={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                                  onClick={(event) => { event.preventDefault(); event.stopPropagation(); }}
-                                  onPointerEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
-                                  onMouseEnter={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
-                                  onMouseOver={(event) => showSelectorTooltip(event.currentTarget, displayName, [primaryDesc])}
-                                  onMouseLeave={() => setSelectorTooltip(null)}
-                                  onPointerLeave={() => setSelectorTooltip(null)}
-                                >
-                                  <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
-                                </span>
-                              )}
-                            </div>
-                          </div>
-                        </button>
-                        );
-                      })
-                    ) : (
-                      <div className="p-3 text-center text-xs text-zinc-500">{t('noAgents')}</div>
-                    )}
-                  </div>
-                </div>
-              )}
-              </div>
+            )}
             </div>
           }
           centerToolbarSlot={
@@ -3135,13 +3611,81 @@ export default function SessionPage() {
         const sid = openMenuSessionId;
         const session = sessions.find(s => s.id === sid);
         if (!session) return null;
+        const currentProjectId = session.effectiveProjectID || session.projectID;
+        const showMovePicker = movePickerSessionId === session.id;
+        const moveTargetProjects = projects.filter((project) => (
+          project.id.startsWith('prj_')
+          && project.canWrite !== false
+          && project.pathStatus !== 'missing'
+          && project.pathStatus !== 'unreadable'
+        ));
+        const movePickerHeight = Math.min(
+          272,
+          48 + Math.max(44, moveTargetProjects.length * 34),
+        );
+        const menuTop = showMovePicker
+          ? Math.max(8, Math.min(menuAnchor.top, window.innerHeight - movePickerHeight - 8))
+          : menuAnchor.top;
         return (
           <div
-            className="fixed z-50 grid w-[132px] gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)]"
-            style={{ top: menuAnchor.top, right: menuAnchor.right }}
+            className={`fixed z-50 grid gap-0.5 overflow-hidden rounded-[10px] border border-black/[0.11] bg-[#fdfdfc] p-1 shadow-[0_8px_24px_rgba(22,27,34,0.10)] dark:border-white/[0.10] dark:bg-[#303842] dark:shadow-[0_12px_32px_rgba(15,18,22,0.35)] ${
+              showMovePicker ? 'w-[220px]' : 'w-[132px]'
+            }`}
+            style={{
+              top: menuTop,
+              right: menuAnchor.right,
+              maxHeight: showMovePicker ? 'calc(100vh - 16px)' : undefined,
+            }}
             data-session-menu-portal
             onClick={(e) => e.stopPropagation()}
           >
+            {showMovePicker ? (
+              <>
+                <div className="flex h-8 items-center gap-1 border-b border-black/[0.07] px-1 pb-1 dark:border-white/[0.08]">
+                  <button
+                    type="button"
+                    onClick={() => setMovePickerSessionId(null)}
+                    className="grid h-6 w-6 shrink-0 place-items-center rounded-md text-[#6f757c] transition-colors hover:bg-black/[0.05] hover:text-[#202328] dark:text-[#aeb8c3] dark:hover:bg-white/[0.07] dark:hover:text-white"
+                    aria-label={t('moveToProjectBack')}
+                  >
+                    <ChevronLeft className="h-3.5 w-3.5" />
+                  </button>
+                  <span className="min-w-0 truncate text-xs font-semibold text-[#34383d] dark:text-[#e3e8ee]">
+                    {t('moveToProjectTitle')}
+                  </span>
+                </div>
+                <div className="session-sidebar-scrollbar min-h-0 max-h-56 overflow-y-auto py-0.5" role="menu" aria-label={t('moveToProjectTitle')}>
+                  {moveTargetProjects.length === 0 ? (
+                    <div className="px-2 py-3 text-center text-xs leading-5 text-[#858a91] dark:text-[#8f9ba8]">
+                      {t('moveToProjectEmpty')}
+                    </div>
+                  ) : moveTargetProjects.map((project) => {
+                    const isCurrent = project.id === currentProjectId;
+                    const isMovingHere = (
+                      movingSessionId === session.id
+                      && movingTargetProjectId === project.id
+                    );
+                    return (
+                      <button
+                        key={project.id}
+                        type="button"
+                        role="menuitem"
+                        onClick={() => void handleMoveSessionToProject(session.id, project)}
+                        disabled={isCurrent || Boolean(movingSessionId)}
+                        title={project.worktree}
+                        className="flex min-h-[34px] w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-default disabled:opacity-60 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      >
+                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <span className="min-w-0 flex-1 truncate">{getProjectLabel(project)}</span>
+                        {isCurrent && <Check className="h-3.5 w-3.5 shrink-0 text-blue-500" />}
+                        {!isCurrent && isMovingHere && <Loader2 className="h-3.5 w-3.5 shrink-0 animate-spin text-blue-500" />}
+                      </button>
+                    );
+                  })}
+                </div>
+              </>
+            ) : (
+              <>
             <button
               onClick={(e) => { e.stopPropagation(); handleStartRename(session.id, session.title); setOpenMenuSessionId(null); setMenuAnchor(null); }}
               className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
@@ -3165,6 +3709,15 @@ export default function SessionPage() {
               <Share2 className="w-3.5 h-3.5" />
               <span>{session.isShared ? t('unshareAction') : t('shareAction')}</span>
             </button>
+            <button
+              onClick={(e) => { e.stopPropagation(); setMovePickerSessionId(session.id); }}
+              disabled={session.canWrite === false || runningSessionIds.has(session.id)}
+              title={runningSessionIds.has(session.id) ? t('moveToProjectRunning') : undefined}
+              className="flex h-[30px] w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] disabled:cursor-not-allowed disabled:opacity-50 dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+            >
+              <FolderOpen className="h-3.5 w-3.5" />
+              <span className="truncate">{t('moveToProjectAction')}</span>
+            </button>
             <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
             <button
               onClick={(e) => { e.stopPropagation(); setOpenMenuSessionId(null); setMenuAnchor(null); void handleArchiveSession(session.id); }}
@@ -3174,6 +3727,8 @@ export default function SessionPage() {
               <Archive className="w-3.5 h-3.5" />
               <span>{t('archiveAction')}</span>
             </button>
+              </>
+            )}
           </div>
         );
       })()}
