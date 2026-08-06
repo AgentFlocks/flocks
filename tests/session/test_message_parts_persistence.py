@@ -193,10 +193,10 @@ async def test_delete_restores_caches_when_message_persistence_fails(
         id="msg_a",
         part_id="part_a",
     )
-    persist_messages = AsyncMock(
+    mutate_many = AsyncMock(
         side_effect=RuntimeError("message storage unavailable")
     )
-    monkeypatch.setattr(Message, "_persist_messages", persist_messages)
+    monkeypatch.setattr(Storage, "mutate_many", mutate_many)
 
     with pytest.raises(RuntimeError, match="message storage unavailable"):
         await Message.delete(session_id, "msg_a")
@@ -210,9 +210,7 @@ async def test_delete_restores_caches_when_message_persistence_fails(
 
 
 @pytest.mark.asyncio
-async def test_delete_commits_when_parts_cleanup_fails(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+async def test_delete_removes_message_and_parts_atomically() -> None:
     session_id = "ses_parts_delete_parts_failure"
     await Message.create(
         session_id,
@@ -221,19 +219,10 @@ async def test_delete_commits_when_parts_cleanup_fails(
         id="msg_a",
         part_id="part_a",
     )
-    original_delete = Storage.delete
-
-    async def fail_parts_delete(key: str) -> None:
-        if key == f"message_parts:{session_id}:msg_a":
-            raise RuntimeError("parts storage unavailable")
-        await original_delete(key)
-
-    monkeypatch.setattr(Storage, "delete", fail_parts_delete)
-
     assert await Message.delete(session_id, "msg_a") is True
     assert await Message.get(session_id, "msg_a") is None
     assert await Storage.get(f"message:{session_id}") == []
-    assert await Storage.get(f"message_parts:{session_id}:msg_a") is not None
+    assert await Storage.get(f"message_parts:{session_id}:msg_a") is None
 
 
 @pytest.mark.asyncio

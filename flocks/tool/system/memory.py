@@ -67,8 +67,8 @@ def evict_session_memory(session_id: str) -> None:
 @ToolRegistry.register_function(
     name="memory_search",
     description=(
-        "Search persistent memory globally across Global, Daily, all Project "
-        "Memory files, and optional Session History sources."
+        "Search USER, Global, Daily, and current Project Memory, plus optional "
+        "readable Session History from the current project."
     ),
     category=ToolCategory.SEARCH,
     parameters=[
