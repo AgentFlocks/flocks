@@ -194,7 +194,11 @@ describe('useSessionChat.createAndSend — image forwarding', () => {
       id: messageId,
       sessionID: SESSION_ID,
       agent: 'rex',
-      parts: [expect.objectContaining({ type: 'text', text: 'visible prompt' })],
+      parts: [expect.objectContaining({
+        type: 'text',
+        text: 'internal prompt',
+        metadata: { displayText: 'visible prompt' },
+      })],
     });
 
     act(() => {

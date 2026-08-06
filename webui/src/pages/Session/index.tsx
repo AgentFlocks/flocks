@@ -1618,14 +1618,14 @@ export default function SessionPage() {
       });
       const newSessionId = response.data.id;
       const messageId = createMessageId();
-      const visibleText = options?.displayText || text;
       const effectiveAgent = agentOverride || selectedAgent || 'rex';
       const optimisticParts: Message['parts'] = [];
-      if (visibleText) {
+      if (text || options?.displayText) {
         optimisticParts.push({
           id: `temp-${messageId}-text`,
           type: 'text',
-          text: visibleText,
+          text,
+          ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
         });
       }
       imageParts?.forEach((image, index) => {
@@ -1674,7 +1674,7 @@ export default function SessionPage() {
         role: 'user',
         parts: optimisticParts.length > 0
           ? optimisticParts
-          : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+          : [{ id: `temp-${messageId}-part`, type: 'text', text }],
         timestamp: Date.now(),
         agent: effectiveAgent,
       });
