@@ -26,6 +26,13 @@ from flocks.utils.log import Log
 log = Log.create(service="memory.manager")
 
 
+_EMBEDDING_PROVIDER_ORDER = ("openai", "google")
+_DEFAULT_EMBEDDING_MODELS = {
+    "openai": "text-embedding-3-small",
+    "google": "models/text-embedding-004",
+}
+
+
 def _safe_resolve_memory_path(memory_root: Path, rel_path: str) -> Path:
     """Resolve *rel_path* under *memory_root* and reject path-traversal attempts."""
     resolved = (memory_root / rel_path).resolve()
@@ -155,14 +162,12 @@ class MemoryManager:
         self._embedding_enabled = config.search.embedding.enabled
         self._requested_provider = config.search.embedding.provider
         self.provider_id: Optional[str] = (
-            config.search.embedding.provider
-            if self._embedding_enabled
+            self._requested_provider
+            if self._embedding_enabled and self._requested_provider != "auto"
             else None
         )
-        if self._embedding_enabled and self.provider_id == "auto":
-            self.provider_id = "openai"  # Default fallback
-        
-        self.embedding_model = config.search.embedding.model
+        self._requested_model = config.search.embedding.model
+        self.embedding_model = self._requested_model
         
         # Components (lazy initialization)
         self.search_engine: Optional[HybridSearch] = None
@@ -212,7 +217,7 @@ class MemoryManager:
             instance = cls._instances[project_id]
             old_enabled = instance._embedding_enabled
             old_provider = instance._requested_provider
-            old_model = instance.embedding_model
+            old_model = instance._requested_model
 
             instance.config = config
             instance.workspace_dir = Path(workspace_dir)
@@ -229,10 +234,11 @@ class MemoryManager:
                 instance._embedding_enabled = new_enabled
                 instance._requested_provider = new_provider
                 instance.provider_id = (
-                    ("openai" if new_provider == "auto" else new_provider)
-                    if new_enabled
+                    new_provider
+                    if new_enabled and new_provider != "auto"
                     else None
                 )
+                instance._requested_model = new_model
                 instance.embedding_model = new_model
                 instance._initialized = False
                 instance.search_engine = None
@@ -255,6 +261,43 @@ class MemoryManager:
             config=config,
         )
         return cls._instances[project_id]
+
+    @staticmethod
+    def _provider_can_embed(provider_id: str) -> bool:
+        """Return whether a configured Provider can generate embeddings."""
+        provider = Provider.get(provider_id)
+        return bool(
+            provider
+            and provider.supports_embeddings()
+            and provider.is_configured()
+        )
+
+    def _resolve_embedding_provider(self) -> Optional[str]:
+        """Resolve the requested embedding Provider from configured credentials."""
+        if not self._embedding_enabled:
+            return None
+        candidates = (
+            _EMBEDDING_PROVIDER_ORDER
+            if self._requested_provider == "auto"
+            else (self._requested_provider,)
+        )
+        return next(
+            (
+                provider_id
+                for provider_id in candidates
+                if self._provider_can_embed(provider_id)
+            ),
+            None,
+        )
+
+    def _resolve_embedding_model(self, provider_id: Optional[str]) -> str:
+        """Return a Provider-compatible model when using built-in defaults."""
+        if provider_id not in _DEFAULT_EMBEDDING_MODELS:
+            return self._requested_model
+        provider_default = _DEFAULT_EMBEDDING_MODELS[provider_id]
+        if self._requested_model in _DEFAULT_EMBEDDING_MODELS.values():
+            return provider_default
+        return self._requested_model
     
     async def initialize(self) -> None:
         """Initialize memory system (concurrency-safe)."""
@@ -272,23 +315,22 @@ class MemoryManager:
                 
                 if self._embedding_enabled:
                     await Provider.init()
-                    provider = Provider.get(self.provider_id) if self.provider_id else None
-                    if not provider or not provider.supports_embeddings():
-                        for fallback_id in ["openai", "google"]:
-                            fallback = Provider.get(fallback_id)
-                            if fallback and fallback.supports_embeddings():
-                                log.warn("manager.provider.fallback", {
-                                    "from": self.provider_id,
-                                    "to": fallback_id,
-                                })
-                                self.provider_id = fallback_id
-                                break
-                        else:
-                            log.info(
-                                "manager.embedding.unavailable",
-                                {"project_id": self.project_id},
-                            )
-                            self.provider_id = None
+                    from flocks.config import Config
+
+                    app_config = await Config.get()
+                    await Provider.apply_config(app_config)
+                    self.provider_id = self._resolve_embedding_provider()
+                    self.embedding_model = self._resolve_embedding_model(
+                        self.provider_id,
+                    )
+                    if self.provider_id is None:
+                        log.info(
+                            "manager.embedding.unavailable",
+                            {
+                                "project_id": self.project_id,
+                                "requested_provider": self._requested_provider,
+                            },
+                        )
                 
                 self.search_engine = HybridSearch(
                     project_id=self.project_id,

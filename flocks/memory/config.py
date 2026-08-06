@@ -22,17 +22,9 @@ class MemoryEmbeddingConfig(BaseModel):
         "text-embedding-3-small",
         description="Embedding model name"
     )
-    api_key: Optional[str] = Field(
-        None,
-        description="API key (optional, can use env var)"
-    )
     local_model_path: Optional[str] = Field(
         None,
         description="Local model path for local provider"
-    )
-    timeout_ms: int = Field(
-        60000,
-        description="Request timeout in milliseconds"
     )
 
 

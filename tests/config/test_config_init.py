@@ -50,8 +50,10 @@ def test_ensure_config_files_creates_from_examples(tmp_path, monkeypatch):
     config_data = json.loads(config_file.read_text(encoding="utf-8"))
     assert config_data["test"] == "config"
     assert set(config_data["memory"]) == {"dream", "search"}
-    assert config_data["memory"]["search"]["embedding"]["provider"] == "auto"
-    assert config_data["memory"]["search"]["embedding"]["enabled"] is False
+    embedding_config = config_data["memory"]["search"]["embedding"]
+    assert set(embedding_config) == {"enabled", "model", "provider"}
+    assert embedding_config["provider"] == "auto"
+    assert embedding_config["enabled"] is False
     assert config_data["memory"]["dream"]["enabled"] is True
     assert set(config_data["memory"]["dream"]) == {
         "enabled",

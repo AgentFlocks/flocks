@@ -230,6 +230,95 @@ async def test_memory_manager_starts_without_fts5_and_session_search_fails_clear
         )
 
 
+def test_auto_embedding_uses_first_configured_provider(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    openai = Mock()
+    openai.supports_embeddings.return_value = True
+    openai.is_configured.return_value = False
+    google = Mock()
+    google.supports_embeddings.return_value = True
+    google.is_configured.return_value = True
+    providers = {"openai": openai, "google": google}
+    monkeypatch.setattr(Provider, "get", providers.get)
+
+    manager = MemoryManager(
+        project_id="default",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(
+            search={"embedding": {"enabled": True, "provider": "auto"}},
+        ),
+    )
+
+    provider_id = manager._resolve_embedding_provider()
+
+    assert provider_id == "google"
+    assert manager._resolve_embedding_model(provider_id) == (
+        "models/text-embedding-004"
+    )
+
+
+def test_auto_embedding_prefers_configured_openai(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    providers = {}
+    for provider_id in ("openai", "google"):
+        provider = Mock()
+        provider.supports_embeddings.return_value = True
+        provider.is_configured.return_value = True
+        providers[provider_id] = provider
+    monkeypatch.setattr(Provider, "get", providers.get)
+
+    manager = MemoryManager(
+        project_id="default",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(
+            search={"embedding": {"enabled": True, "provider": "auto"}},
+        ),
+    )
+
+    provider_id = manager._resolve_embedding_provider()
+
+    assert provider_id == "openai"
+    assert manager._resolve_embedding_model(provider_id) == (
+        "text-embedding-3-small"
+    )
+
+
+@pytest.mark.asyncio
+async def test_embedding_initialization_applies_provider_config(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    openai = Mock()
+    openai.supports_embeddings.return_value = True
+    openai.is_configured.return_value = True
+    apply_config = AsyncMock()
+    monkeypatch.setattr(Provider, "init", AsyncMock())
+    monkeypatch.setattr(Provider, "apply_config", apply_config)
+    monkeypatch.setattr(
+        Provider,
+        "get",
+        lambda provider_id: openai if provider_id == "openai" else None,
+    )
+
+    manager = MemoryManager(
+        project_id="default",
+        workspace_dir=str(tmp_path),
+        config=MemoryConfig(
+            search={"embedding": {"enabled": True, "provider": "auto"}},
+            sync={"on_session_start": False},
+        ),
+    )
+
+    await manager.initialize()
+
+    apply_config.assert_awaited_once()
+    assert manager.provider_id == "openai"
+
+
 @pytest.mark.asyncio
 async def test_text_part_updates_and_message_delete_update_fts(
     tmp_path: Path,
