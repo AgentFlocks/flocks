@@ -34,7 +34,11 @@ from flocks.session.core.defaults import (
     DOOM_LOOP_THRESHOLD,
     REPEATED_EXACT_TOOL_CALL_HALT_THRESHOLD,
 )
-from flocks.session.lifecycle.retry import CONNECTION_ERROR_DISPLAY_MESSAGE, SessionRetry
+from flocks.session.lifecycle.retry import (
+    CONNECTION_ERROR_DISPLAY_MESSAGE,
+    MAX_ERROR_RETRIES,
+    SessionRetry,
+)
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
@@ -237,7 +241,6 @@ class FailoverDecision:
 
     eligible: bool
     reason: str
-    same_model_retries: int = 3
 
 
 @dataclass
@@ -1243,53 +1246,53 @@ class SessionRunner:
             reason = "billing" if any(
                 pattern in lowered for pattern in ("billing", "insufficient quota")
             ) else "rate_limit"
-            return FailoverDecision(True, reason, 0)
+            return FailoverDecision(True, reason)
         if status_code in {401, 403}:
-            return FailoverDecision(True, "auth", 0)
+            return FailoverDecision(True, "auth")
         if status_code == 402:
-            return FailoverDecision(True, "billing", 0)
+            return FailoverDecision(True, "billing")
 
         if "model" in lowered and any(pattern in lowered for pattern in (
             "not found", "model_not_found", "unknown model", "no such model",
         )):
-            return FailoverDecision(True, "model_not_found", 0)
+            return FailoverDecision(True, "model_not_found")
 
         if status_code == 404:
             if any(pattern in lowered for pattern in (
                 "model not found", "model_not_found", "unknown model", "no such model",
             )):
-                return FailoverDecision(True, "model_not_found", 0)
-            return FailoverDecision(True, "unknown_api", 3)
+                return FailoverDecision(True, "model_not_found")
+            return FailoverDecision(True, "unknown_api")
 
         if status_code in {408, 504} or data.get("isConnectionError") is True or any(
             pattern in lowered
             for pattern in ("timeout", "timed out", "connection error", "connection reset")
         ):
-            return FailoverDecision(True, "timeout", 1)
+            return FailoverDecision(True, "timeout")
         if status_code in {503, 529} or any(
             pattern in lowered for pattern in ("overloaded", "temporarily unavailable")
         ):
-            return FailoverDecision(True, "overloaded", 1)
+            return FailoverDecision(True, "overloaded")
         if status_code in {500, 502}:
-            return FailoverDecision(True, "server_error", 3)
+            return FailoverDecision(True, "server_error")
 
         if any(pattern in lowered for pattern in (
             "content policy", "content filter", "content_filter", "safety policy",
             "policy violation",
         )):
-            return FailoverDecision(True, "content_policy", 0)
+            return FailoverDecision(True, "content_policy")
         if error_name == "JSONDecodeError" or any(
             pattern in lowered for pattern in (
                 "malformed response", "invalid response", "empty choices",
                 "returned choice with null", "null message",
             )
         ):
-            return FailoverDecision(True, "invalid_response", 0)
+            return FailoverDecision(True, "invalid_response")
 
         if status_code is not None and 400 <= status_code < 500:
-            return FailoverDecision(True, "provider_request", 0)
+            return FailoverDecision(True, "provider_request")
         if error_name == "APIError" or data.get("isRetryable") is True:
-            return FailoverDecision(True, "unknown_api", 3)
+            return FailoverDecision(True, "unknown_api")
         return FailoverDecision(False, "local_error")
 
     def _deferred_failure_result(
@@ -1636,7 +1639,6 @@ class SessionRunner:
         # The two counters are independent: empty-response retries (transient
         # model quirk) and exception retries (API errors) track separately so
         # that one kind of failure doesn't eat the other's budget.
-        MAX_ERROR_RETRIES = 3
         MAX_EMPTY_RETRIES = 3
         error_attempt = 0
         empty_attempt = 0
@@ -1812,18 +1814,7 @@ class SessionRunner:
                 retry_message = SessionRetry.retryable(error_dict)
                 failover_decision = self.classify_failover_error(error_dict)
                 retry_limit = MAX_ERROR_RETRIES
-                if (
-                    self._defer_step_errors
-                    and failover_decision.eligible
-                ):
-                    retry_limit = failover_decision.same_model_retries
-                    will_retry = error_attempt <= retry_limit
-                    if will_retry and retry_message is None:
-                        retry_message = (
-                            f"Provider error ({failover_decision.reason}), retrying..."
-                        )
-                else:
-                    will_retry = retry_message is not None and error_attempt <= retry_limit
+                will_retry = retry_message is not None and error_attempt <= retry_limit
                 retry_blocked_by_tool_execution = (
                     self._attempt_state.tool_execution_started
                 )

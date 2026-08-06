@@ -130,6 +130,15 @@ class TestRetryable:
 # ---------------------------------------------------------------------------
 
 class TestDelay:
+    def test_five_retry_schedule(self):
+        assert [SessionRetry.delay(attempt) for attempt in range(1, 6)] == [
+            2_000,
+            4_000,
+            8_000,
+            16_000,
+            30_000,
+        ]
+
     def test_attempt_1_returns_initial_delay(self):
         result = SessionRetry.delay(1)
         assert result == RETRY_INITIAL_DELAY
