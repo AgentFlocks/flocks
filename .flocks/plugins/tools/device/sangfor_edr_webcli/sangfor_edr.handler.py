@@ -27,6 +27,7 @@ if _PLUGIN_DIR not in sys.path:
     sys.path.insert(0, _PLUGIN_DIR)
 import sangfor_edr_dashboard_api as _dashboard_api_module  # noqa: E402
 import sangfor_edr_http_login as _http_login_module  # noqa: E402
+import sangfor_edr_threat_assets_api as _threat_assets_api_module  # noqa: E402
 
 SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
@@ -1416,6 +1417,19 @@ async def handle_dashboard(ctx: ToolContext) -> ToolResult:
             success=bool(result.get("success")),
             output=result,
             error=None if result.get("success") else "dashboard_api_partial_failure",
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+
+async def handle_threat_assets(ctx: ToolContext) -> ToolResult:
+    params = dict(ctx.params)
+    try:
+        result = _threat_assets_api_module.run_threat_assets(params)
+        return ToolResult(
+            success=bool(result.get("success")),
+            output=result,
+            error=None if result.get("success") else "threat_assets_api_partial_failure",
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))
