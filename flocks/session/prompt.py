@@ -18,6 +18,11 @@ from datetime import datetime
 import platform
 
 from . import prompt_strings
+from flocks.memory.injection import (
+    CURATED_MEMORY_INJECTION_TOKENS,
+    USER_MEMORY_INJECTION_TOKENS,
+    render_memory_snapshot,
+)
 from flocks.utils.log import Log
 
 
@@ -937,21 +942,38 @@ class SessionPrompt:
             profile_content = user_profile.get("content", "")
             if profile_content:
                 prompts.append(
-                    f"## {user_profile['path']}\n\n{profile_content}"
+                    render_memory_snapshot(
+                        user_profile,
+                        session_id=session_id,
+                        token_budget=USER_MEMORY_INJECTION_TOKENS,
+                        count_tokens=cls.count_tokens,
+                    )
                 )
 
         main_memory = memory_bootstrap_data.get("main_memory")
         if main_memory and main_memory.get("inject"):
             memory_content = main_memory.get("content", "")
             if memory_content:
-                prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
+                prompts.append(
+                    render_memory_snapshot(
+                        main_memory,
+                        session_id=session_id,
+                        token_budget=CURATED_MEMORY_INJECTION_TOKENS,
+                        count_tokens=cls.count_tokens,
+                    )
+                )
 
         project_memory = memory_bootstrap_data.get("project_memory")
         if project_memory and project_memory.get("inject"):
             project_content = project_memory.get("content", "")
             if project_content:
                 prompts.append(
-                    f"## {project_memory['path']}\n\n{project_content}"
+                    render_memory_snapshot(
+                        project_memory,
+                        session_id=session_id,
+                        token_budget=CURATED_MEMORY_INJECTION_TOKENS,
+                        count_tokens=cls.count_tokens,
+                    )
                 )
 
         log.debug("prompt.memory_injected", {
