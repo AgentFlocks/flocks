@@ -1,7 +1,8 @@
-"""Parse syslog lines (RFC 5424 and BSD / RFC 3164 style) without external deps."""
+"""Parse syslog lines (RFC 5424, RFC 3164, and Sangfor SE) without external deps."""
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -20,6 +21,10 @@ _ISO3164_REST_RE = re.compile(
     r"([\s\S]*)$",                                                        # message
     re.DOTALL,
 )
+_SE_ISO_TS_RE = re.compile(
+    r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})?"
+)
+_SE_SPACE_TS_RE = re.compile(r"\d{4}-\d{2}-\d{2}\s+\d{2}:\s*\d{2}:\s*\d{2}")
 
 
 def _pri_parts(pri: int) -> tuple[int, int]:
@@ -54,7 +59,7 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
     """
     Parse one syslog payload into a dict suitable for workflow inputs.
 
-    format_hint: "auto" | "rfc3164" | "rfc5424"
+    format_hint: "auto" | "rfc3164" | "rfc5424" | "se"
     """
     text = raw.decode("utf-8", errors="replace") if isinstance(raw, (bytes, bytearray)) else raw
     text = text.strip()
@@ -72,6 +77,8 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
 
     m_pri = _PRI_RE.match(text)
     if not m_pri:
+        if format_hint == "se" or (format_hint == "auto" and _looks_like_se(text)):
+            return _parse_se(text, raw=text, facility=1, severity=6)
         return {
             "raw": text,
             "facility": 0,
@@ -87,6 +94,8 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
     facility, severity = _pri_parts(pri)
     rest = text[m_pri.end() :]
 
+    if format_hint == "se" or (format_hint == "auto" and _looks_like_se(rest)):
+        return _parse_se(rest, raw=text, facility=facility, severity=severity)
     if format_hint == "rfc3164":
         return _parse_rfc3164(rest, raw=text, facility=facility, severity=severity)
     if format_hint == "rfc5424":
@@ -104,6 +113,73 @@ def parse_syslog(raw: str, format_hint: str = "auto") -> Dict[str, Any]:
                 return _parse_iso3164(m_iso, raw=text, facility=facility, severity=severity)
 
     return _parse_rfc3164(rest, raw=text, facility=facility, severity=severity)
+
+
+def _looks_like_se(rest: str) -> bool:
+    parts = rest.strip().split("|!", 3)
+    return (
+        len(parts) == 4
+        and parts[1].strip() in {"secevent", "alarm"}
+        and parts[3].lstrip().startswith(("{", "["))
+    )
+
+
+def _normalize_se_ts(prefix: str) -> str:
+    iso_match = _SE_ISO_TS_RE.search(prefix)
+    if iso_match:
+        return _normalize_ts(iso_match.group(0))
+    space_match = _SE_SPACE_TS_RE.search(prefix)
+    if space_match:
+        timestamp = re.sub(r"\s*:\s*", ":", space_match.group(0))
+        try:
+            return datetime.fromisoformat(timestamp).isoformat()
+        except ValueError:
+            pass
+    return prefix.strip()
+
+
+def _parse_se(
+    rest: str,
+    *,
+    raw: str,
+    facility: int,
+    severity: int,
+) -> Dict[str, Any]:
+    parts = rest.strip().split("|!", 3)
+    if len(parts) != 4:
+        return {
+            "raw": raw,
+            "facility": facility,
+            "severity": severity,
+            "timestamp": "",
+            "hostname": "",
+            "app_name": "",
+            "message": rest.strip(),
+            "format": "se",
+            "log_type": "",
+            "client_ip": "",
+            "data": None,
+        }
+
+    timestamp, log_type, client_ip, message = (part.strip() for part in parts)
+    try:
+        data = json.loads(message)
+    except (json.JSONDecodeError, TypeError):
+        data = None
+
+    return {
+        "raw": raw,
+        "facility": facility,
+        "severity": severity,
+        "timestamp": _normalize_se_ts(timestamp),
+        "hostname": client_ip,
+        "app_name": log_type,
+        "message": message,
+        "format": "se",
+        "log_type": log_type,
+        "client_ip": client_ip,
+        "data": data,
+    }
 
 
 def _next_rfc5424_token(s: str) -> tuple[str, str]:
