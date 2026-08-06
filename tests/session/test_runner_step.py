@@ -2954,6 +2954,60 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_process_step_does_not_retry_after_tool_execution_started(monkeypatch):
+    runner = _make_runner("ses_runner_tool_side_effect_no_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_side_effect_no_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_tool_side_effect_no_retry")
+    call_count = 0
+    sleep_mock = AsyncMock(return_value=None)
+
+    async def _call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        runner._attempt_state.tool_execution_started = True
+        raise httpcore.ReadError()
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner_mod.SessionPrompt,
+        "build_system_prompts",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_call_llm", _call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 1
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    sleep_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monkeypatch):
     runner = _make_runner("ses_runner_default_max_steps")
     runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
