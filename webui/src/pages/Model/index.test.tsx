@@ -17,6 +17,8 @@ const mocks = vi.hoisted(() => ({
   refetch: vi.fn(),
   getSummary: vi.fn(),
   getResolved: vi.fn(),
+  getFallbacks: vi.fn(),
+  setFallbacks: vi.fn(),
   listDefinitions: vi.fn(),
   createDefinition: vi.fn(),
   getModelSettings: vi.fn(),
@@ -144,6 +146,8 @@ vi.mock('@/api/provider', () => ({
   },
   defaultModelAPI: {
     getResolved: mocks.getResolved,
+    getFallbacks: mocks.getFallbacks,
+    setFallbacks: mocks.setFallbacks,
     delete: vi.fn(),
     set: vi.fn(),
   },
@@ -162,6 +166,8 @@ describe('ModelPage add provider dialog', () => {
     });
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models: [] } });
     mocks.catalogList.mockResolvedValue({
       data: {
@@ -270,6 +276,8 @@ describe('ModelPage configure provider dialog', () => {
     });
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models: [model], total: 1 } });
     mocks.catalogList.mockResolvedValue({
       data: {
@@ -411,6 +419,18 @@ describe('ModelPage default model selector', () => {
       modelCount: 1,
       category: 'connected',
     },
+    {
+      id: 'disconnected',
+      name: 'Disconnected Provider',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: false,
+      modelCount: 1,
+      category: 'available',
+    },
   ];
   const models = [
     {
@@ -452,6 +472,8 @@ describe('ModelPage default model selector', () => {
     });
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
     mocks.createDefinition.mockResolvedValue({ data: {} });
     mocks.getModelSettings.mockResolvedValue({
@@ -603,6 +625,207 @@ describe('ModelPage default model selector', () => {
         'minimax',
         expect.objectContaining({ cache_read_price: null }),
       );
+    });
+  });
+});
+
+describe('ModelPage auxiliary model editor', () => {
+  const providers = [
+    {
+      id: 'openai',
+      name: 'OpenAI Gateway',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 2,
+      category: 'connected',
+    },
+    {
+      id: 'minimax',
+      name: 'MiniMax Cloud',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+  ];
+  const models = [
+    {
+      id: 'gpt-4o',
+      name: 'GPT-4o',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'unconfigured-model',
+      name: 'Unconfigured Model',
+      provider_id: 'disconnected',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'gpt-4o-mini',
+      name: 'GPT-4o Mini',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'minimax-m3',
+      name: 'MiniMax M3',
+      provider_id: 'minimax',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({
+      data: { provider_id: 'openai', model_id: 'gpt-4o' },
+    });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockResolvedValue({ data: { success: true, latency_ms: 10 } });
+  });
+
+  async function openEditor(user: ReturnType<typeof userEvent.setup>) {
+    renderWithRouter(<ModelPage />);
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    return screen.findByRole('dialog', { name: 'fallbacks.title' });
+  }
+
+  it('explains automatic routing when no auxiliary models are configured', async () => {
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+
+    expect(within(dialog).getByText('fallbacks.empty')).toBeInTheDocument();
+    expect(within(dialog).getByText('fallbacks.emptyHint')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+  });
+
+  it('adds and saves an auxiliary model without offering the primary model', async () => {
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    await user.click(editor.getByRole('button', { name: 'fallbacks.add' }));
+    expect(editor.queryByRole('button', { name: /GPT-4o gpt-4o$/ })).not.toBeInTheDocument();
+    expect(editor.queryByRole('button', { name: /Unconfigured Model/ })).not.toBeInTheDocument();
+    await user.click(editor.getByRole('button', { name: /MiniMax M3 minimax-m3/ }));
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
+  });
+
+  it('reorders configured auxiliary models before saving', async () => {
+    mocks.getFallbacks.mockResolvedValue({
+      data: {
+        fallback_providers: [
+          { provider_id: 'minimax', model_id: 'minimax-m3' },
+          { provider_id: 'openai', model_id: 'gpt-4o-mini' },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    await user.click(editor.getAllByRole('button', { name: 'fallbacks.moveDown' })[0]);
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'openai', model_id: 'gpt-4o-mini' },
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
+  });
+
+  it('keeps the editor open and reports save failures', async () => {
+    mocks.setFallbacks.mockRejectedValueOnce(new Error('configuration is read-only'));
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    await user.click(editor.getByRole('button', { name: 'fallbacks.add' }));
+    await user.click(editor.getByRole('button', { name: /MiniMax M3 minimax-m3/ }));
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.toast.error).toHaveBeenCalledWith(
+        'operationFailed',
+        'configuration is read-only',
+      );
+    });
+    expect(screen.getByRole('dialog', { name: 'fallbacks.title' })).toBeInTheDocument();
+  });
+
+  it('blocks saving stale entries until they are removed, then clears the chain', async () => {
+    mocks.getFallbacks.mockResolvedValue({
+      data: {
+        fallback_providers: [
+          { provider_id: 'retired', model_id: 'retired-model' },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    expect(editor.getByText('fallbacks.unavailable')).toBeInTheDocument();
+    expect(editor.getByText('fallbacks.removeInvalidHint')).toBeInTheDocument();
+    expect(editor.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+
+    await user.click(editor.getByRole('button', { name: 'fallbacks.remove' }));
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => expect(mocks.setFallbacks).toHaveBeenCalledWith([]));
+  });
+
+  it('blocks edits until a failed configuration load is retried', async () => {
+    mocks.getFallbacks
+      .mockRejectedValueOnce(new Error('auxiliary request failed'))
+      .mockResolvedValueOnce({ data: { fallback_providers: [] } });
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    expect(await editor.findByText('fallbacks.loadFailed')).toBeInTheDocument();
+    expect(editor.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+    await user.click(editor.getByRole('button', { name: 'fallbacks.retry' }));
+
+    await waitFor(() => expect(mocks.getFallbacks).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(editor.queryByText('fallbacks.loadFailed')).not.toBeInTheDocument();
     });
   });
 });

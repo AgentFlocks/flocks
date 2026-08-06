@@ -915,6 +915,31 @@ async def test_rate_limit_switch_sets_primary_cooldown(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_configured_switch_does_not_set_cross_turn_cooldown(monkeypatch):
+    ctx = _ctx()
+    ctx.model_candidate_policy = "configured"
+    last_user = SimpleNamespace(id="msg_user", agent="rex")
+
+    async def process_step(runner, _messages, _last_user):
+        if runner.provider_id == "primary":
+            return _failure(assistant_id="msg_rate", reason="rate_limit")
+        return StepResult(action="stop", content="recovered")
+
+    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
+
+    await SessionLoop._process_step_with_failover(
+        ctx,
+        LoopCallbacks(),
+        [last_user],
+        last_user,
+    )
+
+    assert (ctx.provider_id, ctx.model_id) == ("fallback", "fallback-model")
+    assert ctx.session.id not in SessionLoop._auto_failover_cooldowns
+
+
+@pytest.mark.asyncio
 async def test_403_quota_failure_sets_primary_cooldown(monkeypatch):
     decision = SessionRunner.classify_failover_error({
         "name": "APIError",
@@ -1130,6 +1155,72 @@ async def test_candidate_builder_allows_primary_only_chain(monkeypatch):
     ) == [primary]
 
 
+@pytest.mark.asyncio
+async def test_candidate_builder_uses_configured_order_without_discovery(
+    monkeypatch,
+):
+    config = SimpleNamespace(fallback_providers=[
+        SimpleNamespace(provider_id="other", model_id="model-b"),
+        SimpleNamespace(provider_id="primary", model_id="model-a"),
+        SimpleNamespace(provider_id="missing", model_id="missing-model"),
+    ])
+    model_manager = MagicMock()
+    monkeypatch.setattr(
+        "flocks.provider.provider.Provider.apply_config",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "flocks.provider.model_manager.get_model_manager",
+        lambda: model_manager,
+    )
+
+    async def validate(provider_id, _model_id, **_kwargs):
+        available = provider_id != "missing"
+        return available, "available" if available else "provider_not_configured"
+
+    monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+    primary = RuntimeModel("primary", "primary-model")
+
+    candidates = await SessionLoop._build_model_candidates(
+        primary,
+        route_seed="unused-for-configured",
+        preferred=RuntimeModel("other", "model-b"),
+        config=config,
+    )
+
+    assert candidates == [
+        primary,
+        RuntimeModel("other", "model-b"),
+        RuntimeModel("primary", "model-a"),
+    ]
+    model_manager.list_models.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_configured_chain_with_no_available_fallbacks_keeps_primary_only(
+    monkeypatch,
+):
+    config = SimpleNamespace(fallback_providers=[
+        SimpleNamespace(provider_id="missing", model_id="missing-model"),
+    ])
+    monkeypatch.setattr(
+        "flocks.provider.provider.Provider.apply_config",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        SessionLoop,
+        "validate_runtime_model",
+        AsyncMock(return_value=(False, "provider_not_configured")),
+    )
+    primary = RuntimeModel("primary", "primary-model")
+
+    assert await SessionLoop._build_model_candidates(
+        primary,
+        route_seed="unused-for-configured",
+        config=config,
+    ) == [primary]
+
+
 def test_cooldown_is_cleared_when_primary_changes():
     candidates = [
         RuntimeModel("new-primary", "new-model"),
@@ -1149,6 +1240,7 @@ def test_cooldown_is_cleared_when_primary_changes():
 @pytest.mark.asyncio
 async def test_synthetic_subtask_continuation_keeps_fallback(monkeypatch):
     ctx = _ctx(index=1)
+    ctx.model_candidate_policy = "configured"
     ctx.turn_user_id = "msg_real"
     synthetic_user = SimpleNamespace(
         id="msg_subtask_continue",
@@ -1181,6 +1273,11 @@ async def test_first_real_turn_builds_stable_chain_from_user_id(monkeypatch):
         RuntimeModel("primary", "same-provider-model"),
         RuntimeModel("other", "other-provider-model"),
     ]
+    config = SimpleNamespace(fallback_providers=None)
+    monkeypatch.setattr(
+        "flocks.config.config.Config.get",
+        AsyncMock(return_value=config),
+    )
     build = AsyncMock(return_value=rebuilt)
     monkeypatch.setattr(SessionLoop, "_build_model_candidates", build)
 
@@ -1192,7 +1289,49 @@ async def test_first_real_turn_builds_stable_chain_from_user_id(monkeypatch):
         RuntimeModel("primary", "primary-model"),
         route_seed="ses_auto:msg_first",
         preferred=None,
+        config=config,
     )
+
+
+@pytest.mark.asyncio
+async def test_configured_first_real_turn_ignores_cooldown_and_starts_primary(
+    monkeypatch,
+):
+    ctx = _ctx(index=1)
+    ctx.turn_user_id = None
+    first_user = SimpleNamespace(
+        id="msg_first",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    config = SimpleNamespace(fallback_providers=[
+        SimpleNamespace(provider_id="fallback", model_id="fallback-model"),
+    ])
+    rebuilt = [
+        RuntimeModel("primary", "primary-model"),
+        RuntimeModel("fallback", "fallback-model"),
+    ]
+    SessionLoop._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+        model=rebuilt[1],
+        primary=rebuilt[0],
+        expires_at=float("inf"),
+        reason="rate_limit",
+    )
+    monkeypatch.setattr(
+        "flocks.config.config.Config.get",
+        AsyncMock(return_value=config),
+    )
+    monkeypatch.setattr(
+        SessionLoop,
+        "_build_model_candidates",
+        AsyncMock(return_value=rebuilt),
+    )
+
+    await SessionLoop._prepare_auto_turn(ctx, first_user)
+
+    assert ctx.model_candidate_policy == "configured"
+    assert ctx.candidate_index == 0
+    assert (ctx.provider_id, ctx.model_id) == ("primary", "primary-model")
+    assert ctx.session.id not in SessionLoop._auto_failover_cooldowns
 
 
 @pytest.mark.asyncio
@@ -1269,6 +1408,11 @@ async def test_queued_webui_turn_rebuilds_auto_chain(monkeypatch):
             "model_id": "primary-model",
         }),
     )
+    config = SimpleNamespace(fallback_providers=None)
+    monkeypatch.setattr(
+        "flocks.config.config.Config.get",
+        AsyncMock(return_value=config),
+    )
     build = AsyncMock(return_value=rebuilt)
     monkeypatch.setattr(SessionLoop, "_build_model_candidates", build)
 
@@ -1280,7 +1424,54 @@ async def test_queued_webui_turn_rebuilds_auto_chain(monkeypatch):
         RuntimeModel("primary", "primary-model"),
         route_seed="ses_auto:msg_auto",
         preferred=None,
+        config=config,
     )
+
+
+@pytest.mark.asyncio
+async def test_queued_configured_turn_restarts_from_primary(monkeypatch):
+    ctx = _ctx(index=1)
+    ctx.turn_user_id = "msg_previous"
+    ctx.auto_failover_allowed = True
+    ctx.model_candidate_policy = "configured"
+    queued_user = SimpleNamespace(
+        id="msg_next",
+        model={"providerID": "primary", "modelID": "primary-model"},
+    )
+    rebuilt = [
+        RuntimeModel("primary", "primary-model"),
+        RuntimeModel("fallback", "fallback-model"),
+    ]
+    config = SimpleNamespace(fallback_providers=[
+        SimpleNamespace(provider_id="fallback", model_id="fallback-model"),
+    ])
+    monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        "flocks.session.session.Session.get_by_id",
+        AsyncMock(return_value=_session(model_auto=True)),
+    )
+    monkeypatch.setattr(
+        "flocks.config.config.Config.get",
+        AsyncMock(return_value=config),
+    )
+    monkeypatch.setattr(
+        "flocks.config.config.Config.resolve_default_llm",
+        AsyncMock(return_value={
+            "provider_id": "primary",
+            "model_id": "primary-model",
+        }),
+    )
+    monkeypatch.setattr(
+        SessionLoop,
+        "_build_model_candidates",
+        AsyncMock(return_value=rebuilt),
+    )
+
+    await SessionLoop._prepare_auto_turn(ctx, queued_user)
+
+    assert ctx.model_candidate_policy == "configured"
+    assert ctx.candidate_index == 0
+    assert (ctx.provider_id, ctx.model_id) == ("primary", "primary-model")
 
 
 @pytest.mark.asyncio
