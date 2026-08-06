@@ -11,11 +11,20 @@ export interface SecurityOverview {
       ingress: IngressRolloutMode;
       visibility: RolloutMode;
       filesystem: RolloutMode;
+      network?: RolloutMode;
     };
     source: string;
   };
   hardDeny: {
     systemRuleIds: string[];
+  };
+  network?: {
+    hardDeny: string[];
+    allowlist: string[];
+    blocklist: string[];
+    trustedTools: Array<{ name: string; source?: string }>;
+    revision: number;
+    modeDefaults: Record<string, string>;
   };
   readonlyCeiling: {
     denyPatterns: string[];
@@ -49,6 +58,8 @@ export interface SecurityOverview {
   };
 }
 
+export type NetworkSecurityRules = NonNullable<SecurityOverview['network']>;
+
 export const flocksproSecurityApi = {
   getOverview: async (): Promise<SecurityOverview> =>
     (await client.get('/api/flockspro/policy/security/overview')).data,
@@ -58,9 +69,19 @@ export const flocksproSecurityApi = {
     ingress: IngressRolloutMode;
     visibility: RolloutMode;
     filesystem: RolloutMode;
+    network?: RolloutMode;
   }): Promise<{
     effective: SecurityOverview['rollout']['effective'];
     source: string;
     message: string;
   }> => (await client.put('/api/flockspro/policy/security/rollout', payload)).data,
+  getNetworkRules: async (): Promise<NetworkSecurityRules> =>
+    (await client.get('/api/flockspro/policy/security/network-rules')).data,
+  setNetworkRules: async (payload: {
+    allowlist: string[];
+    blocklist: string[];
+    trustedTools?: Array<{ name: string; source?: string }>;
+    revision?: number;
+  }): Promise<NetworkSecurityRules> =>
+    (await client.put('/api/flockspro/policy/security/network-rules', payload)).data,
 };

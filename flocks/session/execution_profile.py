@@ -20,6 +20,12 @@ PROFILE_VERSION = "v1"
 
 _PERMISSION_MODES = {"readonly", "require-confirm", "auto-allow-all"}
 _RUNTIME_MODES = {"dev-mode", "exe-mode"}
+_NETWORK_MODES = {"auto-deny-all", "require-confirm", "auto-allow-all"}
+_ENTRY_ALIASES = {
+    "channel_webhook": "channel",
+    "workflow_service": "workflow",
+    "workflow_trigger": "workflow",
+}
 
 
 def _now_iso() -> str:
@@ -37,8 +43,15 @@ def _as_list(value: Any) -> list[str]:
     return out
 
 
+def normalize_entry(value: Any, *, default: str = "interactive") -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized:
+        return default
+    return _ENTRY_ALIASES.get(normalized, normalized)
+
+
 def _normalize_entry(value: Any) -> str:
-    return str(value or "interactive").strip().lower() or "interactive"
+    return normalize_entry(value, default="interactive")
 
 
 def _workspace_root_dir() -> str:
@@ -66,6 +79,28 @@ def _default_runtime_mode(entry: str) -> str:
     return "exe-mode"
 
 
+def default_network_mode(entry: str | None) -> str:
+    normalized = _normalize_entry(entry)
+    if normalized in {"webui", "interactive", "cli", "tui"}:
+        return "require-confirm"
+    if normalized in {
+        "channel",
+        "workflow",
+        "api",
+        "schedule",
+        "task",
+        "session.shell",
+        "http_control_plane",
+    }:
+        return "auto-deny-all"
+    if normalized == "unknown":
+        return "require-confirm"
+    if normalized == "delegate":
+        # Delegate sessions inherit their mode from the parent in Pro.
+        return "require-confirm"
+    return "require-confirm"
+
+
 def _normalize_permission_mode(value: Any, *, entry: str) -> str:
     mode = str(value or "").strip().lower()
     if mode in _PERMISSION_MODES:
@@ -78,6 +113,13 @@ def _normalize_runtime_mode(value: Any, *, entry: str) -> str:
     if mode in _RUNTIME_MODES:
         return mode
     return _default_runtime_mode(entry)
+
+
+def _normalize_network_mode(value: Any, *, entry: str) -> str:
+    mode = str(value or "").strip().lower()
+    if mode in _NETWORK_MODES:
+        return mode
+    return default_network_mode(entry)
 
 
 def default_execution_profile(
@@ -117,6 +159,7 @@ def default_execution_profile(
         "default_agent": default_agent_name,
         "permission_mode": _default_permission_mode(normalized_entry),
         "runtime_mode": _default_runtime_mode(normalized_entry),
+        "network_mode": default_network_mode(normalized_entry),
         "actor_role": str(actor_role or "").strip() or None,
         "actor_department": str(actor_department or "").strip() or None,
         "revision": 1,
@@ -166,6 +209,10 @@ def profile_from_session(session: "SessionInfo") -> dict[str, Any]:
         profile.get("runtime_mode"),
         entry=profile["entry"],
     )
+    profile["network_mode"] = _normalize_network_mode(
+        profile.get("network_mode"),
+        entry=profile["entry"],
+    )
     profile["revision"] = int(profile.get("revision") or 1)
     profile["source"] = str(profile.get("source") or "session.create")
     profile.setdefault("updated_at", _now_iso())
@@ -194,6 +241,10 @@ def merge_profile(
     )
     merged["runtime_mode"] = _normalize_runtime_mode(
         merged.get("runtime_mode"),
+        entry=merged["entry"],
+    )
+    merged["network_mode"] = _normalize_network_mode(
+        merged.get("network_mode"),
         entry=merged["entry"],
     )
     merged["session_id"] = str(session.id)

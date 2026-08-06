@@ -15,6 +15,7 @@ export interface PendingPermission {
 export interface PermissionReply {
   allow: boolean;
   always?: boolean;
+  response?: 'allow' | 'deny' | 'always' | 'never' | 'allow_session' | 'deny_session' | 'trust_tool_network' | 'trust_network_target';
 }
 
 export const permissionApi = {

@@ -2359,10 +2359,16 @@ export default function SessionChat({
     setPermissionSubmitting(true);
     setPermissionError(null);
     try {
-      await permissionApi.reply(request.id, {
-        allow: decision !== 'deny',
-        always: decision === 'always',
-      });
+      if (decision === 'trust_tool_network') {
+        await permissionApi.reply(request.id, { allow: true, response: 'trust_tool_network' });
+      } else if (decision === 'trust_network_target') {
+        await permissionApi.reply(request.id, { allow: true, response: 'trust_network_target' });
+      } else {
+        await permissionApi.reply(request.id, {
+          allow: decision !== 'deny',
+          always: decision === 'always',
+        });
+      }
       setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
     } catch (error: unknown) {
       const message = error instanceof Error ? error.message : String(error);

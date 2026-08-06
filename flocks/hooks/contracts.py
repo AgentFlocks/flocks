@@ -127,6 +127,7 @@ class ToolExecutionTool(_FrozenContract):
 class ToolExecutionSafetyMode(_FrozenContract):
     runtime_mode: str = "exe-mode"
     permission_mode: str = "readonly"
+    network_mode: str = "require-confirm"
 
 
 class ToolExecutionContext(_FrozenContract):

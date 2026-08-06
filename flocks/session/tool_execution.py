@@ -171,6 +171,7 @@ async def build_session_tool_execution_payload(
     profile_entry = str(profile.get("entry") or "unknown").strip() or "unknown"
     runtime_mode = str(profile.get("runtime_mode") or "exe-mode").strip().lower()
     permission_mode = str(profile.get("permission_mode") or "readonly").strip().lower()
+    network_mode = str(profile.get("network_mode") or "require-confirm").strip().lower()
     actor_subject_id, actor_subject_type = _resolve_actor_subject(profile)
     workspace_root = str(
         (profile.get("workspace_dir") or extra.get("workspace_dir") or "")
@@ -221,6 +222,7 @@ async def build_session_tool_execution_payload(
         safety_mode=ToolExecutionSafetyMode(
             runtime_mode=runtime_mode,
             permission_mode=permission_mode,
+            network_mode=network_mode,
         ),
         extension_context=redact_sensitive(
             dict(extra.get("extension_context"))

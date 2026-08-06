@@ -564,6 +564,75 @@ describe('SessionPage session actions menu', () => {
     expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
   });
 
+  it('writes Pro execution settings before sending a new session’s first prompt', async () => {
+    const user = userEvent.setup();
+    const settings = deferred<{ data: {
+      permissionMode: 'require-confirm';
+      runtimeMode: 'dev-mode';
+      networkMode: 'require-confirm';
+      networkModeDefault: 'require-confirm';
+      networkModeOverridden: false;
+      entry: 'webui';
+      revision: 1;
+    } }>();
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/flockspro/license/status') {
+        return Promise.resolve({ data: { pro_enabled: true } });
+      }
+      return Promise.resolve({
+        data: [{
+          id: 'default',
+          worktree: '/tmp/project',
+          name: '默认',
+          isDefault: true,
+          pathStatus: 'available',
+          sessionCount: 0,
+        }],
+      });
+    });
+    client.patch.mockReturnValue(settings.promise);
+
+    renderSessionPage();
+    await waitFor(() => {
+      expect(client.get).toHaveBeenCalledWith('/api/flockspro/license/status');
+    });
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenCalledWith(
+        '/api/flockspro/policy/sessions/session-2/execution-settings',
+        {
+          permissionMode: 'require-confirm',
+          runtimeMode: 'dev-mode',
+          networkMode: 'require-confirm',
+        },
+      );
+    });
+    expect(client.post).not.toHaveBeenCalledWith(
+      '/api/session/session-2/prompt_async',
+      expect.anything(),
+    );
+
+    settings.resolve({
+      data: {
+        permissionMode: 'require-confirm',
+        runtimeMode: 'dev-mode',
+        networkMode: 'require-confirm',
+        networkModeDefault: 'require-confirm',
+        networkModeOverridden: false,
+        entry: 'webui',
+        revision: 1,
+      },
+    });
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.anything(),
+      );
+    });
+  });
+
   it('keeps the first new-session message optimistic with the persisted message id', async () => {
     const user = userEvent.setup();
     renderSessionPage();
@@ -3069,6 +3138,10 @@ describe('SessionPage session actions menu', () => {
           data: {
             permissionMode: 'require-confirm',
             runtimeMode: 'dev-mode',
+            networkMode: 'require-confirm',
+            networkModeDefault: 'require-confirm',
+            networkModeOverridden: false,
+            entry: 'webui',
             revision: 7,
           },
         });
@@ -3089,6 +3162,10 @@ describe('SessionPage session actions menu', () => {
         data: {
           permissionMode: 'readonly',
           runtimeMode: 'dev-mode',
+          networkMode: 'require-confirm',
+          networkModeDefault: 'require-confirm',
+          networkModeOverridden: false,
+          entry: 'webui',
           revision: 8,
         },
       })
@@ -3096,6 +3173,10 @@ describe('SessionPage session actions menu', () => {
         data: {
           permissionMode: 'readonly',
           runtimeMode: 'exe-mode',
+          networkMode: 'require-confirm',
+          networkModeDefault: 'require-confirm',
+          networkModeOverridden: false,
+          entry: 'webui',
           revision: 9,
         },
       });

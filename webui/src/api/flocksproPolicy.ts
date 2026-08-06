@@ -2,6 +2,7 @@ import client from './client';
 
 export type PermissionMode = 'readonly' | 'require-confirm' | 'auto-allow-all';
 export type RuntimeMode = 'dev-mode' | 'exe-mode';
+export type NetworkMode = 'auto-deny-all' | 'require-confirm' | 'auto-allow-all';
 
 export type PermissionModeResponse = {
   permissionMode: PermissionMode | null;
@@ -13,6 +14,10 @@ export type PermissionModeResponse = {
 export type SessionExecutionSettingsResponse = {
   permissionMode: PermissionMode;
   runtimeMode: RuntimeMode;
+  networkMode: NetworkMode;
+  networkModeDefault: NetworkMode;
+  networkModeOverridden: boolean;
+  entry: string;
   revision: number;
   updatedBy?: string;
 };
@@ -35,7 +40,7 @@ export const flocksproPolicyApi = {
     (await client.get(`/api/flockspro/policy/sessions/${encodeURIComponent(sessionId)}/execution-settings`)).data,
   setSessionExecutionSettings: async (
     sessionId: string,
-    payload: Partial<Pick<SessionExecutionSettingsResponse, 'permissionMode' | 'runtimeMode'>> & { revision?: number },
+    payload: Partial<Pick<SessionExecutionSettingsResponse, 'permissionMode' | 'runtimeMode' | 'networkMode'>> & { revision?: number },
   ): Promise<SessionExecutionSettingsResponse> =>
     (await client.patch(`/api/flockspro/policy/sessions/${encodeURIComponent(sessionId)}/execution-settings`, payload)).data,
 };

@@ -26,6 +26,7 @@ import { sessionApi } from '@/api/session';
 import {
   flocksproPolicyApi,
   isSessionExecutionSettingsUnsupported,
+  type NetworkMode,
   type PermissionMode,
   type RuntimeMode,
 } from '@/api/flocksproPolicy';
@@ -688,8 +689,13 @@ export default function SessionPage() {
   const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
   const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
   const [sessionRuntimeMode, setSessionRuntimeMode] = useState<RuntimeMode | null>(null);
+  const [sessionNetworkMode, setSessionNetworkMode] = useState<NetworkMode | null>(null);
+  const [sessionNetworkModeDefault, setSessionNetworkModeDefault] = useState<NetworkMode | null>(null);
+  const [sessionNetworkModeOverridden, setSessionNetworkModeOverridden] = useState(false);
+  const [sessionEntry, setSessionEntry] = useState<string>('unknown');
   const [sessionExecutionRevision, setSessionExecutionRevision] = useState<number | null>(null);
   const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>('dev-mode');
+  const [draftNetworkMode, setDraftNetworkMode] = useState<NetworkMode>('require-confirm');
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [relativeTimeClock, setRelativeTimeClock] = useState(0);
@@ -1437,6 +1443,10 @@ export default function SessionPage() {
     if (!proPolicyEnabled || !selectedSessionId) {
       setSessionPermissionMode(null);
       setSessionRuntimeMode(null);
+      setSessionNetworkMode(null);
+      setSessionNetworkModeDefault(null);
+      setSessionNetworkModeOverridden(false);
+      setSessionEntry('unknown');
       setSessionExecutionRevision(null);
       return;
     }
@@ -1444,11 +1454,19 @@ export default function SessionPage() {
       .then((result) => {
         setSessionPermissionMode(result.permissionMode);
         setSessionRuntimeMode(result.runtimeMode);
+        setSessionNetworkMode(result.networkMode);
+        setSessionNetworkModeDefault(result.networkModeDefault);
+        setSessionNetworkModeOverridden(result.networkModeOverridden);
+        setSessionEntry(result.entry);
         setSessionExecutionRevision(result.revision);
       })
       .catch(() => {
         setSessionPermissionMode(null);
         setSessionRuntimeMode(null);
+        setSessionNetworkMode(null);
+        setSessionNetworkModeDefault(null);
+        setSessionNetworkModeOverridden(false);
+        setSessionEntry('unknown');
         setSessionExecutionRevision(null);
       });
   }, [proPolicyEnabled, selectedSessionId]);
@@ -1466,6 +1484,10 @@ export default function SessionPage() {
       });
       setSessionPermissionMode(updated.permissionMode);
       setSessionRuntimeMode(updated.runtimeMode);
+      setSessionNetworkMode(updated.networkMode);
+      setSessionNetworkModeDefault(updated.networkModeDefault);
+      setSessionNetworkModeOverridden(updated.networkModeOverridden);
+      setSessionEntry(updated.entry);
       setSessionExecutionRevision(updated.revision);
     } catch (error: unknown) {
       if (isSessionExecutionSettingsUnsupported(error)) return;
@@ -1487,6 +1509,35 @@ export default function SessionPage() {
       });
       setSessionPermissionMode(updated.permissionMode);
       setSessionRuntimeMode(updated.runtimeMode);
+      setSessionNetworkMode(updated.networkMode);
+      setSessionNetworkModeDefault(updated.networkModeDefault);
+      setSessionNetworkModeOverridden(updated.networkModeOverridden);
+      setSessionEntry(updated.entry);
+      setSessionExecutionRevision(updated.revision);
+    } catch (error: unknown) {
+      if (isSessionExecutionSettingsUnsupported(error)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('chat.error', 'Error'), message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
+
+  const handleNetworkModeChange = useCallback(async (networkMode: NetworkMode) => {
+    if (!proPolicyEnabled) return;
+    if (!selectedSessionId) {
+      setDraftNetworkMode(networkMode);
+      return;
+    }
+    try {
+      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
+        networkMode,
+        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
+      });
+      setSessionPermissionMode(updated.permissionMode);
+      setSessionRuntimeMode(updated.runtimeMode);
+      setSessionNetworkMode(updated.networkMode);
+      setSessionNetworkModeDefault(updated.networkModeDefault);
+      setSessionNetworkModeOverridden(updated.networkModeOverridden);
+      setSessionEntry(updated.entry);
       setSessionExecutionRevision(updated.revision);
     } catch (error: unknown) {
       if (isSessionExecutionSettingsUnsupported(error)) return;
@@ -1546,12 +1597,43 @@ export default function SessionPage() {
     ]),
     [runtimeModeLabels, t],
   );
+  const networkModeLabels = useMemo<Record<NetworkMode, string>>(
+    () => ({
+      'auto-deny-all': t('permissionMode.networkAutoDenyAll', '自动拒绝全部'),
+      'require-confirm': t('permissionMode.networkRequireConfirm', '访问前确认'),
+      'auto-allow-all': t('permissionMode.networkAutoAllowAll', '自动允许全部'),
+    }),
+    [t],
+  );
+  const networkModeOptions = useMemo(
+    () => ([
+      {
+        value: 'auto-deny-all' as const,
+        label: networkModeLabels['auto-deny-all'],
+        description: t('permissionMode.networkAutoDenyAllDesc', '未命中白名单的网络请求全部拒绝。'),
+      },
+      {
+        value: 'require-confirm' as const,
+        label: networkModeLabels['require-confirm'],
+        description: t('permissionMode.networkRequireConfirmDesc', '未命中白名单时弹出独立网络确认。'),
+      },
+      {
+        value: 'auto-allow-all' as const,
+        label: networkModeLabels['auto-allow-all'],
+        description: t('permissionMode.networkAutoAllowAllDesc', '未命中黑白名单时自动放行。'),
+      },
+    ]),
+    [networkModeLabels, t],
+  );
   const currentPermissionMode = selectedSessionId
     ? (sessionPermissionMode ?? 'require-confirm')
     : draftPermissionMode;
   const currentRuntimeMode = selectedSessionId
     ? (sessionRuntimeMode ?? 'dev-mode')
     : draftRuntimeMode;
+  const currentNetworkMode = selectedSessionId
+    ? (sessionNetworkMode ?? 'require-confirm')
+    : draftNetworkMode;
 
   useEffect(() => {
     if (selectedSession?.model_auto) {
@@ -1795,27 +1877,33 @@ export default function SessionPage() {
       if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = effectiveExecutionMode;
-      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
       if (proPolicyEnabled) {
         try {
           const updated = await flocksproPolicyApi.setSessionExecutionSettings(newSessionId, {
             permissionMode: draftPermissionMode,
             runtimeMode: draftRuntimeMode,
+            networkMode: draftNetworkMode,
           });
           setSessionPermissionMode(updated.permissionMode);
           setSessionRuntimeMode(updated.runtimeMode);
+          setSessionNetworkMode(updated.networkMode);
+          setSessionNetworkModeDefault(updated.networkModeDefault);
+          setSessionNetworkModeOverridden(updated.networkModeOverridden);
+          setSessionEntry(updated.entry);
           setSessionExecutionRevision(updated.revision);
         } catch (error: unknown) {
           if (isSessionExecutionSettingsUnsupported(error)) {
             // Backward compatibility: older backends may not expose execution-settings yet.
             // Session creation and prompt sending should continue without interruption.
-            return;
+          } else {
+            const message = error instanceof Error ? error.message : String(error);
+            toast.error(t('chat.error', 'Error'), message);
+            throw error;
           }
-          const message = error instanceof Error ? error.message : String(error);
-          toast.error(t('chat.error', 'Error'), message);
         }
       }
+      await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
       addSession(response.data);
       void fetchProjects(undefined, searchQuery).catch(() => {});
@@ -1869,6 +1957,7 @@ export default function SessionPage() {
     selectedProjectIDForCreate,
     draftPermissionMode,
     draftRuntimeMode,
+    draftNetworkMode,
     proPolicyEnabled,
     toast,
     t,
@@ -3585,6 +3674,9 @@ export default function SessionPage() {
                     <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
                       {runtimeModeLabels[currentRuntimeMode]}
                     </span>
+                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
+                      {networkModeLabels[currentNetworkMode]}
+                    </span>
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
@@ -3631,6 +3723,45 @@ export default function SessionPage() {
                             {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                           </button>
                         ))}
+                        <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
+                          <div className="px-2.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.networkTitle', '网络模式')}
+                          </div>
+                          <div className="mt-1 space-y-1">
+                            {networkModeOptions.map(({ value: mode, label, description }) => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => {
+                                  void handleNetworkModeChange(mode);
+                                  setShowPermissionModeOptions(false);
+                                }}
+                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
+                                  currentNetworkMode === mode
+                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                }`}
+                              >
+                                <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
+                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                                  currentNetworkMode === mode
+                                    ? 'text-zinc-700 dark:text-zinc-200'
+                                    : 'text-zinc-500 dark:text-zinc-400'
+                                }`}
+                                >
+                                  {description}
+                                </div>
+                                {currentNetworkMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              </button>
+                            ))}
+                          </div>
+                          <div className="px-2.5 pt-1 text-[10px] text-zinc-500 dark:text-zinc-400">
+                            {t(
+                              'permissionMode.networkModeDefaultHint',
+                              `默认来源: ${sessionEntry} -> ${networkModeLabels[sessionNetworkModeDefault ?? 'require-confirm']}${sessionNetworkModeOverridden ? '（已覆盖）' : '（未覆盖）'}`,
+                            )}
+                          </div>
+                        </div>
                         <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
                           <div className="px-2.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
                             {t('permissionMode.title')}

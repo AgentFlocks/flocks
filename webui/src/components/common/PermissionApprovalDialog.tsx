@@ -2,7 +2,12 @@ import { useEffect } from 'react';
 import { AlertTriangle, Loader2, ShieldCheck } from 'lucide-react';
 import type { PendingPermission } from '@/api/permission';
 
-export type PermissionDecision = 'allow' | 'always' | 'deny';
+export type PermissionDecision =
+  | 'allow'
+  | 'always'
+  | 'deny'
+  | 'trust_tool_network'
+  | 'trust_network_target';
 
 interface PermissionApprovalDialogProps {
   request: PendingPermission | null;
@@ -33,6 +38,13 @@ export function PermissionApprovalDialog({
     ? request.metadata.command.trim()
     : '';
   const description = command || request.toolID || request.permission;
+  const confirmOptions = Array.isArray(request.metadata.network_confirm_options)
+    ? request.metadata.network_confirm_options
+      .map((item) => (typeof item === 'string' ? item.trim().toLowerCase() : ''))
+      .filter(Boolean)
+    : [];
+  const networkTrustEnabled = confirmOptions.includes('trust_tool_network');
+  const networkTargetTrustEnabled = confirmOptions.includes('trust_network_target');
 
   return (
     <div
@@ -64,12 +76,22 @@ export function PermissionApprovalDialog({
         <button
           type="button"
           disabled={submitting}
-          onClick={() => onReply('always')}
+          onClick={() => onReply(networkTargetTrustEnabled ? 'trust_network_target' : 'always')}
           className="inline-flex items-center gap-1 rounded-lg border border-amber-400 px-3 py-1.5 text-xs font-medium text-amber-800 transition-colors hover:bg-amber-100 disabled:cursor-not-allowed disabled:opacity-60 dark:text-amber-200 dark:hover:bg-amber-900/40"
         >
           <ShieldCheck className="h-3.5 w-3.5" />
-          始终允许此类命令
+          {networkTargetTrustEnabled ? '始终允许此目标' : '始终允许'}
         </button>
+        {networkTrustEnabled && (
+          <button
+            type="button"
+            disabled={submitting}
+            onClick={() => onReply('trust_tool_network')}
+            className="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 transition-colors hover:bg-zinc-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-zinc-700 dark:text-zinc-200 dark:hover:bg-zinc-800"
+          >
+            信任此工具的网络访问
+          </button>
+        )}
         <button
           type="button"
           disabled={submitting}

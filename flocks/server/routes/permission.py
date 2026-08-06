@@ -8,7 +8,7 @@ Flocks expects:
 - POST /permission/{id}/reply - Reply to a permission request
 """
 
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Literal
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -51,6 +51,34 @@ class PermissionReplyRequest(BaseModel):
     """Request to reply to a permission"""
     allow: bool
     always: bool = False  # Remember this decision
+    response: Optional[
+        Literal[
+            "trust_tool_network",
+            "trust_network_target",
+        ]
+    ] = None
+
+
+_NETWORK_TRUST_RESPONSES = {
+    "trust_tool_network",
+    "trust_network_target",
+}
+
+
+def _network_confirm_options(metadata: Dict[str, Any]) -> set[str]:
+    """Return the explicit network trust responses offered by Pro."""
+    raw_options = metadata.get("network_confirm_options")
+    if not isinstance(raw_options, list):
+        return set()
+    return {
+        str(option).strip().lower()
+        for option in raw_options
+        if str(option).strip().lower() in _NETWORK_TRUST_RESPONSES
+    }
+
+
+def _is_network_confirmation(metadata: Dict[str, Any]) -> bool:
+    return isinstance(metadata.get("network_confirm_options"), list)
 
 
 class PermissionInfo(BaseModel):
@@ -238,7 +266,22 @@ async def reply_permission(
         "always": request.always,
     })
     
-    if request.always:
+    network_options = _network_confirm_options(info.metadata)
+    if request.response:
+        if not request.allow or request.response not in network_options:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Network trust response is not allowed for this permission request",
+            )
+        # Keep the Pro-defined reply verb intact.  Pro applies subject-scoped
+        # trust rules; OSS must not reinterpret a network grant as `always`.
+        reply = request.response
+    elif _is_network_confirmation(info.metadata) and request.always:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Network confirmations require an explicit trust response",
+        )
+    elif request.always:
         if SessionPolicy.is_admin(user):
             reply = "always" if request.allow else "never"
         else:

@@ -35,4 +35,28 @@ describe('permissionApi', () => {
       always: true,
     });
   });
+
+  it('supports explicit response payloads', async () => {
+    mockPost.mockResolvedValue({ data: { success: true } });
+    const { permissionApi } = await import('./permission');
+
+    await permissionApi.reply('permission/2', { allow: true, response: 'trust_tool_network' });
+
+    expect(mockPost).toHaveBeenCalledWith('/api/permission/permission%2F2/reply', {
+      allow: true,
+      response: 'trust_tool_network',
+    });
+  });
+
+  it('supports explicit trust network target response', async () => {
+    mockPost.mockResolvedValue({ data: { success: true } });
+    const { permissionApi } = await import('./permission');
+
+    await permissionApi.reply('permission/3', { allow: true, response: 'trust_network_target' });
+
+    expect(mockPost).toHaveBeenCalledWith('/api/permission/permission%2F3/reply', {
+      allow: true,
+      response: 'trust_network_target',
+    });
+  });
 });
