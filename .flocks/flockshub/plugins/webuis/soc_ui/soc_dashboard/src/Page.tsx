@@ -467,6 +467,161 @@ function createMockTaskCenterState() {
   };
 }
 
+function createMockStats(timeFilter) {
+  const now = new Date();
+  const [windowStart, windowEnd] = resolveTimeWindow(timeFilter) || resolveRelativeWindow(DEFAULT_TIME_RANGE, now);
+  const generatedAt = new Date(Math.min(now.getTime(), windowEnd.getTime())).toISOString();
+  return mergeStats({
+    date: todayLocal(),
+    generatedAt,
+    dateRange: {
+      start: windowStart.toISOString().slice(0, 10),
+      end: windowEnd.toISOString().slice(0, 10),
+      label: timeFilterLabel(timeFilter || createRelativeTimeFilter()),
+      availableDates: [todayLocal()],
+      fileDates: [todayLocal()],
+    },
+    eventRange: {
+      start: windowStart.toISOString(),
+      end: windowEnd.toISOString(),
+      label: timeFilterLabel(timeFilter || createRelativeTimeFilter()),
+      source: 'mock',
+    },
+    sourceStatus: {
+      workflowRoot: 'mock',
+      denoise: ['mock-stream-alert-denoise.jsonl'],
+      triage: ['mock-stream-alert-triage.jsonl'],
+      denoiseFiles: ['mock-stream-alert-denoise.jsonl'],
+      triageFiles: ['mock-stream-alert-triage.jsonl'],
+      missing: [],
+    },
+    denoise: {
+      totalRaw: 1248,
+      totalNormalized: 1248,
+      afterFilter: 1042,
+      totalUnique: 326,
+      filterRemoved: 206,
+      dedupRemoved: 716,
+      duplicates: 922,
+      duplicateRate: 0.7388,
+      dedupRate: 0.6869,
+      uniqueRate: 0.2612,
+      files: 18,
+      parseErrors: 0,
+    },
+    triage: {
+      totalRecords: 326,
+      newTriaged: 74,
+      cacheHit: 168,
+      triageFailed: 3,
+      followersReused: 81,
+      attackTotal: 42,
+      attackSuccess: 11,
+      attack: 42,
+      attackFailed: 31,
+      benign: 251,
+      unknown: 33,
+      attackRate: 0.1288,
+      successRate: 0.2619,
+      cacheRate: 0.5153,
+      coverageRate: 0.9908,
+      avgTriageMs: 18600,
+      files: 12,
+      parseErrors: 0,
+    },
+    pipeline: {
+      raw: 1248,
+      unique: 326,
+      triageTotal: 326,
+      attackTotal: 42,
+      reductionSaved: 922,
+      llmSaved: 249,
+      uniqueRate: 0.2612,
+      workloadReuseRate: 0.7638,
+      coverageRate: 0.9908,
+      attackRate: 0.1288,
+      successRate: 0.2619,
+    },
+    sources: [
+      { key: 'skyeye', label: 'SkyEye', value: 684, rate: 0.5481, active: true },
+      { key: 'tdp', label: 'TDP', value: 312, rate: 0.25, active: true },
+      { key: 'onesec', label: 'OneSEC', value: 178, rate: 0.1426, active: true },
+      { key: 'other', label: '其他接入', value: 74, rate: 0.0593, active: true },
+    ],
+    closedLoop: {
+      autoClosed: 246,
+      resolved: 269,
+      manualDecision: 33,
+      pending: 24,
+      resolutionRate: 0.8252,
+    },
+    tokenUsage: {
+      totalTokens: 186400000,
+      todayTokens: 12860000,
+      todayRequests: 74,
+      dailySeries: [7_600_000, 8_900_000, 10_200_000, 9_400_000, 11_800_000, 12_100_000, 12_860_000],
+      dailyLabels: ['D-6', 'D-5', 'D-4', 'D-3', 'D-2', 'D-1', '今天'],
+      source: 'mock',
+    },
+    verdicts: [
+      { key: 'attack', label: '安全事件', value: 42, color: '#ff4d6d' },
+      { key: 'benign', label: '非安全事件', value: 251, color: '#2ee6a6' },
+      { key: 'unknown', label: '待人工复核', value: 33, color: '#ffd166' },
+    ],
+    attackProfile: [
+      {
+        key: 'phase',
+        label: '攻击阶段',
+        total: 42,
+        color: '#2be7ff',
+        items: [
+          { key: 'initial-access', label: '初始访问', value: 15, rate: 0.3571 },
+          { key: 'execution', label: '执行', value: 12, rate: 0.2857 },
+          { key: 'discovery', label: '探测发现', value: 9, rate: 0.2143 },
+        ],
+      },
+      {
+        key: 'direction',
+        label: '流量方向',
+        total: 42,
+        color: '#9b8cff',
+        items: [
+          { key: 'inbound', label: '外到内', value: 29, rate: 0.6905 },
+          { key: 'east-west', label: '横向', value: 8, rate: 0.1905 },
+          { key: 'outbound', label: '内到外', value: 5, rate: 0.119 },
+        ],
+      },
+    ],
+    topThreatTypes: [
+      { key: 'rce', label: '远程命令执行', value: 14, rate: 0.3333 },
+      { key: 'bruteforce', label: '异常登录', value: 11, rate: 0.2619 },
+      { key: 'sql-injection', label: 'SQL 注入', value: 8, rate: 0.1905 },
+      { key: 'scan', label: '扫描探测', value: 5, rate: 0.119 },
+      { key: 'webshell', label: 'WebShell 行为', value: 4, rate: 0.0952 },
+    ],
+    severityLevels: [
+      { label: 'critical', value: 3 },
+      { label: 'high', value: 18 },
+      { label: 'medium', value: 47 },
+      { label: 'low', value: 92 },
+    ],
+    riskLevels: [
+      { label: 'high', value: 42 },
+      { label: 'medium', value: 47 },
+      { label: 'low', value: 92 },
+      { label: 'unknown', value: 33 },
+    ],
+    timeline: {
+      window: 'Mock 时间窗',
+      denoiseRaw: [62, 74, 96, 88, 131, 156, 172, 149, 183, 137],
+      denoiseUnique: [21, 24, 31, 26, 42, 39, 45, 37, 49, 42],
+      triageTotal: [18, 22, 28, 25, 37, 34, 41, 33, 46, 42],
+      triageAttack: [2, 4, 3, 5, 6, 4, 7, 3, 5, 3],
+    },
+    mock: true,
+  });
+}
+
 function taskCenterHasVisibleRows(taskCenter) {
   return Boolean(
     taskCenter?.scheduledTasks?.length
@@ -475,6 +630,27 @@ function taskCenterHasVisibleRows(taskCenter) {
     || taskCenter?.scheduledExecutionCount
     || taskCenter?.workflowExecutionCount
   );
+}
+
+function statsHasVisibleData(stats) {
+  const values = [
+    stats?.denoise?.totalRaw,
+    stats?.denoise?.totalNormalized,
+    stats?.denoise?.totalUnique,
+    stats?.triage?.totalRecords,
+    stats?.triage?.attackTotal,
+    stats?.triage?.benign,
+    stats?.triage?.unknown,
+    stats?.closedLoop?.autoClosed,
+    stats?.closedLoop?.pending,
+  ];
+  const listValues = [
+    ...(stats?.severityLevels || []),
+    ...(stats?.riskLevels || []),
+    ...(stats?.topThreatTypes || []),
+    ...(stats?.verdicts || []),
+  ].map((item) => item?.value);
+  return [...values, ...listValues].some((value) => Number(value || 0) > 0);
 }
 
 function activityDuration(event) {
@@ -705,6 +881,7 @@ function refreshLabel(value) {
 function mergeStats(raw) {
   const denoise = { ...EMPTY_STATS.denoise, ...((raw || {}).denoise || {}) };
   const processedTotal = Math.max(Number(denoise.totalRaw || 0), 0);
+  const rawSources = Array.isArray((raw || {}).sources) ? (raw || {}).sources : [];
   denoise.totalNormalized = processedTotal;
   return {
     ...EMPTY_STATS,
@@ -718,7 +895,7 @@ function mergeStats(raw) {
     dateRange: { ...EMPTY_STATS.dateRange, ...((raw || {}).dateRange || {}) },
     eventRange: { ...EMPTY_STATS.eventRange, ...((raw || {}).eventRange || {}) },
     timeline: { ...EMPTY_STATS.timeline, ...((raw || {}).timeline || {}) },
-    sources: [
+    sources: rawSources.length ? rawSources : [
       { key: 'ndr', label: 'NDR', value: processedTotal, rate: processedTotal > 0 ? 1 : 0, active: processedTotal > 0 },
       { key: 'other', label: '其他接入', value: 0, rate: 0, active: false },
     ],
@@ -2880,6 +3057,14 @@ export default function Page() {
     ),
     [activity, mockDashboardEnabled],
   );
+  const displayStats = useMemo(
+    () => (
+      mockDashboardEnabled && !statsHasVisibleData(stats)
+        ? createMockStats(timeFilter)
+        : stats
+    ),
+    [mockDashboardEnabled, stats, timeFilter],
+  );
   const displayTaskCenter = useMemo(
     () => (
       !taskCenterHasVisibleRows(taskCenter) && mockDashboardEnabled
@@ -2911,7 +3096,7 @@ export default function Page() {
       timeMenuOpen,
       setTimeMenuOpen,
       applyTimeRefresh,
-      stats,
+      stats: displayStats,
       loading,
       refresh,
       activity: displayActivity,
@@ -2922,8 +3107,8 @@ export default function Page() {
       key: 'main',
     }, [
       h('div', { className: 'command-main', key: 'workspace' }, [
-        h(CommandGraph, { key: 'graph', stats, activity: displayActivity }),
-        h(CommandMetrics, { key: 'metrics', stats }),
+        h(CommandGraph, { key: 'graph', stats: displayStats, activity: displayActivity }),
+        h(CommandMetrics, { key: 'metrics', stats: displayStats }),
       ]),
       h(CommandEventRail, {
         key: 'events',
