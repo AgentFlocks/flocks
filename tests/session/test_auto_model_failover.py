@@ -97,25 +97,24 @@ def _clear_cooldowns():
 
 
 @pytest.mark.parametrize(
-    ("status_code", "message", "reason", "same_model_retries"),
+    ("status_code", "message", "reason"),
     [
-        (401, "Unauthorized", "auth", 0),
-        (402, "Payment required", "billing", 0),
-        (429, "Too many requests", "rate_limit", 0),
-        (403, "Quota exceeded", "rate_limit", 0),
-        (403, "Insufficient quota", "billing", 0),
-        (408, "Request timeout", "timeout", 1),
-        (404, "Route not found", "unknown_api", 3),
-        (500, "Internal server error", "server_error", 3),
-        (502, "Bad gateway", "server_error", 3),
-        (529, "Provider overloaded", "overloaded", 1),
+        (401, "Unauthorized", "auth"),
+        (402, "Payment required", "billing"),
+        (429, "Too many requests", "rate_limit"),
+        (403, "Quota exceeded", "rate_limit"),
+        (403, "Insufficient quota", "billing"),
+        (408, "Request timeout", "timeout"),
+        (404, "Route not found", "unknown_api"),
+        (500, "Internal server error", "server_error"),
+        (502, "Bad gateway", "server_error"),
+        (529, "Provider overloaded", "overloaded"),
     ],
 )
-def test_failover_classifier_retry_thresholds(
+def test_failover_classifier(
     status_code: int,
     message: str,
     reason: str,
-    same_model_retries: int,
 ):
     decision = SessionRunner.classify_failover_error({
         "name": "APIError",
@@ -124,7 +123,6 @@ def test_failover_classifier_retry_thresholds(
 
     assert decision.eligible is True
     assert decision.reason == reason
-    assert decision.same_model_retries == same_model_retries
 
 
 @pytest.mark.asyncio
@@ -133,15 +131,15 @@ def test_failover_classifier_retry_thresholds(
     [
         (401, 1),
         (402, 1),
-        (429, 1),
-        (408, 2),
-        (404, 4),
-        (500, 4),
-        (502, 4),
-        (529, 2),
+        (429, 6),
+        (408, 1),
+        (404, 1),
+        (500, 6),
+        (502, 6),
+        (529, 1),
     ],
 )
-async def test_runner_applies_failover_retry_thresholds(
+async def test_auto_runner_uses_standard_retry_policy(
     monkeypatch,
     status_code: int,
     expected_calls: int,
@@ -200,16 +198,16 @@ async def test_runner_applies_failover_retry_thresholds(
 @pytest.mark.parametrize(
     ("status_code", "expected_calls"),
     [
-        (429, 1),
-        (503, 2),
+        (429, 6),
+        (503, 6),
     ],
 )
-async def test_last_auto_candidate_keeps_hermes_retry_thresholds(
+async def test_last_auto_candidate_uses_standard_retry_policy(
     monkeypatch,
     status_code: int,
     expected_calls: int,
 ):
-    """The last candidate still has Auto's per-model retry budget."""
+    """The last candidate uses the same retry policy as every other mode."""
     runner = SessionRunner(
         session=_session(),
         provider_id="fallback",
@@ -339,7 +337,6 @@ def test_model_not_found_without_status_fails_over():
 
     assert decision.eligible is True
     assert decision.reason == "model_not_found"
-    assert decision.same_model_retries == 0
 
 
 def test_content_filter_error_fails_over_immediately():
@@ -350,7 +347,6 @@ def test_content_filter_error_fails_over_immediately():
 
     assert decision.eligible is True
     assert decision.reason == "content_policy"
-    assert decision.same_model_retries == 0
 
 
 def test_candidate_switch_keeps_tool_loop_guard_only():
