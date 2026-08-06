@@ -2368,7 +2368,7 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
 
     result = await runner._process_step([last_user], last_user)
 
-    assert call_count == 4
+    assert call_count == 6
     assert result.action == "stop"
     assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
     runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
@@ -2386,7 +2386,7 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
         call for call in error_log.call_args_list
         if call.args and call.args[0] == "runner.step.max_retries_exceeded"
     ]
-    assert len(retry_logs) == 3
+    assert len(retry_logs) == 5
     assert len(max_retry_logs) == 1
     assert not any(
         call.args and call.args[0] == "runner.step.error"
