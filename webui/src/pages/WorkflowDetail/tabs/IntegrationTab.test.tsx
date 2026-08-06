@@ -353,6 +353,7 @@ describe('IntegrationTab trigger workspace', () => {
     expect(within(triggerCard).queryByText('Inputs（JSON）')).not.toBeInTheDocument();
     await user.click(within(triggerCard).getByRole('button', { name: '配置' }));
     expect(within(triggerCard).getByText('Inputs（JSON）')).toBeInTheDocument();
+    expect(within(triggerCard).getByRole('option', { name: 'se' })).toBeInTheDocument();
     expect(within(triggerCard).getByText('Flocks辅助配置')).toBeInTheDocument();
     await user.click(within(triggerCard).getByRole('button', { name: '辅助配置' }));
     expect(onGuidePrompt).toHaveBeenCalledWith(
