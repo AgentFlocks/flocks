@@ -206,8 +206,7 @@ async def vector_search(
     
     Args:
         db_path: Database path
-        project_id: Current Session project ID (retained for API compatibility;
-            Memory file search is global)
+        project_id: Current Session project ID
         embedding: Query embedding vector
         max_results: Maximum results to return
         min_score: Minimum similarity score
@@ -217,7 +216,6 @@ async def vector_search(
         List of search results
     """
     results = []
-    del project_id  # Memory file search is intentionally global across scopes.
     
     try:
         async with Storage.connect(db_path) as db:
@@ -225,8 +223,12 @@ async def vector_search(
                 SELECT id, path, source, start_line, end_line, text, embedding
                 FROM memory_chunks
                 WHERE embedding IS NOT NULL
+                    AND (
+                        scope = 'global'
+                        OR (scope = 'project' AND scope_id = ?)
+                    )
             """
-            params: list[Any] = []
+            params: list[Any] = [project_id]
             
             if sources:
                 placeholders = ",".join("?" * len(sources))
@@ -319,8 +321,7 @@ async def fts_search(
     
     Args:
         db_path: Database path
-        project_id: Current Session project ID (retained for API compatibility;
-            Memory file search is global)
+        project_id: Current Session project ID
         query: Search query (FTS5 format)
         max_results: Maximum results to return
         sources: Optional list of sources to filter
@@ -329,7 +330,6 @@ async def fts_search(
         List of search results with BM25 scores
     """
     results = []
-    del project_id  # Memory file search is intentionally global across scopes.
     
     try:
         async with Storage.connect(db_path) as db:
@@ -350,8 +350,12 @@ async def fts_search(
                     rank
                 FROM memory_fts f
                 WHERE f.text MATCH ?
+                    AND (
+                        f.scope = 'global'
+                        OR (f.scope = 'project' AND f.scope_id = ?)
+                    )
             """
-            params = [fts_query]
+            params = [fts_query, project_id]
             
             if sources:
                 placeholders = ",".join("?" * len(sources))

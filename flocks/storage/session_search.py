@@ -618,35 +618,43 @@ async def session_fts_search(
     project_id: str,
     query: str,
     max_results: int,
+    readable_session_ids: Optional[set[str]] = None,
 ) -> list[dict[str, Any]]:
-    """Search all indexed session messages using FTS5 BM25 ranking."""
+    """Search readable Session messages in the current project."""
     from flocks.storage.vector import build_fts_query
 
     require_session_search_available()
-    del project_id  # Retained for API compatibility; Session search is global.
     fts_query = build_fts_query(query)
     if not fts_query:
         return []
+    if readable_session_ids is not None and not readable_session_ids:
+        return []
+
+    sql = """
+        SELECT
+            s.message_id,
+            s.session_id,
+            s.role,
+            s.created_at,
+            snippet(session_transcript_fts, 0, '', '', ' … ', 24),
+            bm25(session_transcript_fts)
+        FROM session_transcript_fts
+        JOIN session_transcript_index_state s
+            ON s.id = session_transcript_fts.rowid
+        WHERE session_transcript_fts MATCH ?
+            AND s.project_id = ?
+    """
+    params: list[Any] = [fts_query, project_id]
+    if readable_session_ids is not None:
+        ordered_ids = sorted(readable_session_ids)
+        placeholders = ",".join("?" for _ in ordered_ids)
+        sql += f" AND s.session_id IN ({placeholders})"
+        params.extend(ordered_ids)
+    sql += " ORDER BY bm25(session_transcript_fts) LIMIT ?"
+    params.append(max_results)
 
     async with Storage.connect(db_path) as db:
-        cursor = await db.execute(
-            """
-            SELECT
-                s.message_id,
-                s.session_id,
-                s.role,
-                s.created_at,
-                snippet(session_transcript_fts, 0, '', '', ' … ', 24),
-                bm25(session_transcript_fts)
-            FROM session_transcript_fts
-            JOIN session_transcript_index_state s
-                ON s.id = session_transcript_fts.rowid
-            WHERE session_transcript_fts MATCH ?
-            ORDER BY bm25(session_transcript_fts)
-            LIMIT ?
-            """,
-            (fts_query, max_results),
-        )
+        cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
 
     count = len(rows)

@@ -4,7 +4,7 @@ Memory Manager - Core orchestrator for memory system
 Coordinates all memory system components: indexing, search, and sync.
 """
 
-from typing import Optional, List, Dict, Any, Callable
+from typing import Optional, List, Dict, Any, Callable, Set
 from pathlib import Path
 import asyncio
 import os
@@ -347,6 +347,7 @@ class MemoryManager:
         max_results: Optional[int] = None,
         min_score: Optional[float] = None,
         sources: Optional[List[MemorySource]] = None,
+        readable_session_ids: Optional[Set[str]] = None,
     ) -> List[MemorySearchResult]:
         """
         Search memory
@@ -356,6 +357,7 @@ class MemoryManager:
             max_results: Maximum results (default from config)
             min_score: Minimum similarity score (default from config)
             sources: Sources to search (default from config)
+            readable_session_ids: Session IDs the caller may read
             
         Returns:
             List of search results
@@ -418,6 +420,11 @@ class MemoryManager:
                     query=query,
                     max_results=limit
                     * self.config.query.hybrid.candidate_multiplier,
+                    readable_session_ids=(
+                        readable_session_ids
+                        if readable_session_ids is not None
+                        else set()
+                    ),
                 )
                 results.extend(
                     MemorySearchResult(

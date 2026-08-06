@@ -17,6 +17,7 @@ from flocks.storage import (
     ensure_vector_tables,
     fts_search,
     replace_memory_file_index,
+    vector_search,
 )
 
 
@@ -40,6 +41,7 @@ def _chunk(
     scope_id: str,
     path: str,
     text: str,
+    embedding: list[float] | None = None,
 ) -> dict[str, object]:
     return {
         "id": f"chunk:{scope}:{scope_id}:{path}",
@@ -51,9 +53,9 @@ def _chunk(
         "end_line": 1,
         "hash": f"hash:{text}",
         "text": text,
-        "embedding": None,
-        "embedding_model": None,
-        "embedding_dims": None,
+        "embedding": embedding,
+        "embedding_model": "test" if embedding else None,
+        "embedding_dims": len(embedding) if embedding else None,
     }
 
 
@@ -78,11 +80,15 @@ async def test_search_reconciles_filesystem_before_every_search(
 
 
 @pytest.mark.asyncio
-async def test_memory_search_is_global_across_scopes(tmp_path: Path) -> None:
+async def test_memory_search_uses_global_and_current_project_scopes(
+    tmp_path: Path,
+) -> None:
     db_path = tmp_path / "scope.db"
     await Storage.init(db_path)
     records = [
+        ("global", "", "USER.md", "scopeword user"),
         ("global", "", "MEMORY.md", "scopeword global"),
+        ("global", "", "daily/2026-08-03.md", "scopeword daily"),
         (
             "project",
             "prj_alpha",
@@ -100,19 +106,35 @@ async def test_memory_search_is_global_across_scopes(tmp_path: Path) -> None:
         await replace_memory_file_index(
             db_path,
             file_entry=_file_entry(scope, scope_id, path),
-            chunks=[_chunk(scope, scope_id, path, text)],
+            chunks=[_chunk(scope, scope_id, path, text, [1.0, 0.0])],
         )
 
-    alpha = await fts_search(db_path, "prj_alpha", "scopeword")
-    default = await fts_search(db_path, "default", "scopeword")
-
-    expected_paths = {
+    expected_global_paths = {
+        "USER.md",
         "MEMORY.md",
-        "projects/prj_alpha/MEMORY.md",
-        "projects/prj_beta/MEMORY.md",
+        "daily/2026-08-03.md",
     }
-    assert {result["path"] for result in alpha} == expected_paths
-    assert {result["path"] for result in default} == expected_paths
+    expected_alpha_paths = expected_global_paths | {
+        "projects/prj_alpha/MEMORY.md",
+    }
+
+    alpha_fts = await fts_search(db_path, "prj_alpha", "scopeword")
+    default_fts = await fts_search(db_path, "default", "scopeword")
+    alpha_vector = await vector_search(
+        db_path,
+        "prj_alpha",
+        [1.0, 0.0],
+    )
+    default_vector = await vector_search(
+        db_path,
+        "default",
+        [1.0, 0.0],
+    )
+
+    assert {result["path"] for result in alpha_fts} == expected_alpha_paths
+    assert {result["path"] for result in alpha_vector} == expected_alpha_paths
+    assert {result["path"] for result in default_fts} == expected_global_paths
+    assert {result["path"] for result in default_vector} == expected_global_paths
 
 
 @pytest.mark.asyncio

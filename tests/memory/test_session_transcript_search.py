@@ -7,6 +7,7 @@ import uuid
 
 import pytest
 
+from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
 from flocks.config.config import Config
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
@@ -14,6 +15,7 @@ from flocks.memory.search.hybrid import HybridSearch
 from flocks.memory.types import MemorySearchResult
 from flocks.memory.types import MemorySource
 from flocks.provider import Provider
+from flocks.session.features.memory import SessionMemory
 from flocks.session.message import Message, MessageRole
 from flocks.session.session import Session, SessionInfo
 from flocks.storage.session_search import (
@@ -60,13 +62,25 @@ async def isolate_transcript_search(
     Storage._db_path = None
 
 
-async def _create_session(tmp_path: Path, project_id: str = "project-search"):
+async def _create_session(
+    tmp_path: Path,
+    project_id: str = "project-search",
+    *,
+    owner_user_id: str | None = None,
+    owner_username: str | None = None,
+    metadata: dict | None = None,
+    status: str = "active",
+):
     session = SessionInfo(
         id=f"session-{uuid.uuid4().hex}",
         project_id=project_id,
         directory=str(tmp_path),
         agent="rex",
         memory_enabled=True,
+        owner_user_id=owner_user_id,
+        owner_username=owner_username,
+        metadata=metadata or {},
+        status=status,
     )
     await Storage.set(
         f"session:{project_id}:{session.id}",
@@ -267,7 +281,7 @@ async def test_text_part_updates_and_message_delete_update_fts(
 
 
 @pytest.mark.asyncio
-async def test_session_search_is_global_across_projects(
+async def test_session_search_is_limited_to_current_project(
     tmp_path: Path,
 ) -> None:
     alpha = await _create_session(tmp_path, project_id="prj_alpha")
@@ -292,7 +306,6 @@ async def test_session_search_is_global_across_projects(
 
     assert {result["path"] for result in results} == {
         f"sessions/{alpha.id}/messages/{alpha_message.id}",
-        f"sessions/{beta.id}/messages/{beta_message.id}",
     }
 
     async with Storage.connect(Storage.get_db_path()) as db:
@@ -309,8 +322,297 @@ async def test_session_search_is_global_across_projects(
     assert stats["updated"] == 2
     assert {result["path"] for result in rebuilt} == {
         f"sessions/{alpha.id}/messages/{alpha_message.id}",
-        f"sessions/{beta.id}/messages/{beta_message.id}",
     }
+
+
+@pytest.mark.asyncio
+async def test_session_search_filters_readable_ids_within_project(
+    tmp_path: Path,
+) -> None:
+    readable = await _create_session(tmp_path, project_id="prj_alpha")
+    private = await _create_session(tmp_path, project_id="prj_alpha")
+    readable_message = await Message.create(
+        readable.id,
+        MessageRole.USER,
+        "same project permission marker readable",
+    )
+    await Message.create(
+        private.id,
+        MessageRole.USER,
+        "same project permission marker private",
+    )
+
+    results = await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id="prj_alpha",
+        query="same project permission marker",
+        max_results=10,
+        readable_session_ids={readable.id},
+    )
+
+    assert [result["path"] for result in results] == [
+        f"sessions/{readable.id}/messages/{readable_message.id}"
+    ]
+    assert not await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id="prj_alpha",
+        query="same project permission marker",
+        max_results=10,
+        readable_session_ids=set(),
+    )
+
+
+@pytest.mark.asyncio
+async def test_session_memory_uses_session_read_policy(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from flocks.project.project import Project
+
+    caller = AuthUser(id="user-a", username="alice", role="member")
+    current = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id=caller.id,
+        owner_username=caller.username,
+    )
+    owned = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id=caller.id,
+        owner_username=caller.username,
+    )
+    archived = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id=caller.id,
+        owner_username=caller.username,
+        status="archived",
+    )
+    private = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id="user-b",
+        owner_username="bob",
+    )
+    shared = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id="user-b",
+        owner_username="bob",
+        metadata={"shared_read_access_user_ids": [caller.id]},
+    )
+    deleted = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id=caller.id,
+        owner_username=caller.username,
+        status="deleted",
+    )
+    other_project = await _create_session(
+        tmp_path,
+        project_id="prj_beta",
+        owner_user_id=caller.id,
+        owner_username=caller.username,
+    )
+    monkeypatch.setattr(Project, "shared_project_ids", lambda: set())
+
+    token = set_current_auth_user(caller)
+    try:
+        memory = SessionMemory(
+            session_id=current.id,
+            project_id=current.project_id,
+            workspace_dir=str(tmp_path),
+            enabled=True,
+        )
+        resolved_session, resolved_caller, shared_projects = (
+            await memory._search_access_context()
+        )
+        readable_ids = await memory._readable_session_ids(
+            resolved_session,
+            resolved_caller,
+            shared_projects,
+        )
+    finally:
+        reset_current_auth_user(token)
+
+    assert readable_ids == {current.id, owned.id, archived.id, shared.id}
+    assert private.id not in readable_ids
+    assert deleted.id not in readable_ids
+    assert other_project.id not in readable_ids
+
+
+@pytest.mark.asyncio
+async def test_session_memory_honors_shared_project_access(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from flocks.project.project import Project
+
+    caller = AuthUser(id="user-a", username="alice", role="member")
+    current = await _create_session(
+        tmp_path,
+        project_id="prj_shared",
+        owner_user_id="user-b",
+        owner_username="bob",
+    )
+    sibling = await _create_session(
+        tmp_path,
+        project_id="prj_shared",
+        owner_user_id="user-b",
+        owner_username="bob",
+    )
+    monkeypatch.setattr(
+        Project,
+        "shared_project_ids",
+        lambda: {"prj_shared"},
+    )
+
+    token = set_current_auth_user(caller)
+    try:
+        memory = SessionMemory(
+            session_id=current.id,
+            project_id=current.project_id,
+            workspace_dir=str(tmp_path),
+            enabled=True,
+        )
+        resolved_session, resolved_caller, shared_projects = (
+            await memory._search_access_context()
+        )
+        readable_ids = await memory._readable_session_ids(
+            resolved_session,
+            resolved_caller,
+            shared_projects,
+        )
+    finally:
+        reset_current_auth_user(token)
+
+    assert readable_ids == {current.id, sibling.id}
+
+
+@pytest.mark.asyncio
+async def test_session_memory_without_caller_only_reads_current_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from flocks.auth.service import AuthService
+    from flocks.project.project import Project
+
+    current = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id="missing-user",
+    )
+    await _create_session(tmp_path, project_id="prj_alpha")
+    monkeypatch.setattr(Project, "shared_project_ids", lambda: set())
+    monkeypatch.setattr(
+        AuthService,
+        "get_user_by_id",
+        AsyncMock(return_value=None),
+    )
+    memory = SessionMemory(
+        session_id=current.id,
+        project_id=current.project_id,
+        workspace_dir=str(tmp_path),
+        enabled=True,
+    )
+
+    resolved_session, caller, shared_projects = (
+        await memory._search_access_context()
+    )
+    readable_ids = await memory._readable_session_ids(
+        resolved_session,
+        caller,
+        shared_projects,
+    )
+
+    assert caller is None
+    assert readable_ids == {current.id}
+
+
+@pytest.mark.asyncio
+async def test_session_memory_falls_back_to_session_owner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from flocks.auth.service import AuthService
+    from flocks.project.project import Project
+
+    owner_auth = AuthUser(id="user-a", username="alice", role="member")
+    owner = Mock()
+    owner.to_auth_user.return_value = owner_auth
+    current = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id=owner_auth.id,
+        owner_username=owner_auth.username,
+    )
+    sibling = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id=owner_auth.id,
+        owner_username=owner_auth.username,
+    )
+    private = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id="user-b",
+        owner_username="bob",
+    )
+    monkeypatch.setattr(Project, "shared_project_ids", lambda: set())
+    monkeypatch.setattr(
+        AuthService,
+        "get_user_by_id",
+        AsyncMock(return_value=owner),
+    )
+    memory = SessionMemory(
+        session_id=current.id,
+        project_id=current.project_id,
+        workspace_dir=str(tmp_path),
+        enabled=True,
+    )
+
+    resolved_session, caller, shared_projects = (
+        await memory._search_access_context()
+    )
+    readable_ids = await memory._readable_session_ids(
+        resolved_session,
+        caller,
+        shared_projects,
+    )
+
+    assert caller == owner_auth
+    assert readable_ids == {current.id, sibling.id}
+    assert private.id not in readable_ids
+
+
+@pytest.mark.asyncio
+async def test_session_memory_rejects_unreadable_current_session(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from flocks.project.project import Project
+
+    current = await _create_session(
+        tmp_path,
+        project_id="prj_alpha",
+        owner_user_id="user-b",
+        owner_username="bob",
+    )
+    monkeypatch.setattr(Project, "shared_project_ids", lambda: set())
+    caller = AuthUser(id="user-a", username="alice", role="member")
+    token = set_current_auth_user(caller)
+    try:
+        memory = SessionMemory(
+            session_id=current.id,
+            project_id=current.project_id,
+            workspace_dir=str(tmp_path),
+            enabled=True,
+        )
+        with pytest.raises(PermissionError, match="Session access denied"):
+            await memory._search_access_context()
+    finally:
+        reset_current_auth_user(token)
 
 
 @pytest.mark.asyncio
@@ -499,6 +801,7 @@ async def test_explicit_session_search_persists_opt_in_without_embeddings(
     results = await manager.search(
         query="marker",
         sources=[MemorySource.SESSION],
+        readable_session_ids={session.id},
     )
 
     assert results

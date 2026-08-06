@@ -57,7 +57,7 @@ USER describes the user; Memory contains the agent's durable notes.
 
 ### Managing Memory Files:
 - The injected USER, Global, and Project files are a snapshot for this run. Read the file again before changing it.
-- Use `read`, `glob`, and `grep` to inspect Memory explicitly, and `memory_search` for indexed recall across all projects.
+- Use `read`, `glob`, and `grep` to inspect Memory explicitly, and `memory_search` for indexed recall across USER, Global, Daily, and the current Project.
 - Use `write` only to create a missing curated Memory file. Use `edit` for precise entry-level changes to an existing curated file.
 - Never write or edit `daily/`; only the Session lifecycle may append Daily entries.
 - **User profile**: Maintain `{memory_root}/USER.md` only for facts about the user.
@@ -88,7 +88,7 @@ USER describes the user; Memory contains the agent's durable notes.
 - Verify stale or conflicting Memory against current authoritative evidence before replacing or removing it.
 
 ### Available Tools:
-- `memory_search` - Reconcile and search indexed Memory across all projects
+- `memory_search` - Reconcile and search USER, Global, Daily, and current Project Memory
 - `read`, `glob`, `grep` - Inspect Memory files
 - `write` - Create a missing Memory file
 - `edit` - Precisely update an existing Memory file

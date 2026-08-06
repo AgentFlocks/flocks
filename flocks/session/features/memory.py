@@ -4,7 +4,7 @@ Session Memory Integration
 Bridges Session and MemoryManager for seamless memory access within sessions.
 """
 
-from typing import Optional, List, Dict, Any, Set
+from typing import Optional, List, Dict, Any, Set, TYPE_CHECKING
 from pathlib import Path
 import asyncio
 
@@ -12,6 +12,10 @@ from flocks.memory import MemoryManager, MemorySearchResult, MemorySource
 from flocks.memory.config import resolve_memory_config
 from flocks.config import Config
 from flocks.utils.log import Log
+
+if TYPE_CHECKING:
+    from flocks.auth.context import AuthUser
+    from flocks.session.session import SessionInfo
 
 log = Log.create(service="session.memory")
 
@@ -94,6 +98,93 @@ class SessionMemory:
                     "error": str(e),
                 })
                 return False
+
+    async def _resolve_search_caller(
+        self,
+        session: "SessionInfo",
+    ) -> Optional["AuthUser"]:
+        """Resolve the authenticated caller, falling back to Session owner."""
+        from flocks.auth.context import (
+            API_TOKEN_SERVICE_USER_ID,
+            AuthUser,
+            get_current_auth_user,
+        )
+
+        caller = get_current_auth_user()
+        if caller is not None:
+            return caller
+
+        owner_id = getattr(session, "owner_user_id", None)
+        if not owner_id:
+            return None
+        if owner_id == API_TOKEN_SERVICE_USER_ID:
+            return AuthUser(
+                id=API_TOKEN_SERVICE_USER_ID,
+                username=API_TOKEN_SERVICE_USER_ID,
+                role="admin",
+            )
+
+        from flocks.auth.service import AuthService
+
+        owner = await AuthService.get_user_by_id(owner_id)
+        if owner is None:
+            return None
+        to_auth_user = getattr(owner, "to_auth_user", None)
+        if callable(to_auth_user):
+            return to_auth_user()
+        return AuthUser(
+            id=str(owner.id),
+            username=str(owner.username),
+            role=str(owner.role),
+            status=str(getattr(owner, "status", "active")),
+        )
+
+    async def _search_access_context(
+        self,
+    ) -> tuple["SessionInfo", Optional["AuthUser"], Set[str]]:
+        """Validate the current Session and resolve its effective caller."""
+        from flocks.project.project import Project
+        from flocks.session.policy import SessionPolicy
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id_unfiltered(self.session_id)
+        if session is None:
+            raise PermissionError("Session not found")
+
+        caller = await self._resolve_search_caller(session)
+        shared_project_ids = Project.shared_project_ids()
+        if caller is not None and not SessionPolicy.can_read(
+            session,
+            caller,
+            shared_project_ids=shared_project_ids,
+        ):
+            raise PermissionError("Session access denied")
+        return session, caller, shared_project_ids
+
+    async def _readable_session_ids(
+        self,
+        current_session: "SessionInfo",
+        caller: Optional["AuthUser"],
+        shared_project_ids: Set[str],
+    ) -> Set[str]:
+        """Return readable, non-deleted Session IDs in the current project."""
+        if caller is None:
+            return {current_session.id}
+
+        from flocks.session.policy import SessionPolicy
+        from flocks.session.session import Session
+
+        return {
+            session.id
+            for session in await Session.list_all_unfiltered()
+            if session.project_id == self.project_id
+            and session.status != "deleted"
+            and SessionPolicy.can_read(
+                session,
+                caller,
+                shared_project_ids=shared_project_ids,
+            )
+        }
     
     async def search(
         self,
@@ -122,11 +213,33 @@ class SessionMemory:
                 return []
         
         try:
-            results = await self._manager.search(
+            manager = self._manager
+            if manager is None:
+                raise RuntimeError("Memory manager is not initialized")
+            current_session, caller, shared_project_ids = (
+                await self._search_access_context()
+            )
+            selected_sources = (
+                list(sources)
+                if sources is not None
+                else [
+                    MemorySource(source)
+                    for source in manager.config.sources
+                ]
+            )
+            readable_session_ids = None
+            if MemorySource.SESSION in selected_sources:
+                readable_session_ids = await self._readable_session_ids(
+                    current_session,
+                    caller,
+                    shared_project_ids,
+                )
+            results = await manager.search(
                 query=query,
                 max_results=max_results,
                 min_score=min_score,
                 sources=sources,
+                readable_session_ids=readable_session_ids,
             )
             
             log.debug("session.memory.search", {
