@@ -856,6 +856,7 @@ class KafkaManager:
         try:
             action_payload = {
                 "operation": "workflow.trigger.kafka",
+                "transport": "headless",
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
@@ -865,19 +866,11 @@ class KafkaManager:
                 },
             }
             await execute_with_hooks(
-                {
-                    **action_payload,
-                    "transport": "headless",
-                    "entry": "kafka",
-                    "legacy_compat": True,
-                },
-                lambda: execute_with_hooks(
-                    action_payload,
-                    lambda: self._dispatcher.dispatch(
-                        trigger=trigger,
-                        event=event,
-                        executor=_executor,
-                    ),
+                action_payload,
+                lambda: self._dispatcher.dispatch(
+                    trigger=trigger,
+                    event=event,
+                    executor=_executor,
                 ),
                 before=HookPipeline.run_ingress_before,
                 after=HookPipeline.run_ingress_after,

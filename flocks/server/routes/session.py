@@ -1094,25 +1094,6 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             detail=str(exc),
         ) from exc
     Project.invalidate_session_stats()
-    try:
-        from flocks.hooks.pipeline import HookPipeline
-
-        await HookPipeline.run_event(
-            {
-                "type": "session.execution_profile.updated",
-                "properties": {
-                    "session_id": session.id,
-                    "entry": "webui",
-                    "session_execution_profile": session_execution_profile,
-                },
-            }
-        )
-    except Exception as exc:
-        log.warn(
-            "session.execution_profile.event_error",
-            {"session_id": session.id, "error": str(exc)},
-        )
-
     log.info("session.created", {"session_id": session.id})
     try:
         await emit_audit_event(

@@ -613,9 +613,9 @@ export default function SecurityConfigPage() {
                 </div>
                 <div className="space-y-4">
                   <div className="rounded-lg border border-blue-200 bg-blue-50 p-3 text-xs leading-5 text-blue-900 dark:border-blue-900/60 dark:bg-blue-950/30 dark:text-blue-200">
-                    <p><strong>readonly:</strong> {localizedText('阻断命令执行与文件变更，仅允许策略范围内读取。', 'Blocks command execution and file mutations; allows policy-scoped reads only.')}</p>
-                    <p><strong>require-confirm:</strong> {localizedText('低风险操作按策略允许，高风险操作要求确认。', 'Allows low-risk actions by policy and requires confirmation for high-risk actions.')}</p>
-                    <p><strong>auto-allow-all:</strong> {localizedText('自动通过可确认操作，但不能绕过 Runtime 上限、External 与 hard-deny。', 'Automatically allows confirmable actions, but cannot override Runtime ceilings, External, or hard-deny.')}</p>
+                    <p><strong>{localizedText('只读模式（readonly）', 'readonly')}:</strong> {localizedText('阻断命令执行与文件变更，仅允许策略范围内读取。', 'Blocks command execution and file mutations; allows policy-scoped reads only.')}</p>
+                    <p><strong>{localizedText('人工审批（require-confirm）', 'require-confirm')}:</strong> {localizedText('低风险操作按策略允许，高风险操作要求确认。', 'Allows low-risk actions by policy and requires confirmation for high-risk actions.')}</p>
+                    <p><strong>{localizedText('全部允许（auto-allow-all）', 'auto-allow-all')}:</strong> {localizedText('自动通过可确认操作，但不能绕过 Runtime 上限、External 与 hard-deny。', 'Automatically allows confirmable actions, but cannot override Runtime ceilings, External, or hard-deny.')}</p>
                     <p className="mt-2"><strong>{localizedText('风险说明：', 'Risk notes:')}</strong> {localizedText('低风险通常可直接执行；高风险需要确认；hard-deny 是不可由任何模式放宽的系统拒绝规则。', 'Low risk normally runs directly; high risk requires confirmation; hard-deny rules cannot be relaxed by any mode.')}</p>
                   </div>
                   <div>

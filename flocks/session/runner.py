@@ -16,6 +16,7 @@ import os
 import re
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
 from dataclasses import dataclass, field
@@ -69,7 +70,7 @@ from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
-from flocks.hooks.pipeline import HookPipeline, HookStage
+from flocks.hooks.pipeline import HookPipeline
 from flocks.tool.catalog import (
     get_always_load_tool_names,
     get_tool_catalog_metadata,
@@ -1132,7 +1133,10 @@ class SessionRunner:
         
         cwd = session.directory or os.getcwd()
 
-        async def _effect() -> Dict[str, Any]:
+        async def _effect(
+            execution_command: str = command,
+            execution_cwd: str = cwd,
+        ) -> Dict[str, Any]:
             user_msg = await Message.create(
                 session_id=session_id,
                 role=MessageRole.USER,
@@ -1151,10 +1155,10 @@ class SessionRunner:
             start_time = asyncio.get_event_loop().time()
             try:
                 proc = await asyncio.create_subprocess_shell(
-                    command,
+                    execution_command,
                     stdout=asyncio.subprocess.PIPE,
                     stderr=asyncio.subprocess.PIPE,
-                    cwd=cwd,
+                    cwd=execution_cwd,
                 )
                 stdout_bytes, stderr_bytes = await asyncio.wait_for(
                     proc.communicate(), timeout=300,
@@ -1177,7 +1181,7 @@ class SessionRunner:
 
             log.info("runner.shell", {
                 "session_id": session_id,
-                "command": command[:50],
+                "command": execution_command[:50],
                 "exit_code": exit_code,
                 "duration_ms": int((end_time - start_time) * 1000),
             })
@@ -1197,29 +1201,54 @@ class SessionRunner:
                     "tool": "bash",
                     "state": {
                         "status": "completed",
-                        "input": {"command": command},
+                        "input": {"command": execution_command},
                         "output": output,
                     },
                 }],
             }
 
-        # Flocks does not interpret the command or decide whether it is safe;
-        # this payload is a neutral lifecycle carrier for installed extensions.
-        from flocks.hooks.execution import execute_with_hooks
+        from flocks.session.tool_execution import (
+            build_session_tool_execution_payload,
+            run_tool_execution_lifecycle,
+        )
 
-        return await execute_with_hooks(
-            {
-                "operation": "session.shell",
-                "session_id": session_id,
-                "agent": agent,
-                "execution_domain": "execution_runtime",
-                "resource": {"type": "command", "id": "session.shell"},
-                "tool": {
-                    "name": "shell",
-                    "input": {"command": command, "workdir": cwd},
+        payload = await build_session_tool_execution_payload(
+            session_id=session_id,
+            message_id=Identifier.create("message"),
+            agent=agent,
+            tool_name="shell",
+            tool_input={"command": command, "workdir": cwd},
+            validated_input={"command": command, "workdir": cwd},
+            tool_schema={
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "workdir": {"type": "string"},
+                },
+                "required": ["command"],
+            },
+            tool_context_extra={
+                "tool_source": "session_runner",
+                "tool_category": "command",
+                "workspace_dir": cwd,
+                "session_execution_profile": {
+                    "entry": "session.shell",
+                    "workspace_dir": cwd,
                 },
             },
+        )
+
+        async def _patched_effect(patch: Mapping[str, Any]) -> Dict[str, Any]:
+            patched_command = patch.get("command", command)
+            patched_cwd = patch.get("workdir", cwd)
+            if not isinstance(patched_command, str) or not isinstance(patched_cwd, str):
+                raise ValueError("Shell hook patch must contain string command and workdir")
+            return await _effect(patched_command, patched_cwd)
+
+        return await run_tool_execution_lifecycle(
+            payload,
             _effect,
+            patched_effect=_patched_effect,
         )
     
     def abort(self) -> None:

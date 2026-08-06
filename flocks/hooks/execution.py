@@ -132,6 +132,10 @@ class ExecutionStopped(RuntimeError):
     """Raised when a lifecycle hook requests that an operation stop."""
 
 
+async def _noop_stage(payload: dict[str, Any]) -> HookContext:
+    return HookContext(stage="noop", input=payload, output={})
+
+
 def raise_if_execution_stopped(ctx: HookContext) -> None:
     """Apply the one built-in lifecycle control without interpreting hook data."""
     error = execution_stop_error(ctx)
@@ -203,9 +207,9 @@ async def execute_with_hooks(
 ) -> T:
     """Run an operation between generic before/after lifecycle stages."""
     if before is None:
-        before = HookPipeline.run_action_before
+        before = _noop_stage
     if after is None:
-        after = HookPipeline.run_action_after
+        after = _noop_stage
     with execution_lifecycle_scope(reuse_current=reuse_execution_scope):
         return await _execute_with_hooks_in_scope(
             payload,

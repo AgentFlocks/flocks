@@ -2,7 +2,11 @@ from starlette.requests import Request
 from fastapi import HTTPException
 import pytest
 
-from flocks.auth.context import AuthUser, get_current_auth_user
+from flocks.auth.context import (
+    AuthUser,
+    get_current_auth_user,
+    set_current_auth_user,
+)
 from flocks.server import auth as auth_module
 
 
@@ -80,6 +84,32 @@ async def test_apply_auth_for_request_non_browser_accepts_valid_token(monkeypatc
         assert user.username == "api-token-service"
     finally:
         auth_module.clear_auth_context(token)
+
+
+@pytest.mark.asyncio
+async def test_apply_auth_for_request_resets_context_when_adapter_fails(monkeypatch):
+    authenticated = AuthUser(
+        id="usr_adapter",
+        username="adapter-user",
+        role="member",
+        status="active",
+    )
+
+    async def apply_authenticated_request(_request):
+        token = set_current_auth_user(authenticated)
+        return None, token, authenticated
+
+    async def failing_adapter(_request, _user):
+        raise RuntimeError("adapter failed")
+
+    monkeypatch.setattr(auth_module, "_apply_auth_for_request", apply_authenticated_request)
+    auth_module.register_auth_context_adapter("failing-test-adapter", failing_adapter)
+    try:
+        with pytest.raises(RuntimeError, match="adapter failed"):
+            await auth_module.apply_auth_for_request(_make_request())
+        assert get_current_auth_user() is None
+    finally:
+        auth_module.unregister_auth_context_adapter("failing-test-adapter")
 
 
 @pytest.mark.asyncio

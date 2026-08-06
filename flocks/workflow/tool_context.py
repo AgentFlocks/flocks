@@ -97,8 +97,6 @@ async def build_workflow_tool_context(
     try:
         # Workflow runtime carries provenance metadata only; mode resolution is
         # fully Pro-owned.
-        from flocks.hooks.pipeline import HookPipeline
-
         await upsert_session_execution_profile(
             effective_session_id,
             patch={
@@ -106,22 +104,6 @@ async def build_workflow_tool_context(
                 "default_agent": effective_agent or "rex",
             },
             source="workflow.runtime.tool_context",
-        )
-        profile = await get_session_execution_profile(effective_session_id)
-        await HookPipeline.run_event(
-            {
-                "type": "session.execution_profile.updated",
-                "properties": {
-                    "session_id": effective_session_id,
-                    "entry": "workflow",
-                    "workflow_context": {
-                        "source": "workflow_runtime",
-                        "workflow_id": workflow_id,
-                        "action_name": action_name,
-                    },
-                    "session_execution_profile": profile or {},
-                },
-            }
         )
     except Exception:
         pass

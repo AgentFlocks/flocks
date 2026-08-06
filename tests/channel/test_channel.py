@@ -405,6 +405,7 @@ class TestFeishuNativeCommands:
         from flocks.channel.inbound.session_binding import SessionBinding
 
         dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
         binding = SessionBinding(
             channel_id="feishu",
             account_id="default",
@@ -474,7 +475,6 @@ class TestFeishuNativeCommands:
         from flocks.channel.inbound.session_binding import SessionBinding
 
         dispatcher = InboundDispatcher()
-        dispatcher._trigger_command_hook = AsyncMock()
         binding = SessionBinding(
             channel_id="feishu",
             account_id="default",
@@ -635,21 +635,10 @@ class TestFeishuNativeCommands:
         update_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("flocks.session.session.Session.update", update_mock)
         profile_upsert = AsyncMock(return_value=None)
-        profile_get = AsyncMock(return_value={"entry": "channel", "revision": 1})
-        profile_event = AsyncMock(return_value=SimpleNamespace(output={}))
         monkeypatch.setattr(
             "flocks.session.execution_profile.upsert_session_execution_profile",
             profile_upsert,
         )
-        monkeypatch.setattr(
-            "flocks.session.execution_profile.get_session_execution_profile",
-            profile_get,
-        )
-        monkeypatch.setattr(
-            "flocks.hooks.pipeline.HookPipeline.run_event",
-            profile_event,
-        )
-
         handled = await dispatcher._handle_feishu_native_command(
             binding=binding,
             msg=msg,
@@ -673,9 +662,6 @@ class TestFeishuNativeCommands:
         assert profile_upsert.await_args.kwargs["patch"]["entry"] == "channel"
         assert profile_upsert.await_args.kwargs["patch"]["channel_id"] == "feishu"
         assert profile_upsert.await_args.kwargs["patch"]["account_id"] == "default"
-        profile_event.assert_awaited_once()
-        assert profile_event.await_args.args[0]["type"] == "session.execution_profile.updated"
-        assert profile_event.await_args.args[0]["properties"]["entry"] == "channel"
         # Rebinding only changes the active IM target; it must preserve the
         # existing session and its history for later WebUI inspection.
         update_mock.assert_not_awaited()
@@ -1800,105 +1786,6 @@ class TestMediaFilenameHelpers:
 
 
 class TestChannelPolicySecurityConfig:
-    @pytest.mark.asyncio
-    async def test_dispatch_builds_default_channel_policy_on_cold_start(
-        self, monkeypatch
-    ):
-        from flocks.channel.inbound.dispatcher import (
-            InboundDispatcher,
-            _channel_config_cache,
-        )
-        from flocks.config.config import ChannelConfig
-
-        dispatcher = InboundDispatcher()
-        _channel_config_cache.clear()
-        captured_payload: dict[str, object] = {}
-
-        async def fake_execute_with_hooks(payload, _effect, before=None, after=None):
-            captured_payload.update(payload)
-            return None
-
-        monkeypatch.setattr(
-            "flocks.hooks.execution.execute_with_hooks",
-            fake_execute_with_hooks,
-        )
-        monkeypatch.setattr(
-            InboundDispatcher,
-            "_get_channel_config",
-            staticmethod(AsyncMock(return_value=ChannelConfig())),
-        )
-
-        await dispatcher.dispatch(
-            InboundMessage(
-                channel_id="feishu",
-                account_id="default",
-                message_id="msg_1",
-                sender_id="ou_user",
-                chat_id="ou_user",
-                chat_type=ChatType.DIRECT,
-                text="hello",
-                raw={"event": "verified"},
-            )
-        )
-
-        policy = captured_payload.get("channel_policy")
-        assert isinstance(policy, dict)
-        assert "permission_mode" not in policy
-        assert policy["visible_agents"] == []
-
-    @pytest.mark.asyncio
-    async def test_dispatch_loads_channel_policy_from_config_on_cold_start(
-        self, monkeypatch
-    ):
-        from flocks.channel.inbound.dispatcher import (
-            InboundDispatcher,
-            _channel_config_cache,
-        )
-
-        dispatcher = InboundDispatcher()
-        _channel_config_cache.clear()
-        captured_payload: dict[str, object] = {}
-
-        async def fake_execute_with_hooks(payload, _effect, before=None, after=None):
-            captured_payload.update(payload)
-            return None
-
-        monkeypatch.setattr(
-            "flocks.hooks.execution.execute_with_hooks",
-            fake_execute_with_hooks,
-        )
-        monkeypatch.setattr(
-            InboundDispatcher,
-            "_get_channel_config",
-            staticmethod(
-                AsyncMock(
-                    return_value=ChannelConfig(
-                        default_agent="ops-agent",
-                        visible_agents=["ops-agent", "qa-agent"],
-                    )
-                )
-            ),
-        )
-
-        await dispatcher.dispatch(
-            InboundMessage(
-                channel_id="feishu",
-                account_id="default",
-                message_id="msg_admin_1",
-                sender_id="ou_admin",
-                chat_id="ou_admin",
-                chat_type=ChatType.DIRECT,
-                text="hello",
-                raw={"event": "verified"},
-            )
-        )
-
-        policy = captured_payload.get("channel_policy")
-        assert isinstance(policy, dict)
-        assert "permission_mode" not in policy
-        assert policy["default_agent"] == "ops-agent"
-        assert policy["visible_agents"] == ["ops-agent", "qa-agent"]
-
     @pytest.mark.asyncio
     async def test_get_channel_config_force_refresh_bypasses_fresh_cache(
         self, monkeypatch

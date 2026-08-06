@@ -15,7 +15,6 @@ from pydantic import BaseModel
 from flocks.channel.gateway.manager import default_manager
 from flocks.channel.registry import default_registry
 from flocks.hooks.execution import ExecutionStopped, execute_with_hooks
-from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 
 router = APIRouter()
@@ -181,8 +180,6 @@ async def channel_webhook(channel_id: str, request: Request):
         result = await execute_with_hooks(
             payload,
             lambda: plugin.handle_webhook(body, headers),
-            before=HookPipeline.run_channel_webhook_before,
-            after=HookPipeline.run_channel_webhook_after,
         )
     except ExecutionStopped as exc:
         raise HTTPException(status_code=403, detail="Channel webhook stopped by extension") from exc

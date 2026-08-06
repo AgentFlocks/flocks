@@ -7,7 +7,8 @@ from __future__ import annotations
 import hmac
 import os
 import re
-from typing import Optional
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, Optional
 
 from fastapi import HTTPException, Request, Response, status
 from starlette.requests import HTTPConnection
@@ -23,6 +24,21 @@ from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
+
+AuthContextAdapter = Callable[
+    [HTTPConnection, AuthUser | None],
+    Awaitable[Mapping[str, Any] | None],
+]
+_auth_context_adapters: dict[str, AuthContextAdapter] = {}
+
+
+def register_auth_context_adapter(name: str, adapter: AuthContextAdapter) -> None:
+    """Register an optional post-auth extension-context adapter."""
+    _auth_context_adapters[name] = adapter
+
+
+def unregister_auth_context_adapter(name: str) -> None:
+    _auth_context_adapters.pop(name, None)
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({
@@ -241,43 +257,21 @@ def _build_api_token_user() -> AuthUser:
     )
 
 
-def _auth_ingress_payload(request: HTTPConnection) -> dict:
-    return {
-        "operation": "auth.request",
-        "transport": "http",
-        "request": request,
-        "method": getattr(request, "method", None),
-        "path": request.url.path,
-        "client": getattr(getattr(request, "client", None), "host", None),
-        "headers": request.headers,
-    }
-
-
 async def apply_auth_for_request(request: HTTPConnection):
-    """Resolve auth within the generic HTTP ingress lifecycle."""
-    from flocks.hooks.execution import execute_with_hooks
-    from flocks.hooks.pipeline import HookPipeline
-
+    """Resolve auth for the HTTP request."""
     auth_token = None
 
-    async def _authenticated_effect():
-        nonlocal auth_token
-        result = await _apply_auth_for_request(request)
-        auth_token = result[1]
-        return result
-
     try:
-        return await execute_with_hooks(
-            _auth_ingress_payload(request),
-            _authenticated_effect,
-            before=HookPipeline.run_ingress_before,
-            after=HookPipeline.run_ingress_after,
-            subject_sink=lambda subject: setattr(request.state, "subject", subject),
-            context_sink=lambda context: setattr(
-                request.state, "extension_context", dict(context)
-            ),
-            reuse_execution_scope=True,
-        )
+        result = await _apply_auth_for_request(request)
+        _blocked, auth_token, user = result
+        extension_context: dict[str, Any] = {}
+        for adapter in _auth_context_adapters.values():
+            supplied = await adapter(request, user)
+            if isinstance(supplied, Mapping):
+                extension_context.update(supplied)
+        if extension_context:
+            request.state.extension_context = extension_context
+        return result
     except BaseException:
         if auth_token is not None:
             clear_auth_context(auth_token)

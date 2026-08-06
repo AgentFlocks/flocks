@@ -163,35 +163,23 @@ class TestSessionCRUD:
         monkeypatch: pytest.MonkeyPatch,
     ):
         """Session creation emits the canonical Bus lifecycle event."""
-        from flocks.hooks.pipeline import HookPipeline
+        from flocks.bus.bus import Bus
+        from flocks.bus.events import SessionCreated
 
         emit_event = AsyncMock()
-        monkeypatch.setattr(HookPipeline, "run_event", emit_event)
+        monkeypatch.setattr(Bus, "publish", emit_event)
 
         response = await client.post("/api/session", json={})
 
         assert response.status_code == status.HTTP_200_OK
-        created_payload, profile_payload = [
-            call.args[0] for call in emit_event.await_args_list
-        ]
-        info = created_payload["properties"]["info"]
-        assert created_payload["type"] == "session.created"
+        emit_event.assert_awaited_once()
+        assert emit_event.await_args.args[0] is SessionCreated
+        info = emit_event.await_args.args[1]["info"]
         assert info == {
             "id": response.json()["id"],
             "title": response.json()["title"],
             "parentID": None,
             "projectID": response.json()["projectID"],
-        }
-        assert profile_payload == {
-            "type": "session.execution_profile.updated",
-            "properties": {
-                "session_id": response.json()["id"],
-                "entry": "interactive",
-                "session_execution_profile": {
-                    "entry": "interactive",
-                    "source": "webui.session.create",
-                },
-            },
         }
 
     @pytest.mark.asyncio

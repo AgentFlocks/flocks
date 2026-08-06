@@ -147,16 +147,45 @@ class Pty:
         if not use_action_lifecycle:
             return await cls._create(input_data)
 
-        from flocks.hooks.execution import execute_with_hooks
-
-        return await execute_with_hooks(
-            {
-                "operation": "pty.open",
-                "action": "pty.open",
-                "resource": {"type": "pty"},
-                "action_input": input_data.model_dump(),
+        command = input_data.command or cls._get_shell()
+        args = list(input_data.args or [])
+        cls._validate_process_arguments(command, args)
+        normalized_input = {
+            **input_data.model_dump(),
+            "command": command,
+            "args": args,
+        }
+        from flocks.session.tool_execution import (
+            build_session_tool_execution_payload,
+            run_tool_execution_lifecycle,
+        )
+        payload = await build_session_tool_execution_payload(
+            session_id="pty",
+            message_id=Identifier.create("pty"),
+            agent="pty",
+            tool_name="pty.open",
+            tool_input=input_data.model_dump(),
+            validated_input=normalized_input,
+            tool_schema=CreateInput.model_json_schema(),
+            tool_context_extra={
+                "tool_source": "pty",
+                "tool_category": "command",
+                "workspace_dir": input_data.cwd or os.getcwd(),
             },
+        )
+
+        async def _patched_effect(patch: Dict[str, Any]) -> PtyInfo:
+            patched = CreateInput.model_validate({**normalized_input, **patch})
+            cls._validate_process_arguments(
+                patched.command or cls._get_shell(),
+                list(patched.args or []),
+            )
+            return await cls._create(patched)
+
+        return await run_tool_execution_lifecycle(
+            payload,
             lambda: cls._create(input_data),
+            patched_effect=_patched_effect,
         )
 
     @classmethod
@@ -385,16 +414,41 @@ class Pty:
             await cls._write_async(pty_id, data)
             return
 
-        from flocks.hooks.execution import execute_with_hooks
-
-        await execute_with_hooks(
-            {
-                "operation": "pty.input",
-                "action": "pty.input",
-                "resource": {"type": "pty", "id": pty_id},
-                "action_input": {"data": data},
+        from flocks.session.tool_execution import (
+            build_session_tool_execution_payload,
+            run_tool_execution_lifecycle,
+        )
+        payload = await build_session_tool_execution_payload(
+            session_id="pty",
+            message_id=Identifier.create("pty"),
+            agent="pty",
+            tool_name="pty.input",
+            tool_input={"data": data, "pty_id": pty_id},
+            validated_input={"data": data, "pty_id": pty_id},
+            tool_schema={
+                "type": "object",
+                "properties": {
+                    "data": {"type": "string"},
+                    "pty_id": {"type": "string"},
+                },
+                "required": ["data", "pty_id"],
             },
+            tool_context_extra={
+                "tool_source": "pty",
+                "tool_category": "command",
+            },
+        )
+
+        async def _patched_effect(patch: Dict[str, Any]) -> None:
+            patched_data = patch.get("data", data)
+            if not isinstance(patched_data, str):
+                raise ValueError("PTY hook patch must contain string data")
+            await cls._write_async(pty_id, patched_data)
+
+        await run_tool_execution_lifecycle(
+            payload,
             lambda: cls._write_async(pty_id, data),
+            patched_effect=_patched_effect,
         )
 
     @classmethod

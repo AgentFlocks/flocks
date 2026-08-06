@@ -228,7 +228,8 @@
     "loading": "正在加载安全配置...",
     "actions": {
       "viewAudit": "查看审计日志",
-      "saveRollout": "保存运行模式"
+      "saveRollout": "保存运行模式",
+      "viewDetails": "查看详情"
     },
     "sections": {
       "rollout": "运行模式",
@@ -246,13 +247,22 @@
       "channelDefaultMode": "通道创建会话",
       "uiDefaultMode": "UI 创建会话",
       "hardDeny": "系统始终拒绝执行的命令",
-      "readonlyCeiling": "readonly 模式下被隐藏的工具"
+      "readonlyCeiling": "readonly 模式下被隐藏的工具",
+      "pathRegion": "路径区域",
+      "operation": "操作",
+      "developmentMode": "开发模式（dev-mode）",
+      "executionMode": "执行模式（exe-mode）",
+      "filesystemRollout": "文件管控",
+      "filesystemHardDenies": "文件硬拒绝项",
+      "filesystemManagedScope": "纳管",
+      "filesystemExcludedScope": "不纳管"
     },
     "hints": {
       "policyRollout": "决定通用策略（文件读写、工作流动作、高风险工具等）是否真正拦截。仅审计：照样计算并写审计，但不阻断；启用管控：deny/需确认会真正停下。",
       "commandRollout": "专门控制 Shell/命令类操作（bash、shell、cmd、PowerShell、SSH 命令等）。可与策略执行分开开启，例如只先管控命令、其它仍仅审计。",
       "ingressRollout": "控制 Channel、HTTP、工作流等入口是否要求有效身份。关闭：不做入口身份校验；仅审计：解析身份但不挡请求；启用管控：无有效身份时直接拒绝进入。",
-      "visibilityRollout": "按安全策略决定 AI 当前能使用哪些工具。例如 readonly 模式下，Agent 不可见被隐藏的工具。仅审计：仍全部展示，只记录本应隐藏的工具；启用管控：真正隐藏这些工具。"
+      "visibilityRollout": "按安全策略决定 AI 当前能使用哪些工具。例如 readonly 模式下，Agent 不可见被隐藏的工具。仅审计：仍全部展示，只记录本应隐藏的工具；启用管控：真正隐藏这些工具。",
+      "filesystemRollout": "控制文件工具策略以审计模式或强制模式运行"
     },
     "modes": {
       "disabled": "关闭",

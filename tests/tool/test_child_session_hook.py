@@ -6,8 +6,10 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from flocks.hooks.pipeline import HookBase, HookPipeline
+from flocks.storage.storage import Storage
 from flocks.tool.agent.delegate_task import delegate_task_tool
 from flocks.tool.registry import ToolContext, ToolResult
+from flocks.workflow.store import WorkflowStore
 
 
 @pytest.fixture(autouse=True)
@@ -23,10 +25,10 @@ async def test_delegation_emits_child_lifecycle_with_parent_and_child_ids() -> N
     observed: list[tuple[str, dict]] = []
 
     class ChildLifecycle(HookBase):
-        async def session_child_before(self, ctx):
+        async def subagent_before(self, ctx):
             observed.append((ctx.stage, dict(ctx.input)))
 
-        async def session_child_after(self, ctx):
+        async def subagent_after(self, ctx):
             observed.append((ctx.stage, dict(ctx.input)))
 
     HookPipeline.register("child-lifecycle", ChildLifecycle())
@@ -38,31 +40,35 @@ async def test_delegation_emits_child_lifecycle_with_parent_and_child_ids() -> N
     )
     context = ToolContext(session_id="parent-1", message_id="message-1", agent="rex")
 
-    with (
-        patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
-        patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
-        patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
-        patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent)),
-        patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child)),
-        patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
-        patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace())),
-        patch("flocks.session.features.activity_forwarder.ActivityForwarder", return_value=forwarder),
-        patch(
-            "flocks.tool.agent.delegate_task.format_sync_subagent_result",
-            AsyncMock(return_value=ToolResult(success=True, output="complete")),
-        ),
-    ):
-        result = await delegate_task_tool(
-            context,
-            subagent_type="asset-survey",
-            prompt="Inspect the workspace",
-        )
+    try:
+        with (
+            patch("flocks.tool.agent.delegate_task._find_completed_delegate", AsyncMock(return_value=None)),
+            patch("flocks.tool.agent.delegate_task.Config.get", AsyncMock(return_value=SimpleNamespace(categories=None))),
+            patch("flocks.tool.agent.delegate_task.is_delegatable", return_value=True),
+            patch("flocks.tool.agent.delegate_task.Session.get_by_id", AsyncMock(return_value=parent)),
+            patch("flocks.tool.agent.delegate_task.Session.create", AsyncMock(return_value=child)),
+            patch("flocks.tool.agent.delegate_task.Message.create", AsyncMock()),
+            patch("flocks.tool.agent.delegate_task.SessionLoop.run", AsyncMock(return_value=SimpleNamespace())),
+            patch("flocks.session.features.activity_forwarder.ActivityForwarder", return_value=forwarder),
+            patch(
+                "flocks.tool.agent.delegate_task.format_sync_subagent_result",
+                AsyncMock(return_value=ToolResult(success=True, output="complete")),
+            ),
+        ):
+            result = await delegate_task_tool(
+                context,
+                subagent_type="asset-survey",
+                prompt="Inspect the workspace",
+            )
 
-    assert result.success is True
-    assert [stage for stage, _payload in observed] == [
-        "session.child.before",
-        "session.child.after",
-    ]
-    for _stage, payload in observed:
-        assert payload["parent_session_id"] == "parent-1"
-        assert payload["child_session_id"] == "child-1"
+        assert result.success is True
+        assert [stage for stage, _payload in observed] == [
+            "subagent.before",
+            "subagent.after",
+        ]
+        assert observed[0][1]["parent_session_id"] == "parent-1"
+        assert observed[0][1]["child_session_id"] is None
+        assert observed[1][1]["child_session_id"] == "child-1"
+    finally:
+        await WorkflowStore.close()
+        await Storage.shutdown()

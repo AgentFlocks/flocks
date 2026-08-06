@@ -8,14 +8,13 @@ and the function schema exposed to the model for the current turn.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, Iterable, List, Mapping, Optional, Set
 
 from flocks.tool.catalog import get_always_load_tool_names
 from flocks.session.callable_state import (
     get_session_callable_tools,
     initialize_session_callable_tools,
 )
-from flocks.hooks.pipeline import HookPipeline
 from flocks.identity import get_current_subject
 from flocks.tool.registry import ToolRegistry
 
@@ -24,6 +23,43 @@ from flocks.tool.registry import ToolRegistry
 class CallableSchemaResult:
     tool_infos: List[Any]
     metadata: Dict[str, Any]
+
+
+CallableToolResolver = Callable[
+    [List[Any], Mapping[str, Any]],
+    Awaitable[List[Any]] | List[Any],
+]
+_callable_tool_resolvers: dict[str, CallableToolResolver] = {}
+
+
+def register_callable_tool_resolver(name: str, resolver: CallableToolResolver) -> None:
+    """Register a declarative, subset-only callable-tool resolver."""
+    _callable_tool_resolvers[name] = resolver
+
+
+def unregister_callable_tool_resolver(name: str) -> None:
+    _callable_tool_resolvers.pop(name, None)
+
+
+async def _apply_callable_tool_resolvers(
+    tool_infos: List[Any],
+    context: Mapping[str, Any],
+) -> List[Any]:
+    """Apply resolvers as an intersection; they can never expand candidates."""
+    allowed = {tool.name for tool in tool_infos}
+    resolved = list(tool_infos)
+    for resolver in _callable_tool_resolvers.values():
+        candidate = resolver(list(resolved), context)
+        if hasattr(candidate, "__await__"):
+            candidate = await candidate
+        if not isinstance(candidate, list):
+            continue
+        candidate_names = {
+            tool.name for tool in candidate
+            if getattr(tool, "name", None) in allowed
+        }
+        resolved = [tool for tool in resolved if tool.name in candidate_names]
+    return resolved
 
 
 def resolve_callable_tool_infos(tool_names: Iterable[str]) -> tuple[List[Any], int]:
@@ -122,17 +158,7 @@ async def list_session_callable_tool_infos(
         # Subject is an opaque extension carrier.  Flocks deliberately keeps
         # its attributes nested and does not interpret them as policy fields.
         projection_payload["subject"] = subject.model_dump()
-
-    projection_ctx = await HookPipeline.run_capability_filter(projection_payload)
-    replacement = projection_ctx.output.get("candidates")
-    if isinstance(replacement, list):
-        candidate_by_name = {tool_info.name: tool_info for tool_info in tool_infos}
-        replacement_names = [
-            item.get("name")
-            for item in replacement
-            if isinstance(item, dict) and isinstance(item.get("name"), str)
-        ]
-        tool_infos = [candidate_by_name[name] for name in replacement_names if name in candidate_by_name]
+    tool_infos = await _apply_callable_tool_resolvers(tool_infos, projection_payload)
 
     metadata = {
         "enabledToolCount": enabled_count,

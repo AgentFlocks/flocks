@@ -67,7 +67,7 @@ async def list_sessions():
 async def create_session(input_data: CreateInput):
     """Create a new PTY session - operationId: pty.create"""
     try:
-        info = await Pty.create(input_data, use_action_lifecycle=False)
+        info = await Pty.create(input_data)
         return _to_response(info)
     except Exception as e:
         log.error("pty.create.error", {"error": str(e)})

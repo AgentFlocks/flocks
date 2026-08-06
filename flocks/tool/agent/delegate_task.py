@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from typing import Optional, List, Dict, Any
 
 from flocks.tool.registry import (
@@ -23,7 +22,6 @@ from flocks.skill.skill import Skill
 from flocks.hooks.execution import execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
 from flocks.tool.subagent_result import (
-    _extract_message_error,
     format_sync_subagent_result,
 )
 from flocks.utils.log import Log
@@ -44,128 +42,16 @@ async def _run_subagent_with_hooks(
     model_id: Optional[str] = None,
     callbacks: Optional[Any] = None,
 ) -> Any:
-    """Run one child session with paired SubagentStart/SubagentStop hooks."""
-    from flocks.hooks.pipeline import HookPipeline
-
-    common_payload = {
-        "sessionID": ctx.session_id,
-        "workspace": workspace,
-        "parentSessionID": ctx.session_id,
-        "parentMessageID": ctx.message_id,
-        "childSessionID": child_session_id,
-        "agentType": child_agent,
-        "prompt": prompt,
-        "description": description,
-        "resumed": resumed,
-    }
+    """Run one child session and surface terminal outcome to caller."""
     try:
-        await HookPipeline.run_subagent_start(common_payload)
-    except Exception as exc:
-        log.debug("delegate_task.hook.subagent_start.error", {
-            "child_session_id": child_session_id,
-            "error": str(exc),
-        })
-
-    started_at = time.perf_counter()
-    try:
-        result = await SessionLoop.run(
+        return await SessionLoop.run(
             child_session_id,
             provider_id=provider_id,
             model_id=model_id,
             callbacks=callbacks,
         )
     except asyncio.CancelledError:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        try:
-            await HookPipeline.run_subagent_stop({
-                **common_payload,
-                "status": "interrupted",
-                "durationMs": duration_ms,
-                "summary": None,
-                "error": "Sub-agent execution was interrupted",
-            })
-        except Exception as exc:
-            log.debug("delegate_task.hook.subagent_stop.error", {
-                "child_session_id": child_session_id,
-                "error": str(exc),
-            })
         raise
-    except Exception as exc:
-        duration_ms = int((time.perf_counter() - started_at) * 1000)
-        try:
-            await HookPipeline.run_subagent_stop({
-                **common_payload,
-                "status": "error",
-                "durationMs": duration_ms,
-                "summary": None,
-                "error": str(exc),
-            })
-        except Exception as hook_exc:
-            log.debug("delegate_task.hook.subagent_stop.error", {
-                "child_session_id": child_session_id,
-                "error": str(hook_exc),
-            })
-        raise
-
-    summary = None
-    last_message = getattr(result, "last_message", None)
-    if last_message is not None:
-        try:
-            summary = await Message.get_text_content(last_message)
-        except Exception as exc:
-            log.debug("delegate_task.hook.subagent_summary.error", {
-                "child_session_id": child_session_id,
-                "error": str(exc),
-            })
-    result_error = getattr(result, "error", None)
-    message_error = (
-        _extract_message_error(last_message)
-        if last_message is not None
-        else None
-    )
-    message_finish = (
-        getattr(last_message, "finish", None)
-        if last_message is not None
-        else None
-    )
-    result_metadata = getattr(result, "metadata", None)
-    interrupted = (
-        isinstance(result_metadata, dict)
-        and bool(result_metadata.get("aborted"))
-    )
-    if interrupted:
-        status = "interrupted"
-        stop_error = result_error or "Sub-agent execution was interrupted"
-    elif (
-        getattr(result, "action", None) == "error"
-        or result_error
-        or message_error
-        or message_finish == "error"
-    ):
-        status = "error"
-        stop_error = (
-            result_error
-            or message_error
-            or "Sub-agent execution failed"
-        )
-    else:
-        status = "completed"
-        stop_error = None
-    duration_ms = int((time.perf_counter() - started_at) * 1000)
-    try:
-        await HookPipeline.run_subagent_stop({
-            **common_payload,
-            "status": status,
-            "durationMs": duration_ms,
-            "summary": summary,
-            "error": stop_error,
-        })
-    except Exception as exc:
-        log.debug("delegate_task.hook.subagent_stop.error", {
-            "child_session_id": child_session_id,
-            "error": str(exc),
-        })
-    return result
 
 
 async def _subagent_session_permissions(agent_name: str) -> list:
@@ -527,72 +413,77 @@ async def delegate_task_tool(
             model=explicit_model["modelID"],
             model_pinned=True,
         )
-    created = await Session.create(**create_kwargs)
-    try:
-        from flocks.session.execution_profile import upsert_session_execution_profile
+    child_payload = {
+        "operation": "subagent.run",
+        "parent_session_id": parent_session.id,
+        "child_session_id": None,
+        "workspace": runtime_directory,
+        "prompt": full_prompt,
+        "description": description,
+        "agent_type": agent_to_use,
+    }
 
-        await upsert_session_execution_profile(
-            created.id,
-            patch={
-                "entry": "delegate",
-                "parent_session_id": parent_session.id,
-                "default_agent": agent_to_use,
-            },
-            source="delegate_task.child_metadata",
-        )
-    except Exception:
-        pass
-    if ctx.extra.get("workflow_temp_parent") is True:
-        ctx.extra["workflow_child_session_created"] = True
-    await Message.create(
-        session_id=created.id,
-        role=MessageRole.USER,
-        content=full_prompt,
-        agent=agent_to_use,
-    )
-    from flocks.session.features.activity_forwarder import ActivityForwarder
-
-    forwarder = ActivityForwarder(
-        parent_ctx=ctx,
-        child_session_id=created.id,
-        description=description,
-    )
-    ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
-    parent_profile_snapshot: dict[str, Any] = {}
-    try:
-        from flocks.session.execution_profile import get_session_execution_profile
-
-        profile = await get_session_execution_profile(parent_session.id)
-        if isinstance(profile, dict):
-            parent_profile_snapshot = dict(profile)
-    except Exception:
-        pass
-    if parent_profile_snapshot:
+    async def _run_child_effect() -> dict[str, Any]:
+        created = await Session.create(**create_kwargs)
+        child_payload["child_session_id"] = created.id
         try:
             from flocks.session.execution_profile import upsert_session_execution_profile
 
-            inherited_patch: dict[str, Any] = {}
-            if parent_profile_snapshot.get("permission_mode"):
-                inherited_patch["permission_mode"] = parent_profile_snapshot.get("permission_mode")
-            if parent_profile_snapshot.get("runtime_mode"):
-                inherited_patch["runtime_mode"] = parent_profile_snapshot.get("runtime_mode")
-            if inherited_patch:
-                await upsert_session_execution_profile(
-                    created.id,
-                    patch=inherited_patch,
-                    source="delegate_task.inherit_parent_profile",
-                )
+            await upsert_session_execution_profile(
+                created.id,
+                patch={
+                    "entry": "delegate",
+                    "parent_session_id": parent_session.id,
+                    "default_agent": agent_to_use,
+                },
+                source="delegate_task.child_metadata",
+            )
         except Exception:
             pass
-    child_payload = {
-        "operation": "session.child.run",
-        "parent_session_id": parent_session.id,
-        "child_session_id": created.id,
-        "parent_session_profile": parent_profile_snapshot,
-    }
-    result = await execute_with_hooks(
-        child_payload,
-        lambda: _run_subagent_with_hooks(
+        if ctx.extra.get("workflow_temp_parent") is True:
+            ctx.extra["workflow_child_session_created"] = True
+        await Message.create(
+            session_id=created.id,
+            role=MessageRole.USER,
+            content=full_prompt,
+            agent=agent_to_use,
+        )
+
+        from flocks.session.features.activity_forwarder import ActivityForwarder
+
+        forwarder = ActivityForwarder(
+            parent_ctx=ctx,
+            child_session_id=created.id,
+            description=description,
+        )
+        ctx.metadata({"title": description, "metadata": {"sessionId": created.id, "status": "running"}})
+        parent_profile_snapshot: dict[str, Any] = {}
+        try:
+            from flocks.session.execution_profile import get_session_execution_profile
+
+            profile = await get_session_execution_profile(parent_session.id)
+            if isinstance(profile, dict):
+                parent_profile_snapshot = dict(profile)
+        except Exception:
+            pass
+        if parent_profile_snapshot:
+            try:
+                from flocks.session.execution_profile import upsert_session_execution_profile
+
+                inherited_patch: dict[str, Any] = {}
+                if parent_profile_snapshot.get("permission_mode"):
+                    inherited_patch["permission_mode"] = parent_profile_snapshot.get("permission_mode")
+                if parent_profile_snapshot.get("runtime_mode"):
+                    inherited_patch["runtime_mode"] = parent_profile_snapshot.get("runtime_mode")
+                if inherited_patch:
+                    await upsert_session_execution_profile(
+                        created.id,
+                        patch=inherited_patch,
+                        source="delegate_task.inherit_parent_profile",
+                    )
+            except Exception:
+                pass
+        loop_result = await _run_subagent_with_hooks(
             ctx=ctx,
             child_session_id=created.id,
             child_agent=agent_to_use,
@@ -605,16 +496,27 @@ async def delegate_task_tool(
             callbacks=forwarder.build_callbacks(
                 event_publish_callback=ctx.event_publish_callback,
             ),
-        ),
-        before=HookPipeline.run_session_child_before,
-        after=HookPipeline.run_session_child_after,
+        )
+        return {
+            "loop_result": loop_result,
+            "child_session_id": created.id,
+            "metadata": dict(forwarder.final_metadata),
+        }
+
+    result = await execute_with_hooks(
+        child_payload,
+        _run_child_effect,
+        before=HookPipeline.run_subagent_before,
+        after=HookPipeline.run_subagent_after,
     )
+    child_session_id = str(result.get("child_session_id") or "")
+    final_metadata = dict(result.get("metadata") or {})
     tool_result = await format_sync_subagent_result(
         description=description,
-        session_id=created.id,
-        loop_result=result,
-        metadata=forwarder.final_metadata,
+        session_id=child_session_id,
+        loop_result=result["loop_result"],
+        metadata=final_metadata,
     )
-    result_status = str((tool_result.metadata or {}).get("status") or ("completed" if tool_result.success else "error"))
-    ctx.metadata({"title": description, "metadata": {**forwarder.final_metadata, "status": result_status}})
+    result_status = "completed" if tool_result.success else "error"
+    ctx.metadata({"title": description, "metadata": {**final_metadata, "status": result_status}})
     return tool_result

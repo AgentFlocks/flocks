@@ -158,24 +158,19 @@ def create_service_app(
 
             action_payload = {
                 "operation": "workflow.service.invoke",
+                "transport": "headless",
                 "workflow_id": app.state.workflow_id,
                 "release_id": app.state.release_id,
                 "inputs": req.inputs,
             }
-            ingress_payload = {
-                **action_payload,
-                "transport": "headless",
-                "entry": "workflow_service",
-            }
             if expected_api_key:
-                ingress_payload["evidence"] = {
+                action_payload["evidence"] = {
                     "auth_scheme": "api_key",
                     "api_key_id": api_key_fingerprint(str(expected_api_key)),
                 }
-
             result = await execute_with_hooks(
-                ingress_payload,
-                lambda: execute_with_hooks(action_payload, _effect),
+                action_payload,
+                _effect,
                 before=HookPipeline.run_ingress_before,
                 after=HookPipeline.run_ingress_after,
             )

@@ -17,6 +17,11 @@ export type SessionExecutionSettingsResponse = {
   updatedBy?: string;
 };
 
+export const isSessionExecutionSettingsUnsupported = (error: unknown): boolean => {
+  const status = (error as { response?: { status?: number } } | undefined)?.response?.status;
+  return status === 404 || status === 405 || status === 501;
+};
+
 export const flocksproPolicyApi = {
   getChannel: async (channelId: string): Promise<PermissionModeResponse> =>
     (await client.get(`/api/flockspro/policy/channels/${encodeURIComponent(channelId)}/permission-mode`)).data,

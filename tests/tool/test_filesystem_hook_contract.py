@@ -44,12 +44,12 @@ def _search_tool(name: str) -> Tool:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tool_name", ["glob", "grep"])
-async def test_search_file_tools_reach_filesystem_hook(tool_name: str) -> None:
+async def test_search_file_tools_reach_tool_execute_hook(tool_name: str) -> None:
     observed: list[dict[str, Any]] = []
 
     class Recorder(HookBase):
-        async def filesystem_before(self, ctx) -> None:  # noqa: ANN001
-            observed.append(dict(ctx.input["filesystem_action"]))
+        async def tool_before(self, ctx) -> None:  # noqa: ANN001
+            observed.append(dict(ctx.input["tool_execution"]))
 
     HookPipeline.register("filesystem-recorder", Recorder())
     context = ToolContext(
@@ -75,5 +75,6 @@ async def test_search_file_tools_reach_filesystem_hook(tool_name: str) -> None:
     )
 
     assert result.success is True
-    assert observed[0]["operation"] == "search"
-    assert observed[0]["target_path"] == "/projects/current"
+    assert observed[0]["tool"]["name"] == tool_name
+    assert observed[0]["tool"]["validated_input"]["path"] == "/projects/current"
+    assert observed[0]["safety_mode"]["runtime_mode"] == "dev-mode"

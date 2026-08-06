@@ -656,9 +656,7 @@ class SessionBindingService:
             **owner_kwargs,
         )
         try:
-            from flocks.hooks.pipeline import HookPipeline
             from flocks.session.execution_profile import (
-                get_session_execution_profile,
                 upsert_session_execution_profile,
             )
 
@@ -672,17 +670,6 @@ class SessionBindingService:
                     "default_agent": str(default_agent or session.agent or "").strip(),
                 },
                 source="channel.binding.create",
-            )
-            profile = await get_session_execution_profile(session.id)
-            await HookPipeline.run_event(
-                {
-                    "type": "session.execution_profile.updated",
-                    "properties": {
-                        "session_id": session.id,
-                        "entry": "channel",
-                        "session_execution_profile": profile or {},
-                    },
-                }
             )
         except Exception:
             pass

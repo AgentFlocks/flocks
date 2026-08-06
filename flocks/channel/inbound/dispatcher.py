@@ -22,6 +22,8 @@ from flocks.channel.inbound.session_binding import (
     is_channel_media_placeholder,
 )
 from flocks.config.config import ChannelConfig
+from flocks.hooks.execution import execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.identity import ChannelIngressProvenance
 from flocks.utils.log import Log
 
@@ -312,32 +314,26 @@ class InboundDispatcher:
         *,
         provenance: ChannelIngressProvenance | None = None,
     ) -> None:
-        from flocks.hooks.execution import execute_with_hooks
-        from flocks.hooks.pipeline import HookPipeline
-        # Resolve config before ingress hooks so channel_policy uses persisted
-        # role/agent settings even on cold start (empty in-memory cache).
-        channel_config = await self._get_channel_config(
-            msg.channel_id,
-            force_refresh=True,
-        )
-        channel_policy = _build_channel_policy_context(channel_config)
-
-        return await execute_with_hooks(
-            {
-                "operation": "channel.dispatch",
-                "transport": "channel",
-                "channel_id": msg.channel_id,
-                "account_id": msg.account_id,
-                "message_id": msg.message_id,
-                "sender_id": msg.sender_id,
-                "chat_id": msg.chat_id,
-                "chat_type": msg.chat_type.value,
-                "message": msg,
-                "text": msg.text,
-                "evidence": msg.raw,
-                "provenance": provenance,
-                "channel_policy": channel_policy,
+        ingress_payload = {
+            "operation": "channel.inbound.dispatch",
+            "transport": "channel",
+            "entry": "channel_webhook",
+            "channel_id": msg.channel_id,
+            "account_id": msg.account_id,
+            "chat_id": msg.chat_id,
+            "sender_id": msg.sender_id,
+            "chat_type": msg.chat_type.value,
+            "message_id": msg.message_id,
+            "authentication": {
+                "plugin_authenticated": bool(provenance is not None)
             },
+            "provenance": provenance,
+            "message": msg,
+            "evidence": msg.raw,
+            "raw": msg.raw if isinstance(msg.raw, dict) else {},
+        }
+        return await execute_with_hooks(
+            ingress_payload,
             lambda: self._dispatch(msg),
             before=HookPipeline.run_ingress_before,
             after=HookPipeline.run_ingress_after,
@@ -365,8 +361,7 @@ class InboundDispatcher:
 
         # 4. channel.inbound hook — allows plugins to inspect/block/modify
         try:
-            from flocks.hooks.pipeline import HookPipeline
-            hook_ctx = await HookPipeline.run_channel_inbound({
+            hook_ctx = await HookPipeline.run_channel_inbound_before({
                 "channel_id": msg.channel_id,
                 "sender_id": msg.sender_id,
                 "chat_id": msg.chat_id,
@@ -954,9 +949,7 @@ class InboundDispatcher:
             **owner_kwargs,
         )
         try:
-            from flocks.hooks.pipeline import HookPipeline
             from flocks.session.execution_profile import (
-                get_session_execution_profile,
                 upsert_session_execution_profile,
             )
 
@@ -969,17 +962,6 @@ class InboundDispatcher:
                     "default_agent": str(new_session.agent or "").strip(),
                 },
                 source="channel.command.new_session",
-            )
-            profile = await get_session_execution_profile(new_session.id)
-            await HookPipeline.run_event(
-                {
-                    "type": "session.execution_profile.updated",
-                    "properties": {
-                        "session_id": new_session.id,
-                        "entry": "channel",
-                        "session_execution_profile": profile or {},
-                    },
-                }
             )
         except Exception:
             pass
@@ -1550,15 +1532,6 @@ def _resolve_visible_agents(channel_config: ChannelConfig) -> list[str]:
     if not isinstance(raw, list):
         return []
     return [str(item).strip() for item in raw if str(item).strip()]
-
-
-def _build_channel_policy_context(
-    channel_config: ChannelConfig,
-) -> dict[str, Any]:
-    return {
-        "default_agent": str(channel_config.default_agent or "").strip(),
-        "visible_agents": _resolve_visible_agents(channel_config),
-    }
 
 
 async def _expand_merge_forward(

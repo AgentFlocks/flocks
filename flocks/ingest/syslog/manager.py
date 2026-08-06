@@ -6,7 +6,7 @@ import asyncio
 import threading
 import time
 import uuid
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from flocks.hooks.execution import execute_with_hooks
 from flocks.hooks.pipeline import HookPipeline
@@ -702,6 +702,7 @@ class SyslogManager:
         try:
             action_payload = {
                 "operation": "workflow.trigger.syslog",
+                "transport": "headless",
                 "workflow_id": workflow_id,
                 "trigger": trigger,
                 "event": event,
@@ -711,19 +712,11 @@ class SyslogManager:
                 },
             }
             await execute_with_hooks(
-                {
-                    **action_payload,
-                    "transport": "headless",
-                    "entry": "syslog",
-                    "legacy_compat": True,
-                },
-                lambda: execute_with_hooks(
-                    action_payload,
-                    lambda: self._dispatcher.dispatch(
-                        trigger=trigger,
-                        event=event,
-                        executor=_executor,
-                    ),
+                action_payload,
+                lambda: self._dispatcher.dispatch(
+                    trigger=trigger,
+                    event=event,
+                    executor=_executor,
                 ),
                 before=HookPipeline.run_ingress_before,
                 after=HookPipeline.run_ingress_after,

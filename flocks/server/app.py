@@ -1387,8 +1387,29 @@ def _install_flockspro_license_fallback() -> None:
     log.info("flockspro.license.fallback.installed")
 
 
+def _install_flockspro_policy_fallback() -> None:
+    overview_registered = _route_registered("/api/flockspro/policy/security/overview", "GET")
+    if overview_registered:
+        log.info(
+            "flockspro.policy.fallback.skipped",
+            {"overview_registered": overview_registered},
+        )
+        return
+    try:
+        from flockspro.web.policy_routes import router as flockspro_policy_router
+    except Exception as exc:
+        log.warning(
+            "flockspro.policy.fallback.import_failed",
+            {"error": str(exc)},
+        )
+        return
+    app.include_router(flockspro_policy_router)
+    log.info("flockspro.policy.fallback.installed")
+
+
 _load_installed_package_plugins()
 _install_flockspro_license_fallback()
+_install_flockspro_policy_fallback()
 
 
 @app.get("/", tags=["Root"])

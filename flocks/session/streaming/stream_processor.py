@@ -729,22 +729,15 @@ class StreamProcessor:
             except Exception as exc:
                 log.debug("stream.tool_span.init_failed", {"error": str(exc)})
         try:
-            if hook_blocked:
+            sandbox_meta = await self._resolve_sandbox_meta(tool_name)
+            if sandbox_meta["blocked"]:
                 result = ToolResult(
                     success=False,
-                    error=hook_block_reason or "Tool execution blocked by hook",
-                    metadata={"blocked_by_hook": True},
+                    error=sandbox_meta["error"],
+                    metadata={"sandbox": True, "blocked_by_policy": True},
                 )
             else:
-                sandbox_meta = await self._resolve_sandbox_meta(tool_name)
-                if sandbox_meta["blocked"]:
-                    result = ToolResult(
-                        success=False,
-                        error=sandbox_meta["error"],
-                        metadata={"sandbox": True, "blocked_by_policy": True},
-                    )
-                else:
-                    def _make_metadata_cb(
+                def _make_metadata_cb(
                         _part_id=tool_state.part_id,
                         _call_id=tool_call_id,
                         _tool=tool_name,
@@ -850,70 +843,58 @@ class StreamProcessor:
                         _cb.mark_finished = _mark_finished
                         return _cb
 
-                    tool_extra = {
-                        **sandbox_meta["extra"],
-                        "agent_execution_session": True,
-                        "execution_mode": self._execution_mode,
-                        "workspace_dir": self._workspace_dir,
-                        "model": {
-                            "providerID": getattr(
-                                self.assistant_message,
-                                "providerID",
-                                None,
-                            ),
-                            "modelID": getattr(
-                                self.assistant_message,
-                                "modelID",
-                                None,
-                            ),
-                        },
-                        "plan_file_path": self._plan_file_path,
-                        "plan_relative_path": self._plan_relative_path,
-                        "plan_permission_path": self._plan_permission_path,
-                    }
-                    ctx = ToolContext(
-                        session_id=self.session_id,
-                        message_id=self.assistant_message.id,
-                        agent=self.agent.name,
-                        call_id=tool_call_id,
-                        abort_event=self.abort_event,
-                        permission_callback=self.permission_callback,
-                        extra=tool_extra,
-                        metadata_callback=_make_metadata_cb(),
-                        event_publish_callback=self.event_publish_callback,
+                tool_extra = {
+                    **sandbox_meta["extra"],
+                    "agent_execution_session": True,
+                    "execution_mode": self._execution_mode,
+                    "workspace_dir": self._workspace_dir,
+                    "model": {
+                        "providerID": getattr(
+                            self.assistant_message,
+                            "providerID",
+                            None,
+                        ),
+                        "modelID": getattr(
+                            self.assistant_message,
+                            "modelID",
+                            None,
+                        ),
+                    },
+                    "execution_context": {
+                        "trace_id": f"{self.session_id}:{self.assistant_message.id}",
+                        "execution_id": self.assistant_message.id,
+                        "turn_id": self.assistant_message.id,
+                        "step": int(self._step_index or 0),
+                        "attempt": 1,
+                    },
+                    "plan_file_path": self._plan_file_path,
+                    "plan_relative_path": self._plan_relative_path,
+                    "plan_permission_path": self._plan_permission_path,
+                }
+                ctx = ToolContext(
+                    session_id=self.session_id,
+                    message_id=self.assistant_message.id,
+                    agent=self.agent.name,
+                    call_id=tool_call_id,
+                    abort_event=self.abort_event,
+                    permission_callback=self.permission_callback,
+                    extra=tool_extra,
+                    metadata_callback=_make_metadata_cb(),
+                    event_publish_callback=self.event_publish_callback,
+                )
+                cb = ctx._metadata_callback
+                try:
+                    result = await ToolRegistry.execute(
+                        tool_name=tool_name,
+                        ctx=ctx,
+                        **tool_input
                     )
-                    cb = ctx._metadata_callback
-                    try:
-                        result = await ToolRegistry.execute(
-                            tool_name=tool_name,
-                            ctx=ctx,
-                            **tool_input
-                        )
-                    finally:
-                        # Mark metadata callback as finished so pending async
-                        # running-state updates cannot overwrite completed,
-                        # errored, or interrupted tool state.
-                        if cb and hasattr(cb, 'mark_finished'):
-                            cb.mark_finished()
-
-            if result.success:
-                hook_status = "completed"
-            elif (result.metadata or {}).get("blocked_by_hook"):
-                hook_status = "blocked"
-            elif (result.metadata or {}).get("blocked_by_policy"):
-                hook_status = "blocked"
-            else:
-                hook_status = "error"
-            post_hook_fired = True
-            result = await self._run_tool_after_hook(
-                tool_name=tool_name,
-                tool_input=tool_input,
-                tool_call_id=tool_call_id,
-                result=result,
-                status=hook_status,
-                tool_start_time=tool_start_time,
-            )
-            
+                finally:
+                    # Mark metadata callback as finished so pending async
+                    # running-state updates cannot overwrite completed,
+                    # errored, or interrupted tool state.
+                    if cb and hasattr(cb, 'mark_finished'):
+                        cb.mark_finished()
             # Update tool state
             tool_state.status = "completed" if result.success else "error"
             tool_state.output = result.output if result.success else None
@@ -1020,7 +1001,6 @@ class StreamProcessor:
                 tool_input=tool_input,
                 tool_call_id=tool_call_id,
                 tool_start_time=tool_start_time,
-                post_hook_fired=post_hook_fired,
                 tool_span_ctx=tool_span_ctx,
             )
             raise
@@ -1030,21 +1010,6 @@ class StreamProcessor:
                 "tool_name": tool_name,
                 "error": str(e),
             })
-            if not post_hook_fired:
-                post_hook_fired = True
-                exception_result = ToolResult(
-                    success=False,
-                    error=str(e),
-                )
-                await self._run_tool_after_hook(
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    tool_call_id=tool_call_id,
-                    result=exception_result,
-                    status="error",
-                    tool_start_time=tool_start_time,
-                    allow_result_override=False,
-                )
             try:
                 if tool_span_ctx is not None:
                     tool_span_ctx.end(
@@ -1126,7 +1091,6 @@ class StreamProcessor:
         tool_input: Dict[str, Any],
         tool_call_id: str,
         tool_start_time: int,
-        post_hook_fired: bool,
         tool_span_ctx: Optional[Any] = None,
     ) -> None:
         """Emit and persist the terminal state for an interrupted tool call."""
@@ -1142,131 +1106,71 @@ class StreamProcessor:
             "tool_name": tool_name,
         })
         try:
-            if not post_hook_fired:
-                interrupted_result = ToolResult(
-                    success=False,
-                    error=interrupt_msg,
-                    metadata=interrupted_metadata,
+            if tool_span_ctx is not None:
+                tool_span_ctx.end(
+                    output=interrupt_msg,
+                    metadata={"success": False},
+                    level="ERROR",
+                    status_message="tool_cancelled",
                 )
-                await self._run_tool_after_hook(
-                    tool_name=tool_name,
-                    tool_input=tool_input,
-                    tool_call_id=tool_call_id,
-                    result=interrupted_result,
-                    status="interrupted",
-                    tool_start_time=tool_start_time,
-                    allow_result_override=False,
-                )
-        finally:
-            try:
-                if tool_span_ctx is not None:
-                    tool_span_ctx.end(
-                        output=interrupt_msg,
-                        metadata={"success": False},
-                        level="ERROR",
-                        status_message="tool_cancelled",
-                    )
-            except Exception as span_error:
-                log.debug(
-                    "stream.tool_span.cancel_end_failed",
-                    {"error": str(span_error)},
-                )
-
-            tool_state.status = "error"
-            tool_state.error = interrupt_msg
-            tool_end_time = int(datetime.now().timestamp() * 1000)
-            error_state = ToolStateError(
-                status="error",
-                input=tool_input,
-                error=interrupt_msg,
-                metadata=interrupted_metadata,
-                time={"start": tool_start_time, "end": tool_end_time},
+        except Exception as span_error:
+            log.debug(
+                "stream.tool_span.cancel_end_failed",
+                {"error": str(span_error)},
             )
-            error_part = ToolPart(
-                id=tool_state.part_id,
-                sessionID=self.session_id,
-                messageID=self.assistant_message.id,
-                type="tool",
-                callID=tool_call_id,
-                tool=tool_name,
-                state=error_state,
-            )
-            try:
-                await Message.store_part(
-                    self.session_id,
-                    self.assistant_message.id,
-                    error_part,
-                )
-                if self.event_publish_callback:
-                    await self.event_publish_callback(
-                        "message.part.updated",
-                        {
-                            "part": {
-                                "id": tool_state.part_id,
-                                "messageID": self.assistant_message.id,
-                                "sessionID": self.session_id,
-                                "type": "tool",
-                                "callID": tool_call_id,
-                                "tool": tool_name,
-                                "state": {
-                                    "status": "error",
-                                    "input": tool_input,
-                                    "error": interrupt_msg,
-                                    "metadata": interrupted_metadata,
-                                    "time": {
-                                        "start": tool_start_time,
-                                        "end": tool_end_time,
-                                    },
-                                },
-                            }
-                        },
-                    )
-            except Exception as store_error:
-                log.error(
-                    "stream.tool_call.cancelled_update_failed",
-                    {"error": str(store_error)},
-                )
 
-    async def _run_tool_after_hook(
-        self,
-        *,
-        tool_name: str,
-        tool_input: Dict[str, Any],
-        tool_call_id: str,
-        result: ToolResult,
-        status: str,
-        tool_start_time: int,
-        allow_result_override: bool = True,
-    ) -> ToolResult:
-        """Run tool_after with a normalized result for every tool outcome."""
+        tool_state.status = "error"
+        tool_state.error = interrupt_msg
+        tool_end_time = int(datetime.now().timestamp() * 1000)
+        error_state = ToolStateError(
+            status="error",
+            input=tool_input,
+            error=interrupt_msg,
+            time={"start": tool_start_time, "end": tool_end_time},
+        )
+        error_part = ToolPart(
+            id=tool_state.part_id,
+            sessionID=self.session_id,
+            messageID=self.assistant_message.id,
+            type="tool",
+            callID=tool_call_id,
+            tool=tool_name,
+            state=error_state,
+        )
         try:
-            from flocks.hooks.pipeline import HookPipeline
-
-            duration_ms = max(
-                0,
-                int(datetime.now().timestamp() * 1000) - tool_start_time,
+            await Message.store_part(
+                self.session_id,
+                self.assistant_message.id,
+                error_part,
             )
-            hook_ctx = await HookPipeline.run_tool_after({
-                "sessionID": self.session_id,
-                "workspace": self._workspace_dir,
-                "agent": self.agent.name,
-                "tool": {
-                    "name": tool_name,
-                    "input": tool_input,
-                    "callID": tool_call_id,
-                },
-                "status": status,
-                "durationMs": duration_ms,
-                "result": result.model_dump(),
-                "error": result.error if not result.success else None,
-            })
-            if allow_result_override and isinstance(hook_ctx.output, dict):
-                override = hook_ctx.output.get("result")
-                if isinstance(override, dict):
-                    return ToolResult(**override)
-        except Exception as exc:
-            log.error("stream.tool_after_hook.error", {"error": str(exc)})
-        return result
+            if self.event_publish_callback:
+                await self.event_publish_callback(
+                    "message.part.updated",
+                    {
+                        "part": {
+                            "id": tool_state.part_id,
+                            "messageID": self.assistant_message.id,
+                            "sessionID": self.session_id,
+                            "type": "tool",
+                            "callID": tool_call_id,
+                            "tool": tool_name,
+                            "state": {
+                                "status": "error",
+                                "input": tool_input,
+                                "error": interrupt_msg,
+                                "time": {
+                                    "start": tool_start_time,
+                                    "end": tool_end_time,
+                                },
+                            },
+                        }
+                    },
+                )
+        except Exception as store_error:
+            log.error(
+                "stream.tool_call.cancelled_update_failed",
+                {"error": str(store_error)},
+            )
 
     async def _load_config_data(self) -> Dict[str, Any]:
         """Load and cache config as plain dict."""

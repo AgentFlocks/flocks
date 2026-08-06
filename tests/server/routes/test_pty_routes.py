@@ -56,16 +56,16 @@ async def test_pty_websocket_authenticates_before_session_lookup(monkeypatch: py
 
 
 @pytest.mark.asyncio
-async def test_public_pty_create_uses_neutral_action_lifecycle_payload(
+async def test_public_pty_create_uses_canonical_tool_lifecycle_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[tuple[str, dict]] = []
 
     class _Recorder(HookBase):
-        async def action_before(self, ctx) -> None:
+        async def tool_before(self, ctx) -> None:
             observed.append((ctx.stage, dict(ctx.input)))
 
-        async def action_after(self, ctx) -> None:
+        async def tool_after(self, ctx) -> None:
             observed.append((ctx.stage, dict(ctx.input)))
 
     HookPipeline.register("pty-lifecycle-recorder", _Recorder())
@@ -89,31 +89,26 @@ async def test_public_pty_create_uses_neutral_action_lifecycle_payload(
 
     assert (await Pty.create(input_data)).id == "pty_created"
 
-    assert [stage for stage, _ in observed] == ["action.before", "action.after"]
+    assert [stage for stage, _ in observed] == ["tool.execute.before", "tool.execute.after"]
     before = observed[0][1]
     after = observed[1][1]
-    assert before["action"] == "pty.open"
-    assert before["resource"] == {"type": "pty"}
-    assert before["action_input"] == input_data.model_dump()
-    assert "tool" not in before
-    assert after["action"] == "pty.open"
-    assert after["resource"] == {"type": "pty"}
-    assert after["action_input"] == input_data.model_dump()
-    assert after["outcome"] == "success"
+    assert before["tool_execution"]["tool"]["name"] == "pty.open"
+    assert before["tool_execution"]["tool"]["validated_input"]["command"] == input_data.command
+    assert after["outcome"]["status"] == "success"
     create.assert_awaited_once_with(input_data)
 
 
 @pytest.mark.asyncio
-async def test_public_pty_write_uses_neutral_action_lifecycle_payload(
+async def test_public_pty_write_uses_canonical_tool_lifecycle_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     observed: list[tuple[str, dict]] = []
 
     class _Recorder(HookBase):
-        async def action_before(self, ctx) -> None:
+        async def tool_before(self, ctx) -> None:
             observed.append((ctx.stage, dict(ctx.input)))
 
-        async def action_after(self, ctx) -> None:
+        async def tool_after(self, ctx) -> None:
             observed.append((ctx.stage, dict(ctx.input)))
 
     HookPipeline.register("pty-lifecycle-recorder", _Recorder())
@@ -122,22 +117,20 @@ async def test_public_pty_write_uses_neutral_action_lifecycle_payload(
 
     await Pty.write("pty_123", "first raw input")
 
-    assert [stage for stage, _ in observed] == ["action.before", "action.after"]
+    assert [stage for stage, _ in observed] == ["tool.execute.before", "tool.execute.after"]
     before = observed[0][1]
     after = observed[1][1]
-    assert before["action"] == "pty.input"
-    assert before["resource"] == {"type": "pty", "id": "pty_123"}
-    assert before["action_input"] == {"data": "first raw input"}
-    assert "tool" not in before
-    assert after["action"] == "pty.input"
-    assert after["resource"] == {"type": "pty", "id": "pty_123"}
-    assert after["action_input"] == {"data": "first raw input"}
-    assert after["outcome"] == "success"
+    assert before["tool_execution"]["tool"]["name"] == "pty.input"
+    assert before["tool_execution"]["tool"]["validated_input"] == {
+        "data": "first raw input",
+        "pty_id": "pty_123",
+    }
+    assert after["outcome"]["status"] == "success"
     write.assert_called_once_with("pty_123", "first raw input")
 
 
 @pytest.mark.asyncio
-async def test_http_pty_create_skips_action_lifecycle(
+async def test_http_pty_create_uses_tool_lifecycle(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     input_data = CreateInput(command="/bin/sh")
@@ -156,7 +149,7 @@ async def test_http_pty_create_skips_action_lifecycle(
     response = await pty_routes.create_session(input_data)
 
     assert response.id == "pty_http"
-    create.assert_awaited_once_with(input_data, use_action_lifecycle=False)
+    create.assert_awaited_once_with(input_data)
 
 
 @pytest.mark.asyncio

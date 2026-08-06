@@ -23,7 +23,12 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
-import { flocksproPolicyApi, type PermissionMode, type RuntimeMode } from '@/api/flocksproPolicy';
+import {
+  flocksproPolicyApi,
+  isSessionExecutionSettingsUnsupported,
+  type PermissionMode,
+  type RuntimeMode,
+} from '@/api/flocksproPolicy';
 import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
@@ -1463,6 +1468,7 @@ export default function SessionPage() {
       setSessionRuntimeMode(updated.runtimeMode);
       setSessionExecutionRevision(updated.revision);
     } catch (error: unknown) {
+      if (isSessionExecutionSettingsUnsupported(error)) return;
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('chat.error', 'Error'), message);
     }
@@ -1483,6 +1489,7 @@ export default function SessionPage() {
       setSessionRuntimeMode(updated.runtimeMode);
       setSessionExecutionRevision(updated.revision);
     } catch (error: unknown) {
+      if (isSessionExecutionSettingsUnsupported(error)) return;
       const message = error instanceof Error ? error.message : String(error);
       toast.error(t('chat.error', 'Error'), message);
     }
@@ -1800,6 +1807,11 @@ export default function SessionPage() {
           setSessionRuntimeMode(updated.runtimeMode);
           setSessionExecutionRevision(updated.revision);
         } catch (error: unknown) {
+          if (isSessionExecutionSettingsUnsupported(error)) {
+            // Backward compatibility: older backends may not expose execution-settings yet.
+            // Session creation and prompt sending should continue without interruption.
+            return;
+          }
           const message = error instanceof Error ? error.message : String(error);
           toast.error(t('chat.error', 'Error'), message);
         }
@@ -3145,10 +3157,10 @@ export default function SessionPage() {
                               insertMention(agent.name);
                               closeMenu();
                             }}
-                            className={`w-full min-w-0 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                            className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left transition-colors ${
                               selectedAgent === agent.name
-                                ? 'bg-zinc-100/90 text-zinc-900 dark:bg-white/[0.09] dark:text-zinc-50'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
@@ -3189,6 +3201,7 @@ export default function SessionPage() {
                                   <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                 </span>
                               )}
+                              {selectedAgent === agent.name && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                             </div>
                           </button>
                         );
@@ -3296,29 +3309,30 @@ export default function SessionPage() {
                             role="menuitemradio"
                             aria-checked={selected}
                             onClick={() => handleSelectExecutionMode(mode)}
-                            className={`flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors ${
+                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
                               selected
-                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                             }`}
                           >
-                            <ExecutionModeIcon
-                              mode={mode}
-                              className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
-                                selected
-                                  ? 'text-zinc-700 dark:text-zinc-100'
-                                  : 'text-zinc-400 dark:text-zinc-500'
-                              }`}
-                            />
-                            <span className="min-w-0 flex-1">
-                              <span className="block text-xs font-medium">
-                                {t(`executionMode.options.${mode}.label`)}
-                              </span>
-                              <span className="mt-0.5 block text-[10px] leading-4 text-zinc-400 dark:text-zinc-500">
-                                {t(`executionMode.options.${mode}.description`)}
-                              </span>
-                            </span>
-                            {selected && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                            <div className="flex w-20 shrink-0 items-center gap-1.5 text-sm font-medium">
+                              <ExecutionModeIcon
+                                mode={mode}
+                                className={`h-3.5 w-3.5 shrink-0 ${
+                                  selected
+                                    ? 'text-zinc-700 dark:text-zinc-100'
+                                    : 'text-zinc-400 dark:text-zinc-500'
+                                }`}
+                              />
+                              <span>{t(`executionMode.options.${mode}.label`)}</span>
+                            </div>
+                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                              selected ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-400'
+                            }`}
+                            >
+                              {t(`executionMode.options.${mode}.description`)}
+                            </div>
+                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                           </button>
                         );
                       })}
@@ -3361,11 +3375,15 @@ export default function SessionPage() {
                           setSelectedProjectId(group.id);
                           setShowProjectOptions(false);
                         }}
-                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                        className={`flex h-8 w-full items-center gap-2 rounded-lg border px-2 text-left text-xs transition-colors ${
+                          selectedProjectId === group.id
+                            ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                            : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                        }`}
                       >
-                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <FolderGit2 className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-[#4f92e8]" />}
+                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                       </button>
                     ))}
                     <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
@@ -3377,11 +3395,15 @@ export default function SessionPage() {
                         setSelectedProjectId(TASK_SESSION_GROUP_ID);
                         setShowProjectOptions(false);
                       }}
-                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className={`flex h-8 w-full items-center gap-2 rounded-lg border px-2 text-left text-xs transition-colors ${
+                        selectedProjectId === TASK_SESSION_GROUP_ID
+                          ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                          : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                      }`}
                     >
-                      <X className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                      <X className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                       <span className="min-w-0 flex-1 truncate">{t('projectPicker.none')}</span>
-                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-[#4f92e8]" />}
+                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                     </button>
                     <button
                       type="button"
@@ -3450,10 +3472,10 @@ export default function SessionPage() {
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
                             disabled={!canSelectAuto}
-                            className={`w-full rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
-                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
@@ -3473,6 +3495,7 @@ export default function SessionPage() {
                               >
                                 <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
+                              {selectedModelAuto && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                             </div>
                           </button>
                         </div>
@@ -3490,10 +3513,10 @@ export default function SessionPage() {
                                 key={option.key}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
-                                className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
+                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
-                                    ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                    : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
@@ -3518,6 +3541,7 @@ export default function SessionPage() {
                                       <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                     </span>
                                   </div>
+                                  {selectedModelOption?.key === option.key && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                                 </div>
                               </button>
                             ))}
@@ -3589,16 +3613,22 @@ export default function SessionPage() {
                               void handleRuntimeModeChange(mode);
                               setShowPermissionModeOptions(false);
                             }}
-                            className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
                               currentRuntimeMode === mode
-                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                             }`}
                           >
                             <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
-                            <div className="min-w-0 flex-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                              currentRuntimeMode === mode
+                                ? 'text-zinc-700 dark:text-zinc-200'
+                                : 'text-zinc-500 dark:text-zinc-400'
+                            }`}
+                            >
                               {description}
                             </div>
+                            {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                           </button>
                         ))}
                         <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
@@ -3614,16 +3644,22 @@ export default function SessionPage() {
                                   void handlePermissionModeChange(mode);
                                   setShowPermissionModeOptions(false);
                                 }}
-                                className={`flex w-full items-center gap-3 rounded-lg px-2.5 py-1.5 text-left transition-colors ${
+                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
                                   currentPermissionMode === mode
-                                    ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                    : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                                 }`}
                               >
                                 <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
-                                <div className="min-w-0 flex-1 truncate text-[11px] text-zinc-500 dark:text-zinc-400">
+                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                                  currentPermissionMode === mode
+                                    ? 'text-zinc-700 dark:text-zinc-200'
+                                    : 'text-zinc-500 dark:text-zinc-400'
+                                }`}
+                                >
                                   {description}
                                 </div>
+                                {currentPermissionMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                               </button>
                             ))}
                           </div>

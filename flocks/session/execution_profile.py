@@ -110,6 +110,7 @@ def default_execution_profile(
             "updated",
             None,
         ),
+        "owner_user_id": str(getattr(session, "owner_user_id", "") or "").strip() or None,
         "owner_username": str(getattr(session, "owner_username", "") or "").strip() or None,
         "entry": normalized_entry,
         "visible_agents": visible,
@@ -146,6 +147,9 @@ def profile_from_session(session: "SessionInfo") -> dict[str, Any]:
         "updated",
         None,
     )
+    profile["owner_user_id"] = str(
+        getattr(session, "owner_user_id", "") or ""
+    ).strip() or None
     profile["owner_username"] = str(getattr(session, "owner_username", "") or "").strip() or None
     profile["visible_agents"] = _as_list(profile.get("visible_agents"))
     profile["default_agent"] = str(
@@ -203,6 +207,9 @@ def merge_profile(
         "updated",
         None,
     )
+    merged["owner_user_id"] = str(
+        getattr(session, "owner_user_id", "") or ""
+    ).strip() or None
     merged["owner_username"] = str(getattr(session, "owner_username", "") or "").strip() or None
     merged["version"] = PROFILE_VERSION
     merged["revision"] = int(current.get("revision") or 1) + 1

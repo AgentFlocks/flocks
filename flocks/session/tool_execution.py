@@ -1,215 +1,144 @@
-"""Core helpers for unified session tool-execution payloads."""
+"""Core helpers for unified session tool-execution contracts."""
 
 from __future__ import annotations
 
-import os
-import re
-from typing import Any, Mapping
+import asyncio
+import time
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, TypeVar
 
+from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+from flocks.hooks.contracts import (
+    ToolExecutionActor,
+    ToolExecutionActorAgent,
+    ToolExecutionActorSubject,
+    ToolExecutionContext,
+    ToolExecutionIdentity,
+    ToolExecutionSafetyMode,
+    ToolExecutionSession,
+    ToolExecutionSessionProject,
+    ToolExecutionTool,
+    redact_sensitive,
+    schema_digest,
+    utc_now_iso,
+)
 from flocks.session.execution_profile import get_session_execution_profile
-from flocks.workspace.manager import WorkspaceManager
-
-_FILESYSTEM_TOOL_OPERATION_BY_NAME: dict[str, str] = {
-    "read": "read",
-    "glob": "search",
-    "grep": "search",
-    "doc_parser": "edit",
-    "write": "write",
-    "edit": "edit",
-    "apply_patch": "apply_patch",
-    "delete": "delete",
-    "move": "move",
-    "copy": "copy",
-    "mkdir": "mkdir",
-}
 
 
-def _normalize_operation_path(path: str | None, *, cwd: str) -> str | None:
-    text = str(path or "").strip()
-    if not text:
-        return None
-    expanded = os.path.expanduser(text)
-    if os.path.isabs(expanded):
-        return os.path.realpath(expanded)
-    return os.path.realpath(os.path.join(cwd, expanded))
+T = TypeVar("T")
 
 
-def _extract_apply_patch_action(
-    *,
-    patch_text: str,
-    cwd: str,
-) -> dict[str, str | None] | None:
-    action: dict[str, str | None] | None = None
-    update_pattern = re.compile(r"^\*\*\* Update File:\s*(.+)$")
-    add_pattern = re.compile(r"^\*\*\* Add File:\s*(.+)$")
-    delete_pattern = re.compile(r"^\*\*\* Delete File:\s*(.+)$")
-    for raw_line in patch_text.splitlines():
-        line = raw_line.strip()
-        if not line:
-            continue
-        update_match = update_pattern.match(line)
-        if update_match:
-            if action is not None:
-                return None
-            payload = update_match.group(1).strip()
-            if " -> " in payload:
-                source_raw, target_raw = [part.strip() for part in payload.split(" -> ", 1)]
-                action = {
-                    "operation": "move",
-                    "source_path": _normalize_operation_path(source_raw, cwd=cwd),
-                    "target_path": _normalize_operation_path(target_raw, cwd=cwd),
-                }
-            else:
-                action = {
-                    "operation": "edit",
-                    "source_path": None,
-                    "target_path": _normalize_operation_path(payload, cwd=cwd),
-                }
-            continue
-        add_match = add_pattern.match(line)
-        if add_match:
-            if action is not None:
-                return None
-            target_raw = add_match.group(1).strip()
-            action = {
-                "operation": "write",
-                "source_path": None,
-                "target_path": _normalize_operation_path(target_raw, cwd=cwd),
-            }
-            continue
-        delete_match = delete_pattern.match(line)
-        if delete_match:
-            if action is not None:
-                return None
-            target_raw = delete_match.group(1).strip()
-            action = {
-                "operation": "delete",
-                "source_path": None,
-                "target_path": _normalize_operation_path(target_raw, cwd=cwd),
-            }
-    return action
-
-
-def _first_present(mapping: Mapping[str, Any], keys: tuple[str, ...]) -> str | None:
-    for key in keys:
-        value = mapping.get(key)
-        if value is None:
-            continue
-        text = str(value).strip()
-        if text:
-            return text
-    return None
-
-
-def _filesystem_action_payload(
-    *,
-    session_id: str,
-    message_id: str,
-    agent: str,
-    tool_name: str,
-    tool_input: Mapping[str, Any],
-    profile: Mapping[str, Any],
-    tool_context_extra: Mapping[str, Any],
-) -> dict[str, Any] | None:
-    if tool_context_extra.get("agent_execution_session") is not True:
-        return None
-    operation = _FILESYSTEM_TOOL_OPERATION_BY_NAME.get(str(tool_name or "").strip().lower())
-    if operation is None:
-        return None
-    sandbox = tool_context_extra.get("sandbox")
-    sandbox_workspace_dir = (
-        str(sandbox.get("workspace_dir") or "").strip()
-        if isinstance(sandbox, Mapping)
-        else ""
-    )
-    workspace_root = str((profile.get("workspace_dir") or os.getcwd())).strip() or os.getcwd()
-    project_root = str(profile.get("project_root") or "").strip() or None
-    operation_cwd = (
-        sandbox_workspace_dir
-        or str((tool_context_extra.get("workspace_dir") or "")).strip()
-        or project_root
-        or workspace_root
-    )
-    permission_mode = str(profile.get("permission_mode") or "readonly").strip().lower()
-    runtime_mode = str(profile.get("runtime_mode") or "exe-mode").strip().lower()
-    source_path = _first_present(
-        tool_input,
-        ("sourcePath", "source_path", "from", "src", "oldPath", "input_path", "inputPath"),
-    )
-    target_path = _first_present(
-        tool_input,
-        ("targetPath", "target_path", "to", "dst", "filePath", "path", "newPath", "output_path", "outputPath"),
-    )
-    if operation in {"read", "search", "write", "edit", "apply_patch", "delete", "mkdir"} and target_path is None:
-        target_path = _first_present(tool_input, ("filePath", "path", "dirPath"))
-    source_path = _normalize_operation_path(source_path, cwd=operation_cwd)
-    target_path = _normalize_operation_path(target_path, cwd=operation_cwd)
-    owner_username = _first_present(profile, ("owner_username",))
-    output_root = str(
-        WorkspaceManager.get_instance().get_default_outputs_dir(
-            username=owner_username,
-            include_today=False,
+def _resolve_actor_subject(profile: Mapping[str, Any]) -> tuple[str | None, str | None]:
+    subject_id = (
+        str(
+            profile.get("subject_id")
+            or profile.get("owner_user_id")
+            or profile.get("owner_username")
+            or ""
         )
+        .strip()
+        or None
     )
-    flocks_root = os.path.expanduser(os.getenv("FLOCKS_ROOT", "~/.flocks"))
-    plugins_root = os.path.join(flocks_root, "plugins")
-    project_id = _first_present(profile, ("project_id",))
-    project_revision_raw = profile.get("project_revision")
-    project_revision = None
-    if project_revision_raw is not None:
-        text_revision = str(project_revision_raw).strip()
-        if text_revision:
-            project_revision = text_revision
-    execution_context = (
-        dict(tool_context_extra.get("execution_context"))
-        if isinstance(tool_context_extra.get("execution_context"), Mapping)
-        else {}
-    )
-    trace_id = _first_present(execution_context, ("trace_id", "traceId")) or message_id
-    execution_id = _first_present(execution_context, ("execution_id", "executionId")) or message_id
-    payload: dict[str, Any] = {
-        "trace_id": trace_id,
-        "execution_id": execution_id,
-        "session_id": session_id,
-        "agent_execution_session": True,
-        "workflow_execution": _first_present(profile, ("entry",)) == "workflow",
-        "runtime_mode": runtime_mode,
-        "operation": operation,
-        "source_path": source_path,
-        "target_path": target_path,
-        "cwd": operation_cwd,
-        "session_permission_mode": permission_mode,
-        "owner_username": owner_username,
-        "workspace": {
-            "root": workspace_root,
-            "output_owner_id": owner_username,
-            "output_root": output_root,
-        },
-        "project": {
-            "id": project_id,
-            "root": project_root,
-            "revision": project_revision,
-        },
-        "subject": {
-            "id": _first_present(profile, ("subject_id",)),
-            "type": _first_present(profile, ("subject_type",)),
-            "role": _first_present(profile, ("actor_role",)),
-        },
-        "agent": {"id": agent},
-        "flocks": {"root": flocks_root, "plugins_root": plugins_root},
-        "workspace_root": workspace_root,
-        "output_root": output_root,
-        "project_root": project_root,
-        "flocks_root": flocks_root,
-        "plugins_root": plugins_root,
-    }
-    if operation == "apply_patch":
-        patch_text = str(tool_input.get("patchText") or tool_input.get("patch_text") or "")
-        payload["apply_patch_action"] = _extract_apply_patch_action(
-            patch_text=patch_text,
-            cwd=operation_cwd,
+    explicit_type = str(profile.get("subject_type") or "").strip().lower()
+    if explicit_type:
+        return subject_id, explicit_type
+    if subject_id is None:
+        return None, None
+    if subject_id == API_TOKEN_SERVICE_USER_ID:
+        return subject_id, "service"
+    return subject_id, "human"
+
+
+class ToolExecutionConfirmationRequired(RuntimeError):
+    """Raised for non-Registry callers when a tool hook requests confirmation."""
+
+
+async def run_tool_execution_lifecycle(
+    payload: dict[str, Any],
+    effect: Callable[[], Awaitable[T]],
+    *,
+    patched_effect: Callable[[Mapping[str, Any]], Awaitable[T]] | None = None,
+) -> T:
+    """Run an already-normalized operation through the canonical tool lifecycle.
+
+    Non-Registry tool entry points use this adapter to share decision and
+    terminal-outcome semantics without repurposing generic action hooks.
+    """
+    from flocks.hooks.contracts import HookDecisionAction, ToolDecision, ToolExecutionOutcome
+    from flocks.hooks.execution import execution_stop_error
+    from flocks.hooks.pipeline import HookPipeline
+
+    started = time.perf_counter()
+    result: T | None = None
+    status = "error"
+    error: BaseException | None = None
+    try:
+        ctx = await HookPipeline.run_tool_before(payload)
+        raw_decision = ctx.output.get("decision")
+        normalized_decision = (
+            {
+                key: value
+                for key, value in raw_decision.items()
+                if key in {"action", "reason", "labels", "validated_input_patch"}
+            }
+            if isinstance(raw_decision, Mapping)
+            else {}
         )
-    return payload
+        decision = ToolDecision.model_validate(
+            normalized_decision
+        )
+        legacy_stop = execution_stop_error(ctx)
+        if legacy_stop is not None:
+            decision = ToolDecision(
+                action=HookDecisionAction.DENY,
+                reason=str(legacy_stop),
+            )
+        if decision.action is HookDecisionAction.DENY:
+            status = "deny"
+            raise PermissionError(decision.reason or "Tool execution denied by hook")
+        if decision.action is HookDecisionAction.CONFIRM:
+            status = "confirm"
+            raise ToolExecutionConfirmationRequired(
+                decision.reason or "Tool execution requires confirmation"
+            )
+        if decision.validated_input_patch:
+            if patched_effect is None:
+                raise ValueError(
+                    "This tool entry point does not support validated_input_patch"
+                )
+            result = await patched_effect(decision.validated_input_patch)
+        else:
+            result = await effect()
+        status = "success"
+        return result
+    except asyncio.CancelledError as exc:
+        status = "cancelled"
+        error = exc
+        raise
+    except BaseException as exc:
+        error = exc
+        if status not in {"deny", "confirm"}:
+            status = "error"
+        raise
+    finally:
+        outcome = ToolExecutionOutcome(
+            status=status,
+            duration_ms=max(0, int((time.perf_counter() - started) * 1000)),
+            error_type=type(error).__name__ if error is not None else None,
+            error_message=str(error) if error is not None else None,
+            result_summary=(
+                {"type": type(result).__name__} if result is not None else None
+            ),
+        )
+        try:
+            await HookPipeline.run_tool_after({
+                **payload,
+                "outcome": outcome.model_dump(mode="json"),
+            })
+        except Exception:
+            # An after hook is observational; it must never replace the
+            # operation's terminal success, denial, or cancellation.
+            pass
 
 
 async def build_session_tool_execution_payload(
@@ -219,10 +148,11 @@ async def build_session_tool_execution_payload(
     agent: str,
     tool_name: str,
     tool_input: Mapping[str, Any] | None,
+    tool_schema: Mapping[str, Any],
     tool_context_extra: Mapping[str, Any] | None = None,
-    execution_domain: str = "execution_runtime",
+    validated_input: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Build one canonical payload used by all tool execution entrypoints."""
+    """Build one canonical, versioned tool execution payload."""
     extra = dict(tool_context_extra or {})
     if not isinstance(extra.get("session_execution_profile"), dict):
         profile = await get_session_execution_profile(session_id)
@@ -233,34 +163,72 @@ async def build_session_tool_execution_payload(
         if isinstance(extra.get("session_execution_profile"), Mapping)
         else {}
     )
-    filesystem_action = _filesystem_action_payload(
-        session_id=session_id,
-        message_id=message_id,
-        agent=agent,
-        tool_name=tool_name,
-        tool_input=tool_input or {},
-        profile=profile,
-        tool_context_extra=extra,
+    execution_context = (
+        dict(extra.get("execution_context"))
+        if isinstance(extra.get("execution_context"), Mapping)
+        else {}
     )
-    if filesystem_action is not None:
-        extra["filesystem_action"] = filesystem_action
+    profile_entry = str(profile.get("entry") or "unknown").strip() or "unknown"
+    runtime_mode = str(profile.get("runtime_mode") or "exe-mode").strip().lower()
+    permission_mode = str(profile.get("permission_mode") or "readonly").strip().lower()
+    actor_subject_id, actor_subject_type = _resolve_actor_subject(profile)
+    workspace_root = str(
+        (profile.get("workspace_dir") or extra.get("workspace_dir") or "")
+    ).strip() or None
+    raw_input = redact_sensitive(dict(tool_input or {}))
+    normalized_input = redact_sensitive(dict(validated_input or {}))
+    tool_schema_digest = schema_digest(dict(tool_schema))
+    context = ToolExecutionContext(
+        execution=ToolExecutionIdentity(
+            id=str(execution_context.get("execution_id") or message_id),
+            trace_id=(
+                str(execution_context.get("trace_id") or "").strip() or message_id
+            ),
+            tool_call_id=str(extra.get("tool_call_id") or "").strip() or None,
+            attempt=int(execution_context.get("attempt") or 1),
+            started_at=utc_now_iso(),
+        ),
+        session=ToolExecutionSession(
+            id=session_id,
+            message_id=message_id,
+            turn_id=(
+                str(execution_context.get("turn_id") or "").strip() or message_id
+            ),
+            step=int(execution_context.get("step") or 0),
+            entry=profile_entry,
+            workspace_root=workspace_root,
+            project=ToolExecutionSessionProject(
+                id=str(profile.get("project_id") or "").strip() or None,
+                root=str(profile.get("project_root") or "").strip() or None,
+                revision=str(profile.get("project_revision") or "").strip() or None,
+            ),
+        ),
+        actor=ToolExecutionActor(
+            subject=ToolExecutionActorSubject(
+                id=actor_subject_id,
+                type=actor_subject_type,
+            ),
+            agent=ToolExecutionActorAgent(id=agent),
+        ),
+        tool=ToolExecutionTool(
+            name=tool_name,
+            source=str(extra.get("tool_source") or "").strip() or None,
+            category=str(extra.get("tool_category") or "").strip() or None,
+            raw_input=raw_input,
+            validated_input=normalized_input,
+            schema_digest=tool_schema_digest,
+        ),
+        safety_mode=ToolExecutionSafetyMode(
+            runtime_mode=runtime_mode,
+            permission_mode=permission_mode,
+        ),
+        extension_context=redact_sensitive(
+            dict(extra.get("extension_context"))
+            if isinstance(extra.get("extension_context"), Mapping)
+            else {}
+        ),
+    )
     return {
         "operation": "tool.execute",
-        "execution_domain": str(execution_domain or "execution_runtime"),
-        "entry": str(
-            (
-                (extra.get("session_execution_profile") or {}).get("entry")
-                if isinstance(extra.get("session_execution_profile"), Mapping)
-                else ""
-            )
-            or "unknown"
-        ),
-        "tool": {
-            "name": tool_name,
-            "input": dict(tool_input or {}),
-        },
-        "session_id": session_id,
-        "message_id": message_id,
-        "agent": agent,
-        "tool_context_extra": extra,
+        "tool_execution": context.model_dump(mode="json"),
     }

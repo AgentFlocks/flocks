@@ -1,11 +1,10 @@
-"""Regression coverage for neutral Channel execution lifecycle hooks."""
+"""Regression coverage for channel lifecycle hooks after simplification."""
 
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
 import pytest
-from fastapi import HTTPException
 
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.server.routes.channel import SendMessageRequest, channel_send, channel_webhook
@@ -14,16 +13,13 @@ from flocks.server.routes.channel import SendMessageRequest, channel_send, chann
 @pytest.fixture(autouse=True)
 def _reset_hooks() -> None:
     HookPipeline.reset()
+    HookPipeline._initialized = True
     yield
     HookPipeline.reset()
 
 
 @pytest.mark.asyncio
-async def test_public_webhook_stops_before_plugin_handler_when_extension_denies(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A public webhook must expose neutral authentication evidence pre-effect."""
-
+async def test_public_webhook_is_processed_by_plugin(monkeypatch: pytest.MonkeyPatch) -> None:
     handled = AsyncMock(return_value={"ok": True})
 
     class _Plugin:
@@ -34,55 +30,56 @@ async def test_public_webhook_stops_before_plugin_handler_when_extension_denies(
 
         handle_webhook = handled
 
-    class _DenyWebhook(HookBase):
-        async def channel_webhook_before(self, ctx):
-            assert ctx.input["entry"] == "channel_webhook"
-            assert ctx.input["channel_id"] == "example"
-            assert ctx.input["authentication"] == {"plugin_authenticated": True}
-            ctx.output["execution"] = {"stop": True, "detail": "denied by extension"}
-
     class _Request:
         headers = {"x-test": "1"}
 
         async def body(self):
             return b"{}"
 
-    HookPipeline.register("test.channel.webhook", _DenyWebhook(), critical=True)
     monkeypatch.setattr(
         "flocks.server.routes.channel.default_registry.get",
         lambda _channel_id: _Plugin(),
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        await channel_webhook("example", _Request())
+    result = await channel_webhook("example", _Request())
 
-    assert exc_info.value.status_code == 403
-    handled.assert_not_awaited()
+    assert result == {"ok": True}
+    handled.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_channel_send_stops_before_outbound_delivery_when_action_hook_denies(
+async def test_channel_send_can_be_blocked_by_outbound_before_hook(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Channel control actions must enter the generic action lifecycle."""
+    send_text_mock = AsyncMock()
 
-    deliver = AsyncMock()
+    class _BlockOutbound(HookBase):
+        async def channel_outbound_before(self, ctx):
+            ctx.output["blocked"] = True
 
-    class _DenyAction(HookBase):
-        async def action_before(self, ctx):
-            assert ctx.input["operation"] == "channel.channel_send"
-            assert ctx.input["resource"] == {"type": "channel", "id": "send"}
-            ctx.output["execution"] = {"stop": True, "detail": "denied by extension"}
+    class _Plugin:
+        rate_limit = (1, 1)
+        text_chunk_limit = 1000
 
-    HookPipeline.register("test.channel.action", _DenyAction(), critical=True)
+        def format_message(self, text: str) -> str:
+            return text
+
+        def chunk_text(self, text: str, _limit: int):
+            return [text]
+
+        async def send_text(self, _ctx):
+            return await send_text_mock(_ctx)
+
+    HookPipeline.register("test.channel.outbound", _BlockOutbound(), critical=True)
     monkeypatch.setattr(
-        "flocks.channel.outbound.deliver.OutboundDelivery.deliver", deliver,
+        "flocks.channel.outbound.deliver.default_registry.get",
+        lambda _channel_id: _Plugin(),
     )
 
-    with pytest.raises(HTTPException) as exc_info:
-        await channel_send(
-            SendMessageRequest(channel_id="example", to="target", text="message")
-        )
+    result = await channel_send(
+        SendMessageRequest(channel_id="example", to="target", text="message")
+    )
 
-    assert exc_info.value.status_code == 403
-    deliver.assert_not_awaited()
+    assert result["ok"] is True
+    assert result["message_ids"] == []
+    send_text_mock.assert_not_awaited()
