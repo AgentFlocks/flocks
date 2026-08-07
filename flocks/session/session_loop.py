@@ -20,6 +20,7 @@ from typing import Optional, List, Dict, Any, Callable, Awaitable, Literal
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from flocks.agent.runtime.contracts import ModelTurnSnapshot, RuntimeModel
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import (
@@ -54,14 +55,6 @@ MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
 RATE_LIMIT_COOLDOWN_SECONDS = 60.0
 CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
-
-
-@dataclass(frozen=True)
-class RuntimeModel:
-    """Concrete provider/model candidate used by Auto failover."""
-
-    provider_id: str
-    model_id: str
 
 
 @dataclass
@@ -1297,6 +1290,7 @@ class SessionLoop:
     ) -> Any:
         """Run one logical step, moving across candidates without replaying output."""
         from flocks.session.runner import RunnerCallbacks, SessionRunner
+        from flocks.session.step_engine import SessionStepEngine
 
         while True:
             runner_cbs = callbacks.runner_callbacks
@@ -1323,10 +1317,21 @@ class SessionLoop:
                 turn_additional_context=ctx.turn_additional_context,
                 session_start_pending=ctx.session_start_pending,
             )
-            runner._step = ctx.trace_step
-
-            step_result = await runner._process_step(messages, last_user)
-            if runner._session_start_fired:
+            step_engine = SessionStepEngine(runner)
+            snapshot = ModelTurnSnapshot(
+                session_id=ctx.session.id,
+                agent_name=ctx.agent_name,
+                active_model=RuntimeModel(
+                    provider_id=ctx.provider_id,
+                    model_id=ctx.model_id,
+                ),
+                model_turn_index=ctx.step,
+                trace_step=ctx.trace_step,
+                messages=tuple(messages),
+                last_user=last_user,
+            )
+            step_result = await step_engine.run(snapshot)
+            if step_engine.session_start_fired:
                 ctx.session_start_pending = False
             failure = step_result.failure
             if not ctx.auto_failover or failure is None:

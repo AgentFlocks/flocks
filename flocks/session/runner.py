@@ -18,11 +18,18 @@ import sys
 import time
 from datetime import datetime
 from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import httpcore
 import httpx
 
+from flocks.agent.runtime.contracts import (
+    AttemptEffects,
+    FailoverDecision,
+    StepFailure,
+    StepResult,
+    ToolCall,
+)
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
@@ -213,58 +220,7 @@ def _find_retryable_transport_exception(exception: Exception) -> Optional[Except
     return None
 
 
-@dataclass
-class ToolCall:
-    """Tool call from LLM response."""
-    id: str
-    name: str
-    arguments: Dict[str, Any]
-
-
-@dataclass
-class LlmAttemptState:
-    """Observable side effects accumulated across retries for one model."""
-
-    received_chunk: bool = False
-    observable_output_started: bool = False
-    tool_execution_started: bool = False
-
-    @property
-    def replay_safe(self) -> bool:
-        """Whether the same logical LLM call can safely run on another model."""
-        return not self.observable_output_started and not self.tool_execution_started
-
-
-@dataclass(frozen=True)
-class FailoverDecision:
-    """Hermes-aligned retry/failover classification for a provider error."""
-
-    eligible: bool
-    reason: str
-
-
-@dataclass
-class StepFailure:
-    """Failure details returned to SessionLoop when finalization is deferred."""
-
-    message: str
-    error_data: Dict[str, Any]
-    assistant_message_id: Optional[str]
-    reason: str
-    allow_fallback: bool
-    attempt_state: LlmAttemptState
-    attempts: int = 0
-
-
-@dataclass
-class StepResult:
-    """Result of a single processing step."""
-    action: str  # "stop", "continue", "compact"
-    content: str = ""
-    tool_calls: List[ToolCall] = field(default_factory=list)
-    error: Optional[str] = None
-    usage: Optional[Dict[str, int]] = None
-    failure: Optional[StepFailure] = None
+LlmAttemptState = AttemptEffects
 
 
 @dataclass
@@ -1386,7 +1342,7 @@ class SessionRunner:
                         "data": {"message": error},
                     },
                     assistant_message_id=None,
-                    decision=FailoverDecision(True, "provider_unavailable", 0),
+                    decision=FailoverDecision(True, "provider_unavailable"),
                     attempts=0,
                 )
             error_dict = self._build_session_error_dict(
@@ -1426,7 +1382,7 @@ class SessionRunner:
                         "data": {"message": error},
                     },
                     assistant_message_id=None,
-                    decision=FailoverDecision(True, "provider_unavailable", 0),
+                    decision=FailoverDecision(True, "provider_unavailable"),
                     attempts=0,
                 )
             error_dict = self._build_session_error_dict(
@@ -1742,7 +1698,7 @@ class SessionRunner:
                                 message=empty_error_msg,
                                 error_data=empty_error_dict,
                                 assistant_message_id=assistant_msg.id,
-                                decision=FailoverDecision(True, "empty_response", 3),
+                                decision=FailoverDecision(True, "empty_response"),
                                 attempts=empty_attempt,
                             )
                         if self.callbacks.on_error:
