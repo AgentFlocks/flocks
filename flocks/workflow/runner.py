@@ -452,6 +452,14 @@ def run_workflow(
     if isinstance(runtime_metadata, dict):
         if "process_rpc_max_bytes" in runtime_metadata:
             isolated_runtime_options["isolated_rpc_max_bytes"] = runtime_metadata["process_rpc_max_bytes"]
+        if "process_rpc_max_inflight_bytes" in runtime_metadata:
+            isolated_runtime_options["isolated_rpc_max_inflight_bytes"] = runtime_metadata[
+                "process_rpc_max_inflight_bytes"
+            ]
+        if "process_rpc_max_response_bytes" in runtime_metadata:
+            isolated_runtime_options["isolated_rpc_max_response_bytes"] = runtime_metadata[
+                "process_rpc_max_response_bytes"
+            ]
         if "process_rpc_max_workers" in runtime_metadata:
             isolated_runtime_options["isolated_rpc_max_workers"] = runtime_metadata["process_rpc_max_workers"]
 

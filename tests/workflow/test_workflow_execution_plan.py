@@ -107,6 +107,8 @@ def test_workflow_metadata_configures_process_rpc_limits(monkeypatch) -> None:
     workflow.metadata = {
         "runtime": {
             "process_rpc_max_bytes": None,
+            "process_rpc_max_inflight_bytes": 1024 * 1024,
+            "process_rpc_max_response_bytes": 100_000,
             "process_rpc_max_workers": 3,
         }
     }
@@ -119,4 +121,6 @@ def test_workflow_metadata_configures_process_rpc_limits(monkeypatch) -> None:
     assert result.status == "SUCCEEDED"
     runtime = captured_init["runtime"]
     assert runtime.isolated_rpc_max_bytes is None
+    assert runtime.isolated_rpc_max_inflight_bytes == 1024 * 1024
+    assert runtime.isolated_rpc_max_response_bytes == 100_000
     assert runtime.isolated_rpc_max_workers == 3

@@ -27,6 +27,7 @@ def test_sandbox_runtime_success_payload(monkeypatch: pytest.MonkeyPatch) -> Non
         def __init__(self, *args, **kwargs):
             _ = args
             assert kwargs["encoding"] == "utf-8"
+            assert kwargs["errors"] == "replace"
             self.stdin = io.StringIO()
             self.stdout = io.StringIO(
                 '{"type":"final","token":"tok","payload":{"outputs":{"result":1},"stdout":"ok","error":null}}\n'

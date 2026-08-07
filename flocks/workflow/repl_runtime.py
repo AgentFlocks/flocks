@@ -15,6 +15,7 @@ import tempfile
 import threading
 import traceback
 import uuid
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor as _ThreadPoolExecutor
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from dataclasses import dataclass, field
@@ -35,20 +36,140 @@ class Runtime:
 
 _RPC_MAX_BYTES = 4 * 1024 * 1024
 _HOST_PROCESS_RPC_MAX_BYTES = 64 * 1024 * 1024
+_HOST_PROCESS_RPC_MAX_INFLIGHT_BYTES = 64 * 1024 * 1024
+_HOST_PROCESS_RPC_MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 _HOST_PROCESS_RPC_MAX_WORKERS = 32
+_HOST_PROCESS_RPC_MIN_FRAME_BYTES = 512
+_HOST_PROCESS_RPC_QUEUE_SIZE = 4
+_HOST_PROCESS_STDERR_MAX_BYTES = 1024 * 1024
 _WORKFLOW_SITE_PACKAGES = "/workspace/.flocks/workflow/site-packages"
 _TOOL_CANCEL_CHECKER_INSTALL_LOCK = threading.Lock()
 
 
-def _drain_text_stream(stream: TextIO, chunks: list[str]) -> None:
+class _RPCFrameTooLarge(ValueError):
+    pass
+
+
+class _InflightByteBudget:
+    def __init__(self, limit: Optional[int]):
+        self._limit = limit
+        self._used = 0
+        self._condition = threading.Condition()
+
+    def acquire(self, size: int, stop: threading.Event) -> bool:
+        if self._limit is None:
+            return True
+        if size > self._limit:
+            return False
+        with self._condition:
+            while self._used + size > self._limit:
+                if stop.is_set():
+                    return False
+                self._condition.wait(timeout=0.05)
+            self._used += size
+            return True
+
+    def release(self, size: int) -> None:
+        if self._limit is None:
+            return
+        with self._condition:
+            self._used = max(0, self._used - size)
+            self._condition.notify_all()
+
+    def wake(self) -> None:
+        with self._condition:
+            self._condition.notify_all()
+
+
+def _utf8_size_exceeds(text: str, limit: int) -> bool:
+    if len(text) > limit:
+        return True
+    if text.isascii():
+        return False
+    size = 0
+    for char in text:
+        codepoint = ord(char)
+        size += 1 if codepoint < 0x80 else 2 if codepoint < 0x800 else 3 if codepoint < 0x10000 else 4
+        if size > limit:
+            return True
+    return False
+
+
+def _contains_oversized_scalar(value: Any, limit: int, seen: Optional[set[int]] = None) -> bool:
+    if isinstance(value, str):
+        return _utf8_size_exceeds(value, limit)
+    if isinstance(value, (bytes, bytearray)):
+        return len(value) > limit
+    if isinstance(value, dict):
+        seen = seen or set()
+        marker = id(value)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        try:
+            return any(
+                _contains_oversized_scalar(key, limit, seen)
+                or _contains_oversized_scalar(item, limit, seen)
+                for key, item in value.items()
+            )
+        finally:
+            seen.remove(marker)
+    if isinstance(value, (list, tuple)):
+        seen = seen or set()
+        marker = id(value)
+        if marker in seen:
+            return False
+        seen.add(marker)
+        try:
+            return any(_contains_oversized_scalar(item, limit, seen) for item in value)
+        finally:
+            seen.remove(marker)
+    return False
+
+
+def _json_line_with_limit(payload: Dict[str, Any], max_bytes: Optional[int]) -> str:
+    if max_bytes is None:
+        return json.dumps(payload, ensure_ascii=False, default=str) + "\n"
+    if _contains_oversized_scalar(payload, max_bytes):
+        raise _RPCFrameTooLarge(f"RPC message exceeds configured limit ({max_bytes} bytes)")
+    buffer = io.StringIO()
+    size = 1  # trailing newline
+    encoder = json.JSONEncoder(ensure_ascii=False, default=str)
+    for chunk in encoder.iterencode(payload):
+        remaining = max_bytes - size
+        if remaining < 0 or _utf8_size_exceeds(chunk, remaining):
+            raise _RPCFrameTooLarge(f"RPC message exceeds configured limit ({max_bytes} bytes)")
+        buffer.write(chunk)
+        size += len(chunk) if chunk.isascii() else len(chunk.encode("utf-8"))
+    buffer.write("\n")
+    return buffer.getvalue()
+
+
+def _drain_text_stream(
+    stream: TextIO,
+    chunks: list[str],
+    max_bytes: int = _HOST_PROCESS_STDERR_MAX_BYTES,
+) -> None:
+    tail: deque[tuple[str, int]] = deque()
+    retained_bytes = 0
+    truncated = False
     try:
         while True:
-            line = stream.readline()
-            if line == "":
+            chunk = stream.read(8192)
+            if chunk == "":
                 break
-            chunks.append(line)
+            chunk_bytes = len(chunk.encode("utf-8", errors="replace"))
+            tail.append((chunk, chunk_bytes))
+            retained_bytes += chunk_bytes
+            while retained_bytes > max_bytes and tail:
+                _, removed_bytes = tail.popleft()
+                retained_bytes -= removed_bytes
+                truncated = True
     except Exception:
-        return
+        pass
+    if truncated:
+        chunks.append(f"[stderr truncated to last {max_bytes} bytes]\n")
+    chunks.extend(chunk for chunk, _ in tail)
 
 
 class _ThreadScopedCancelChecker:
@@ -104,6 +225,8 @@ class PythonExecRuntime(Runtime):
     cleanup_globals_after_execute: bool = False
     enable_cancel_trace: bool = True
     isolated_rpc_max_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_BYTES
+    isolated_rpc_max_inflight_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_INFLIGHT_BYTES
+    isolated_rpc_max_response_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_RESPONSE_BYTES
     isolated_rpc_max_workers: int = _HOST_PROCESS_RPC_MAX_WORKERS
 
     _RUNTIME_GLOBAL_KEYS: ClassVar[frozenset[str]] = frozenset(
@@ -330,6 +453,7 @@ class SandboxPythonExecRuntime(Runtime):
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env={**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
             )
@@ -685,8 +809,14 @@ sys.stdout.flush()
         )
         return f"{shlex.quote(python_executable)} -I -c {shlex.quote(wrapped)}"
 
-    def _write_json_line(self, stream: TextIO, payload: Dict[str, Any]) -> None:
-        stream.write(json.dumps(payload, ensure_ascii=False, default=str) + "\n")
+    def _write_json_line(
+        self,
+        stream: TextIO,
+        payload: Dict[str, Any],
+        *,
+        max_bytes: Optional[int] = None,
+    ) -> None:
+        stream.write(_json_line_with_limit(payload, max_bytes))
         stream.flush()
 
     def _parse_json_line(self, raw_line: str) -> Optional[Dict[str, Any]]:
@@ -808,6 +938,8 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
     inherited_fd_keys: Tuple[str, ...] = ()
     retained_fd_keys: Tuple[str, ...] = ()
     rpc_max_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_BYTES
+    rpc_max_inflight_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_INFLIGHT_BYTES
+    rpc_max_response_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_RESPONSE_BYTES
     rpc_max_workers: int = _HOST_PROCESS_RPC_MAX_WORKERS
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
@@ -828,9 +960,55 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         if rpc_max_bytes is not None:
             if type(rpc_max_bytes) is not int or rpc_max_bytes <= 0:
                 raise NodeExecutionError(node_id="<runtime>", message="rpc_max_bytes must be None or a positive integer")
+        rpc_max_inflight_bytes = self.rpc_max_inflight_bytes
+        if rpc_max_inflight_bytes is not None:
+            if type(rpc_max_inflight_bytes) is not int or rpc_max_inflight_bytes <= 0:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message="rpc_max_inflight_bytes must be None or a positive integer",
+                )
+            if rpc_max_bytes is not None and rpc_max_bytes > rpc_max_inflight_bytes:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message="rpc_max_bytes cannot exceed rpc_max_inflight_bytes",
+                )
         rpc_max_workers = self.rpc_max_workers
-        if type(rpc_max_workers) is not int or rpc_max_workers <= 0:
-            raise NodeExecutionError(node_id="<runtime>", message="rpc_max_workers must be a positive integer")
+        if type(rpc_max_workers) is not int or not 1 <= rpc_max_workers <= _HOST_PROCESS_RPC_MAX_WORKERS:
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"rpc_max_workers must be an integer between 1 and {_HOST_PROCESS_RPC_MAX_WORKERS}",
+            )
+        rpc_frame_limit = rpc_max_bytes if rpc_max_bytes is not None else rpc_max_inflight_bytes
+        if rpc_frame_limit is not None and rpc_frame_limit < _HOST_PROCESS_RPC_MIN_FRAME_BYTES:
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"effective RPC frame limit must be at least {_HOST_PROCESS_RPC_MIN_FRAME_BYTES} bytes",
+            )
+        rpc_max_response_bytes = self.rpc_max_response_bytes
+        if rpc_max_response_bytes is not None:
+            if type(rpc_max_response_bytes) is not int or rpc_max_response_bytes <= 0:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message="rpc_max_response_bytes must be None or a positive integer",
+                )
+        response_limits = [limit for limit in (rpc_frame_limit, rpc_max_response_bytes) if limit is not None]
+        rpc_response_limit = min(response_limits) if response_limits else None
+        if rpc_response_limit is not None and rpc_response_limit < _HOST_PROCESS_RPC_MIN_FRAME_BYTES:
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=f"effective RPC response limit must be at least {_HOST_PROCESS_RPC_MIN_FRAME_BYTES} bytes",
+            )
+        if rpc_max_inflight_bytes is not None:
+            if rpc_response_limit is None:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message="RPC responses must have a size limit when rpc_max_inflight_bytes is configured",
+                )
+            if rpc_response_limit * rpc_max_workers > rpc_max_inflight_bytes:
+                raise NodeExecutionError(
+                    node_id="<runtime>",
+                    message="rpc_max_response_bytes and rpc_max_workers exceed rpc_max_inflight_bytes",
+                )
 
         inherited_fds = self._resolve_inherited_fds(inputs)
         retained_fds = self._resolve_retained_fds(inputs)
@@ -888,6 +1066,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
+                errors="replace",
                 bufsize=1,
                 env={**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
                 start_new_session=(os.name != "nt"),
@@ -919,9 +1098,13 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         bridge_closed = threading.Event()
         stdout_reader_stop = threading.Event()
         bridge_errors: list[str] = []
-        stdout_lines: queue.Queue[Optional[str]] = queue.Queue(maxsize=rpc_max_workers)
+        inflight_budget = _InflightByteBudget(rpc_max_inflight_bytes)
+        response_budget = _InflightByteBudget(rpc_max_inflight_bytes)
+        stdout_lines: queue.Queue[Optional[tuple[bytes, int]]] = queue.Queue(
+            maxsize=min(rpc_max_workers, _HOST_PROCESS_RPC_QUEUE_SIZE)
+        )
 
-        def _queue_stdout_line(line: Optional[str]) -> bool:
+        def _queue_stdout_line(line: Optional[tuple[bytes, int]]) -> bool:
             while not stdout_reader_stop.is_set():
                 try:
                     stdout_lines.put(line, timeout=0.05)
@@ -933,19 +1116,22 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         def _read_stdout() -> None:
             try:
                 while True:
-                    if rpc_max_bytes is None:
+                    if rpc_frame_limit is None:
                         raw_line = proc.stdout.buffer.readline()
                     else:
-                        raw_line = proc.stdout.buffer.readline(rpc_max_bytes + 1)
+                        raw_line = proc.stdout.buffer.readline(rpc_frame_limit + 1)
                     if raw_line == b"":
                         break
-                    if rpc_max_bytes is not None and len(raw_line) > rpc_max_bytes:
+                    frame_bytes = len(raw_line)
+                    if rpc_frame_limit is not None and frame_bytes > rpc_frame_limit:
                         bridge_errors.append(
-                            f"Isolated host RPC message exceeds configured limit ({rpc_max_bytes} bytes)"
+                            f"Isolated host RPC message exceeds configured limit ({rpc_frame_limit} bytes)"
                         )
                         break
-                    line = raw_line.decode(proc.stdout.encoding or "utf-8")
-                    if not _queue_stdout_line(line):
+                    if not inflight_budget.acquire(frame_bytes, stdout_reader_stop):
+                        return
+                    if not _queue_stdout_line((raw_line, frame_bytes)):
+                        inflight_budget.release(frame_bytes)
                         return
             except Exception as exc:
                 bridge_errors.append(f"Isolated host RPC bridge read failed: {exc}")
@@ -972,72 +1158,122 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         def _rpc_cancel_requested() -> bool:
             return bridge_closed.is_set() or self._cancel_requested()
 
-        def _handle_rpc(message: Dict[str, Any]) -> None:
+        def _handle_rpc(message: Dict[str, Any], request_bytes: int) -> None:
+            response_reservation = rpc_response_limit or 0
+            response_reserved = False
             try:
+                if not response_budget.acquire(response_reservation, bridge_closed):
+                    return
+                response_reserved = True
                 response = self._handle_rpc_request(
                     msg=message,
                     token=token,
                     cancel_checker=_rpc_cancel_requested,
                 )
+                response_error: Optional[str] = None
+                try:
+                    response_line = _json_line_with_limit(response, rpc_response_limit)
+                except _RPCFrameTooLarge:
+                    response_error = "RPC response exceeds configured limit"
+                except Exception as exc:
+                    response_error = f"RPC response serialization failed ({type(exc).__name__})"
+                finally:
+                    response = None
+                if response_error is not None:
+                    try:
+                        response_line = _json_line_with_limit(
+                            {
+                                "type": "rpc_result",
+                                "token": token,
+                                "id": str(message.get("id") or ""),
+                                "ok": False,
+                                "error": response_error,
+                            },
+                            rpc_response_limit,
+                        )
+                    except ValueError:
+                        return
                 try:
                     with stdin_lock:
                         if not bridge_closed.is_set() and proc.poll() is None:
-                            self._write_json_line(proc.stdin, response)
+                            proc.stdin.write(response_line)
+                            proc.stdin.flush()
                 except (BrokenPipeError, OSError, ValueError):
                     return
             finally:
+                if response_reserved:
+                    response_budget.release(response_reservation)
+                inflight_budget.release(request_bytes)
                 rpc_slots.release()
 
         try:
-            self._write_json_line(proc.stdin, {"type": "init", "token": token, "inputs": child_inputs})
+            try:
+                self._write_json_line(
+                    proc.stdin,
+                    {"type": "init", "token": token, "inputs": child_inputs},
+                    max_bytes=rpc_frame_limit,
+                )
+            except _RPCFrameTooLarge as exc:
+                bridge_errors.append(str(exc))
+                self._terminate_process(proc)
             while True:
                 if self._cancel_requested():
                     cancelled = True
                     self._terminate_process(proc)
                     break
                 try:
-                    line = stdout_lines.get(timeout=0.05)
+                    item = stdout_lines.get(timeout=0.05)
                 except queue.Empty:
                     continue
-                if line is None:
+                if item is None:
                     break
-                msg = self._parse_json_line(line)
-                if msg is None:
-                    continue
-                msg_type = str(msg.get("type") or "").strip().lower()
-                if msg_type == "rpc":
-                    slot_acquired = False
-                    while not slot_acquired:
-                        slot_acquired = rpc_slots.acquire(timeout=0.05)
-                        if slot_acquired:
+                raw_line, frame_bytes = item
+                release_frame = True
+                try:
+                    line = raw_line.decode(proc.stdout.encoding or "utf-8")
+                    msg = self._parse_json_line(line)
+                    if msg is None:
+                        continue
+                    msg_type = str(msg.get("type") or "").strip().lower()
+                    if msg_type == "rpc":
+                        slot_acquired = False
+                        while not slot_acquired:
+                            slot_acquired = rpc_slots.acquire(timeout=0.05)
+                            if slot_acquired:
+                                break
+                            if self._cancel_requested():
+                                cancelled = True
+                                self._terminate_process(proc)
+                                break
+                            if proc.poll() is not None:
+                                bridge_closed.set()
+                                break
+                            if bridge_closed.is_set():
+                                break
+                        if cancelled:
                             break
-                        if self._cancel_requested():
-                            cancelled = True
-                            self._terminate_process(proc)
-                            break
-                        if proc.poll() is not None:
-                            bridge_closed.set()
-                            break
+                        if not slot_acquired:
+                            continue
                         if bridge_closed.is_set():
-                            break
-                    if cancelled:
-                        break
-                    if not slot_acquired:
-                        continue
-                    if bridge_closed.is_set():
-                        rpc_slots.release()
-                        continue
-                    try:
-                        rpc_pool.submit(_handle_rpc, msg)
-                    except Exception:
-                        rpc_slots.release()
-                        raise
-                elif msg_type == "final" and msg.get("token") == token:
-                    payload = msg.get("payload")
-                    final_payload = payload if isinstance(payload, dict) else {}
+                            rpc_slots.release()
+                            continue
+                        try:
+                            rpc_pool.submit(_handle_rpc, msg, frame_bytes)
+                            release_frame = False
+                        except Exception:
+                            rpc_slots.release()
+                            raise
+                    elif msg_type == "final" and msg.get("token") == token:
+                        payload = msg.get("payload")
+                        final_payload = payload if isinstance(payload, dict) else {}
+                finally:
+                    if release_frame:
+                        inflight_budget.release(frame_bytes)
         finally:
             bridge_closed.set()
             stdout_reader_stop.set()
+            inflight_budget.wake()
+            response_budget.wake()
             rpc_pool.shutdown(
                 wait=final_payload is not None and not cancelled,
                 cancel_futures=True,
