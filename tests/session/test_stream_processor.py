@@ -222,6 +222,108 @@ class TestTextAccumulation:
         assert proc.get_text_content() == ""
 
     @pytest.mark.asyncio
+    async def test_text_delta_hides_dsml_tool_call_from_published_text(self):
+        event_callback = AsyncMock()
+        proc = _make_processor(event_callback=event_callback)
+
+        await proc.process_event(TextStartEvent())
+        await proc.process_event(TextDeltaEvent(text="先查询一下"))
+        await proc.process_event(TextDeltaEvent(text="""
+< | DSML | tool_use>
+{"name":"bash","input":{"command":"ls /root/flocks/plugins/skills/ | head -50"}}
+</ | DSML | tool_use>
+"""))
+
+        published_texts = [
+            call.args[1]["part"]["text"]
+            for call in event_callback.await_args_list
+            if call.args[0] == "message.part.updated" and "part" in call.args[1]
+        ]
+        published_deltas = [
+            call.args[1].get("delta", "")
+            for call in event_callback.await_args_list
+            if call.args[0] == "message.part.updated"
+        ]
+
+        assert published_texts[-1] == "先查询一下"
+        assert all("DSML" not in text for text in published_texts)
+        assert all("DSML" not in delta for delta in published_deltas)
+
+    @pytest.mark.asyncio
+    async def test_text_end_parses_deepseek_dsml_json_tool_use(self):
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(TextStartEvent())
+            await proc.process_event(TextDeltaEvent(text="""
+< | DSML | tool_use>
+{"name":"bash","input":{"command":"RUN_ROOT=/root/flocks/workspace/outputs/2026-08-03/risk-agent/ses_03991c1b0ffeb5KNPtPsetG6Jq && mkdir -p $RUN_ROOT/agent-notes"}}
+</ | DSML | tool_use>
+"""))
+            await proc.process_event(TextEndEvent())
+
+        mock_handle_tool_call.assert_awaited_once()
+        tool_event = mock_handle_tool_call.await_args.args[0]
+        assert tool_event.tool_name == "bash"
+        assert tool_event.input == {
+            "command": "RUN_ROOT=/root/flocks/workspace/outputs/2026-08-03/risk-agent/ses_03991c1b0ffeb5KNPtPsetG6Jq && mkdir -p $RUN_ROOT/agent-notes"
+        }
+        assert proc._text_tool_calls_executed is True
+        assert proc.get_text_content() == ""
+
+    @pytest.mark.asyncio
+    async def test_text_end_parses_deepseek_dsml_invoke_tool_calls(self):
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(TextStartEvent())
+            await proc.process_event(TextDeltaEvent(text="""
+<｜DSML｜tool_calls>
+<｜DSML｜invoke name="search">
+<｜DSML｜parameter name="q" string="true">weather</｜DSML｜parameter>
+<｜DSML｜parameter name="limit" string="false">3</｜DSML｜parameter>
+</｜DSML｜invoke>
+</｜DSML｜tool_calls>
+"""))
+            await proc.process_event(TextEndEvent())
+
+        mock_handle_tool_call.assert_awaited_once()
+        tool_event = mock_handle_tool_call.await_args.args[0]
+        assert tool_event.tool_name == "search"
+        assert tool_event.input == {"q": "weather", "limit": 3}
+        assert proc._text_tool_calls_executed is True
+        assert proc.get_text_content() == ""
+
+    @pytest.mark.asyncio
+    async def test_text_end_parses_deepseek_dsml_ascii_pipe_tool_calls(self):
+        proc = _make_processor()
+
+        with (
+            patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
+            patch.object(proc, "_handle_tool_call", new=AsyncMock()) as mock_handle_tool_call,
+        ):
+            await proc.process_event(TextStartEvent())
+            await proc.process_event(TextDeltaEvent(text="""
+<||DSML||tool_calls>
+[{"tool_name":"bash","parameters":{"command":"pwd"}}]
+</||DSML||tool_calls>
+"""))
+            await proc.process_event(TextEndEvent())
+
+        mock_handle_tool_call.assert_awaited_once()
+        tool_event = mock_handle_tool_call.await_args.args[0]
+        assert tool_event.tool_name == "bash"
+        assert tool_event.input == {"command": "pwd"}
+        assert proc._text_tool_calls_executed is True
+        assert proc.get_text_content() == ""
+
+    @pytest.mark.asyncio
     async def test_text_placeholder_keeps_text_before_tool_in_stored_order(self):
         proc = _make_processor()
         stored_parts = []

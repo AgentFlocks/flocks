@@ -1481,15 +1481,20 @@ class StreamProcessor:
             # Intercept text-embedded tool calls produced by models that hallucinate
             # tool invocations as text rather than using the native API tool-calling
             # mechanism.  Two formats are supported:
-            #   1. XML:  <tool_use>{"name":"…","input":{…}}</tool_use>
-            #   2. JSON: [{"tool_name":"…","parameters":{…}}]
+            #   1. XML:  <tool_use>{"name":"...","input":{...}}</tool_use>
+            #   2. DSML: <｜DSML｜tool_calls>...</｜DSML｜tool_calls>
+            #   3. JSON: [{"tool_name":"...","parameters":{...}}]
             # Parse, execute, and strip them so the conversation loop continues
             # correctly and no raw markup/JSON appears in the UI.
             raw_text = self.current_text_part.text
             all_text_tool_calls: list[dict] = []
             cleaned = raw_text
 
-            if "<tool_use>" in cleaned or "<minimax:tool_call>" in cleaned:
+            if (
+                "<tool_use>" in cleaned
+                or "<minimax:tool_call>" in cleaned
+                or self._contains_dsml_tool_markup(cleaned)
+            ):
                 cleaned, xml_calls = self._parse_xml_text_tool_calls(cleaned)
                 all_text_tool_calls.extend(xml_calls)
 
@@ -1515,7 +1520,11 @@ class StreamProcessor:
                             input=tc["input"],
                         ))
                 self._text_tool_calls_executed = True
-            elif "<tool_use>" in raw_text or "<minimax:tool_call>" in raw_text:
+            elif (
+                "<tool_use>" in raw_text
+                or "<minimax:tool_call>" in raw_text
+                or self._contains_dsml_tool_markup(raw_text)
+            ):
                 log.warn("stream.text_tool_use_xml_stripped", {
                     "session_id": self.session_id,
                     "reason": "found XML tool-call markup but could not parse any valid tool calls",
@@ -1597,9 +1606,52 @@ class StreamProcessor:
             return current[len(previous):]
         return current
 
+    _DSML_NAMESPACE_RE = r"(?:\|\s*\|\s*DSML\s*\|\s*\||\|\s*DSML\s*\||｜\s*DSML\s*｜)"
+    _DSML_TAG_RE = re.compile(
+        r"<\s*(/?)\s*" + _DSML_NAMESPACE_RE + r"\s*([A-Za-z_][\w]*)\b([^>]*)>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_COMPLETE_BLOCK_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result)\b[^>]*>"
+        r".*?"
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result)\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_COMPLETE_INVOKE_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*invoke\b[^>]*>"
+        r".*?"
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*invoke\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_OPEN_BLOCK_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result|invoke)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _contains_dsml_tool_markup(cls, text: str) -> bool:
+        return bool(cls._DSML_OPEN_BLOCK_RE.search(text))
+
+    @classmethod
+    def _normalize_dsml_tags(cls, text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            closing = "/" if match.group(1) else ""
+            tag_name = match.group(2).lower()
+            attrs = "" if closing else match.group(3)
+            return f"<{closing}dsml:{tag_name}{attrs}>"
+
+        return cls._DSML_TAG_RE.sub(replace, text)
+
+    @classmethod
+    def _strip_dsml_blocks(cls, text: str) -> str:
+        text = cls._DSML_COMPLETE_BLOCK_RE.sub("", text)
+        return cls._DSML_COMPLETE_INVOKE_RE.sub("", text)
+
     @staticmethod
     def _sanitize_streaming_text_for_display(text: str) -> str:
         visible = text
+
+        visible = StreamProcessor._strip_dsml_blocks(visible)
 
         block_patterns = [
             re.compile(r"<tool_use>.*?</tool_use>", re.DOTALL),
@@ -1623,6 +1675,10 @@ class StreamProcessor:
                     truncate_at = start if truncate_at is None else min(truncate_at, start)
                     break
                 start = visible.find(start_tag, end + len(end_tag))
+
+        dsml_start = StreamProcessor._DSML_OPEN_BLOCK_RE.search(visible)
+        if dsml_start:
+            truncate_at = dsml_start.start() if truncate_at is None else min(truncate_at, dsml_start.start())
 
         if truncate_at is not None:
             visible = visible[:truncate_at]
@@ -1731,13 +1787,143 @@ class StreamProcessor:
                     "input": raw_input,
                 })
 
+        dsml_calls = self._parse_dsml_text_tool_calls(text)
+        tool_calls.extend(dsml_calls)
+
         # Strip <tool_use> and <tool_result> blocks from visible text
         cleaned = tool_use_re.sub("", text)
         cleaned = minimax_tool_call_re.sub("", cleaned)
         cleaned = tool_result_re.sub("", cleaned)
+        cleaned = self._strip_dsml_blocks(cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
         return cleaned, tool_calls
+
+    def _parse_dsml_text_tool_calls(self, text: str) -> list[dict]:
+        """Extract tool calls from DeepSeek-style DSML text blocks."""
+        normalized = self._normalize_dsml_tags(text)
+        tool_calls: list[dict] = []
+
+        for match in re.finditer(
+            r"<dsml:(?:tool_use|tool_calls)\b[^>]*>(.*?)</dsml:(?:tool_use|tool_calls)>",
+            normalized,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            body = match.group(1).strip()
+            if not body or body[:1] not in "{[":
+                continue
+
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            if isinstance(data, dict):
+                candidates: list[Any] = [data]
+                if isinstance(data.get("tool_calls"), list):
+                    candidates = data["tool_calls"]
+            elif isinstance(data, list):
+                candidates = data
+            else:
+                candidates = []
+
+            for item in candidates:
+                parsed = self._coerce_text_tool_call_dict(item)
+                if parsed:
+                    tool_calls.append(parsed)
+
+        for match in re.finditer(
+            r"<dsml:invoke\b([^>]*)>(.*?)</dsml:invoke>",
+            normalized,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            attrs = self._parse_xml_attrs(match.group(1))
+            name = str(attrs.get("name") or "").strip()
+            if not name:
+                continue
+
+            raw_input: dict[str, Any] = {}
+            invoke_body = match.group(2)
+            for param_match in re.finditer(
+                r"<dsml:parameter\b([^>]*)>(.*?)</dsml:parameter>",
+                invoke_body,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                param_attrs = self._parse_xml_attrs(param_match.group(1))
+                param_name = str(param_attrs.get("name") or "").strip()
+                if not param_name:
+                    continue
+
+                param_value = param_match.group(2).strip()
+                parsed_value: Any = param_value
+                if str(param_attrs.get("string") or "").lower() != "true" and param_value:
+                    try:
+                        parsed_value = json.loads(param_value)
+                    except (json.JSONDecodeError, ValueError):
+                        parsed_value = param_value
+                raw_input[param_name] = parsed_value
+
+            tool_calls.append({
+                "id": Identifier.create("call"),
+                "name": name,
+                "input": raw_input,
+            })
+
+        return tool_calls
+
+    @staticmethod
+    def _parse_xml_attrs(raw_attrs: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in re.finditer(r"([A-Za-z_][\w:-]*)\s*=\s*(\"([^\"]*)\"|'([^']*)')", raw_attrs):
+            attrs[match.group(1)] = match.group(3) if match.group(3) is not None else match.group(4)
+        return attrs
+
+    @staticmethod
+    def _coerce_text_tool_call_dict(data: Any) -> Optional[dict]:
+        if not isinstance(data, dict):
+            return None
+
+        function_data = data.get("function") if isinstance(data.get("function"), dict) else {}
+        name = next(
+            (
+                value for value in (
+                    data.get("name"),
+                    data.get("tool_name"),
+                    data.get("tool"),
+                    function_data.get("name"),
+                )
+                if value
+            ),
+            None,
+        )
+        if not isinstance(name, str) or not name.strip():
+            return None
+
+        raw_input = next(
+            (
+                value for value in (
+                    data.get("input"),
+                    data.get("parameters"),
+                    data.get("arguments"),
+                    function_data.get("arguments"),
+                )
+                if value is not None
+            ),
+            {},
+        )
+        if isinstance(raw_input, str):
+            try:
+                raw_input = json.loads(raw_input)
+            except (json.JSONDecodeError, ValueError):
+                raw_input = {}
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+
+        return {
+            "id": Identifier.create("call"),
+            "name": name.strip(),
+            "input": raw_input,
+        }
 
     def _parse_json_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
         """

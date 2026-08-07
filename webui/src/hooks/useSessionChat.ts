@@ -169,13 +169,13 @@ export function useSessionChat({
       await client.post(`/api/session/${sid}/prompt_async`, payload);
 
       if (!resumedExistingSession) {
-        const visibleText = displayText || text;
         const optimisticParts: Message['parts'] = [];
-        if (visibleText) {
+        if (text || displayText) {
           optimisticParts.push({
             id: `temp-${messageId}-text`,
             type: 'text',
-            text: visibleText,
+            text,
+            ...(displayText ? { metadata: { displayText } } : {}),
           });
         }
         imageParts?.forEach((image, index) => {
@@ -193,7 +193,7 @@ export function useSessionChat({
           role: 'user',
           parts: optimisticParts.length > 0
             ? optimisticParts
-            : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+            : [{ id: `temp-${messageId}-part`, type: 'text', text }],
           timestamp: Date.now(),
           agent,
         });

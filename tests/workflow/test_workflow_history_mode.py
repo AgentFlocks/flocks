@@ -1,3 +1,4 @@
+import flocks.workflow.runner as workflow_runner_module
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.repl_runtime import PythonExecRuntime
 
@@ -139,6 +140,59 @@ def test_python_runtime_can_cleanup_node_globals_after_execute() -> None:
     assert "temporary_payload" not in runtime.globals
     assert "inputs" not in runtime.globals
     assert "outputs" not in runtime.globals
+
+
+def test_low_frequency_workflow_boundary_collects_gc_once_on_success_and_failure(monkeypatch) -> None:
+    collect_calls = []
+    monkeypatch.setattr(
+        workflow_runner_module.gc,
+        "collect",
+        lambda generation: collect_calls.append(generation) or 0,
+    )
+
+    success = run_workflow(
+        workflow={
+            "start": "done",
+            "nodes": [{"id": "done", "type": "python", "code": "outputs['ok'] = True"}],
+            "edges": [],
+        },
+        ensure_requirements=False,
+    )
+    assert success.status == "SUCCEEDED"
+    assert collect_calls == [0]
+
+    failure = run_workflow(
+        workflow={
+            "start": "fail",
+            "nodes": [{"id": "fail", "type": "python", "code": "raise RuntimeError('boom')"}],
+            "edges": [],
+        },
+        ensure_requirements=False,
+    )
+    assert failure.status == "FAILED"
+    assert collect_calls == [0, 0]
+
+
+def test_high_frequency_workflow_boundary_skips_gc(monkeypatch) -> None:
+    collect_calls = []
+    monkeypatch.setattr(
+        workflow_runner_module.gc,
+        "collect",
+        lambda generation: collect_calls.append(generation) or 0,
+    )
+
+    result = run_workflow(
+        workflow={
+            "start": "done",
+            "nodes": [{"id": "done", "type": "python", "code": "outputs['ok'] = True"}],
+            "edges": [],
+        },
+        ensure_requirements=False,
+        execution_profile="high_frequency",
+    )
+
+    assert result.status == "SUCCEEDED"
+    assert collect_calls == []
 
 
 def test_mapped_payload_is_not_retained_for_remaining_run() -> None:

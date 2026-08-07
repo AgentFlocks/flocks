@@ -343,6 +343,7 @@ SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues 
     name="delegate_task",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
+    native=True,
     parameters=[
         ToolParameter(
             name="load_skills",
