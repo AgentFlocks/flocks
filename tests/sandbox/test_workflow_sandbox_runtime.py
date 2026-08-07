@@ -26,7 +26,8 @@ def test_sandbox_runtime_success_payload(monkeypatch: pytest.MonkeyPatch) -> Non
     class FakePopen:
         def __init__(self, *args, **kwargs):
             _ = args
-            _ = kwargs
+            assert kwargs["encoding"] == "utf-8"
+            assert kwargs["errors"] == "replace"
             self.stdin = io.StringIO()
             self.stdout = io.StringIO(
                 '{"type":"final","token":"tok","payload":{"outputs":{"result":1},"stdout":"ok","error":null}}\n'
@@ -85,18 +86,19 @@ def test_run_workflow_uses_sandbox_runtime_when_context_has_sandbox(
             self.tool_registry = tool_registry
 
     class FakeHostRuntime:
-        def __init__(self, tool_registry):
+        def __init__(self, tool_registry, **_kwargs):
             self.tool_registry = tool_registry
 
     class FakeEngine:
         def __init__(self, _wf, runtime=None, **_kwargs):
             captured["runtime_class"] = type(runtime).__name__
 
-        def run(self, initial_inputs=None, timeout_s=None):
+        def run(self, initial_inputs=None, timeout_s=None, **_kwargs):
             _ = initial_inputs
             _ = timeout_s
             return SimpleNamespace(
                 history=[],
+                outputs={},
                 steps=0,
                 last_node_id=None,
                 run_id="sandbox-run",
@@ -152,17 +154,17 @@ def test_run_workflow_uses_host_runtime_when_sandbox_mode_off(
             _ = tool_registry
 
     class FakeHostRuntime:
-        def __init__(self, tool_registry):
+        def __init__(self, tool_registry, **_kwargs):
             _ = tool_registry
 
     class FakeEngine:
         def __init__(self, _wf, runtime=None, **_kwargs):
             captured["runtime_class"] = type(runtime).__name__
 
-        def run(self, initial_inputs=None, timeout_s=None):
+        def run(self, initial_inputs=None, timeout_s=None, **_kwargs):
             _ = initial_inputs
             _ = timeout_s
-            return SimpleNamespace(history=[], steps=0, last_node_id=None, run_id="host-run")
+            return SimpleNamespace(history=[], outputs={}, steps=0, last_node_id=None, run_id="host-run")
 
     monkeypatch.setattr("flocks.workflow.runner.SandboxPythonExecRuntime", FakeSandboxRuntime)
     monkeypatch.setattr("flocks.workflow.runner.PythonExecRuntime", FakeHostRuntime)
@@ -211,17 +213,17 @@ def test_run_workflow_uses_sandbox_runtime_when_sandbox_mode_on(
             self.tool_registry = tool_registry
 
     class FakeHostRuntime:
-        def __init__(self, tool_registry):
+        def __init__(self, tool_registry, **_kwargs):
             _ = tool_registry
 
     class FakeEngine:
         def __init__(self, _wf, runtime=None, **_kwargs):
             captured["runtime_class"] = type(runtime).__name__
 
-        def run(self, initial_inputs=None, timeout_s=None):
+        def run(self, initial_inputs=None, timeout_s=None, **_kwargs):
             _ = initial_inputs
             _ = timeout_s
-            return SimpleNamespace(history=[], steps=0, last_node_id=None, run_id="sandbox-default-run")
+            return SimpleNamespace(history=[], outputs={}, steps=0, last_node_id=None, run_id="sandbox-default-run")
 
     async def fake_resolve_sandbox_context(**kwargs):
         _ = kwargs
@@ -270,17 +272,17 @@ def test_run_workflow_installs_requirements_in_sandbox_runtime(
             _ = tool_registry
 
     class FakeHostRuntime:
-        def __init__(self, tool_registry):
+        def __init__(self, tool_registry, **_kwargs):
             _ = tool_registry
 
     class FakeEngine:
         def __init__(self, _wf, runtime=None, **_kwargs):
             _ = runtime
 
-        def run(self, initial_inputs=None, timeout_s=None):
+        def run(self, initial_inputs=None, timeout_s=None, **_kwargs):
             _ = initial_inputs
             _ = timeout_s
-            return SimpleNamespace(history=[], steps=0, last_node_id=None, run_id="sandbox-req-run")
+            return SimpleNamespace(history=[], outputs={}, steps=0, last_node_id=None, run_id="sandbox-req-run")
 
     class FakeHostInstaller:
         def __init__(self, installer="auto"):
@@ -350,17 +352,17 @@ def test_run_workflow_installs_requirements_in_host_runtime(
             _ = tool_registry
 
     class FakeHostRuntime:
-        def __init__(self, tool_registry):
+        def __init__(self, tool_registry, **_kwargs):
             _ = tool_registry
 
     class FakeEngine:
         def __init__(self, _wf, runtime=None, **_kwargs):
             _ = runtime
 
-        def run(self, initial_inputs=None, timeout_s=None):
+        def run(self, initial_inputs=None, timeout_s=None, **_kwargs):
             _ = initial_inputs
             _ = timeout_s
-            return SimpleNamespace(history=[], steps=0, last_node_id=None, run_id="host-req-run")
+            return SimpleNamespace(history=[], outputs={}, steps=0, last_node_id=None, run_id="host-req-run")
 
     class FakeHostInstaller:
         def __init__(self, installer="auto"):
@@ -491,17 +493,17 @@ def test_run_workflow_injects_workflow_file_context_inputs(
     captured = {"initial_inputs": None}
 
     class FakeHostRuntime:
-        def __init__(self, tool_registry):
+        def __init__(self, tool_registry, **_kwargs):
             _ = tool_registry
 
     class FakeEngine:
         def __init__(self, _wf, runtime=None, **_kwargs):
             _ = runtime
 
-        def run(self, initial_inputs=None, timeout_s=None):
+        def run(self, initial_inputs=None, timeout_s=None, **_kwargs):
             _ = timeout_s
             captured["initial_inputs"] = dict(initial_inputs or {})
-            return SimpleNamespace(history=[], steps=0, last_node_id=None, run_id="wf-input-inject")
+            return SimpleNamespace(history=[], outputs={}, steps=0, last_node_id=None, run_id="wf-input-inject")
 
     monkeypatch.setattr("flocks.workflow.runner.PythonExecRuntime", FakeHostRuntime)
     monkeypatch.setattr("flocks.workflow.runner.WorkflowEngine", FakeEngine)
