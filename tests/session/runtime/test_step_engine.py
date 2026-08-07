@@ -16,16 +16,16 @@ from flocks.session.runtime.contracts import (
     RuntimeModel,
     StepResult,
 )
-from flocks.session.runtime.session_turn import LoopCallbacks, SessionTurn
+from flocks.session.runtime.session_turn import LoopCallbacks, LoopContext
 from flocks.session.runtime.step_engine import StepCancelled, StepEngine
 from flocks.session.session import SessionInfo
 
 
-def _turn(*, aborted: bool = False) -> SessionTurn:
+def _turn(*, aborted: bool = False) -> LoopContext:
     abort_event = asyncio.Event()
     if aborted:
         abort_event.set()
-    return SessionTurn(
+    return LoopContext(
         session=SessionInfo.model_construct(
             id="session-1",
             projectID="project",

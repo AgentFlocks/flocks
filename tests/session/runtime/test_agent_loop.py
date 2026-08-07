@@ -321,4 +321,4 @@ async def test_ready_preparation_requires_snapshot() -> None:
         [],
     )
     assert outcome.status == AgentRunStatus.FATAL_FAILURE
-    assert outcome.error == "SessionTurn returned READY without a model-turn snapshot"
+    assert outcome.error == "LoopContext returned READY without a model-turn snapshot"

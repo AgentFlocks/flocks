@@ -179,6 +179,11 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
         AsyncMock(side_effect=_after),
     )
     monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
         runner_mod.StepEngine,
         "_end_observability",
         staticmethod(lambda *args, **kwargs: None),
@@ -272,6 +277,11 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         runner_mod.HookPipeline,
         "run_llm_after",
         AsyncMock(side_effect=_after),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
     )
     monkeypatch.setattr(
         runner_mod.StepEngine,

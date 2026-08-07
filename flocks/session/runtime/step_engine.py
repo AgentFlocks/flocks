@@ -282,7 +282,7 @@ class StepEngine:
         turn: Any,
         model_policy: Optional[ModelRoutingPolicy] = None,
     ) -> "StepEngine":
-        """Create the production engine for one stateful ``SessionTurn``."""
+        """Create the production engine for one stateful ``LoopContext``."""
         engine = cls(
             session=turn.session,
             provider_id=turn.provider_id,

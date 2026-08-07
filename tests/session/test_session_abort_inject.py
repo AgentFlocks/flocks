@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from flocks.session.runtime.continuation_policy import DEFAULT_CONTINUATION_POLICY
-from flocks.session.runtime.session_turn import SessionTurn
+from flocks.session.runtime.session_turn import LoopContext as RuntimeLoopContext
 from flocks.session.message import ToolPart, ToolStateCompleted
 from flocks.session.goal import GoalDecision
 from flocks.session.session_loop import (
@@ -263,7 +263,7 @@ class TestShouldExitWithInject:
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
 
         # assistant.id > user.id → user.id < assistant.id → True → should exit
-        assert SessionTurn._should_exit(last_user, last_assistant) is True
+        assert RuntimeLoopContext._should_exit(last_user, last_assistant) is True
 
     def test_no_exit_when_user_injected_after_assistant(self):
         """Should NOT exit when a new user message appears after the assistant.
@@ -275,34 +275,34 @@ class TestShouldExitWithInject:
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
 
         # user.id > assistant.id → user.id < assistant.id → False → don't exit
-        assert SessionTurn._should_exit(last_user, last_assistant) is False
+        assert RuntimeLoopContext._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_has_tool_calls(self):
         """Should NOT exit when assistant finish is 'tool-calls'."""
         last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish="tool-calls")
 
-        assert SessionTurn._should_exit(last_user, last_assistant) is False
+        assert RuntimeLoopContext._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_no_assistant(self):
         """Should NOT exit when there is no assistant message yet."""
         last_user = self._make_msg("msg_001", "user")
 
-        assert SessionTurn._should_exit(last_user, None) is False
+        assert RuntimeLoopContext._should_exit(last_user, None) is False
 
     def test_no_exit_when_assistant_finish_is_unknown(self):
         """Should NOT exit when finish reason is 'unknown'."""
         last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish="unknown")
 
-        assert SessionTurn._should_exit(last_user, last_assistant) is False
+        assert RuntimeLoopContext._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_not_finished(self):
         """Should NOT exit when assistant has no finish status."""
         last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish=None)
 
-        assert SessionTurn._should_exit(last_user, last_assistant) is False
+        assert RuntimeLoopContext._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_has_completed_tool_parts(self):
         """Should continue so completed tool results can be fed back to the model."""
@@ -310,7 +310,7 @@ class TestShouldExitWithInject:
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
         last_assistant_parts = [_make_completed_tool_part(last_assistant.id)]
 
-        assert SessionTurn._should_exit(
+        assert RuntimeLoopContext._should_exit(
             last_user,
             last_assistant,
             last_assistant_parts,

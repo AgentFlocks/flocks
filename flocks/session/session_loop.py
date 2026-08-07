@@ -31,9 +31,9 @@ from flocks.session.runtime.model_policy import (
     ModelRoutingPolicy,
 )
 from flocks.session.runtime.session_turn import (
+    LoopContext,
     LoopCallbacks,
     LoopResult,
-    SessionTurn,
 )
 from flocks.session.runtime.step_engine import StepEngine
 from flocks.session.session import (
@@ -45,31 +45,27 @@ from flocks.utils.log import Log
 
 log = Log.create(service="session.loop")
 
-# Public compatibility name. There is only one state implementation.
-LoopContext = SessionTurn
-
-
 @dataclass(frozen=True)
 class _SessionLease:
     """One process-local ownership record."""
 
     session_id: str
-    turn: SessionTurn
+    turn: LoopContext
 
 
 class _SessionLeaseRegistry:
     """Keep lease bookkeeping out of the SessionLoop control flow."""
 
-    def __init__(self, active_turns: MutableMapping[str, SessionTurn]):
+    def __init__(self, active_turns: MutableMapping[str, LoopContext]):
         self._active_turns = active_turns
 
-    def get(self, session_id: str) -> Optional[SessionTurn]:
+    def get(self, session_id: str) -> Optional[LoopContext]:
         return self._active_turns.get(session_id)
 
     def acquire(
         self,
         session_id: str,
-        turn: SessionTurn,
+        turn: LoopContext,
     ) -> Optional[_SessionLease]:
         if session_id in self._active_turns:
             return None
@@ -87,7 +83,7 @@ class _SessionLeaseRegistry:
 class SessionLoop:
     """Decide whether a persistent session should continue or settle."""
 
-    _active_turns: ClassVar[dict[str, SessionTurn]] = {}
+    _active_turns: ClassVar[dict[str, LoopContext]] = {}
     _leases: ClassVar[_SessionLeaseRegistry] = _SessionLeaseRegistry(
         _active_turns,
     )
@@ -162,7 +158,7 @@ class SessionLoop:
 
         trace_offset = await cls._load_trace_offset(session_id)
         runtime_callbacks = callbacks or LoopCallbacks()
-        turn = SessionTurn(
+        turn = LoopContext(
             session=session,
             provider_id=provider_id,
             model_id=model_id,
@@ -231,7 +227,7 @@ class SessionLoop:
     @classmethod
     async def _run_logical_input(
         cls,
-        turn: SessionTurn,
+        turn: LoopContext,
     ) -> AgentRunOutcome[Any]:
         """Execute one prepared logical input through AgentLoop."""
         turn.reset()
@@ -242,7 +238,7 @@ class SessionLoop:
 
     @staticmethod
     async def _should_continue(
-        turn: SessionTurn,
+        turn: LoopContext,
         continuation_policy: ContinuationPolicy,
         outcome: AgentRunOutcome[Any],
     ) -> bool:
@@ -263,7 +259,7 @@ class SessionLoop:
         return session_id in cls._active_turns
 
     @classmethod
-    def get_context(cls, session_id: str) -> Optional[SessionTurn]:
+    def get_context(cls, session_id: str) -> Optional[LoopContext]:
         """Return the active turn used by public session controls."""
         return cls._active_turns.get(session_id)
 
@@ -465,7 +461,7 @@ class SessionLoop:
     @classmethod
     def _to_loop_result(
         cls,
-        turn: SessionTurn,
+        turn: LoopContext,
         outcome: AgentRunOutcome[Any],
     ) -> LoopResult:
         loop_error = (
@@ -512,7 +508,7 @@ class SessionLoop:
 
     @staticmethod
     def _authorize_auto_failover(
-        turn: SessionTurn,
+        turn: LoopContext,
         requested: bool,
     ) -> None:
         if requested and is_model_auto_session_category(
@@ -535,7 +531,7 @@ class SessionLoop:
     async def _acquire_lease(
         cls,
         session_id: str,
-        turn: SessionTurn,
+        turn: LoopContext,
     ) -> _SessionLease | LoopResult:
         async with Session.lifecycle_lock(session_id):
             latest_session = await Session.get_by_id(session_id)
@@ -584,7 +580,7 @@ class SessionLoop:
 
     @staticmethod
     async def _handle_execution_error(
-        turn: SessionTurn,
+        turn: LoopContext,
         error: Exception,
         processed_user_id: Optional[str],
     ) -> AgentRunOutcome[Any]:
@@ -670,7 +666,7 @@ class SessionLoop:
 
     @staticmethod
     async def _publish_released(
-        turn: SessionTurn,
+        turn: LoopContext,
         callbacks: LoopCallbacks,
     ) -> None:
         session_id = turn.session.id

@@ -90,11 +90,11 @@ class LoopResult:
 
 
 @dataclass
-class SessionTurn:
-    """Own state and persistence boundaries for one logical user input.
+class LoopContext:
+    """Own state and persistence boundaries for one session loop run.
 
     Supports:
-    - Message iteration
+    - Logical user-turn and message iteration
     - Compaction triggers
     - Reminder injection
     """

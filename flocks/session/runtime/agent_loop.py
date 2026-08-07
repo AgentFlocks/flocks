@@ -9,7 +9,7 @@ from flocks.session.runtime.contracts import (
     StepAction,
     TurnPreparationStatus,
 )
-from flocks.session.runtime.session_turn import SessionTurn
+from flocks.session.runtime.session_turn import LoopContext
 from flocks.session.runtime.step_engine import StepCancelled, StepEngine
 from flocks.utils.log import Log
 
@@ -22,7 +22,7 @@ class AgentLoop:
 
     async def run(
         self,
-        turn: SessionTurn,
+        turn: LoopContext,
         engine: StepEngine,
     ) -> AgentRunOutcome[MessageInfo]:
         """Run the current logical input to a session-level boundary."""
@@ -54,7 +54,7 @@ class AgentLoop:
                     state=state,
                     last_message=last_message,
                     error=(
-                        "SessionTurn returned READY without a model-turn "
+                        "LoopContext returned READY without a model-turn "
                         "snapshot"
                     ),
                 )
