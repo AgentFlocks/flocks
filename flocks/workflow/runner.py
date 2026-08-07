@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import logging
 import os
 import threading
@@ -446,6 +447,13 @@ def run_workflow(
     registry = tool_registry or get_tool_registry(tool_context=tool_context)
     sandbox_payload = _extract_sandbox_runtime_payload(tool_context)
     runtime_preference = _resolve_workflow_runtime_preference(tool_context)
+    isolated_runtime_options: Dict[str, Any] = {}
+    runtime_metadata = wf.metadata.get("runtime") if isinstance(wf.metadata, dict) else None
+    if isinstance(runtime_metadata, dict):
+        if "process_rpc_max_bytes" in runtime_metadata:
+            isolated_runtime_options["isolated_rpc_max_bytes"] = runtime_metadata["process_rpc_max_bytes"]
+        if "process_rpc_max_workers" in runtime_metadata:
+            isolated_runtime_options["isolated_rpc_max_workers"] = runtime_metadata["process_rpc_max_workers"]
 
     if runtime_preference == "host":
         sandbox_payload = None
@@ -472,6 +480,7 @@ def run_workflow(
         rt = PythonExecRuntime(
             tool_registry=registry,
             cleanup_globals_after_execute=(history_mode == "summary"),
+            **isolated_runtime_options,
         )
 
     _logger.debug(
@@ -557,6 +566,9 @@ def run_workflow(
             outputs=last_outputs,
             history=history_from_error,
         )
+    finally:
+        if execution_profile != "high_frequency":
+            gc.collect(0)
 
     history = [s.model_dump(mode="json") for s in result.history] if result.history else []
     last_outputs = result.outputs if result.outputs else {}

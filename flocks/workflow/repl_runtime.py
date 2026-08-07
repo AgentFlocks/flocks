@@ -34,7 +34,10 @@ class Runtime:
 
 
 _RPC_MAX_BYTES = 4 * 1024 * 1024
+_HOST_PROCESS_RPC_MAX_BYTES = 64 * 1024 * 1024
+_HOST_PROCESS_RPC_MAX_WORKERS = 32
 _WORKFLOW_SITE_PACKAGES = "/workspace/.flocks/workflow/site-packages"
+_TOOL_CANCEL_CHECKER_INSTALL_LOCK = threading.Lock()
 
 
 def _drain_text_stream(stream: TextIO, chunks: list[str]) -> None:
@@ -46,6 +49,45 @@ def _drain_text_stream(stream: TextIO, chunks: list[str]) -> None:
             chunks.append(line)
     except Exception:
         return
+
+
+class _ThreadScopedCancelChecker:
+    def __init__(self, fallback: Optional[Callable[[], bool]]):
+        self._fallback = fallback
+        self._local = threading.local()
+
+    def __call__(self) -> bool:
+        stack = getattr(self._local, "stack", None)
+        checker = stack[-1] if stack else self._fallback
+        return bool(checker and checker())
+
+    @contextlib.contextmanager
+    def scope(self, checker: Optional[Callable[[], bool]]):
+        stack = getattr(self._local, "stack", None)
+        if stack is None:
+            stack = []
+            self._local.stack = stack
+        stack.append(checker)
+        try:
+            yield
+        finally:
+            stack.pop()
+            if not stack:
+                del self._local.stack
+
+
+def _legacy_registry_cancel_scope(registry: Any, checker: Optional[Callable[[], bool]]):
+    if not hasattr(registry, "cancel_checker"):
+        return contextlib.nullcontext()
+    try:
+        with _TOOL_CANCEL_CHECKER_INSTALL_LOCK:
+            scoped_checker = getattr(registry, "cancel_checker", None)
+            if not isinstance(scoped_checker, _ThreadScopedCancelChecker):
+                scoped_checker = _ThreadScopedCancelChecker(scoped_checker)
+                registry.cancel_checker = scoped_checker
+        return scoped_checker.scope(checker)
+    except Exception:
+        return contextlib.nullcontext()
 
 
 @dataclass
@@ -61,6 +103,8 @@ class PythonExecRuntime(Runtime):
     cancel_checker: Optional[Callable[[], bool]] = None
     cleanup_globals_after_execute: bool = False
     enable_cancel_trace: bool = True
+    isolated_rpc_max_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_BYTES
+    isolated_rpc_max_workers: int = _HOST_PROCESS_RPC_MAX_WORKERS
 
     _RUNTIME_GLOBAL_KEYS: ClassVar[frozenset[str]] = frozenset(
         {
@@ -285,6 +329,7 @@ class SandboxPythonExecRuntime(Runtime):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
                 bufsize=1,
                 env={**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
             )
@@ -398,16 +443,38 @@ import sys
 import threading
 import traceback
 
+for _stream in (sys.stdin, sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8")
+    except (AttributeError, OSError):
+        pass
+
 outputs = {{}}
 _MAX = {rpc_max_bytes!r}
 _TOKEN = {json.dumps(bridge_token, ensure_ascii=False)}
+_stdin_pending = bytearray()
 
 def _read_json_line():
-    line = sys.stdin.readline()
-    if not line:
-        raise RuntimeError("Bridge channel closed")
-    if _MAX is not None and len(line) > _MAX:
-        raise RuntimeError("Bridge payload too large")
+    if _MAX is None:
+        line = sys.stdin.readline()
+        if not line:
+            raise RuntimeError("Bridge channel closed")
+    else:
+        while True:
+            newline = _stdin_pending.find(b"\\n")
+            if newline >= 0:
+                if newline + 1 > _MAX:
+                    raise RuntimeError("Bridge payload too large")
+                raw_line = bytes(_stdin_pending[: newline + 1])
+                del _stdin_pending[: newline + 1]
+                break
+            if len(_stdin_pending) > _MAX:
+                raise RuntimeError("Bridge payload too large")
+            chunk = os.read(sys.stdin.fileno(), 65536)
+            if not chunk:
+                raise RuntimeError("Bridge channel closed")
+            _stdin_pending.extend(chunk)
+        line = raw_line.decode("utf-8")
     obj = json.loads(line)
     if not isinstance(obj, dict):
         raise RuntimeError("Bridge payload must be an object")
@@ -415,10 +482,12 @@ def _read_json_line():
 
 def _fail_rpc_waiters(message):
     with _rpc_waiters_lock:
-        waiters = list(_rpc_waiters.values())
-    for waiter in waiters:
+        waiters = list(_rpc_waiters.items())
+    for req_id, waiter in waiters:
         waiter["response"] = {{
             "type": "rpc_result",
+            "token": _TOKEN,
+            "id": req_id,
             "ok": False,
             "error": message,
         }}
@@ -630,7 +699,13 @@ sys.stdout.flush()
             return None
         return obj if isinstance(obj, dict) else None
 
-    def _handle_rpc_request(self, *, msg: Dict[str, Any], token: str) -> Dict[str, Any]:
+    def _handle_rpc_request(
+        self,
+        *,
+        msg: Dict[str, Any],
+        token: str,
+        cancel_checker: Optional[Callable[[], bool]] = None,
+    ) -> Dict[str, Any]:
         req_id = str(msg.get("id") or "")
         if msg.get("token") != token:
             return {"type": "rpc_result", "token": token, "id": req_id, "ok": False, "error": "Invalid bridge token"}
@@ -639,9 +714,10 @@ sys.stdout.flush()
             return {"type": "rpc_result", "token": token, "id": req_id, "ok": False, "error": "Invalid RPC payload"}
 
         kind = str(rpc.get("kind") or "").strip().lower()
+        effective_cancel_checker = self.cancel_checker if cancel_checker is None else cancel_checker
         try:
             if kind == "cancelled":
-                output = bool(self.cancel_checker and self.cancel_checker())
+                output = bool(effective_cancel_checker and effective_cancel_checker())
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
             if kind in ("tool", "tool_safe"):
@@ -654,15 +730,20 @@ sys.stdout.flush()
                 if not isinstance(kwargs, dict):
                     raise RuntimeError("Tool kwargs must be an object")
                 registry = self.tool_registry or get_tool_registry()
-                if hasattr(registry, "cancel_checker"):
+                cancel_scope = contextlib.nullcontext()
+                with_cancel_checker = getattr(registry, "with_cancel_checker", None)
+                if callable(with_cancel_checker):
                     try:
-                        registry.cancel_checker = self.cancel_checker
+                        registry = with_cancel_checker(effective_cancel_checker)
                     except Exception:
-                        pass
-                if kind == "tool_safe":
-                    output = registry.run_safe(name, **kwargs)
+                        cancel_scope = _legacy_registry_cancel_scope(registry, effective_cancel_checker)
                 else:
-                    output = registry.run(name, **kwargs)
+                    cancel_scope = _legacy_registry_cancel_scope(registry, effective_cancel_checker)
+                with cancel_scope:
+                    if kind == "tool_safe":
+                        output = registry.run_safe(name, **kwargs)
+                    else:
+                        output = registry.run(name, **kwargs)
                 return {"type": "rpc_result", "token": token, "id": req_id, "ok": True, "output": output}
 
             if kind == "llm":
@@ -697,7 +778,7 @@ sys.stdout.flush()
                     retry_delay_s = float(retry_delay_raw)
                 except Exception as exc:
                     raise RuntimeError("LLM retry_delay_s must be a number when provided") from exc
-                output = get_lazy_llm(cancel_checker=self.cancel_checker).ask(
+                output = get_lazy_llm(cancel_checker=effective_cancel_checker).ask(
                     prompt,
                     temperature=temperature,
                     model=model,
@@ -726,6 +807,8 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
     sandbox: Dict[str, Any] = field(default_factory=dict)
     inherited_fd_keys: Tuple[str, ...] = ()
     retained_fd_keys: Tuple[str, ...] = ()
+    rpc_max_bytes: Optional[int] = _HOST_PROCESS_RPC_MAX_BYTES
+    rpc_max_workers: int = _HOST_PROCESS_RPC_MAX_WORKERS
 
     def execute(self, code: str, inputs: Dict[str, Any]) -> Tuple[Dict[str, Any], str]:
         if not isinstance(code, str):
@@ -740,6 +823,14 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 node_id="<runtime>",
                 message=f"Inputs must be a dict, got {type(inputs).__name__}",
             )
+
+        rpc_max_bytes = self.rpc_max_bytes
+        if rpc_max_bytes is not None:
+            if type(rpc_max_bytes) is not int or rpc_max_bytes <= 0:
+                raise NodeExecutionError(node_id="<runtime>", message="rpc_max_bytes must be None or a positive integer")
+        rpc_max_workers = self.rpc_max_workers
+        if type(rpc_max_workers) is not int or rpc_max_workers <= 0:
+            raise NodeExecutionError(node_id="<runtime>", message="rpc_max_workers must be a positive integer")
 
         inherited_fds = self._resolve_inherited_fds(inputs)
         retained_fds = self._resolve_retained_fds(inputs)
@@ -767,7 +858,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
             python_source = self._build_python_source(
                 code=code,
                 bridge_token=token,
-                rpc_max_bytes=None,
+                rpc_max_bytes=rpc_max_bytes,
                 extra_site_packages=package_root,
             )
             with tempfile.NamedTemporaryFile(
@@ -783,7 +874,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
             python_cmd = self._build_python_cmd(
                 code=code,
                 bridge_token=token,
-                rpc_max_bytes=None,
+                rpc_max_bytes=rpc_max_bytes,
                 extra_site_packages=package_root,
                 python_executable=sys.executable,
             )
@@ -796,6 +887,7 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
+                encoding="utf-8",
                 bufsize=1,
                 env={**os.environ, "LC_ALL": "C.UTF-8", "LANG": "C.UTF-8"},
                 start_new_session=(os.name != "nt"),
@@ -824,17 +916,42 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         )
         stderr_thread.start()
 
-        stdout_lines: queue.Queue[Optional[str]] = queue.Queue()
+        bridge_closed = threading.Event()
+        stdout_reader_stop = threading.Event()
+        bridge_errors: list[str] = []
+        stdout_lines: queue.Queue[Optional[str]] = queue.Queue(maxsize=rpc_max_workers)
+
+        def _queue_stdout_line(line: Optional[str]) -> bool:
+            while not stdout_reader_stop.is_set():
+                try:
+                    stdout_lines.put(line, timeout=0.05)
+                    return True
+                except queue.Full:
+                    continue
+            return False
 
         def _read_stdout() -> None:
             try:
                 while True:
-                    line = proc.stdout.readline()
-                    if line == "":
+                    if rpc_max_bytes is None:
+                        raw_line = proc.stdout.buffer.readline()
+                    else:
+                        raw_line = proc.stdout.buffer.readline(rpc_max_bytes + 1)
+                    if raw_line == b"":
                         break
-                    stdout_lines.put(line)
+                    if rpc_max_bytes is not None and len(raw_line) > rpc_max_bytes:
+                        bridge_errors.append(
+                            f"Isolated host RPC message exceeds configured limit ({rpc_max_bytes} bytes)"
+                        )
+                        break
+                    line = raw_line.decode(proc.stdout.encoding or "utf-8")
+                    if not _queue_stdout_line(line):
+                        return
+            except Exception as exc:
+                bridge_errors.append(f"Isolated host RPC bridge read failed: {exc}")
             finally:
-                stdout_lines.put(None)
+                bridge_closed.set()
+                _queue_stdout_line(None)
 
         stdout_thread = threading.Thread(
             target=_read_stdout,
@@ -846,16 +963,30 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         final_payload: Optional[Dict[str, Any]] = None
         cancelled = False
         stdin_lock = threading.Lock()
-        rpc_pool = _ThreadPoolExecutor(max_workers=32, thread_name_prefix="wf-process-rpc")
+        rpc_slots = threading.BoundedSemaphore(rpc_max_workers)
+        rpc_pool = _ThreadPoolExecutor(
+            max_workers=rpc_max_workers,
+            thread_name_prefix="wf-process-rpc",
+        )
+
+        def _rpc_cancel_requested() -> bool:
+            return bridge_closed.is_set() or self._cancel_requested()
 
         def _handle_rpc(message: Dict[str, Any]) -> None:
-            response = self._handle_rpc_request(msg=message, token=token)
             try:
-                with stdin_lock:
-                    if proc.poll() is None:
-                        self._write_json_line(proc.stdin, response)
-            except (BrokenPipeError, OSError, ValueError):
-                return
+                response = self._handle_rpc_request(
+                    msg=message,
+                    token=token,
+                    cancel_checker=_rpc_cancel_requested,
+                )
+                try:
+                    with stdin_lock:
+                        if not bridge_closed.is_set() and proc.poll() is None:
+                            self._write_json_line(proc.stdin, response)
+                except (BrokenPipeError, OSError, ValueError):
+                    return
+            finally:
+                rpc_slots.release()
 
         try:
             self._write_json_line(proc.stdin, {"type": "init", "token": token, "inputs": child_inputs})
@@ -875,11 +1006,38 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
                     continue
                 msg_type = str(msg.get("type") or "").strip().lower()
                 if msg_type == "rpc":
-                    rpc_pool.submit(_handle_rpc, msg)
+                    slot_acquired = False
+                    while not slot_acquired:
+                        slot_acquired = rpc_slots.acquire(timeout=0.05)
+                        if slot_acquired:
+                            break
+                        if self._cancel_requested():
+                            cancelled = True
+                            self._terminate_process(proc)
+                            break
+                        if proc.poll() is not None:
+                            bridge_closed.set()
+                            break
+                        if bridge_closed.is_set():
+                            break
+                    if cancelled:
+                        break
+                    if not slot_acquired:
+                        continue
+                    if bridge_closed.is_set():
+                        rpc_slots.release()
+                        continue
+                    try:
+                        rpc_pool.submit(_handle_rpc, msg)
+                    except Exception:
+                        rpc_slots.release()
+                        raise
                 elif msg_type == "final" and msg.get("token") == token:
                     payload = msg.get("payload")
                     final_payload = payload if isinstance(payload, dict) else {}
         finally:
+            bridge_closed.set()
+            stdout_reader_stop.set()
             rpc_pool.shutdown(
                 wait=final_payload is not None and not cancelled,
                 cancel_futures=True,
@@ -908,6 +1066,13 @@ class HostProcessPythonExecRuntime(SandboxPythonExecRuntime):
         if cancelled:
             self._close_parent_fds(managed_fds)
             raise RunCancelledError("<runtime>")
+        if bridge_errors:
+            self._close_parent_fds(managed_fds)
+            raise NodeExecutionError(
+                node_id="<runtime>",
+                message=bridge_errors[0],
+                traceback=stderr_text,
+            )
         if exit_code != 0:
             self._close_parent_fds(managed_fds)
             message = stderr_text.strip() or f"Isolated command exited with code {exit_code}"

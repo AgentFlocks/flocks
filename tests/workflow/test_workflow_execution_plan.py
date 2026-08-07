@@ -85,3 +85,38 @@ def test_high_frequency_profile_uses_lightweight_runtime_options(monkeypatch) ->
     assert isinstance(captured_init["execution_plan"], WorkflowExecutionPlan)
     assert captured_run["retain_history"] is False
     assert captured_run["run_id"] == "exec-1"
+
+
+def test_workflow_metadata_configures_process_rpc_limits(monkeypatch) -> None:
+    captured_init: dict[str, Any] = {}
+
+    class FakeEngine:
+        def __init__(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            captured_init.update(kwargs)
+
+        def run(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            return SimpleNamespace(
+                run_id="rpc-config",
+                steps=1,
+                last_node_id="start",
+                outputs={"ok": True},
+                history=[],
+            )
+
+    workflow = _workflow()
+    workflow.metadata = {
+        "runtime": {
+            "process_rpc_max_bytes": None,
+            "process_rpc_max_workers": 3,
+        }
+    }
+    monkeypatch.setattr(runner_module, "WorkflowEngine", FakeEngine)
+    monkeypatch.setattr(runner_module, "_resolve_workflow_runtime_preference", lambda _ctx: "host")
+    monkeypatch.setattr(runner_module, "get_tool_registry", lambda tool_context=None: None)
+
+    result = run_workflow(workflow=workflow, ensure_requirements=False)
+
+    assert result.status == "SUCCEEDED"
+    runtime = captured_init["runtime"]
+    assert runtime.isolated_rpc_max_bytes is None
+    assert runtime.isolated_rpc_max_workers == 3
