@@ -21,6 +21,10 @@ export interface SecurityOverview {
   network?: {
     hardDeny: string[];
     allowlist: string[];
+    personalAllowlist?: string[];
+    personalAllowlistSubjectId?: string | null;
+    personalTrustedTools?: Array<{ name: string; source?: string }>;
+    personalTrustedToolsSubjectId?: string | null;
     blocklist: string[];
     trustedTools: Array<{ name: string; source?: string }>;
     revision: number;
@@ -80,6 +84,10 @@ export const flocksproSecurityApi = {
   setNetworkRules: async (payload: {
     allowlist: string[];
     blocklist: string[];
+    personalAllowlist?: string[];
+    personalAllowlistSubjectId?: string | null;
+    personalTrustedTools?: Array<{ name: string; source?: string }>;
+    personalTrustedToolsSubjectId?: string | null;
     trustedTools?: Array<{ name: string; source?: string }>;
     revision?: number;
   }): Promise<NetworkSecurityRules> =>

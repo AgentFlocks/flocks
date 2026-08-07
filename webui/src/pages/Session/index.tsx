@@ -3671,20 +3671,15 @@ export default function SessionPage() {
                     <span className="max-w-[116px] truncate font-medium">
                       {permissionModeLabels[currentPermissionMode]}
                     </span>
-                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                      {runtimeModeLabels[currentRuntimeMode]}
-                    </span>
-                    <span className="rounded bg-zinc-200 px-1.5 py-0.5 text-[10px] text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
-                      {networkModeLabels[currentNetworkMode]}
-                    </span>
                     <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
                   </button>
                   {showPermissionModeOptions && (
                     <div className="absolute bottom-full left-0 z-50 mb-2 w-[520px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
-                      <div className="space-y-1 p-1.5">
-                        <div className="flex items-center justify-between px-2.5">
+                      <div className="space-y-3 p-2">
+                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+                        <div className="flex items-center justify-between px-1">
                           <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.runtimeTitle', 'Runtime mode')}
+                            {t('permissionMode.runtimeTitle', '平台开发模式')}
                           </div>
                           <button
                             type="button"
@@ -3697,6 +3692,7 @@ export default function SessionPage() {
                             {t('permissionMode.viewDetails')}
                           </button>
                         </div>
+                        <div className="mt-1 space-y-1">
                         {runtimeModeOptions.map(({ value: mode, label, description }) => (
                           <button
                             key={mode}
@@ -3711,7 +3707,7 @@ export default function SessionPage() {
                                 : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                             }`}
                           >
-                            <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
+                            <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
                             <div className={`min-w-0 flex-1 truncate text-[11px] ${
                               currentRuntimeMode === mode
                                 ? 'text-zinc-700 dark:text-zinc-200'
@@ -3723,9 +3719,11 @@ export default function SessionPage() {
                             {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                           </button>
                         ))}
-                        <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
-                          <div className="px-2.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
-                            {t('permissionMode.networkTitle', '网络模式')}
+                        </div>
+                        </section>
+                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.networkTitle', '网络访问模式')}
                           </div>
                           <div className="mt-1 space-y-1">
                             {networkModeOptions.map(({ value: mode, label, description }) => (
@@ -3742,7 +3740,7 @@ export default function SessionPage() {
                                     : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                                 }`}
                               >
-                                <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
+                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
                                 <div className={`min-w-0 flex-1 truncate text-[11px] ${
                                   currentNetworkMode === mode
                                     ? 'text-zinc-700 dark:text-zinc-200'
@@ -3755,15 +3753,9 @@ export default function SessionPage() {
                               </button>
                             ))}
                           </div>
-                          <div className="px-2.5 pt-1 text-[10px] text-zinc-500 dark:text-zinc-400">
-                            {t(
-                              'permissionMode.networkModeDefaultHint',
-                              `默认来源: ${sessionEntry} -> ${networkModeLabels[sessionNetworkModeDefault ?? 'require-confirm']}${sessionNetworkModeOverridden ? '（已覆盖）' : '（未覆盖）'}`,
-                            )}
-                          </div>
-                        </div>
-                        <div className="mt-2 border-t border-zinc-100 pt-2 dark:border-zinc-800">
-                          <div className="px-2.5 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                        </section>
+                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
                             {t('permissionMode.title')}
                           </div>
                           <div className="mt-1 space-y-1">
@@ -3781,7 +3773,7 @@ export default function SessionPage() {
                                     : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
                                 }`}
                               >
-                                <div className="w-20 shrink-0 text-sm font-medium">{label}</div>
+                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
                                 <div className={`min-w-0 flex-1 truncate text-[11px] ${
                                   currentPermissionMode === mode
                                     ? 'text-zinc-700 dark:text-zinc-200'
@@ -3794,7 +3786,7 @@ export default function SessionPage() {
                               </button>
                             ))}
                           </div>
-                        </div>
+                        </section>
                       </div>
                     </div>
                   )}

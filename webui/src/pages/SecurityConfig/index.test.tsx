@@ -182,6 +182,9 @@ describe('SecurityConfigPage', () => {
       </MemoryRouter>,
     );
 
+    const openButton = await screen.findByRole('button', { name: '查看网络管控详情' });
+    await user.click(openButton);
+
     const allowlistInput = await screen.findByPlaceholderText(/example\.com/);
     await user.clear(allowlistInput);
     await user.type(allowlistInput, 'ssh://example.com:22');
