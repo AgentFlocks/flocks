@@ -30,6 +30,7 @@ from flocks.agent.runtime.contracts import (
     StepResult,
     ToolCall,
 )
+from flocks.agent.runtime.ports import ExternalRuntimePorts
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
@@ -270,6 +271,7 @@ class SessionRunner:
         failover_available: bool = False,
         turn_additional_context: Optional[str] = None,
         session_start_pending: bool = False,
+        runtime_ports: Optional[ExternalRuntimePorts] = None,
     ):
         self.session = session
         from flocks.session.core.defaults import fallback_provider_id, fallback_model_id
@@ -290,6 +292,26 @@ class SessionRunner:
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
         self._attempt_state = LlmAttemptState()
+        if runtime_ports is None:
+            from flocks.session.runtime_adapters import (
+                create_default_runtime_ports,
+            )
+
+            runtime_ports = create_default_runtime_ports()
+        self._runtime_ports = runtime_ports
+
+    @property
+    def _ports(self) -> ExternalRuntimePorts:
+        """Return injected ports, lazily supporting legacy test instances."""
+        ports = getattr(self, "_runtime_ports", None)
+        if ports is None:
+            from flocks.session.runtime_adapters import (
+                create_default_runtime_ports,
+            )
+
+            ports = create_default_runtime_ports()
+            self._runtime_ports = ports
+        return ports
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -333,9 +355,7 @@ class SessionRunner:
             return
         self._session_start_fired = True
         try:
-            from flocks.hooks.pipeline import HookPipeline
-
-            await HookPipeline.run_session_start({
+            await self._ports.hooks.run_session_start({
                 "sessionID": self.session.id,
                 "workspace": self.session.directory,
                 "agent": agent.name,
@@ -553,7 +573,7 @@ class SessionRunner:
             execution_mode == SessionExecutionMode.PLAN
             and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
         ):
-            plan_exit = ToolRegistry.get("plan_exit")
+            plan_exit = self._ports.tools.get("plan_exit")
             if plan_exit is not None and getattr(plan_exit.info, "enabled", True):
                 tool_infos.append(plan_exit.info)
         metadata = dict(result.metadata)
@@ -625,7 +645,10 @@ class SessionRunner:
     def _provider_capability_key(self) -> str:
         interleaved = None
         try:
-            active_model = Provider.resolve_model(self.provider_id, self.model_id)
+            active_model = self._ports.models.resolve_model(
+                self.provider_id,
+                self.model_id,
+            )
             if active_model and getattr(active_model, "capabilities", None):
                 interleaved = getattr(active_model.capabilities, "interleaved", None)
         except Exception:
@@ -644,7 +667,7 @@ class SessionRunner:
         text_tool_call_mode: bool,
     ) -> Tuple[Any, ...]:
         return (
-            ToolRegistry.revision(),
+            self._ports.tools.revision(),
             getattr(agent, "name", ""),
             tuple(sorted(getattr(agent, "tools", None) or ())),
             tuple(tool_info.name for tool_info in selected_tool_infos),
@@ -804,9 +827,7 @@ class SessionRunner:
         unknown configurations.
         """
         try:
-            from flocks.provider.provider import Provider as _Provider
-
-            provider = _Provider.get(self.provider_id)
+            provider = self._ports.models.get_provider(self.provider_id)
             if provider is not None:
                 for model in getattr(provider, "_config_models", []) or []:
                     if model.id == self.model_id:
@@ -1330,7 +1351,7 @@ class SessionRunner:
         is_last_step = self._step >= max_steps
         
         # Get provider
-        provider = Provider.get(self.provider_id)
+        provider = self._ports.models.get_provider(self.provider_id)
         if not provider:
             error = f"Provider {self.provider_id} not found"
             if self._defer_step_errors:
@@ -1364,7 +1385,7 @@ class SessionRunner:
 
         # Apply config-based provider options (api_key/base_url)
         try:
-            await Provider.apply_config(provider_id=self.provider_id)
+            await self._ports.models.apply_config(self.provider_id)
         except Exception as e:
             log.debug("runner.provider.apply_config.error", {
                 "provider": self.provider_id,
@@ -1425,7 +1446,7 @@ class SessionRunner:
             current_device_revision = None
 
         prompts_started_at = time.perf_counter()
-        system_prompts = await SessionPrompt.build_system_prompts(
+        system_prompts = await self._ports.prompts.build_system_prompts(
             session_id=self.session.id,
             session_directory=self.session.directory,
             agent_name=agent.name,
@@ -1438,7 +1459,7 @@ class SessionRunner:
                 plan_file=self._turn_plan_file,
             ),
             prompt_tool_names=prompt_tool_names,
-            tool_revision=ToolRegistry.revision(),
+            tool_revision=self._ports.tools.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
             static_cache=self._static_cache,
             sandbox_prompt_factory=sandbox_prompt_factory,
@@ -2011,7 +2032,7 @@ class SessionRunner:
 
         vendor_by_storage_key: Dict[str, str] = {}
         try:
-            for tool_info in ToolRegistry.list_tools():
+            for tool_info in self._ports.tools.list_tools():
                 if getattr(tool_info, "source", None) != "device":
                     continue
                 storage_key = str(getattr(tool_info, "provider", "") or "").strip()
@@ -2298,7 +2319,7 @@ class SessionRunner:
     
     def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
         """Check if agent statically declares a tool."""
-        tool = ToolRegistry.get(tool_name)
+        tool = self._ports.tools.get(tool_name)
         if tool is None:
             return False
         metadata = get_tool_catalog_metadata(tool_name, tool.info)
@@ -2405,7 +2426,10 @@ class SessionRunner:
     def _get_context_window_tokens(self) -> int:
         """Resolve the context window size for the current model."""
         try:
-            ctx, _, _ = Provider.resolve_model_info(self.provider_id, self.model_id)
+            ctx, _, _ = self._ports.models.resolve_model_info(
+                self.provider_id,
+                self.model_id,
+            )
             if ctx and ctx > 0:
                 return ctx
         except Exception:
@@ -2607,7 +2631,10 @@ class SessionRunner:
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
         queued_user_message_ids: set[str] = set(getattr(self, "_queued_user_message_ids", set()) or set())
-        active_model = Provider.resolve_model(self.provider_id, self.model_id)
+        active_model = self._ports.models.resolve_model(
+            self.provider_id,
+            self.model_id,
+        )
         active_interleaved = (
             getattr(active_model.capabilities, "interleaved", None)
             if active_model and getattr(active_model, "capabilities", None)
@@ -3248,13 +3275,17 @@ class SessionRunner:
         llm_after_enabled = False
         self._llm_call_aborted = False
         try:
-            llm_before_enabled = await HookPipeline.has_stage_handlers(
+            llm_before_enabled = (
+                await self._ports.hooks.has_stage_handlers(
                 HookStage.LLM_BEFORE,
                 llm_hook_metadata,
             )
-            llm_after_enabled = await HookPipeline.has_stage_handlers(
+            )
+            llm_after_enabled = (
+                await self._ports.hooks.has_stage_handlers(
                 HookStage.LLM_AFTER,
                 llm_hook_metadata,
+            )
             )
         except Exception as exc:
             log.debug("runner.hook.stage_probe.error", {"error": str(exc)})
@@ -3273,7 +3304,9 @@ class SessionRunner:
             }
             try:
                 hook_started_at = time.perf_counter()
-                await HookPipeline.run_llm_before(llm_before_hook_input)
+                await self._ports.hooks.run_llm_before(
+                    llm_before_hook_input,
+                )
                 self._log_perf(
                     "runner.hook.llm_before.complete",
                     hook_started_at,
@@ -3463,7 +3496,7 @@ class SessionRunner:
             )
             if llm_after_enabled:
                 try:
-                    await HookPipeline.run_llm_after(
+                    await self._ports.hooks.run_llm_after(
                         llm_hook_metadata,
                         {
                             "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
@@ -3575,7 +3608,7 @@ class SessionRunner:
         if llm_after_enabled:
             try:
                 hook_started_at = time.perf_counter()
-                await HookPipeline.run_llm_after(
+                await self._ports.hooks.run_llm_after(
                     llm_hook_metadata,
                     {
                         "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
