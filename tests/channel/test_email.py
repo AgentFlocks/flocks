@@ -117,7 +117,24 @@ def test_config_normalizes_allowed_senders() -> None:
     })
 
     assert cfg["address"] == "agent@example.com"
+    assert cfg["username"] == "agent@example.com"
     assert parse_allowed_senders(cfg) == {"user@example.com", "second@example.com"}
+
+
+def test_config_allows_distinct_login_username() -> None:
+    plugin = EmailChannel()
+    cfg = resolved_config({
+        "address": "Agent@Example.COM",
+        "username": r"EXAMPLE\AgentUser",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    assert cfg["address"] == "agent@example.com"
+    assert cfg["username"] == r"EXAMPLE\AgentUser"
+    assert plugin.validate_config(cfg) is None
 
 
 def test_email_parsing_helpers() -> None:
@@ -291,6 +308,7 @@ def test_send_email_threads_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     plugin = EmailChannel()
     plugin._resolved = resolved_config({
         "address": "agent@example.com",
+        "username": "agent-login",
         "password": "pw",
         "imapHost": "imap.example.com",
         "smtpHost": "smtp.example.com",
@@ -323,6 +341,8 @@ def test_send_email_threads_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     assert msg["Subject"] == "Re: Question"
     assert msg["In-Reply-To"] == "<orig@example.com>"
     assert msg["References"] == "<root@example.com>"
+    assert msg["From"] == "agent@example.com"
+    assert sent["login"] == ("agent-login", "pw")
 
 
 def test_send_email_prefers_requested_thread_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -454,6 +474,7 @@ def test_fetch_new_messages_sends_imap_id_before_select(monkeypatch: pytest.Monk
     plugin = EmailChannel()
     plugin._resolved = resolved_config({
         "address": "agent@example.com",
+        "username": "agent-login",
         "password": "pw",
         "imapHost": "imap.example.com",
         "smtpHost": "smtp.example.com",
@@ -463,7 +484,8 @@ def test_fetch_new_messages_sends_imap_id_before_select(monkeypatch: pytest.Monk
     calls: list[str] = []
 
     class FakeIMAP:
-        def login(self, *_args):
+        def login(self, username, password):
+            assert (username, password) == ("agent-login", "pw")
             calls.append("login")
             return "OK", [b"LOGIN completed"]
 
@@ -487,6 +509,33 @@ def test_fetch_new_messages_sends_imap_id_before_select(monkeypatch: pytest.Monk
 
     assert plugin._fetch_new_messages() == []
     assert calls[:4] == ["login", "xatom:ID", "select:INBOX", "uid:search"]
+
+
+def test_test_connections_uses_login_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "username": "agent-login",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+        "skipExistingOnStart": False,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.login.return_value = ("OK", [b"LOGIN completed"])
+    fake_imap.xatom.return_value = ("OK", [b"ID completed"])
+    fake_imap.select.return_value = ("OK", [b"0"])
+    fake_smtp = MagicMock()
+
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: fake_imap)
+    monkeypatch.setattr(plugin, "_connect_smtp", lambda: fake_smtp)
+
+    plugin._test_connections()
+
+    fake_imap.login.assert_called_once_with("agent-login", "pw")
+    fake_smtp.login.assert_called_once_with("agent-login", "pw")
 
 
 def test_fetch_new_messages_reports_select_failure_without_search(monkeypatch: pytest.MonkeyPatch) -> None:

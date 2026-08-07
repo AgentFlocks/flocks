@@ -270,7 +270,7 @@ class EmailChannel(ChannelPlugin):
         imap = self._connect_imap()
         try:
             try:
-                imap.login(cfg["address"], cfg["password"])
+                imap.login(cfg["username"], cfg["password"])
                 self._identify_imap_client(imap)
                 self._select_inbox(imap)
                 if cfg["skipExistingOnStart"]:
@@ -292,7 +292,7 @@ class EmailChannel(ChannelPlugin):
             raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
         try:
             try:
-                smtp.login(cfg["address"], cfg["password"])
+                smtp.login(cfg["username"], cfg["password"])
             except Exception as exc:
                 raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
         finally:
@@ -306,7 +306,7 @@ class EmailChannel(ChannelPlugin):
         parsed_messages: list[tuple[bytes, InboundMessage]] = []
         imap = self._connect_imap()
         try:
-            imap.login(cfg["address"], cfg["password"])
+            imap.login(cfg["username"], cfg["password"])
             self._identify_imap_client(imap)
             self._select_inbox(imap)
             status, data = imap.uid("search", None, "UNSEEN")
@@ -543,7 +543,7 @@ class EmailChannel(ChannelPlugin):
 
         smtp = self._connect_smtp()
         try:
-            smtp.login(cfg["address"], cfg["password"])
+            smtp.login(cfg["username"], cfg["password"])
             smtp.send_message(msg)
         finally:
             try:

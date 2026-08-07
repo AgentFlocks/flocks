@@ -148,6 +148,7 @@ interface SlackChannelConfig {
 interface EmailChannelConfig {
   enabled: boolean;
   address?: string;
+  username?: string;
   password?: string;
   imapHost?: string;
   imapPort?: number;
@@ -2069,6 +2070,13 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
             value={config.address ?? ''}
             onChange={setAddress}
             placeholder="agent@example.com"
+          />
+        </FieldRow>
+        <FieldRow label={t('email.username')} hint={t('email.usernameHint')}>
+          <TextInput
+            value={config.username ?? ''}
+            onChange={(v) => set('username', v || undefined)}
+            placeholder="username"
           />
         </FieldRow>
         <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
