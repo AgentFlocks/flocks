@@ -2030,6 +2030,18 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
     (value: string) => onChange(applyEmailHostPreset(config, value || undefined)),
     [config, onChange]
   );
+  const setAuthMode = useCallback(
+    (value: EmailAuthMode) => {
+      const next: EmailChannelConfig = { ...config, authMode: value };
+      if (value === 'xoauth2') {
+        delete next.password;
+      } else {
+        delete next.accessToken;
+      }
+      onChange(next);
+    },
+    [config, onChange]
+  );
   const setSecurity = useCallback(
     (
       protocol: EmailProtocol,
@@ -2087,7 +2099,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.authMode')} required hint={t('email.authModeHint')}>
           <Select
             value={authMode}
-            onChange={(v) => set('authMode', v as EmailAuthMode)}
+            onChange={(v) => setAuthMode(v as EmailAuthMode)}
             options={[
               { value: 'password', label: t('email.authModePassword') },
               { value: 'xoauth2', label: t('email.authModeXoauth2') },
@@ -3634,6 +3646,14 @@ function stripEmpty(obj: Record<string, any>): Record<string, any> {
 
 function stripChannelConfigForSave(channelId: string, cfg: Record<string, any>): Record<string, any> {
   const result = stripEmpty(cfg);
+
+  if (channelId === 'email') {
+    if (result.authMode === 'xoauth2') {
+      delete result.password;
+    } else {
+      delete result.accessToken;
+    }
+  }
 
   if (channelId === 'slack') {
     const allowFrom = Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [];
