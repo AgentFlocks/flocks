@@ -347,6 +347,7 @@ async def run_dream_bridge(
         sources, backlog, sync_targets = await _collect_dream_sources(
             config,
             target,
+            parent_session_id=parent_session_id,
             max_chars=max(source_budget // 2, 1),
         )
         if not sources:

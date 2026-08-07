@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
+from flocks.auth.context import AuthUser
 from flocks.memory.config import (
     MemoryAutoFlushConfig,
     MemoryConfig,
@@ -18,6 +19,7 @@ from flocks.memory.evolution import (
     EvolutionCheckpointStore,
     MemoryEvolutionScheduler,
     SourceSnapshot,
+    list_dream_targets,
     run_dream_bridge,
 )
 from flocks.memory.evolution.common import (
@@ -551,6 +553,9 @@ async def test_dream_sources_share_budget_and_deduplicate_daily_session(
         status="active",
         project_id="default",
         directory=str(tmp_path),
+        owner_user_id="usr_alice",
+        owner_username="alice",
+        metadata={},
     )
     session_source = SourceSnapshot(
         source_type="session",
@@ -579,6 +584,7 @@ async def test_dream_sources_share_budget_and_deduplicate_daily_session(
         sources, backlog, _ = await _collect_dream_sources(
             MemoryConfig(),
             DreamTarget.global_only(),
+            caller=AuthUser(id="usr_alice", username="alice", role="member"),
             max_chars=1_000,
         )
 
@@ -587,6 +593,155 @@ async def test_dream_sources_share_budget_and_deduplicate_daily_session(
     assert sources[1].source_type == "daily"
     assert sources[1].content == ""
     assert backlog is False
+
+
+@pytest.mark.asyncio
+async def test_dream_sources_follow_session_read_policy(tmp_path: Path) -> None:
+    await Storage.init(tmp_path / "dream-access.db")
+    sessions = [
+        SimpleNamespace(
+            id="ses_alice",
+            category="user",
+            status="active",
+            project_id="prj_test",
+            directory=str(tmp_path),
+            owner_user_id="usr_alice",
+            owner_username="alice",
+            metadata={},
+        ),
+        SimpleNamespace(
+            id="ses_bob_private",
+            category="user",
+            status="active",
+            project_id="prj_test",
+            directory=str(tmp_path),
+            owner_user_id="usr_bob",
+            owner_username="bob",
+            metadata={},
+        ),
+        SimpleNamespace(
+            id="ses_bob_shared",
+            category="user",
+            status="active",
+            project_id="prj_test",
+            directory=str(tmp_path),
+            owner_user_id="usr_bob",
+            owner_username="bob",
+            metadata={"shared_read_access_user_ids": ["usr_alice"]},
+        ),
+        SimpleNamespace(
+            id="ses_other_project",
+            category="user",
+            status="active",
+            project_id="prj_other",
+            directory=str(tmp_path),
+            owner_user_id="usr_alice",
+            owner_username="alice",
+            metadata={},
+        ),
+    ]
+
+    async def session_delta(
+        session_id: str,
+        *_: object,
+        **__: object,
+    ) -> tuple[SourceSnapshot, bool]:
+        return (
+            SourceSnapshot(
+                source_type="session",
+                source_key=session_id,
+                content=f"evidence from {session_id}",
+                content_hash=session_id,
+                line_count=1,
+            ),
+            False,
+        )
+
+    with (
+        patch(
+            "flocks.session.session.Session.list_all_unfiltered",
+            new=AsyncMock(return_value=sessions),
+        ),
+        patch(
+            "flocks.project.project.Project.shared_project_ids",
+            return_value=set(),
+        ),
+        patch(
+            "flocks.project.project.Project.get_owner_user_id",
+            return_value="usr_alice",
+        ),
+        patch(
+            "flocks.memory.evolution.common.get_current_auth_user",
+            return_value=None,
+        ),
+        patch(
+            "flocks.memory.evolution.common.Config.get_data_path",
+            return_value=tmp_path,
+        ),
+        patch(
+            "flocks.memory.evolution.common._session_delta",
+            new=AsyncMock(side_effect=session_delta),
+        ),
+    ):
+        sources, _, sync_targets = await _collect_dream_sources(
+            MemoryConfig(),
+            DreamTarget.project("prj_test"),
+        )
+        with pytest.raises(PermissionError, match="access denied"):
+            await _collect_dream_sources(
+                MemoryConfig(),
+                DreamTarget.project("prj_test"),
+                caller=AuthUser(id="usr_bob", username="bob", role="member"),
+                parent_session_id="ses_alice",
+            )
+
+    assert [source.source_key for source in sources] == [
+        "ses_alice",
+        "ses_bob_shared",
+    ]
+    assert sync_targets == [
+        ("prj_test", str(tmp_path)),
+        ("prj_test", str(tmp_path)),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_scheduled_dream_skips_targets_without_one_owner() -> None:
+    sessions = [
+        SimpleNamespace(
+            category="user",
+            status="active",
+            project_id="default",
+            owner_user_id="usr_alice",
+        ),
+        SimpleNamespace(
+            category="user",
+            status="active",
+            project_id="default",
+            owner_user_id="usr_bob",
+        ),
+        SimpleNamespace(
+            category="user",
+            status="active",
+            project_id="prj_owned",
+            owner_user_id="usr_alice",
+        ),
+    ]
+    with (
+        patch(
+            "flocks.session.session.Session.list_all_unfiltered",
+            new=AsyncMock(return_value=sessions),
+        ),
+        patch(
+            "flocks.project.project.Project.get_owner_user_id",
+            side_effect=lambda project_id: (
+                "usr_alice" if project_id == "prj_owned" else None
+            ),
+        ),
+    ):
+        targets = await list_dream_targets()
+
+    assert targets == [DreamTarget.project("prj_owned")]
 
 
 @pytest.mark.asyncio

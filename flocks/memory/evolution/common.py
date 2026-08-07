@@ -11,6 +11,7 @@ from pathlib import Path
 import re
 from typing import Any, Literal, Optional
 
+from flocks.auth.context import AuthUser, get_current_auth_user
 from flocks.config import Config
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
@@ -483,17 +484,24 @@ def _daily_delta(
 
 async def list_dream_targets() -> list[DreamTarget]:
     """List deterministic Dream targets backed by non-deleted user Sessions."""
+    from flocks.project.project import Project
     from flocks.session.session import Session
 
     sessions = await Session.list_all_unfiltered()
-    project_ids = {
-        session.project_id for session in sessions if session.category == "user" and session.status != "deleted"
-    }
+    eligible_sessions = [session for session in sessions if session.category == "user" and session.status != "deleted"]
+    project_ids = {session.project_id for session in eligible_sessions}
     targets: list[DreamTarget] = []
-    if "default" in project_ids:
+    default_owner_ids = {
+        session.owner_user_id
+        for session in eligible_sessions
+        if session.project_id == "default" and session.owner_user_id
+    }
+    if "default" in project_ids and len(default_owner_ids) == 1:
         targets.append(DreamTarget.global_only())
     targets.extend(
-        DreamTarget.project(project_id) for project_id in sorted(project_ids) if is_registered_project_id(project_id)
+        DreamTarget.project(project_id)
+        for project_id in sorted(project_ids)
+        if is_registered_project_id(project_id) and Project.get_owner_user_id(project_id) is not None
     )
     return targets
 
@@ -510,16 +518,74 @@ async def _collect_dream_sources(
     config: MemoryConfig,
     target: DreamTarget,
     *,
+    caller: Optional[AuthUser] = None,
+    parent_session_id: Optional[str] = None,
     max_chars: Optional[int] = None,
 ) -> tuple[list[SourceSnapshot], bool, list[tuple[str, str]]]:
     """Collect one bounded bridge batch and its MemoryManager sync targets."""
+    from flocks.project.project import Project
+    from flocks.session.policy import SessionPolicy
     from flocks.session.session import Session
 
     sessions = await Session.list_all_unfiltered()
+    current_session = None
+    if parent_session_id is not None:
+        current_session = next(
+            (session for session in sessions if session.id == parent_session_id),
+            None,
+        )
+        if current_session is None:
+            raise PermissionError("Dream parent Session not found")
+
+    if caller is None:
+        caller = get_current_auth_user()
+    if caller is None:
+        if current_session is not None:
+            caller_id = current_session.owner_user_id
+        elif target.scope == MemoryScope.PROJECT:
+            caller_id = Project.get_owner_user_id(target.scope_id)
+        else:
+            owner_ids = {
+                session.owner_user_id
+                for session in sessions
+                if session.category == "user"
+                and session.status != "deleted"
+                and session.project_id == target.project_id
+                and session.owner_user_id
+            }
+            caller_id = next(iter(owner_ids)) if len(owner_ids) == 1 else None
+
+        if caller_id:
+            caller = AuthUser(
+                id=caller_id,
+                username=caller_id,
+                role="member",
+            )
+
+    if caller is None:
+        raise PermissionError("Dream caller could not be resolved")
+
+    shared_project_ids = Project.shared_project_ids()
+    if current_session is not None and not SessionPolicy.can_read(
+        current_session,
+        caller,
+        shared_project_ids=shared_project_ids,
+    ):
+        raise PermissionError("Dream parent Session access denied")
+
     all_eligible_sessions = [
         session for session in sessions if session.category == "user" and session.status != "deleted"
     ]
-    eligible_sessions = [session for session in all_eligible_sessions if session.project_id == target.project_id]
+    eligible_sessions = [
+        session
+        for session in all_eligible_sessions
+        if session.project_id == target.project_id
+        and SessionPolicy.can_read(
+            session,
+            caller,
+            shared_project_ids=shared_project_ids,
+        )
+    ]
     eligible_session_ids = {session.id for session in eligible_sessions}
     session_prefixes = _unique_session_prefixes(all_eligible_sessions)
     if max_chars is None:
