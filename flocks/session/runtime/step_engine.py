@@ -2,6 +2,7 @@
 
 import asyncio
 import copy
+import hashlib
 import json
 import os
 import re
@@ -36,7 +37,7 @@ from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
 from flocks.session.message import Message, MessageInfo, MessageRole, TextPart
-from flocks.session.prompt import SessionPrompt
+from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
 from flocks.session.core.status import SessionStatus, SessionStatusRetry, SessionStatusBusy
 from flocks.session.core.defaults import (
     DEFAULT_MAX_TOOL_STEPS,
@@ -275,6 +276,8 @@ class StepEngine:
         ] = {}
         self._turn: Optional[Any] = None
         self._model_policy: ModelRoutingPolicy = DEFAULT_MODEL_ROUTING_POLICY
+        self._step_agent: Optional[AgentInfo] = None
+        self._frozen_tool_request: Optional[ModelRequest[ChatMessage]] = None
 
     @classmethod
     def from_turn(
@@ -1293,9 +1296,10 @@ class StepEngine:
         )
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
-        agent = getattr(self, "_step_agent", None)
+        agent = self._step_agent
         if agent is None:
             agent = await Agent.get(agent_name) or await Agent.get("rex")
+            assert agent is not None, "runtime agent invariant violated"
             if self._turn is not None:
                 self._step_agent = agent
 
@@ -1381,7 +1385,7 @@ class StepEngine:
 
         # Build prompts and tools
         tools_started_at = time.perf_counter()
-        frozen_tool_request = getattr(self, "_frozen_tool_request", None)
+        frozen_tool_request = self._frozen_tool_request
         if isinstance(frozen_tool_request, ModelRequest):
             tools = frozen_tool_request.provider_tools()
         else:
@@ -1389,24 +1393,19 @@ class StepEngine:
         self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
         prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 
-        async def sandbox_prompt_factory() -> Optional[str]:
-            return await self._build_sandbox_prompt(agent)
-
-        async def channel_context_prompt_factory() -> Optional[str]:
-            return await self._build_channel_context_prompt()
-
-        async def device_asset_prompt_factory() -> Optional[str]:
-            return await self._build_device_asset_hint()
-
-        try:
-            from flocks.tool.device.store import device_revision as get_device_revision
-
-            current_device_revision = get_device_revision()
-        except Exception:
-            current_device_revision = None
-
         prompts_started_at = time.perf_counter()
-        system_prompts = await SessionPrompt.build_system_prompts(
+        minimal_prompt = await SessionPrompt._is_builtin_system_subagent_session(
+            session_id=self.session.id,
+            agent_name=agent.name,
+        )
+        turn_prompt_context = await self._build_turn_prompt_context(
+            agent=agent,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+            minimal_prompt=minimal_prompt,
+        )
+        system_prompt_blocks = await SessionPrompt.build_system_prompt_blocks(
             session_id=self.session.id,
             session_directory=self.session.directory,
             agent_name=agent.name,
@@ -1419,56 +1418,18 @@ class StepEngine:
                 plan_file=self._turn_plan_file,
             ),
             prompt_tool_names=prompt_tool_names,
-            tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
             static_cache=self._static_cache,
-            sandbox_prompt_factory=sandbox_prompt_factory,
-            channel_context_prompt_factory=channel_context_prompt_factory,
-            tool_catalog_prompt_factory=lambda: self._build_tool_catalog_prompt(agent),
-            device_asset_prompt_factory=device_asset_prompt_factory,
-            device_revision=current_device_revision,
+            turn_context=turn_prompt_context,
             use_text_tool_call_mode=self._should_use_text_tool_call_mode(),
         )
-        self._log_perf("runner.process_step.system_prompts_ready", prompts_started_at, prompt_count=len(system_prompts))
+        self._log_perf(
+            "runner.process_step.system_prompts_ready",
+            prompts_started_at,
+            prompt_count=len(system_prompt_blocks),
+        )
 
         await self._run_session_start_hook(agent)
-
-        if self._turn_additional_context:
-            system_prompts.append(self._turn_additional_context)
-
-        if self._should_use_text_tool_call_mode() and tools:
-            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
-            if text_tool_catalog:
-                system_prompts.append(text_tool_catalog)
-
-        # If the last assistant message only contains tool results and no text,
-        # force a direct answer to avoid repeated tool calls.
-        last_assistant_msg = None
-        for msg in reversed(messages):
-            if msg.role == MessageRole.ASSISTANT:
-                last_assistant_msg = msg
-                break
-        if last_assistant_msg:
-            parts = await Message.parts(last_assistant_msg.id, self.session.id)
-            has_text = any(getattr(p, "type", None) == "text" and getattr(p, "text", "").strip() for p in parts)
-            has_tool_result = any(
-                getattr(p, "type", None) == "tool" and
-                getattr(getattr(p, "state", None), "status", None) in ("completed", "error", "running")
-                for p in parts
-            )
-            if has_tool_result and not has_text:
-                from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
-                system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
-
-            if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
-                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
-                log.warn("runner.repeated_tool_calls_detected", {
-                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
-                    "exact_count": state.get("exact_count", 0),
-                    "step": self._step,
-                })
-                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
-                system_prompts.append(PROMPT_REPEATED_TOOL_CALLS)
 
         # Convert messages to chat format with error handling
         try:
@@ -1479,7 +1440,10 @@ class StepEngine:
             self._queued_user_message_ids = queued_user_message_ids
             chat_messages_started_at = time.perf_counter()
             try:
-                chat_messages = await self._to_chat_messages(messages, system_prompts)
+                chat_messages = await self._to_chat_messages(
+                    messages,
+                    system_prompt_blocks,
+                )
             finally:
                 if previous_queued_user_ids is None:
                     if hasattr(self, "_queued_user_message_ids"):
@@ -1985,6 +1949,162 @@ class StepEngine:
                 "error": str(exc),
             })
 
+    async def _build_turn_prompt_context(
+        self,
+        *,
+        agent: AgentInfo,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+        minimal_prompt: bool = False,
+    ) -> TurnPromptContext:
+        """Collect cached runtime values before deterministic prompt assembly."""
+        if minimal_prompt:
+            return await self._add_turn_prompt_tail(
+                TurnPromptContext(minimal_prompt=True),
+                messages=messages,
+                last_user=last_user,
+                tools=tools,
+            )
+
+        from flocks.config import Config
+        from flocks.project.instance import Instance
+
+        try:
+            from flocks.tool.device.store import device_revision
+
+            current_device_revision = device_revision()
+        except Exception:
+            current_device_revision = None
+
+        current_tool_revision = ToolRegistry.revision()
+        try:
+            config = await Config.get()
+            config_data = config.model_dump(by_alias=True, exclude_none=True)
+            config_instructions = tuple(config.instructions or ())
+        except Exception as exc:
+            log.debug("runner.prompt_context.config_error", {"error": str(exc)})
+            config_data = None
+            config_instructions = ()
+
+        worktree = Instance.get_worktree()
+        config_fingerprint = hashlib.sha256(
+            json.dumps(
+                config_data,
+                ensure_ascii=False,
+                sort_keys=True,
+                default=str,
+            ).encode("utf-8"),
+        ).hexdigest()
+        source_key = (
+            self.session.id,
+            agent.name,
+            self.session.directory,
+            worktree,
+            current_tool_revision,
+            current_device_revision,
+            config_fingerprint,
+        )
+        cached = self._static_cache.get("runtime_prompt_context")
+        source_context = None
+        if isinstance(cached, dict) and cached.get("key") == source_key:
+            candidate = cached.get("context")
+            if isinstance(candidate, TurnPromptContext):
+                source_context = candidate
+
+        if source_context is None:
+            sandbox_context, channel_context, device_asset_hint = await asyncio.gather(
+                self._build_sandbox_prompt(agent, config_data=config_data),
+                self._build_channel_context_prompt(),
+                self._build_device_asset_hint(),
+            )
+            source_context = TurnPromptContext(
+                tool_catalog=self._build_tool_catalog_prompt(agent),
+                device_asset_hint=device_asset_hint,
+                sandbox_context=sandbox_context,
+                channel_context=channel_context,
+                worktree=worktree,
+                config_instructions=config_instructions,
+                tool_revision=current_tool_revision,
+                device_revision=current_device_revision,
+                minimal_prompt=False,
+            )
+            self._static_cache["runtime_prompt_context"] = {
+                "key": source_key,
+                "context": source_context,
+            }
+
+        return await self._add_turn_prompt_tail(
+            source_context,
+            messages=messages,
+            last_user=last_user,
+            tools=tools,
+        )
+
+    async def _add_turn_prompt_tail(
+        self,
+        source_context: TurnPromptContext,
+        *,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        tools: List[Dict[str, Any]],
+    ) -> TurnPromptContext:
+        """Add uncached per-step context and reminders to a source snapshot."""
+        text_tool_catalog = None
+        if self._should_use_text_tool_call_mode() and tools:
+            text_tool_catalog = self._build_text_tool_call_catalog_prompt(tools)
+
+        tool_results_reminder = None
+        repeated_tool_calls_reminder = None
+        last_assistant_msg = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.role == MessageRole.ASSISTANT
+            ),
+            None,
+        )
+        if last_assistant_msg is not None:
+            parts = await Message.parts(last_assistant_msg.id, self.session.id)
+            has_text = any(
+                getattr(part, "type", None) == "text"
+                and getattr(part, "text", "").strip()
+                for part in parts
+            )
+            has_tool_result = any(
+                getattr(part, "type", None) == "tool"
+                and getattr(getattr(part, "state", None), "status", None)
+                in ("completed", "error", "running")
+                for part in parts
+            )
+            if has_tool_result and not has_text:
+                from flocks.session.prompt_strings import (
+                    PROMPT_TOOL_RESULTS_AVAILABLE,
+                )
+
+                tool_results_reminder = PROMPT_TOOL_RESULTS_AVAILABLE
+
+            if has_tool_result and self._should_warn_about_tool_loop(
+                last_user_id=last_user.id,
+            ):
+                state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
+                log.warn("runner.repeated_tool_calls_detected", {
+                    "tool_name": state.get("last_signature", "").split(":", 1)[0],
+                    "exact_count": state.get("exact_count", 0),
+                    "step": self._step,
+                })
+                from flocks.session.prompt_strings import PROMPT_REPEATED_TOOL_CALLS
+
+                repeated_tool_calls_reminder = PROMPT_REPEATED_TOOL_CALLS
+
+        return replace(
+            source_context,
+            additional_context=self._turn_additional_context,
+            text_tool_catalog=text_tool_catalog,
+            tool_results_reminder=tool_results_reminder,
+            repeated_tool_calls_reminder=repeated_tool_calls_reminder,
+        )
+
     async def _build_device_asset_hint(self) -> Optional[str]:
         """Return concise device-aware tool guidance plus enabled device summary."""
         try:
@@ -2027,15 +2147,22 @@ class StepEngine:
             "如果同类设备有多个候选，不要猜测，先询问用户选择。"
         )
 
-    async def _build_sandbox_prompt(self, agent: AgentInfo) -> Optional[str]:
+    async def _build_sandbox_prompt(
+        self,
+        agent: AgentInfo,
+        *,
+        config_data: Optional[Dict[str, Any]] = None,
+    ) -> Optional[str]:
         """Build sandbox context prompt when sandboxing is active."""
         try:
-            from flocks.config import Config
             from flocks.session.core.session_state import get_main_session_id
             from flocks.sandbox.system_prompt import build_sandbox_system_prompt
 
-            cfg = await Config.get()
-            config_data = cfg.model_dump(by_alias=True, exclude_none=True)
+            if config_data is None:
+                from flocks.config import Config
+
+                config = await Config.get()
+                config_data = config.model_dump(by_alias=True, exclude_none=True)
             session_key = self.session.id
             main_session_key = get_main_session_id() or self.session.id
             return await build_sandbox_system_prompt(
@@ -2550,14 +2677,26 @@ class StepEngine:
 
     def _build_system_message_content(
         self,
-        system_prompts: List[str],
+        system_prompts: List[SystemPromptBlock] | List[str],
     ) -> str | list[dict[str, Any]]:
         """Format system prompts for the active provider.
 
         Anthropic supports structured system blocks, which lets us place a
         conservative cache breakpoint before the dynamic runtime tail.
         """
-        prompt_parts = [prompt for prompt in system_prompts if prompt and prompt.strip()]
+        typed_blocks = [
+            block
+            for block in system_prompts
+            if isinstance(block, SystemPromptBlock) and block.content.strip()
+        ]
+        if typed_blocks:
+            prompt_parts = [block.content for block in typed_blocks]
+        else:
+            prompt_parts = [
+                prompt
+                for prompt in system_prompts
+                if isinstance(prompt, str) and prompt.strip()
+            ]
         if not prompt_parts:
             return ""
 
@@ -2565,7 +2704,19 @@ class StepEngine:
         if "anthropic" not in provider_lower:
             return "\n\n".join(prompt_parts)
 
-        cache_break_index = max(0, len(prompt_parts) - 3)
+        if typed_blocks:
+            first_runtime_tail = next(
+                (
+                    index
+                    for index, block in enumerate(typed_blocks)
+                    if block.cache_scope == "runtime_tail"
+                ),
+                len(typed_blocks),
+            )
+            cache_break_index = max(0, first_runtime_tail - 1)
+        else:
+            # Compatibility for callers still passing plain strings.
+            cache_break_index = max(0, len(prompt_parts) - 3)
         blocks: list[dict[str, Any]] = []
         for index, prompt in enumerate(prompt_parts):
             block: dict[str, Any] = {
@@ -2580,7 +2731,7 @@ class StepEngine:
     async def _to_chat_messages(
         self,
         messages: List[MessageInfo],
-        system_prompts: List[str],
+        system_prompts: List[SystemPromptBlock] | List[str],
     ) -> List[ChatMessage]:
         """
         Convert messages to chat format with tool calls.
