@@ -21,7 +21,6 @@ from flocks.session.runtime.continuation_policy import (
 )
 from flocks.session.runtime.contracts import (
     AgentRunOutcome,
-    AgentRunState,
     AgentRunStatus,
     RuntimeModel,
 )
@@ -195,9 +194,6 @@ class SessionLoop:
                         turn.prepared_user_id or processed_user_id
                     )
                     outcome = await cls._run_logical_input(turn)
-                    processed_user_id = (
-                        outcome.state.current_user_id or processed_user_id
-                    )
                     if await cls._should_continue(
                         turn,
                         continuation_policy,
@@ -208,7 +204,6 @@ class SessionLoop:
                     outcome = await cls._handle_execution_error(
                         turn,
                         exc,
-                        processed_user_id,
                     )
 
                 if await cls._settle_or_continue(
@@ -230,7 +225,6 @@ class SessionLoop:
         turn: LoopContext,
     ) -> AgentRunOutcome[Any]:
         """Execute one prepared logical input through AgentLoop."""
-        turn.reset()
         return await AgentLoop().run(
             turn,
             StepEngine.from_turn(turn),
@@ -474,9 +468,7 @@ class SessionLoop:
             }
             else None
         )
-        unhandled_runtime_error = bool(
-            outcome.state.metadata.get("unhandled_runtime_error"),
-        )
+        unhandled_runtime_error = outcome.unhandled_error
         return LoopResult(
             action=(
                 "error"
@@ -582,7 +574,6 @@ class SessionLoop:
     async def _handle_execution_error(
         turn: LoopContext,
         error: Exception,
-        processed_user_id: Optional[str],
     ) -> AgentRunOutcome[Any]:
         session_id = turn.session.id
         log.error(
@@ -610,19 +601,10 @@ class SessionLoop:
                 "session.error_event_failed",
                 {"error": str(publish_error)},
             )
-        state = AgentRunState[Any](
-            session_id=session_id,
-            agent_name=turn.agent_name,
-            active_model=RuntimeModel(turn.provider_id, turn.model_id),
-            model_turn_index=turn.step,
-            trace_step_offset=turn.trace_step_offset,
-            current_user_id=processed_user_id,
-            metadata={"unhandled_runtime_error": True},
-        )
         return AgentRunOutcome(
             status=AgentRunStatus.FATAL_FAILURE,
-            state=state,
             error=str(error),
+            unhandled_error=True,
         )
 
     @classmethod

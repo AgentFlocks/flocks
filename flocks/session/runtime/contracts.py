@@ -109,12 +109,9 @@ class ModelRequest(Generic[ProviderMessageT]):
 class AttemptEffects:
     """Observable effects accumulated during one provider attempt."""
 
-    request_sent: bool = False
     received_chunk: bool = False
     observable_output_started: bool = False
     tool_execution_started: bool = False
-    tool_execution_completed: bool = False
-    externally_visible: bool = False
 
     @property
     def replay_safe(self) -> bool:
@@ -170,49 +167,16 @@ class StepResult:
     error: Optional[str] = None
     usage: Optional[dict[str, int]] = None
     failure: Optional[StepFailure] = None
-    effective_model: Optional[RuntimeModel] = None
-
-
-@dataclass
-class AgentRunState(Generic[MessageT]):
-    """Agent-loop-owned mutable state for one resumable agent run."""
-
-    session_id: str
-    agent_name: str
-    active_model: RuntimeModel
-    messages: list[MessageT] = field(default_factory=list)
-    model_turn_index: int = 0
-    trace_step_offset: int = 0
-    current_user_id: Optional[str] = None
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-    @property
-    def trace_step(self) -> int:
-        """Return the session-cumulative model-turn index."""
-        return self.trace_step_offset + self.model_turn_index
 
 
 @dataclass(frozen=True)
 class ModelTurnSnapshot(Generic[MessageT]):
     """Immutable input presented to a step engine for one model turn."""
 
-    session_id: str
-    agent_name: str
     active_model: RuntimeModel
-    model_turn_index: int
     trace_step: int
     messages: tuple[MessageT, ...]
     last_user: MessageT
-    metadata: Mapping[str, Any] = field(default_factory=dict)
-
-    def __post_init__(self) -> None:
-        """Defensively freeze caller-owned collections."""
-        object.__setattr__(self, "messages", tuple(self.messages))
-        object.__setattr__(
-            self,
-            "metadata",
-            MappingProxyType(dict(self.metadata)),
-        )
 
 
 class TurnPreparationStatus(str, Enum):
@@ -221,7 +185,6 @@ class TurnPreparationStatus(str, Enum):
     READY = "ready"
     CONTINUE = "continue"
     COMPLETE = "complete"
-    FATAL = "fatal"
 
 
 @dataclass(frozen=True)
@@ -231,25 +194,14 @@ class ModelTurnPreparation(Generic[MessageT]):
     status: TurnPreparationStatus
     snapshot: Optional[ModelTurnSnapshot[MessageT]] = None
     last_message: Optional[MessageT] = None
-    error: Optional[str] = None
-
-
-@dataclass(frozen=True)
-class QueuedInputBatch(Generic[MessageT]):
-    """New input made visible to the loop at a model-turn boundary."""
-
-    messages: tuple[MessageT, ...] = ()
 
 
 @dataclass(frozen=True)
 class ModelTurnBoundary(Generic[MessageT]):
     """Committed session view after one model turn finishes."""
 
-    messages: tuple[MessageT, ...]
     last_message: Optional[MessageT] = None
-    queued_inputs: QueuedInputBatch[MessageT] = field(
-        default_factory=QueuedInputBatch,
-    )
+    input_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -281,7 +233,8 @@ class AgentRunOutcome(Generic[MessageT]):
     """Structured terminal result for a resumable agent-loop invocation."""
 
     status: AgentRunStatus
-    state: AgentRunState[MessageT]
+    last_user: Optional[MessageT] = None
     last_message: Optional[MessageT] = None
     error: Optional[str] = None
     step_result: Optional[StepResult] = None
+    unhandled_error: bool = False

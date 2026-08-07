@@ -5,16 +5,12 @@ Verifies that:
 1. SessionContext protocol is properly defined
 2. DefaultSessionContext implements all methods
 3. DefaultSessionContext delegates to underlying session modules
-4. LoopContext carries session_store
-5. StepEngine accepts session_store
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from flocks.session.core.context import SessionContext, DefaultSessionContext
-from flocks.session.session_loop import LoopContext
-from flocks.session.runtime.step_engine import StepEngine
 
 
 class TestSessionContextProtocol:
@@ -135,84 +131,3 @@ class TestDefaultSessionContext:
         with patch("flocks.session.session.Session.touch", new_callable=AsyncMock) as mock_touch:
             await ctx.touch()
             mock_touch.assert_called_once_with("proj-1", "ses-123")
-
-
-class TestLoopContextSessionStore:
-    """LoopContext should carry session_store."""
-
-    def test_loop_context_has_session_store_field(self):
-        import asyncio
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        ctx = LoopContext(
-            session=session,
-            provider_id="anthropic",
-            model_id="claude-sonnet-4",
-            agent_name="rex",
-        )
-        assert ctx.session_store is None
-
-    def test_loop_context_with_session_store(self):
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        session_store = DefaultSessionContext(session)
-        ctx = LoopContext(
-            session=session,
-            provider_id="anthropic",
-            model_id="claude-sonnet-4",
-            agent_name="rex",
-            session_store=session_store,
-        )
-        assert ctx.session_store is session_store
-        assert ctx.session_store.session_id == "test"
-
-    def test_loop_context_tracks_observed_prompt_tokens(self):
-        # B3 — LoopContext must expose ``last_observed_prompt_tokens`` so
-        # the overflow decision can prefer the provider's reported usage
-        # over our synthetic estimate.
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-
-        ctx = LoopContext(
-            session=session,
-            provider_id="anthropic",
-            model_id="claude-sonnet-4",
-            agent_name="rex",
-        )
-        assert ctx.last_observed_prompt_tokens == 0
-        ctx.last_observed_prompt_tokens = 123_456
-        assert ctx.last_observed_prompt_tokens == 123_456
-
-
-class TestStepEngineSessionStore:
-    """StepEngine should accept session_store."""
-
-    def test_step_engine_accepts_session_store(self):
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        session_store = DefaultSessionContext(session)
-        runner = StepEngine(
-            session=session,
-            session_store=session_store,
-        )
-        assert runner.session_store is session_store
-
-    def test_step_engine_session_store_defaults_to_none(self):
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        runner = StepEngine(session=session)
-        assert runner.session_store is None

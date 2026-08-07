@@ -140,13 +140,11 @@ class ContextInfo(BaseModel):
 
 @dataclass(frozen=True)
 class SystemPromptBlock:
-    """Internal system prompt layer with cache metadata."""
+    """Assembled system prompt layer."""
 
     name: str
     content: str
     cache_scope: str
-    digest_inputs: Dict[str, Any]
-    cache_key: str
 
 
 @dataclass(frozen=True)
@@ -843,8 +841,6 @@ class SessionPrompt:
             name=name,
             content=content,
             cache_scope=cache_scope,
-            digest_inputs=digest_inputs,
-            cache_key=cache_key,
         )
 
     @classmethod
@@ -870,8 +866,6 @@ class SessionPrompt:
             name=name,
             content=content,
             cache_scope=cache_scope,
-            digest_inputs=digest_inputs,
-            cache_key=cache_key,
         )
 
     @classmethod

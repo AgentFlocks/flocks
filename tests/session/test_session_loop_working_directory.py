@@ -6,9 +6,7 @@ from flocks.bus.bus import Bus
 from flocks.session.runtime.agent_loop import AgentLoop
 from flocks.session.runtime.contracts import (
     AgentRunOutcome,
-    AgentRunState,
     AgentRunStatus,
-    RuntimeModel,
 )
 from flocks.session.message import Message
 from flocks.session.session import Session, SessionInfo
@@ -25,14 +23,8 @@ async def test_run_uses_runtime_working_directory(monkeypatch: pytest.MonkeyPatc
     )
 
     async def run_agent_turn(context, _engine):
-        state = AgentRunState(
-            session_id=context.session.id,
-            agent_name=context.agent_name,
-            active_model=RuntimeModel(context.provider_id, context.model_id),
-        )
         return AgentRunOutcome(
             status=AgentRunStatus.ABORTED,
-            state=state,
         )
 
     run_turn = AsyncMock(side_effect=run_agent_turn)

@@ -14,11 +14,9 @@ from dataclasses import dataclass, field
 from datetime import datetime
 
 from flocks.session.runtime.contracts import (
-    AgentRunState,
     ModelTurnBoundary,
     ModelTurnPreparation,
     ModelTurnSnapshot,
-    QueuedInputBatch,
     RuntimeModel,
     StepAction,
     StepResult,
@@ -129,21 +127,6 @@ class LoopContext:
     session_start_pending: bool = False
     model_policy: Optional[Any] = field(default=None, repr=False)
     continuation_policy: Optional[Any] = field(default=None, repr=False)
-    state: AgentRunState[MessageInfo] = field(init=False, repr=False)
-
-    def __post_init__(self) -> None:
-        self.reset()
-
-    def reset(self) -> None:
-        """Start a fresh AgentLoop state for the current logical input."""
-        self.state = AgentRunState[MessageInfo](
-            session_id=self.session.id,
-            agent_name=self.agent_name,
-            active_model=RuntimeModel(self.provider_id, self.model_id),
-            model_turn_index=self.step,
-            trace_step_offset=self.trace_step_offset,
-            current_user_id=self.turn_user_id,
-        )
 
     @property
     def trace_step(self) -> int:
@@ -204,10 +187,8 @@ class LoopContext:
         self,
     ) -> ModelTurnPreparation[MessageInfo]:
         """Prepare one immutable model-turn snapshot from session state."""
-        state = self.state
         SessionStatus.set(self.session.id, SessionStatusBusy())
         self.step += 1
-        state.model_turn_index = self.step
         turn_state = set_turn_state(
             self.session.id,
             step=self.step,
@@ -315,8 +296,7 @@ class LoopContext:
                 last_message=last_assistant,
             )
 
-        state.current_user_id = last_user.id
-        state.metadata["last_user"] = last_user
+        self.prepared_user_id = last_user.id
         await self._prepare_memory()
         self._schedule_title_generation(last_user, messages)
 
@@ -338,15 +318,10 @@ class LoopContext:
             return context_preparation
 
         active_model = RuntimeModel(self.provider_id, self.model_id)
-        state.active_model = active_model
-        state.messages = list(messages)
         return ModelTurnPreparation(
             status=TurnPreparationStatus.READY,
             snapshot=ModelTurnSnapshot(
-                session_id=self.session.id,
-                agent_name=self.agent_name,
                 active_model=active_model,
-                model_turn_index=self.step,
                 trace_step=self.trace_step,
                 messages=tuple(messages),
                 last_user=last_user,
@@ -369,7 +344,15 @@ class LoopContext:
         else:
             post_messages = await Message.list(self.session.id)
 
-        last_user = self.state.metadata.get("last_user")
+        last_user = next(
+            (
+                message
+                for message in reversed(post_messages)
+                if message.role == MessageRole.USER
+                and message.id == self.prepared_user_id
+            ),
+            None,
+        )
         last_message = next(
             (
                 message
@@ -448,11 +431,8 @@ class LoopContext:
             )
 
         return ModelTurnBoundary(
-            messages=tuple(post_messages),
             last_message=last_message,
-            queued_inputs=QueuedInputBatch(
-                messages=(queued_user,) if queued_user is not None else (),
-            ),
+            input_available=queued_user is not None,
         )
 
     async def has_late_input(self, processed_user_id: Optional[str]) -> bool:

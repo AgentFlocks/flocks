@@ -8,14 +8,17 @@ import pytest
 
 from flocks.session.runtime.continuation_policy import DEFAULT_CONTINUATION_POLICY
 from flocks.session.runtime.agent_loop import AgentLoop
-from flocks.session.runtime.contracts import ModelTurnSnapshot, RuntimeModel
+from flocks.session.runtime.contracts import (
+    AttemptEffects,
+    ModelTurnSnapshot,
+    RuntimeModel,
+)
 from flocks.session.message import Message, MessageRole
 from flocks.session.runtime.model_policy import (
     DEFAULT_MODEL_ROUTING_POLICY,
     AutoFailoverCooldown,
 )
 from flocks.session.runtime.step_engine import (
-    LlmAttemptState,
     StepEngine,
     StepFailure,
     StepResult,
@@ -94,7 +97,7 @@ def _failure(
     reason: str = "server_error",
     safe: bool = True,
 ) -> StepResult:
-    state = LlmAttemptState(observable_output_started=not safe)
+    state = AttemptEffects(observable_output_started=not safe)
     message = "provider failed"
     return StepResult(
         action="stop",
@@ -120,10 +123,7 @@ async def _process_step_with_failover(
     turn.callbacks = callbacks
     return await StepEngine.from_turn(turn).run(
         ModelTurnSnapshot(
-            session_id=turn.session.id,
-            agent_name=turn.agent_name,
             active_model=RuntimeModel(turn.provider_id, turn.model_id),
-            model_turn_index=turn.step,
             trace_step=turn.trace_step,
             messages=tuple(messages),
             last_user=last_user,
@@ -218,7 +218,7 @@ async def test_auto_runner_uses_standard_retry_policy(
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -284,7 +284,7 @@ async def test_last_auto_candidate_uses_standard_retry_policy(
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -457,7 +457,7 @@ async def test_reasoning_only_empty_response_is_not_replayed(monkeypatch):
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -599,7 +599,7 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -711,7 +711,7 @@ async def test_preflight_chain_exhaustion_persists_final_error(monkeypatch):
                 assistant_message_id=None,
                 reason="provider_unavailable",
                 allow_fallback=True,
-                attempt_state=LlmAttemptState(),
+                attempt_state=AttemptEffects(),
                 attempts=0,
             ),
         )
@@ -1569,20 +1569,13 @@ async def test_unsupported_session_loop_ignores_auto_authorization(
     async def run_turn(_loop, ctx, _engine):
         from flocks.session.runtime.contracts import (
             AgentRunOutcome,
-            AgentRunState,
             AgentRunStatus,
         )
 
         nonlocal captured_ctx
         captured_ctx = ctx
-        state = AgentRunState(
-            session_id=ctx.session.id,
-            agent_name=ctx.agent_name,
-            active_model=RuntimeModel(ctx.provider_id, ctx.model_id),
-        )
         return AgentRunOutcome(
             status=AgentRunStatus.ABORTED,
-            state=state,
         )
 
     build_candidates = AsyncMock()

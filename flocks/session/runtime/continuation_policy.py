@@ -121,7 +121,7 @@ class ContinuationPolicy:
         outcome: AgentRunOutcome[MessageInfo],
     ) -> ContinuationDecision[MessageInfo]:
         """Resolve goal and TurnFinish into a new logical turn."""
-        last_user = outcome.state.metadata.get("last_user")
+        last_user = outcome.last_user
         last_message = outcome.last_message
         if last_user is None or last_message is None:
             await self.publish_turn_stopped(

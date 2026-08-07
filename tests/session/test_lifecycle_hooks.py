@@ -295,7 +295,7 @@ async def test_real_user_arriving_during_goal_evaluation_wins() -> None:
     ctx.callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
     create_message = AsyncMock()
     outcome = SimpleNamespace(
-        state=SimpleNamespace(metadata={"last_user": user}),
+        last_user=user,
         last_message=assistant,
     )
 

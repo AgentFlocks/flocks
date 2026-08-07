@@ -1,11 +1,7 @@
 """
 Tests for Phase 1: Unified UI entry via SessionLoop.
 
-Verifies that:
-1. LoopCallbacks carries model, tool, and event callbacks directly
-2. StepEngine receives the same explicit callback object
-3. The runtime has no reverse dependency on CLI callback globals
-4. _resolve_model implements 5-level priority correctly
+Verifies that _resolve_model implements its model-selection priority.
 """
 
 import asyncio
@@ -13,42 +9,6 @@ import asyncio
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
-
-from flocks.session.session_loop import LoopCallbacks
-
-
-class TestLoopCallbacksFields:
-    """LoopCallbacks should carry all runtime callbacks directly."""
-
-    def test_event_publish_callback_field_exists(self):
-        cb = LoopCallbacks()
-        assert hasattr(cb, 'event_publish_callback')
-        assert cb.event_publish_callback is None
-
-    def test_event_publish_callback_can_be_set(self):
-        publish = AsyncMock()
-        cb = LoopCallbacks(event_publish_callback=publish)
-        assert cb.event_publish_callback is publish
-
-    def test_runtime_callbacks_are_flat(self):
-        on_text_delta = AsyncMock()
-        on_tool_start = AsyncMock()
-        callbacks = LoopCallbacks(
-            on_text_delta=on_text_delta,
-            on_tool_start=on_tool_start,
-        )
-        assert callbacks.on_text_delta is on_text_delta
-        assert callbacks.on_tool_start is on_tool_start
-
-
-class TestCallbackIdentity:
-    """The runtime should use the callbacks explicitly injected by callers."""
-
-    def test_explicit_callbacks_are_complete(self):
-        publish = AsyncMock()
-        cb = LoopCallbacks(event_publish_callback=publish)
-        assert cb.event_publish_callback is publish
-
 
 class TestResolveModel:
     """Test the _resolve_model 5-level priority."""

@@ -2,7 +2,6 @@
 
 import asyncio
 import copy
-import hashlib
 import json
 import os
 import re
@@ -225,9 +224,6 @@ def _find_retryable_transport_exception(exception: Exception) -> Optional[Except
     return None
 
 
-LlmAttemptState = AttemptEffects
-
-
 class StepCancelled(Exception):
     """Signal that the user cancelled the active session step."""
 
@@ -243,7 +239,6 @@ class StepEngine:
         agent_name: Optional[str] = None,
         callbacks: Optional[LoopCallbacks] = None,
         abort_event: Optional[asyncio.Event] = None,
-        session_store: Optional[Any] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
         static_cache: Optional[Dict[str, Any]] = None,
         defer_step_errors: bool = False,
@@ -261,7 +256,6 @@ class StepEngine:
         self._external_abort = abort_event  # External abort event (e.g. from SessionLoop)
         self._step = 0
         self._recent_tool_calls: List[tuple[str, str]] = []  # Track recent (tool_name, args_json) for doom loop
-        self.session_store = session_store
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
         self._defer_step_errors = defer_step_errors
@@ -269,7 +263,7 @@ class StepEngine:
         self._turn_additional_context = turn_additional_context
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
-        self._attempt_state = LlmAttemptState()
+        self._attempt_state = AttemptEffects()
         self._hooked_model_requests: Dict[
             str,
             Tuple[ModelRequest[ChatMessage], bool],
@@ -293,7 +287,6 @@ class StepEngine:
             agent_name=turn.agent_name,
             abort_event=turn.abort_event,
             callbacks=turn.callbacks,
-            session_store=turn.session_store,
             memory_bootstrap_data=turn.memory_bootstrap_data,
             static_cache=turn.step_static_cache,
             defer_step_errors=turn.auto_failover,
@@ -325,7 +318,6 @@ class StepEngine:
             result = await self._run_candidate(
                 replace(snapshot, active_model=active_model),
             )
-            result.effective_model = active_model
             failure = result.failure
             if not turn.auto_failover or failure is None:
                 return result
@@ -1255,13 +1247,10 @@ class StepEngine:
         decision: FailoverDecision,
         attempts: int,
     ) -> StepResult:
-        state = LlmAttemptState(
-            request_sent=self._attempt_state.request_sent,
+        state = AttemptEffects(
             received_chunk=self._attempt_state.received_chunk,
             observable_output_started=self._attempt_state.observable_output_started,
             tool_execution_started=self._attempt_state.tool_execution_started,
-            tool_execution_completed=self._attempt_state.tool_execution_completed,
-            externally_visible=self._attempt_state.externally_visible,
         )
         return StepResult(
             action="stop",
@@ -1283,7 +1272,7 @@ class StepEngine:
         last_user: MessageInfo,
     ) -> StepResult:
         """Process a single step in the loop with retry logic."""
-        self._attempt_state = LlmAttemptState()
+        self._attempt_state = AttemptEffects()
         turn_execution_mode = runtime_execution_mode(
             getattr(last_user, "executionMode", None)
         )
@@ -1522,8 +1511,6 @@ class StepEngine:
             provider_id=self.provider_id,
             parent_id=last_user.id,
         )
-        self._attempt_state.externally_visible = True
-
         # Publish assistant message SSE event so frontends can show the message card
         if self.callbacks.event_publish_callback:
             import time as _time
@@ -1988,51 +1975,22 @@ class StepEngine:
             config_instructions = ()
 
         worktree = Instance.get_worktree()
-        config_fingerprint = hashlib.sha256(
-            json.dumps(
-                config_data,
-                ensure_ascii=False,
-                sort_keys=True,
-                default=str,
-            ).encode("utf-8"),
-        ).hexdigest()
-        source_key = (
-            self.session.id,
-            agent.name,
-            self.session.directory,
-            worktree,
-            current_tool_revision,
-            current_device_revision,
-            config_fingerprint,
+        sandbox_context, channel_context, device_asset_hint = await asyncio.gather(
+            self._build_sandbox_prompt(agent, config_data=config_data),
+            self._build_channel_context_prompt(),
+            self._build_device_asset_hint(),
         )
-        cached = self._static_cache.get("runtime_prompt_context")
-        source_context = None
-        if isinstance(cached, dict) and cached.get("key") == source_key:
-            candidate = cached.get("context")
-            if isinstance(candidate, TurnPromptContext):
-                source_context = candidate
-
-        if source_context is None:
-            sandbox_context, channel_context, device_asset_hint = await asyncio.gather(
-                self._build_sandbox_prompt(agent, config_data=config_data),
-                self._build_channel_context_prompt(),
-                self._build_device_asset_hint(),
-            )
-            source_context = TurnPromptContext(
-                tool_catalog=self._build_tool_catalog_prompt(agent),
-                device_asset_hint=device_asset_hint,
-                sandbox_context=sandbox_context,
-                channel_context=channel_context,
-                worktree=worktree,
-                config_instructions=config_instructions,
-                tool_revision=current_tool_revision,
-                device_revision=current_device_revision,
-                minimal_prompt=False,
-            )
-            self._static_cache["runtime_prompt_context"] = {
-                "key": source_key,
-                "context": source_context,
-            }
+        source_context = TurnPromptContext(
+            tool_catalog=self._build_tool_catalog_prompt(agent),
+            device_asset_hint=device_asset_hint,
+            sandbox_context=sandbox_context,
+            channel_context=channel_context,
+            worktree=worktree,
+            config_instructions=config_instructions,
+            tool_revision=current_tool_revision,
+            device_revision=current_device_revision,
+            minimal_prompt=False,
+        )
 
         return await self._add_turn_prompt_tail(
             source_context,
@@ -3400,7 +3358,6 @@ class StepEngine:
             tool_name: str,
             result: ToolResult,
         ) -> None:
-            self._attempt_state.tool_execution_completed = True
             if self.callbacks.on_tool_end:
                 await self.callbacks.on_tool_end(tool_name, result)
 
@@ -3564,7 +3521,6 @@ class StepEngine:
             "local_endpoint": stream_timeouts.is_local,
         })
         try:
-            self._attempt_state.request_sent = True
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
                     model_id=self.model_id,
