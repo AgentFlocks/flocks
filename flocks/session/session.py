@@ -1056,13 +1056,11 @@ class Session:
     ) -> bool:
         """Stop persisted and in-memory work before committing archive state."""
         from flocks.session.interaction_queue import InteractionQueue
-        from flocks.session.runner import SessionRunner
         from flocks.session.session_loop import SessionLoop
 
         session_ids = [session.id for session in sessions]
         for session_id in session_ids:
             SessionLoop.abort(session_id)
-            SessionRunner.cancel(session_id)
             if clear_prompt_queue:
                 await InteractionQueue.clear(session_id)
             try:

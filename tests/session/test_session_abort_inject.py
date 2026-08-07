@@ -2,7 +2,7 @@
 Tests for session abort and inject functionality.
 
 Tests cover:
-- SessionRunner external abort_event propagation
+- StepEngine external abort_event propagation
 - SessionLoop abort mechanism
 - Inject endpoint logic (message creation without starting new loop)
 - _should_exit behavior with injected messages
@@ -14,12 +14,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from flocks.session.runtime.continuation_policy import DEFAULT_CONTINUATION_POLICY
+from flocks.session.runtime.session_turn import SessionTurn
 from flocks.session.message import ToolPart, ToolStateCompleted
 from flocks.session.goal import GoalDecision
-from flocks.session.session_loop import SessionLoop, LoopCallbacks, LoopContext, LoopResult
-from flocks.session.runner import SessionRunner, StepResult
+from flocks.session.session_loop import (
+    LoopCallbacks,
+    LoopContext,
+    SessionLoop,
+)
+from flocks.session.runtime.step_engine import StepEngine, StepResult
 from flocks.session.session import SessionInfo
 from flocks.server.routes import session as session_routes
+from tests.session_runtime_testkit import run_logical_turns
 
 
 def _make_session_info(session_id: str = "test_session") -> SessionInfo:
@@ -55,14 +62,14 @@ def _make_completed_tool_part(message_id: str) -> ToolPart:
 # ---------------------------------------------------------------------------
 
 class TestAbortPropagation:
-    """Test that abort_event propagates from SessionLoop to SessionRunner."""
+    """Test that abort_event propagates from SessionLoop to StepEngine."""
 
     def test_runner_accepts_external_abort_event(self):
-        """SessionRunner should accept an optional external abort_event."""
+        """StepEngine should accept an optional external abort_event."""
         external_event = asyncio.Event()
         session_info = _make_session_info()
 
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session_info,
             abort_event=external_event,
         )
@@ -75,9 +82,9 @@ class TestAbortPropagation:
         assert runner.is_aborted is True
 
     def test_runner_internal_abort_still_works(self):
-        """SessionRunner's own abort() method should still work."""
+        """StepEngine's own abort() method should still work."""
         session_info = _make_session_info()
-        runner = SessionRunner(session=session_info)
+        runner = StepEngine(session=session_info)
 
         assert runner.is_aborted is False
         runner.abort()
@@ -88,7 +95,7 @@ class TestAbortPropagation:
         external_event = asyncio.Event()
         session_info = _make_session_info()
 
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session_info,
             abort_event=external_event,
         )
@@ -111,7 +118,7 @@ class TestAbortPropagation:
     def test_runner_without_external_event(self):
         """Runner created without abort_event should still work normally."""
         session_info = _make_session_info()
-        runner = SessionRunner(session=session_info)
+        runner = StepEngine(session=session_info)
 
         assert runner._external_abort is None
         assert runner.is_aborted is False
@@ -131,11 +138,11 @@ class TestAbortPropagation:
             "flocks.session.session_loop.Message.list",
             AsyncMock(return_value=[]),
         ), patch(
+            "flocks.session.runtime.session_turn.Message.list",
+            AsyncMock(return_value=[]),
+        ), patch(
             "flocks.session.orphan_tools.abort_orphan_running_parts",
             AsyncMock(return_value=0),
-        ), patch(
-            "flocks.session.session_loop.SessionLoop._run_loop",
-            AsyncMock(return_value=LoopResult(action="stop")),
         ), patch(
             "flocks.session.session_loop.Session.touch",
             AsyncMock(),
@@ -186,7 +193,7 @@ class TestSessionLoopAbort:
         )
 
         # Register the context
-        SessionLoop._active_loops["test_loop_abort"] = ctx
+        SessionLoop._active_turns["test_loop_abort"] = ctx
 
         try:
             assert ctx.should_abort() is False
@@ -195,10 +202,10 @@ class TestSessionLoopAbort:
             assert ctx.should_abort() is True
         finally:
             # Clean up
-            SessionLoop._active_loops.pop("test_loop_abort", None)
+            SessionLoop._active_turns.pop("test_loop_abort", None)
 
     def test_is_running(self):
-        """is_running should reflect _active_loops state."""
+        """is_running should reflect the runtime lease registry."""
         assert SessionLoop.is_running("not_there") is False
 
         session_info = _make_session_info("running_test")
@@ -208,12 +215,12 @@ class TestSessionLoopAbort:
             model_id="test",
             agent_name="test",
         )
-        SessionLoop._active_loops["running_test"] = ctx
+        SessionLoop._active_turns["running_test"] = ctx
 
         try:
             assert SessionLoop.is_running("running_test") is True
         finally:
-            SessionLoop._active_loops.pop("running_test", None)
+            SessionLoop._active_turns.pop("running_test", None)
 
     def test_get_context(self):
         """get_context should return the LoopContext for a running session."""
@@ -224,14 +231,14 @@ class TestSessionLoopAbort:
             model_id="test",
             agent_name="test",
         )
-        SessionLoop._active_loops["ctx_get_test"] = ctx
+        SessionLoop._active_turns["ctx_get_test"] = ctx
 
         try:
             retrieved = SessionLoop.get_context("ctx_get_test")
             assert retrieved is ctx
             assert SessionLoop.get_context("nonexistent") is None
         finally:
-            SessionLoop._active_loops.pop("ctx_get_test", None)
+            SessionLoop._active_turns.pop("ctx_get_test", None)
 
 
 # ---------------------------------------------------------------------------
@@ -256,7 +263,7 @@ class TestShouldExitWithInject:
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
 
         # assistant.id > user.id → user.id < assistant.id → True → should exit
-        assert SessionLoop._should_exit(last_user, last_assistant) is True
+        assert SessionTurn._should_exit(last_user, last_assistant) is True
 
     def test_no_exit_when_user_injected_after_assistant(self):
         """Should NOT exit when a new user message appears after the assistant.
@@ -268,34 +275,34 @@ class TestShouldExitWithInject:
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
 
         # user.id > assistant.id → user.id < assistant.id → False → don't exit
-        assert SessionLoop._should_exit(last_user, last_assistant) is False
+        assert SessionTurn._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_has_tool_calls(self):
         """Should NOT exit when assistant finish is 'tool-calls'."""
         last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish="tool-calls")
 
-        assert SessionLoop._should_exit(last_user, last_assistant) is False
+        assert SessionTurn._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_no_assistant(self):
         """Should NOT exit when there is no assistant message yet."""
         last_user = self._make_msg("msg_001", "user")
 
-        assert SessionLoop._should_exit(last_user, None) is False
+        assert SessionTurn._should_exit(last_user, None) is False
 
     def test_no_exit_when_assistant_finish_is_unknown(self):
         """Should NOT exit when finish reason is 'unknown'."""
         last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish="unknown")
 
-        assert SessionLoop._should_exit(last_user, last_assistant) is False
+        assert SessionTurn._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_not_finished(self):
         """Should NOT exit when assistant has no finish status."""
         last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish=None)
 
-        assert SessionLoop._should_exit(last_user, last_assistant) is False
+        assert SessionTurn._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_has_completed_tool_parts(self):
         """Should continue so completed tool results can be fed back to the model."""
@@ -303,7 +310,7 @@ class TestShouldExitWithInject:
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
         last_assistant_parts = [_make_completed_tool_part(last_assistant.id)]
 
-        assert SessionLoop._should_exit(
+        assert SessionTurn._should_exit(
             last_user,
             last_assistant,
             last_assistant_parts,
@@ -322,7 +329,7 @@ class TestQueuedUserDetection:
     async def test_does_not_treat_current_user_as_queued_when_no_assistant_exists(self):
         current_user = self._make_msg("msg_001", "user")
 
-        queued = await SessionLoop._detect_queued_user_message(
+        queued = await DEFAULT_CONTINUATION_POLICY.detect_queued_user_message(
             "session-1",
             [current_user],
             current_user.id,
@@ -336,7 +343,7 @@ class TestQueuedUserDetection:
         current_user = self._make_msg("msg_001", "user")
         newer_user = self._make_msg("msg_002", "user")
 
-        queued = await SessionLoop._detect_queued_user_message(
+        queued = await DEFAULT_CONTINUATION_POLICY.detect_queued_user_message(
             "session-1",
             [current_user, newer_user],
             current_user.id,
@@ -371,11 +378,11 @@ class TestTurnLifecycle:
             model_id="test-model",
             agent_name="rex",
         )
-        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=[]))
+        ctx.session_store = SimpleNamespace(get_messages=AsyncMock(return_value=[]))
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
 
-        result = await SessionLoop._run_loop(ctx, callbacks)
+        result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         event_names = [call.args[0] for call in event_callback.await_args_list]
@@ -398,11 +405,11 @@ class TestTurnLifecycle:
             agent_name="rex",
         )
         assistant = self._make_msg("msg_001", "assistant", finish="stop")
-        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=[assistant]))
+        ctx.session_store = SimpleNamespace(get_messages=AsyncMock(return_value=[assistant]))
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
 
-        result = await SessionLoop._run_loop(ctx, callbacks)
+        result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         event_names = [call.args[0] for call in event_callback.await_args_list]
@@ -428,11 +435,15 @@ class TestTurnLifecycle:
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
         goal_user = self._make_msg("msg_003", "user")
         assistant_after_goal = self._make_msg("msg_004", "assistant", finish="stop")
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
                 [user, assistant],
+                [user, assistant],
+                [user, assistant],
                 [user, assistant, goal_user],
+                [user, assistant, goal_user, assistant_after_goal],
+                [user, assistant, goal_user, assistant_after_goal],
                 [user, assistant, goal_user, assistant_after_goal],
             ])
         )
@@ -450,25 +461,25 @@ class TestTurnLifecycle:
         ]
 
         with patch(
-            "flocks.session.session_loop.Provider.resolve_model_info",
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
             return_value=(0, 0, None),
         ), patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(return_value=[]),
         ), patch(
-            "flocks.session.session_loop.Message.get_text_content",
+            "flocks.session.runtime.session_turn.Message.get_text_content",
             MagicMock(return_value="still working"),
         ), patch(
-            "flocks.session.session_loop.Message.create",
+            "flocks.session.runtime.session_turn.Message.create",
             AsyncMock(return_value=goal_user),
         ) as create_message, patch(
-            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
             AsyncMock(side_effect=goal_decisions),
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             AsyncMock(side_effect=[StepResult(action="stop"), StepResult(action="stop")]),
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         create_message.assert_awaited_once()
@@ -502,7 +513,7 @@ class TestTurnLifecycle:
         )
         user = self._make_msg("msg_001", "user")
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
                 [user, assistant],
@@ -512,19 +523,19 @@ class TestTurnLifecycle:
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
 
         with patch(
-            "flocks.session.session_loop.Provider.resolve_model_info",
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
             return_value=(0, 0, None),
         ), patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(return_value=[]),
         ), patch(
-            "flocks.session.session_loop.Message.get_text_content",
+            "flocks.session.runtime.session_turn.Message.get_text_content",
             MagicMock(return_value="Please clarify what tests to write."),
         ), patch(
-            "flocks.session.session_loop.Message.create",
+            "flocks.session.runtime.session_turn.Message.create",
             AsyncMock(),
         ) as create_message, patch(
-            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
             AsyncMock(return_value=GoalDecision(
                 status="active",
                 verdict="waiting",
@@ -532,10 +543,10 @@ class TestTurnLifecycle:
                 reason="waiting for user clarification",
             )),
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             AsyncMock(return_value=StepResult(action="stop")),
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         create_message.assert_not_awaited()
@@ -558,7 +569,7 @@ class TestTurnLifecycle:
         )
         user = self._make_msg("msg_001", "user")
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
                 [user, assistant],
@@ -574,28 +585,28 @@ class TestTurnLifecycle:
         ))
 
         with patch(
-            "flocks.session.session_loop.Provider.resolve_model_info",
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
             return_value=(0, 0, None),
         ), patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(return_value=[]),
         ), patch(
-            "flocks.session.session_loop.Message.get_text_content",
+            "flocks.session.runtime.session_turn.Message.get_text_content",
             MagicMock(return_value="Please provide the input."),
         ), patch(
             "flocks.server.routes.question.has_pending_questions",
             MagicMock(return_value=True),
         ), patch(
-            "flocks.session.session_loop.Message.create",
+            "flocks.session.runtime.session_turn.Message.create",
             AsyncMock(),
         ) as create_message, patch(
-            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
             evaluate_goal,
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             AsyncMock(return_value=StepResult(action="stop")),
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         create_message.assert_not_awaited()
@@ -621,23 +632,23 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[[messages[0]], messages])
         )
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
 
         with patch(
-            "flocks.session.session_loop.Provider.resolve_model_info",
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
             return_value=(0, 0, None),
         ), patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(return_value=[]),
         ), patch(
-            "flocks.session.session_loop.Message.get_text_content",
+            "flocks.session.runtime.session_turn.Message.get_text_content",
             MagicMock(return_value="Goal complete: done"),
         ), patch(
-            "flocks.session.session_loop.GoalManager.evaluate_after_turn",
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
             AsyncMock(return_value=GoalDecision(
                 status="completed",
                 verdict="complete",
@@ -645,10 +656,10 @@ class TestTurnLifecycle:
                 objective="finish work",
             )),
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             AsyncMock(return_value=StepResult(action="stop")),
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         event_names = [call.args[0] for call in event_callback.await_args_list]
@@ -693,26 +704,26 @@ class TestTurnLifecycle:
                 tokens={"input": 0, "output": 0, "cache": {"read": 0, "write": 0}},
             ),
         ]
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[overflow_messages, normal_messages, normal_messages])
         )
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
 
         with patch(
-            "flocks.session.session_loop.Provider.resolve_model_info",
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
             return_value=(20000, 1024, None),
         ), patch(
-            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            "flocks.session.runtime.session_turn.SessionCompaction.truncate_oversized_tool_outputs",
             AsyncMock(return_value=1),
         ), patch(
-            "flocks.session.session_loop.SessionPrompt.estimate_full_context_tokens",
+            "flocks.session.runtime.session_turn.SessionPrompt.estimate_full_context_tokens",
             AsyncMock(return_value=0),
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             AsyncMock(return_value=StepResult(action="stop")),
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         event_names = [call.args[0] for call in event_callback.await_args_list]
@@ -745,7 +756,7 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[messages, messages])
         )
         event_callback = AsyncMock()
@@ -754,25 +765,25 @@ class TestTurnLifecycle:
         log_info = MagicMock()
 
         with patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(return_value=[_make_completed_tool_part("msg_002")]),
         ), patch(
-            "flocks.session.session_loop.Provider.resolve_model_info",
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
             return_value=(0, 0, None),
         ), patch(
             "flocks.session.lifecycle.title.SessionTitle.ensure_title",
             MagicMock(return_value=None),
         ), patch(
-            "flocks.session.session_loop.fire_and_forget",
+            "flocks.session.runtime.session_turn.fire_and_forget",
             MagicMock(),
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             process_step,
         ), patch(
-            "flocks.session.session_loop.log.info",
+            "flocks.session.runtime.session_turn.log.info",
             log_info,
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         assert result.last_message is messages[1]
@@ -799,7 +810,7 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
-        ctx.session_ctx = SimpleNamespace(
+        ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(return_value=messages)
         )
         event_callback = AsyncMock()
@@ -808,16 +819,16 @@ class TestTurnLifecycle:
         log_info = MagicMock()
 
         with patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(return_value=[]),
         ), patch(
-            "flocks.session.session_loop.log.info",
+            "flocks.session.runtime.session_turn.log.info",
             log_info,
         ), patch(
-            "flocks.session.runner.SessionRunner._process_step",
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
             process_step,
         ):
-            result = await SessionLoop._run_loop(ctx, callbacks)
+            result = await run_logical_turns(ctx, callbacks)
 
         assert result.action == "stop"
         assert result.last_message is messages[1]
@@ -863,11 +874,11 @@ class TestExecuteSubtask:
 
         with patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=SimpleNamespace(name="helper"))), \
              patch("flocks.tool.registry.ToolRegistry.get", return_value=task_tool), \
-             patch("flocks.session.session_loop.Message.create", AsyncMock(side_effect=[assistant_msg, synthetic_msg])), \
-             patch("flocks.session.session_loop.Message.add_part", AsyncMock()), \
-             patch("flocks.session.session_loop.Message.update", AsyncMock()), \
-             patch("flocks.session.session_loop.Message.update_part", AsyncMock()):
-            await SessionLoop._execute_subtask(ctx, last_user, task_part)
+             patch("flocks.session.runtime.session_turn.Message.create", AsyncMock(side_effect=[assistant_msg, synthetic_msg])), \
+             patch("flocks.session.runtime.session_turn.Message.add_part", AsyncMock()), \
+             patch("flocks.session.runtime.session_turn.Message.update", AsyncMock()), \
+             patch("flocks.session.runtime.session_turn.Message.update_part", AsyncMock()):
+            await ctx._execute_subtask(last_user, task_part)
 
         task_tool.execute.assert_awaited_once()
         tool_ctx = task_tool.execute.await_args.args[0]

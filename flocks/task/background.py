@@ -237,21 +237,27 @@ class BackgroundManager:
             "</task>"
         )
         try:
-            await Message.create(
-                session_id=task.parent_session_id,
-                role=MessageRole.USER,
-                content=content,
-                agent=task.parent_agent or "rex",
-                model=task.parent_model,
-                synthetic=True,
-                part_metadata={
-                    "kind": "background_task_result",
-                    "task_id": task.id,
-                    "session_id": task.session_id,
-                    "status": state,
-                },
+            async def _persist_completion() -> None:
+                await Message.create(
+                    session_id=task.parent_session_id,
+                    role=MessageRole.USER,
+                    content=content,
+                    agent=task.parent_agent or "rex",
+                    model=task.parent_model,
+                    synthetic=True,
+                    part_metadata={
+                        "kind": "background_task_result",
+                        "task_id": task.id,
+                        "session_id": task.session_id,
+                        "status": state,
+                    },
+                )
+                await self._update_parent_tool_part(task)
+
+            await Session.run_active_write(
+                task.parent_session_id,
+                _persist_completion,
             )
-            await self._update_parent_tool_part(task)
             task.completion_injected = True
             self._schedule_parent_resume(task)
         except Exception as exc:
@@ -264,14 +270,6 @@ class BackgroundManager:
     def _schedule_parent_resume(self, task: BackgroundTask) -> None:
         """Kick the parent session so Rex consumes injected background results."""
         if not task.parent_session_id:
-            return
-        if task.status not in ("completed", "error"):
-            return
-        if SessionLoop.is_running(task.parent_session_id):
-            log.info("background.parent_resume.already_running", {
-                "task_id": task.id,
-                "parent_session_id": task.parent_session_id,
-            })
             return
 
         async def _run_parent() -> None:
@@ -423,7 +421,6 @@ class BackgroundManager:
     def _build_activity_callbacks(self, task: BackgroundTask):
         """构建带活跃时间更新的 LoopCallbacks，用于不活跃超时检测。"""
         from flocks.session.session_loop import LoopCallbacks
-        from flocks.session.runner import RunnerCallbacks
         from flocks.server.routes.event import publish_event
 
         def _touch() -> None:
@@ -435,10 +432,9 @@ class BackgroundManager:
         async def _on_text_delta(_text: str) -> None:
             _touch()
 
-        runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
         return LoopCallbacks(
             on_step_start=_on_step_start,
-            runner_callbacks=runner_cbs,
+            on_text_delta=_on_text_delta,
             event_publish_callback=publish_event,
         )
 

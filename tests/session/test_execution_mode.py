@@ -399,9 +399,9 @@ async def test_read_only_sandbox_allows_only_plan_artifact_write(tmp_path) -> No
 
 @pytest.mark.asyncio
 async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
-    from flocks.session.runner import SessionRunner
+    from flocks.session.runtime.step_engine import StepEngine
 
-    runner = object.__new__(SessionRunner)
+    runner = object.__new__(StepEngine)
     runner.session = SimpleNamespace(id="session-1")
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
@@ -434,7 +434,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         return result
 
     monkeypatch.setattr(
-        "flocks.session.runner.list_session_callable_tool_infos",
+        "flocks.session.runtime.step_engine.list_session_callable_tool_infos",
         list_tools,
     )
     monkeypatch.setattr(

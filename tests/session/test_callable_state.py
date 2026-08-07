@@ -1,6 +1,3 @@
-from pathlib import Path
-import tempfile
-
 import pytest
 
 from flocks.storage.storage import Storage
@@ -10,18 +7,8 @@ from flocks.session.callable_state import (
     get_session_callable_tools,
 )
 
-
-@pytest.fixture
-async def callable_storage():
-    with tempfile.TemporaryDirectory() as tmpdir:
-        db_path = Path(tmpdir) / "test_session_callable.db"
-        await Storage.init(db_path)
-        yield
-        await Storage.clear()
-
-
 @pytest.mark.asyncio
-async def test_session_callable_persists_unique_sorted_tools(callable_storage) -> None:
+async def test_session_callable_persists_unique_sorted_tools() -> None:
     await add_session_callable_tools("session-callable", ["websearch", "task", "websearch"])
 
     result = await get_session_callable_tools("session-callable")
@@ -32,7 +19,7 @@ async def test_session_callable_persists_unique_sorted_tools(callable_storage) -
 
 
 @pytest.mark.asyncio
-async def test_session_callable_clear_removes_cache_and_storage(callable_storage) -> None:
+async def test_session_callable_clear_removes_cache_and_storage() -> None:
     await add_session_callable_tools("session-callable-clear", ["websearch"])
     await clear_session_callable_tools("session-callable-clear")
 

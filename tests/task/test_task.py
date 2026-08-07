@@ -624,6 +624,12 @@ async def test_background_task_completion_injects_parent_context(
     monkeypatch.setattr(background_module.Message, "update_part", update_part)
     monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
 
+    async def run_active_write(_session_id, operation, **_kwargs):
+        return await operation()
+
+    active_write = AsyncMock(side_effect=run_active_write)
+    monkeypatch.setattr(background_module.Session, "run_active_write", active_write)
+
     manager = BackgroundManager()
     task = BackgroundTask(
         id="bg_parent_inject",
@@ -642,6 +648,8 @@ async def test_background_task_completion_injects_parent_context(
 
     await manager._inject_parent_completion(task)
 
+    active_write.assert_awaited_once()
+    assert active_write.await_args.args[0] == "ses-parent"
     create_message.assert_awaited_once()
     kwargs = create_message.await_args.kwargs
     assert kwargs["session_id"] == "ses-parent"
@@ -662,12 +670,11 @@ async def test_background_task_completion_injects_parent_context(
 
 
 @pytest.mark.asyncio
-async def test_background_task_completion_does_not_resume_running_parent(
+async def test_background_task_completion_always_attempts_parent_resume(
     monkeypatch: pytest.MonkeyPatch,
 ):
     parent_loop_run = AsyncMock(return_value=SimpleNamespace(action="stop"))
     monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
-    monkeypatch.setattr(background_module.SessionLoop, "is_running", lambda _session_id: True)
 
     manager = BackgroundManager()
     task = BackgroundTask(
@@ -685,7 +692,8 @@ async def test_background_task_completion_does_not_resume_running_parent(
     manager._schedule_parent_resume(task)
     await asyncio.sleep(0)
 
-    parent_loop_run.assert_not_awaited()
+    parent_loop_run.assert_awaited_once()
+    assert parent_loop_run.await_args.kwargs["session_id"] == "ses-parent"
 
 
 @pytest.mark.asyncio

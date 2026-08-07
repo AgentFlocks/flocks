@@ -73,8 +73,7 @@ class TestModelResolutionFromConfig:
              patch("flocks.agent.registry.Agent.default_agent", new_callable=AsyncMock, return_value="rex"), \
              patch("flocks.agent.registry.Agent.get", new_callable=AsyncMock) as mock_agent_get, \
              patch("flocks.session.message.Message.create", new_callable=AsyncMock) as mock_msg_create, \
-             patch("flocks.session.session_loop.SessionLoop.run", new_callable=AsyncMock) as mock_loop_run, \
-             patch("flocks.cli.session_runner._set_cli_callbacks"):
+             patch("flocks.session.session_loop.SessionLoop.run", new_callable=AsyncMock) as mock_loop_run:
 
             mock_agent = MagicMock()
             mock_agent.name = "rex"
@@ -104,8 +103,7 @@ class TestModelResolutionFromConfig:
         with patch("flocks.agent.registry.Agent.default_agent", new_callable=AsyncMock, return_value="rex"), \
              patch("flocks.agent.registry.Agent.get", new_callable=AsyncMock) as mock_agent_get, \
              patch("flocks.session.message.Message.create", new_callable=AsyncMock), \
-             patch("flocks.session.session_loop.SessionLoop.run", new_callable=AsyncMock) as mock_loop_run, \
-             patch("flocks.cli.session_runner._set_cli_callbacks"):
+             patch("flocks.session.session_loop.SessionLoop.run", new_callable=AsyncMock) as mock_loop_run:
 
             mock_agent = MagicMock()
             mock_agent.name = "rex"

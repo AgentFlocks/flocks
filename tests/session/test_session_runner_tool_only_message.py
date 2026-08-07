@@ -5,7 +5,7 @@ from flocks.agent.registry import Agent
 from flocks.provider.provider import ChatMessage, Provider
 from flocks.session.message import Message, MessageRole, ToolPart, ToolStateCompleted
 from flocks.session.prompt import SessionPrompt
-from flocks.session.runner import SessionRunner, StepResult
+from flocks.session.runtime.step_engine import StepEngine, StepResult
 from flocks.session.session import Session
 from flocks.utils.id import Identifier
 
@@ -99,13 +99,13 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
     monkeypatch.setattr(Provider, "get", lambda _provider_id: DummyProvider())
     monkeypatch.setattr(Provider, "apply_config", fake_apply_config)
     monkeypatch.setattr(Agent, "get", fake_agent_get)
-    monkeypatch.setattr(SessionRunner, "_get_prompt_tool_names", fake_get_prompt_tool_names)
+    monkeypatch.setattr(StepEngine, "_get_prompt_tool_names", fake_get_prompt_tool_names)
     monkeypatch.setattr(SessionPrompt, "build_system_prompts", fake_build_system_prompts)
-    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", fake_build_callable_tool_schema)
-    monkeypatch.setattr(SessionRunner, "_to_chat_messages", fake_to_chat_messages)
-    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(StepEngine, "_build_callable_tool_schema", fake_build_callable_tool_schema)
+    monkeypatch.setattr(StepEngine, "_to_chat_messages", fake_to_chat_messages)
+    monkeypatch.setattr(StepEngine, "_call_llm", fake_call_llm)
 
-    runner = SessionRunner(session=session, provider_id="test-provider", model_id="test-model", agent_name="rex")
+    runner = StepEngine(session=session, provider_id="test-provider", model_id="test-model", agent_name="rex")
     runner._step = 2  # ensure reminder wrapping branch doesn't break assumptions
 
     result = await runner._process_step(messages=messages, last_user=user_2)

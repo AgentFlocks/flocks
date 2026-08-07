@@ -1,6 +1,6 @@
 """
 Regression tests for the chunk-handling logic in
-``SessionRunner._call_llm`` (Issue #1 of PR review for Gemini 3 support).
+``StepEngine._call_llm`` (Issue #1 of PR review for Gemini 3 support).
 
 The previous implementation treated any ``StreamChunk`` carrying ``reasoning``
 as reasoning-only and immediately ``continue``d, silently dropping ``delta`` /
@@ -8,10 +8,9 @@ as reasoning-only and immediately ``continue``d, silently dropping ``delta`` /
 fixed loop consumes all three event types out of a single mixed chunk and
 correctly opens / closes the reasoning block around interleaved text.
 
-We exercise the loop in isolation by replicating the exact runner code so the
-test pins the contract; the same loop is used in
-``flocks/session/runner.py``.  Drift is unlikely because the loop is small and
-documented, but a follow-up could refactor the runner to call this helper
+We exercise the loop in isolation by replicating the exact step-engine code so
+the test pins the contract. Drift is unlikely because the loop is small and
+documented, but a follow-up could refactor the engine to call this helper
 directly.
 """
 
@@ -20,9 +19,11 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
+import pytest
+
 
 # ---------------------------------------------------------------------------
-# Minimal stand-ins for runner imports so the test stays self-contained.
+# Minimal stand-ins for step-engine imports so the test stays self-contained.
 # ---------------------------------------------------------------------------
 
 
@@ -113,7 +114,7 @@ class _ToolAccumulator:
 
 # ---------------------------------------------------------------------------
 # The function under test: a faithful copy of the consumer loop in
-# SessionRunner._call_llm (kept in sync via comments + cross-references).
+# StepEngine._call_llm (kept in sync via comments + cross-references).
 # ---------------------------------------------------------------------------
 
 
@@ -211,9 +212,6 @@ async def consume_chunks(chunks, processor, tool_accumulator) -> Dict[str, int]:
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
-
-
-import pytest
 
 
 class TestBundledChunks:

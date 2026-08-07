@@ -5,8 +5,8 @@ Verifies that:
 1. SessionContext protocol is properly defined
 2. DefaultSessionContext implements all methods
 3. DefaultSessionContext delegates to underlying session modules
-4. LoopContext carries session_ctx
-5. SessionRunner accepts session_ctx
+4. LoopContext carries session_store
+5. StepEngine accepts session_store
 """
 
 import pytest
@@ -14,7 +14,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 from flocks.session.core.context import SessionContext, DefaultSessionContext
 from flocks.session.session_loop import LoopContext
-from flocks.session.runner import SessionRunner
+from flocks.session.runtime.step_engine import StepEngine
 
 
 class TestSessionContextProtocol:
@@ -137,10 +137,10 @@ class TestDefaultSessionContext:
             mock_touch.assert_called_once_with("proj-1", "ses-123")
 
 
-class TestLoopContextSessionCtx:
-    """LoopContext should carry session_ctx."""
+class TestLoopContextSessionStore:
+    """LoopContext should carry session_store."""
 
-    def test_loop_context_has_session_ctx_field(self):
+    def test_loop_context_has_session_store_field(self):
         import asyncio
         session = MagicMock()
         session.id = "test"
@@ -153,24 +153,24 @@ class TestLoopContextSessionCtx:
             model_id="claude-sonnet-4",
             agent_name="rex",
         )
-        assert ctx.session_ctx is None
+        assert ctx.session_store is None
 
-    def test_loop_context_with_session_ctx(self):
+    def test_loop_context_with_session_store(self):
         session = MagicMock()
         session.id = "test"
         session.directory = "/test"
         session.project_id = "proj"
         
-        session_ctx = DefaultSessionContext(session)
+        session_store = DefaultSessionContext(session)
         ctx = LoopContext(
             session=session,
             provider_id="anthropic",
             model_id="claude-sonnet-4",
             agent_name="rex",
-            session_ctx=session_ctx,
+            session_store=session_store,
         )
-        assert ctx.session_ctx is session_ctx
-        assert ctx.session_ctx.session_id == "test"
+        assert ctx.session_store is session_store
+        assert ctx.session_store.session_id == "test"
 
     def test_loop_context_tracks_observed_prompt_tokens(self):
         # B3 — LoopContext must expose ``last_observed_prompt_tokens`` so
@@ -192,27 +192,27 @@ class TestLoopContextSessionCtx:
         assert ctx.last_observed_prompt_tokens == 123_456
 
 
-class TestRunnerSessionCtx:
-    """SessionRunner should accept session_ctx."""
+class TestStepEngineSessionStore:
+    """StepEngine should accept session_store."""
 
-    def test_runner_accepts_session_ctx(self):
+    def test_step_engine_accepts_session_store(self):
         session = MagicMock()
         session.id = "test"
         session.directory = "/test"
         session.project_id = "proj"
         
-        session_ctx = DefaultSessionContext(session)
-        runner = SessionRunner(
+        session_store = DefaultSessionContext(session)
+        runner = StepEngine(
             session=session,
-            session_ctx=session_ctx,
+            session_store=session_store,
         )
-        assert runner.session_ctx is session_ctx
+        assert runner.session_store is session_store
 
-    def test_runner_session_ctx_defaults_to_none(self):
+    def test_step_engine_session_store_defaults_to_none(self):
         session = MagicMock()
         session.id = "test"
         session.directory = "/test"
         session.project_id = "proj"
         
-        runner = SessionRunner(session=session)
-        assert runner.session_ctx is None
+        runner = StepEngine(session=session)
+        assert runner.session_store is None

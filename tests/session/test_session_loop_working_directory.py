@@ -3,9 +3,16 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flocks.bus.bus import Bus
+from flocks.session.runtime.agent_loop import AgentLoop
+from flocks.session.runtime.contracts import (
+    AgentRunOutcome,
+    AgentRunState,
+    AgentRunStatus,
+    RuntimeModel,
+)
 from flocks.session.message import Message
 from flocks.session.session import Session, SessionInfo
-from flocks.session.session_loop import LoopResult, SessionLoop
+from flocks.session.session_loop import SessionLoop
 
 
 @pytest.mark.asyncio
@@ -16,12 +23,24 @@ async def test_run_uses_runtime_working_directory(monkeypatch: pytest.MonkeyPatc
         directory="/missing/original",
         title="Legacy session",
     )
-    run_loop = AsyncMock(return_value=LoopResult(action="stop"))
+
+    async def run_agent_turn(context, _engine):
+        state = AgentRunState(
+            session_id=context.session.id,
+            agent_name=context.agent_name,
+            active_model=RuntimeModel(context.provider_id, context.model_id),
+        )
+        return AgentRunOutcome(
+            status=AgentRunStatus.ABORTED,
+            state=state,
+        )
+
+    run_turn = AsyncMock(side_effect=run_agent_turn)
 
     monkeypatch.setattr(Session, "get_by_id", AsyncMock(return_value=session))
     monkeypatch.setattr(Session, "touch", AsyncMock())
     monkeypatch.setattr(Message, "list", AsyncMock(return_value=[]))
-    monkeypatch.setattr(SessionLoop, "_run_loop", run_loop)
+    monkeypatch.setattr(AgentLoop, "run", run_turn)
     monkeypatch.setattr(
         "flocks.session.orphan_tools.abort_orphan_running_parts",
         AsyncMock(),
@@ -36,7 +55,7 @@ async def test_run_uses_runtime_working_directory(monkeypatch: pytest.MonkeyPatc
     )
 
     assert result.action == "stop"
-    loop_context = run_loop.await_args.args[0]
+    loop_context = run_turn.await_args.args[0]
     assert loop_context.session.directory == "/available/default"
-    assert loop_context.session_ctx.directory == "/available/default"
+    assert loop_context.session_store.directory == "/available/default"
     assert session.directory == "/missing/original"

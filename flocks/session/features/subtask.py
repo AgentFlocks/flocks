@@ -44,14 +44,14 @@ class SubtaskResult:
 class SessionSubtask:
     """Subtask manager stub — business logic removed (was dead code).
 
-    The active execution path is SessionLoop._execute_subtask() in session_loop.py.
+    The active execution path is SessionTurn._execute_subtask().
     """
 
     @classmethod
     async def execute_subtask(cls, *args, **kwargs) -> SubtaskResult:
         raise NotImplementedError(
             "SessionSubtask.execute_subtask() is deprecated. "
-            "Subtask execution is handled by SessionLoop._execute_subtask()."
+            "Subtask execution is handled by SessionTurn._execute_subtask()."
         )
 
 

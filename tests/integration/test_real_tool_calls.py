@@ -191,14 +191,9 @@ async def test_rex_tool_call_with_callbacks():
     async def on_tool_end(tool_name, result):
         tool_ends.append((tool_name, result))
     
-    from flocks.session.runner import RunnerCallbacks
-    runner_callbacks = RunnerCallbacks(
+    callbacks = LoopCallbacks(
         on_tool_start=on_tool_start,
         on_tool_end=on_tool_end,
-    )
-    
-    callbacks = LoopCallbacks(
-        runner_callbacks=runner_callbacks
     )
     
     # Mock LLM

@@ -1,13 +1,4 @@
-"""
-Session runner module.
-
-Core session execution logic including:
-- Session loop (message processing)
-- Tool resolution and execution  
-- LLM interaction with tool support
-
-Implements session/prompt.ts SessionPrompt namespace pattern.
-"""
+"""Own one complete model/tool step from frozen input to StepResult."""
 
 import asyncio
 import copy
@@ -16,21 +7,31 @@ import os
 import re
 import sys
 import time
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Optional, Dict, Any, List, Callable, Awaitable, Tuple
-from dataclasses import dataclass
+from typing import Optional, Dict, Any, List, Tuple
+from dataclasses import replace
 
 import httpcore
 import httpx
 
-from flocks.agent.runtime.contracts import (
+from flocks.session.runtime.contracts import (
     AttemptEffects,
     FailoverDecision,
+    ModelRequest,
+    ModelTurnSnapshot,
+    RuntimeModel,
     StepFailure,
     StepResult,
     ToolCall,
 )
-from flocks.agent.runtime.ports import ExternalRuntimePorts
+from flocks.session.runtime.event_sink import SessionEventSink
+from flocks.session.runtime.model_policy import (
+    DEFAULT_MODEL_ROUTING_POLICY,
+    AutoFailoverCooldown,
+    ModelRoutingPolicy,
+)
+from flocks.session.runtime.session_turn import LoopCallbacks
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import Session, SessionInfo
@@ -92,7 +93,7 @@ from flocks.session.execution_mode import (
 from flocks.session.plan_file import session_plan_file
 
 
-log = Log.create(service="session.runner")
+log = Log.create(service="session.step_engine")
 
 TOOL_RESULT_CHAR_BUDGET_RATIO = 0.70
 TOOL_RESULT_TURN_BUDGET_RATIO = 0.35
@@ -122,6 +123,8 @@ def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) 
     return f"{base.rstrip()}\n\n{note}"
 TOOL_RESULT_MIN_TURN_BUDGET = 4_000
 TOOL_RESULT_PREVIEW_CHARS = 160
+RATE_LIMIT_COOLDOWN_SECONDS = 60.0
+CHAIN_EXHAUSTION_COOLDOWN_SECONDS = 5.0
 
 # Maximum seconds to wait for the *first* chunk from the LLM stream.
 # If the model never starts responding, the stream times out and the session
@@ -224,66 +227,40 @@ def _find_retryable_transport_exception(exception: Exception) -> Optional[Except
 LlmAttemptState = AttemptEffects
 
 
-@dataclass
-class RunnerCallbacks:
-    """Callbacks for runner events."""
-    on_step_start: Optional[Callable[[int], Awaitable[None]]] = None
-    on_step_end: Optional[Callable[[int], Awaitable[None]]] = None
-    on_text_delta: Optional[Callable[[str], Awaitable[None]]] = None
-    on_reasoning_delta: Optional[Callable[[str], Awaitable[None]]] = None
-    on_tool_start: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None
-    on_tool_end: Optional[Callable[[str, ToolResult], Awaitable[None]]] = None
-    on_permission_request: Optional[Callable[[Any], Awaitable[bool]]] = None
-    on_error: Optional[Callable[[str], Awaitable[None]]] = None
-    # SSE event publishing callback (for TUI/WebUI real-time updates)
-    event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None
+class StepCancelled(Exception):
+    """Signal that the user cancelled the active session step."""
 
 
-class SessionRunner:
-    """
-    Core session runner.
-    
-    Manages the session execution loop:
-    1. Get messages from session
-    2. Check if LLM response is needed
-    3. Call LLM with tools
-    4. Execute tool calls
-    5. Loop until complete
-    
-    Implements SessionPrompt.loop()
-    """
-    
-    # Class-level state for active sessions
-    _active_sessions: Dict[str, 'SessionRunner'] = {}
-    
+class StepEngine:
+    """Own one complete model/tool step, including retries and failover."""
+
     def __init__(
         self,
         session: SessionInfo,
         provider_id: Optional[str] = None,
         model_id: Optional[str] = None,
         agent_name: Optional[str] = None,
-        callbacks: Optional[RunnerCallbacks] = None,
+        callbacks: Optional[LoopCallbacks] = None,
         abort_event: Optional[asyncio.Event] = None,
-        session_ctx: Optional[Any] = None,  # SessionContext interface
+        session_store: Optional[Any] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
         static_cache: Optional[Dict[str, Any]] = None,
         defer_step_errors: bool = False,
         failover_available: bool = False,
         turn_additional_context: Optional[str] = None,
         session_start_pending: bool = False,
-        runtime_ports: Optional[ExternalRuntimePorts] = None,
     ):
         self.session = session
         from flocks.session.core.defaults import fallback_provider_id, fallback_model_id
         self.provider_id = provider_id or fallback_provider_id()
         self.model_id = model_id or fallback_model_id()
         self.agent_name = agent_name or "rex"
-        self.callbacks = callbacks or RunnerCallbacks()
+        self.callbacks = callbacks or LoopCallbacks()
         self._abort = asyncio.Event()
         self._external_abort = abort_event  # External abort event (e.g. from SessionLoop)
         self._step = 0
         self._recent_tool_calls: List[tuple[str, str]] = []  # Track recent (tool_name, args_json) for doom loop
-        self.session_ctx = session_ctx  # SessionContext interface for decoupled access
+        self.session_store = session_store
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
         self._static_cache = static_cache if static_cache is not None else {}
         self._defer_step_errors = defer_step_errors
@@ -292,26 +269,245 @@ class SessionRunner:
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
         self._attempt_state = LlmAttemptState()
-        if runtime_ports is None:
-            from flocks.session.runtime_adapters import (
-                create_default_runtime_ports,
+        self._hooked_model_requests: Dict[
+            str,
+            Tuple[ModelRequest[ChatMessage], bool],
+        ] = {}
+        self._turn: Optional[Any] = None
+        self._model_policy: ModelRoutingPolicy = DEFAULT_MODEL_ROUTING_POLICY
+
+    @classmethod
+    def from_turn(
+        cls,
+        turn: Any,
+        model_policy: Optional[ModelRoutingPolicy] = None,
+    ) -> "StepEngine":
+        """Create the production engine for one stateful ``SessionTurn``."""
+        engine = cls(
+            session=turn.session,
+            provider_id=turn.provider_id,
+            model_id=turn.model_id,
+            agent_name=turn.agent_name,
+            abort_event=turn.abort_event,
+            callbacks=turn.callbacks,
+            session_store=turn.session_store,
+            memory_bootstrap_data=turn.memory_bootstrap_data,
+            static_cache=turn.step_static_cache,
+            defer_step_errors=turn.auto_failover,
+            failover_available=(
+                turn.auto_failover
+                and turn.candidate_index + 1 < len(turn.model_candidates)
+            ),
+            turn_additional_context=turn.turn_additional_context,
+            session_start_pending=turn.session_start_pending,
+        )
+        engine._turn = turn
+        engine._model_policy = (
+            model_policy
+            or turn.model_policy
+            or DEFAULT_MODEL_ROUTING_POLICY
+        )
+        return engine
+
+    async def run(
+        self,
+        snapshot: ModelTurnSnapshot[MessageInfo],
+    ) -> StepResult:
+        """Execute a replay-safe snapshot across the active model chain."""
+        turn = self._require_turn()
+        self._step_agent = None
+        self._frozen_tool_request = None
+        while True:
+            active_model = RuntimeModel(turn.provider_id, turn.model_id)
+            result = await self._run_candidate(
+                replace(snapshot, active_model=active_model),
+            )
+            result.effective_model = active_model
+            failure = result.failure
+            if not turn.auto_failover or failure is None:
+                return result
+
+            next_index = turn.candidate_index + 1
+            has_next = next_index < len(turn.model_candidates)
+            if (
+                not failure.allow_fallback
+                or not failure.attempt_state.replay_safe
+                or not has_next
+            ):
+                self._record_chain_exhaustion(failure, has_next)
+                await turn.finalize_failure(failure, snapshot.last_user)
+                return result
+
+            if not await self._remove_failed_attempt(failure):
+                await turn.finalize_failure(failure, snapshot.last_user)
+                return result
+
+            await self._switch_candidate(next_index, failure.reason)
+
+    def _require_turn(self) -> Any:
+        if self._turn is None:
+            raise RuntimeError(
+                "StepEngine.run() requires StepEngine.from_turn()",
+            )
+        return self._turn
+
+    async def _run_candidate(
+        self,
+        snapshot: ModelTurnSnapshot[MessageInfo],
+    ) -> StepResult:
+        """Execute one candidate without introducing another runner object."""
+        turn = self._require_turn()
+        self.provider_id = snapshot.active_model.provider_id
+        self.model_id = snapshot.active_model.model_id
+        self._step = snapshot.trace_step
+        self._defer_step_errors = turn.auto_failover
+        self._failover_available = (
+            turn.auto_failover
+            and turn.candidate_index + 1 < len(turn.model_candidates)
+        )
+        self._turn_additional_context = turn.turn_additional_context
+        self._session_start_pending = turn.session_start_pending
+
+        task = asyncio.create_task(
+            self._process_step(list(snapshot.messages), snapshot.last_user),
+        )
+        turn._current_step_task = task
+        started_at = asyncio.get_running_loop().time()
+        try:
+            result = await task
+            if self._session_start_fired:
+                turn.session_start_pending = False
+            return result
+        except asyncio.CancelledError as exc:
+            if turn.aborted:
+                raise StepCancelled from exc
+            raise
+        finally:
+            turn._current_step_task = None
+            log.debug(
+                "session.step.complete",
+                {
+                    "session_id": turn.session.id,
+                    "step": turn.step,
+                    "duration_ms": int(
+                        (
+                            asyncio.get_running_loop().time()
+                            - started_at
+                        )
+                        * 1000
+                    ),
+                },
             )
 
-            runtime_ports = create_default_runtime_ports()
-        self._runtime_ports = runtime_ports
+    def _record_chain_exhaustion(
+        self,
+        failure: Any,
+        has_next: bool,
+    ) -> None:
+        turn = self._require_turn()
+        if not (
+            turn.model_candidate_policy == "automatic"
+            and failure.allow_fallback
+            and failure.attempt_state.replay_safe
+            and not has_next
+            and turn.candidate_index > 0
+            and failure.reason not in {"rate_limit", "billing"}
+        ):
+            return
 
-    @property
-    def _ports(self) -> ExternalRuntimePorts:
-        """Return injected ports, lazily supporting legacy test instances."""
-        ports = getattr(self, "_runtime_ports", None)
-        if ports is None:
-            from flocks.session.runtime_adapters import (
-                create_default_runtime_ports,
+        expires_at = time.monotonic() + CHAIN_EXHAUSTION_COOLDOWN_SECONDS
+        existing = self._model_policy.cooldowns.get(turn.session.id)
+        if existing and existing.expires_at > expires_at:
+            return
+        self._model_policy.cooldowns[turn.session.id] = AutoFailoverCooldown(
+            model=turn.model_candidates[turn.candidate_index],
+            primary=turn.model_candidates[0],
+            expires_at=expires_at,
+            reason="chain_exhausted",
+        )
+
+    async def _remove_failed_attempt(self, failure: Any) -> bool:
+        turn = self._require_turn()
+        message_id = failure.assistant_message_id
+        if not message_id:
+            return True
+        try:
+            deleted = await Message.delete(turn.session.id, message_id)
+        except Exception as exc:
+            deleted = False
+            log.error(
+                "session.model.fallback_cleanup_failed",
+                {
+                    "session_id": turn.session.id,
+                    "message_id": message_id,
+                    "error": str(exc),
+                },
             )
+        if not deleted:
+            return False
+        await SessionEventSink.emit(
+            turn.callbacks,
+            "message.removed",
+            {
+                "sessionID": turn.session.id,
+                "messageID": message_id,
+            },
+        )
+        return True
 
-            ports = create_default_runtime_ports()
-            self._runtime_ports = ports
-        return ports
+    async def _switch_candidate(self, next_index: int, reason: str) -> None:
+        turn = self._require_turn()
+        previous = turn.model_candidates[turn.candidate_index]
+        next_candidate = turn.model_candidates[next_index]
+        if turn.model_candidate_policy == "automatic":
+            if turn.candidate_index == 0 and reason in {
+                "rate_limit",
+                "billing",
+            }:
+                self._model_policy.cooldowns[turn.session.id] = (
+                    AutoFailoverCooldown(
+                        model=next_candidate,
+                        primary=turn.model_candidates[0],
+                        expires_at=(
+                            time.monotonic()
+                            + RATE_LIMIT_COOLDOWN_SECONDS
+                        ),
+                        reason=reason,
+                    )
+                )
+            else:
+                cooldown = self._model_policy.cooldowns.get(turn.session.id)
+                if cooldown and cooldown.expires_at > time.monotonic():
+                    cooldown.model = next_candidate
+
+        self._model_policy.select_candidate(turn, next_index)
+        payload = {
+            "sessionID": turn.session.id,
+            "from": {
+                "providerID": previous.provider_id,
+                "modelID": previous.model_id,
+            },
+            "to": {
+                "providerID": next_candidate.provider_id,
+                "modelID": next_candidate.model_id,
+            },
+            "reason": reason,
+            "candidateIndex": next_index,
+        }
+        log.warn(
+            "session.model.fallback",
+            {
+                "from": payload["from"],
+                "to": payload["to"],
+                "reason": reason,
+                "candidateIndex": next_index,
+            },
+        )
+        await SessionEventSink.emit(
+            turn.callbacks,
+            "session.model.fallback",
+            payload,
+        )
 
     @staticmethod
     def _canonical_tool_signature(tool_name: str, arguments: Dict[str, Any]) -> str:
@@ -355,7 +551,7 @@ class SessionRunner:
             return
         self._session_start_fired = True
         try:
-            await self._ports.hooks.run_session_start({
+            await HookPipeline.run_session_start({
                 "sessionID": self.session.id,
                 "workspace": self.session.directory,
                 "agent": agent.name,
@@ -573,7 +769,7 @@ class SessionRunner:
             execution_mode == SessionExecutionMode.PLAN
             and all(tool_info.name != "plan_exit" for tool_info in tool_infos)
         ):
-            plan_exit = self._ports.tools.get("plan_exit")
+            plan_exit = ToolRegistry.get("plan_exit")
             if plan_exit is not None and getattr(plan_exit.info, "enabled", True):
                 tool_infos.append(plan_exit.info)
         metadata = dict(result.metadata)
@@ -645,7 +841,7 @@ class SessionRunner:
     def _provider_capability_key(self) -> str:
         interleaved = None
         try:
-            active_model = self._ports.models.resolve_model(
+            active_model = Provider.resolve_model(
                 self.provider_id,
                 self.model_id,
             )
@@ -667,7 +863,7 @@ class SessionRunner:
         text_tool_call_mode: bool,
     ) -> Tuple[Any, ...]:
         return (
-            self._ports.tools.revision(),
+            ToolRegistry.revision(),
             getattr(agent, "name", ""),
             tuple(sorted(getattr(agent, "tools", None) or ())),
             tuple(tool_info.name for tool_info in selected_tool_infos),
@@ -827,7 +1023,7 @@ class SessionRunner:
         unknown configurations.
         """
         try:
-            provider = self._ports.models.get_provider(self.provider_id)
+            provider = Provider.get(self.provider_id)
             if provider is not None:
                 for model in getattr(provider, "_config_models", []) or []:
                     if model.id == self.model_id:
@@ -945,236 +1141,10 @@ class SessionRunner:
             placeholder = placeholder[:MAX_PLACEHOLDER_CHARS] + "…"
         text_fallbacks.append(placeholder)
 
-    @classmethod
-    async def loop(cls, session_id: str) -> Optional['MessageInfo']:
-        """
-        Start or continue session processing loop.
-        
-        This is the main entry point for session execution,
-        matching Flocks' SessionPrompt.loop() behavior.
-        
-        Now delegates to SessionLoop for better separation of concerns.
-        
-        Args:
-            session_id: Session ID to process
-            
-        Returns:
-            Last assistant message with parts
-        """
-        # Delegate to SessionLoop (new architecture)
-        from flocks.session.session_loop import SessionLoop
-        
-        result = await SessionLoop.run(session_id)
-        return result.last_message
-    
-    @classmethod
-    def cancel(cls, session_id: str) -> bool:
-        """
-        Cancel a running session.
-        
-        Args:
-            session_id: Session ID to cancel
-            
-        Returns:
-            True if session was cancelled
-        """
-        from flocks.session.core.status import SessionStatus
-        
-        runner = cls._active_sessions.get(session_id)
-        if runner:
-            runner.abort()
-            del cls._active_sessions[session_id]
-            log.info("runner.cancelled", {"session_id": session_id})
-        
-        # Set status to idle (Flocks compatibility)
-        from flocks.session.core.status import SessionStatusIdle
-        SessionStatus.set(session_id, SessionStatusIdle())
-        return True
-    
-    @classmethod
-    def cancel_children(cls, parent_session_id: str) -> int:
-        """Cancel all runners whose session.parent_id matches, recursively."""
-        from flocks.session.core.status import SessionStatus, SessionStatusIdle
-        
-        cancelled = 0
-        child_ids = [
-            sid for sid, runner in list(cls._active_sessions.items())
-            if getattr(runner.session, 'parent_id', None) == parent_session_id
-        ]
-        for sid in child_ids:
-            runner = cls._active_sessions.pop(sid, None)
-            if runner:
-                runner.abort()
-                SessionStatus.set(sid, SessionStatusIdle())
-                cancelled += 1
-                log.info("runner.child_cancelled", {
-                    "session_id": sid,
-                    "parent_session_id": parent_session_id,
-                })
-            cancelled += cls.cancel_children(sid)
-        return cancelled
-    
-    @classmethod
-    async def command(
-        cls,
-        session_id: str,
-        command: str,
-        arguments: str = "",
-        message_id: Optional[str] = None,
-        agent: Optional[str] = None,
-        model: Optional[str] = None,
-        variant: Optional[str] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute a slash command in a session.
-        
-        Args:
-            session_id: Session ID
-            command: Command name (e.g., "init", "help")
-            arguments: Command arguments
-            message_id: Optional message ID
-            agent: Optional agent name
-            model: Optional model string (provider/model)
-            variant: Optional model variant
-            
-        Returns:
-            Command execution result
-        """
-        from flocks.command.command import Command
-        
-        # Get command definition
-        cmd = Command.get(command)
-        if not cmd:
-            raise ValueError(f"Command '{command}' not found")
-        
-        # Parse model if provided
-        provider_id, model_id = None, None
-        if model:
-            parts = model.split("/", 1)
-            if len(parts) == 2:
-                provider_id, model_id = parts
-        
-        # Execute command template
-        template = cmd.template
-        
-        # Replace placeholders
-        template = template.replace("$ARGUMENTS", arguments)
-        
-        # Create prompt request
-        parts = [{"type": "text", "text": template}]
-        
-        log.info("runner.command", {
-            "session_id": session_id,
-            "command": command,
-            "arguments": arguments[:50] if arguments else "",
-        })
-        
-        return {
-            "command": command,
-            "arguments": arguments,
-            "template": template,
-        }
-    
-    @classmethod
-    async def shell(
-        cls,
-        session_id: str,
-        agent: str,
-        command: str,
-        model: Optional[Dict[str, str]] = None,
-    ) -> Dict[str, Any]:
-        """
-        Execute a shell command in session context.
-        
-        Args:
-            session_id: Session ID
-            agent: Agent name
-            command: Shell command to execute
-            model: Optional model info
-            
-        Returns:
-            Shell execution result
-        """
-        session = await Session.get_by_id(session_id)
-        if not session:
-            raise ValueError(f"Session {session_id} not found")
-        
-        cwd = session.directory or os.getcwd()
-        
-        user_msg = await Message.create(
-            session_id=session_id,
-            role=MessageRole.USER,
-            content="The following tool was executed by the user",
-            agent=agent,
-        )
-        
-        assistant_msg = await Message.create(
-            session_id=session_id,
-            role=MessageRole.ASSISTANT,
-            content="",
-            agent=agent,
-            parent_id=user_msg.id,
-        )
-        
-        start_time = asyncio.get_event_loop().time()
-        try:
-            proc = await asyncio.create_subprocess_shell(
-                command,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                cwd=cwd,
-            )
-            stdout_bytes, stderr_bytes = await asyncio.wait_for(
-                proc.communicate(), timeout=300,
-            )
-            output = (stdout_bytes or b"").decode("utf-8", errors="replace") + \
-                     (stderr_bytes or b"").decode("utf-8", errors="replace")
-            exit_code = proc.returncode or 0
-        except asyncio.TimeoutError:
-            output = "Command timed out after 300 seconds"
-            exit_code = -1
-            try:
-                proc.kill()
-            except Exception as _kill_err:
-                log.debug("runner.shell.kill_failed", {"error": str(_kill_err)})
-        except Exception as e:
-            output = f"Error executing command: {str(e)}"
-            exit_code = -1
-        
-        end_time = asyncio.get_event_loop().time()
-        
-        log.info("runner.shell", {
-            "session_id": session_id,
-            "command": command[:50],
-            "exit_code": exit_code,
-            "duration_ms": int((end_time - start_time) * 1000),
-        })
-        
-        return {
-            "info": {
-                "id": assistant_msg.id,
-                "sessionID": session_id,
-                "role": "assistant",
-                "agent": agent,
-            },
-            "parts": [{
-                "id": Identifier.create("part"),
-                "messageID": assistant_msg.id,
-                "sessionID": session_id,
-                "type": "tool",
-                "tool": "bash",
-                "state": {
-                    "status": "completed",
-                    "input": {"command": command},
-                    "output": output,
-                },
-            }],
-        }
-    
     def abort(self) -> None:
         """Signal abort to stop the loop."""
         self._abort.set()
-    
+
     @property
     def is_aborted(self) -> bool:
         """Check if abort was signaled (internal or external)."""
@@ -1282,9 +1252,12 @@ class SessionRunner:
         attempts: int,
     ) -> StepResult:
         state = LlmAttemptState(
+            request_sent=self._attempt_state.request_sent,
             received_chunk=self._attempt_state.received_chunk,
             observable_output_started=self._attempt_state.observable_output_started,
             tool_execution_started=self._attempt_state.tool_execution_started,
+            tool_execution_completed=self._attempt_state.tool_execution_completed,
+            externally_visible=self._attempt_state.externally_visible,
         )
         return StepResult(
             action="stop",
@@ -1299,7 +1272,7 @@ class SessionRunner:
                 attempts=attempts,
             ),
         )
-    
+
     async def _process_step(
         self,
         messages: List[MessageInfo],
@@ -1317,27 +1290,13 @@ class SessionRunner:
             self.session,
             worktree=Instance.get_worktree(),
         )
-        # Check for CLI callbacks (if running in CLI mode)
-        # Only use CLI fallback if no callbacks were explicitly provided via constructor
-        has_explicit_callbacks = any([
-            self.callbacks.on_text_delta,
-            self.callbacks.on_tool_start,
-            self.callbacks.on_tool_end,
-            self.callbacks.on_error,
-            self.callbacks.event_publish_callback,
-        ])
-        if not has_explicit_callbacks:
-            try:
-                from flocks.cli.session_runner import _get_cli_callbacks
-                cli_callbacks = _get_cli_callbacks()
-                if cli_callbacks:
-                    self.callbacks = cli_callbacks
-            except ImportError:
-                pass
-        
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
-        agent = await Agent.get(agent_name) or await Agent.get("rex")
+        agent = getattr(self, "_step_agent", None)
+        if agent is None:
+            agent = await Agent.get(agent_name) or await Agent.get("rex")
+            if self._turn is not None:
+                self._step_agent = agent
 
         # Track session agent (Flocks compatibility)
         try:
@@ -1345,13 +1304,13 @@ class SessionRunner:
             set_session_agent(self.session.id, agent.name)
         except Exception as e:
             log.debug("runner.session_agent.error", {"error": str(e)})
-        
+
         # Check if we've reached max steps (matching Flocks logic)
         max_steps = agent.steps if hasattr(agent, 'steps') and agent.steps is not None else DEFAULT_MAX_TOOL_STEPS
         is_last_step = self._step >= max_steps
-        
+
         # Get provider
-        provider = self._ports.models.get_provider(self.provider_id)
+        provider = Provider.get(self.provider_id)
         if not provider:
             error = f"Provider {self.provider_id} not found"
             if self._defer_step_errors:
@@ -1385,13 +1344,13 @@ class SessionRunner:
 
         # Apply config-based provider options (api_key/base_url)
         try:
-            await self._ports.models.apply_config(self.provider_id)
+            await Provider.apply_config(provider_id=self.provider_id)
         except Exception as e:
             log.debug("runner.provider.apply_config.error", {
                 "provider": self.provider_id,
                 "error": str(e),
             })
-        
+
         if not provider.is_configured():
             error = f"Provider {self.provider_id} not configured"
             if self._defer_step_errors:
@@ -1422,10 +1381,14 @@ class SessionRunner:
             if self.callbacks.on_error:
                 await self.callbacks.on_error(error_dict["data"]["displayMessage"])
             return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
-        
+
         # Build prompts and tools
         tools_started_at = time.perf_counter()
-        tools = await self._build_callable_tool_schema(agent, messages)
+        frozen_tool_request = getattr(self, "_frozen_tool_request", None)
+        if isinstance(frozen_tool_request, ModelRequest):
+            tools = frozen_tool_request.provider_tools()
+        else:
+            tools = await self._build_callable_tool_schema(agent, messages)
         self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
         prompt_tool_names = self._get_prompt_tool_names_from_schema(tools)
 
@@ -1446,7 +1409,7 @@ class SessionRunner:
             current_device_revision = None
 
         prompts_started_at = time.perf_counter()
-        system_prompts = await self._ports.prompts.build_system_prompts(
+        system_prompts = await SessionPrompt.build_system_prompts(
             session_id=self.session.id,
             session_directory=self.session.directory,
             agent_name=agent.name,
@@ -1459,7 +1422,7 @@ class SessionRunner:
                 plan_file=self._turn_plan_file,
             ),
             prompt_tool_names=prompt_tool_names,
-            tool_revision=self._ports.tools.revision(),
+            tool_revision=ToolRegistry.revision(),
             memory_bootstrap_data=self._memory_bootstrap_data,
             static_cache=self._static_cache,
             sandbox_prompt_factory=sandbox_prompt_factory,
@@ -1499,7 +1462,7 @@ class SessionRunner:
             if has_tool_result and not has_text:
                 from flocks.session.prompt_strings import PROMPT_TOOL_RESULTS_AVAILABLE
                 system_prompts.append(PROMPT_TOOL_RESULTS_AVAILABLE)
-            
+
             if has_tool_result and self._should_warn_about_tool_loop(last_user_id=last_user.id):
                 state = self._get_tool_loop_guard_state(last_user_id=last_user.id)
                 log.warn("runner.repeated_tool_calls_detected", {
@@ -1539,7 +1502,7 @@ class SessionRunner:
                 "message_count": len(messages),
             })
             raise
-        
+
         # CRITICAL FIX: Ensure messages don't end with assistant role when tools are present
         # This prevents "assistant role in the final position when tools are used" API error
         # This commonly happens when:
@@ -1561,7 +1524,7 @@ class SessionRunner:
                     "step": self._step,
                     "session_id": self.session.id,
                 })
-        
+
         # Add max steps warning if this is the last step (matching Flocks)
         if is_last_step:
             from flocks.session.prompt_strings import PROMPT_MAX_STEPS
@@ -1569,17 +1532,26 @@ class SessionRunner:
                 role="assistant",
                 content=PROMPT_MAX_STEPS,
             ))
-            
+
             log.warn("runner.max_steps_reached", {
                 "step": self._step,
                 "max_steps": max_steps,
                 "session_id": self.session.id,
             })
-            
+
             # Disable tools when max steps reached
             tools = []
-        
-        # Create assistant message (will be reused across retries)
+
+        request = self._build_model_request(
+            messages=chat_messages,
+            tools=tools,
+            agent=agent,
+        )
+        if self._turn is not None and self._frozen_tool_request is None:
+            self._frozen_tool_request = request
+        self._active_model_request = request
+
+        # Create the persisted assistant attempt after the request is frozen.
         assistant_msg = await Message.create(
             session_id=self.session.id,
             role=MessageRole.ASSISTANT,
@@ -1589,7 +1561,8 @@ class SessionRunner:
             provider_id=self.provider_id,
             parent_id=last_user.id,
         )
-        
+        self._attempt_state.externally_visible = True
+
         # Publish assistant message SSE event so frontends can show the message card
         if self.callbacks.event_publish_callback:
             import time as _time
@@ -1607,7 +1580,7 @@ class SessionRunner:
                     "tokens": {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}},
                 }
             })
-        
+
         # Retry loop matching Flocks' SessionProcessor.process()
         # MAX_ERROR_RETRIES caps exception-based retries so a permanently-failing
         # model endpoint (e.g. repeated 500) cannot hold the session loop open
@@ -1822,7 +1795,7 @@ class SessionRunner:
                         "reason": retry_message,
                         "max_retries": retry_limit,
                     })
-                    
+
                     # Set retry status
                     SessionStatus.set(
                         self.session.id,
@@ -1832,10 +1805,10 @@ class SessionRunner:
                             next=next_retry_time,
                         )
                     )
-                    
+
                     # Wait before retry
                     await SessionRetry.sleep(delay_ms, self._abort)
-                    
+
                     # Continue to next retry attempt
                     continue
                 else:
@@ -1874,7 +1847,7 @@ class SessionRunner:
 
                     if self.callbacks.on_error:
                         await self.callbacks.on_error(final_error_message)
-                    
+
                     # Update assistant message with error (must be dict, not string)
                     await Message.update(
                         self.session.id,
@@ -1890,9 +1863,9 @@ class SessionRunner:
                         error_dict=error_dict,
                         text_part=text_part,
                     )
-                    
+
                     return StepResult(action="stop", error=final_error_message)
-        
+
         # Aborted
         return StepResult(action="stop", error="Aborted")
 
@@ -2019,7 +1992,7 @@ class SessionRunner:
                 "model_id": self.model_id,
                 "error": str(exc),
             })
-    
+
     async def _build_device_asset_hint(self) -> Optional[str]:
         """Return concise device-aware tool guidance plus enabled device summary."""
         try:
@@ -2032,7 +2005,7 @@ class SessionRunner:
 
         vendor_by_storage_key: Dict[str, str] = {}
         try:
-            for tool_info in self._ports.tools.list_tools():
+            for tool_info in ToolRegistry.list_tools():
                 if getattr(tool_info, "source", None) != "device":
                     continue
                 storage_key = str(getattr(tool_info, "provider", "") or "").strip()
@@ -2254,7 +2227,7 @@ class SessionRunner:
                         lines.append(f"  - `{param_name}` ({param_type}, {required_suffix})")
 
         return "\n".join(lines)
-    
+
     async def _build_callable_tool_schema(
         self,
         agent: AgentInfo,
@@ -2316,19 +2289,19 @@ class SessionRunner:
             enabled=selection_metadata.get("enabledToolCount"),
         )
         return tools
-    
+
     def _agent_declares_tool(self, agent: AgentInfo, tool_name: str) -> bool:
         """Check if agent statically declares a tool."""
-        tool = self._ports.tools.get(tool_name)
+        tool = ToolRegistry.get(tool_name)
         if tool is None:
             return False
         metadata = get_tool_catalog_metadata(tool_name, tool.info)
         return agent_declares_tool(agent, tool_name) or metadata.always_load
-    
+
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """
         Convert exception to error dict for retry checking.
-        
+
         Ported from original MessageV2.fromError() structure.
         """
         error_dict = {
@@ -2353,7 +2326,7 @@ class SessionRunner:
                 "transportExceptionType": transport_type,
                 "transportExceptionModule": type(transport_exception).__module__,
             })
-        
+
         # Provider SDKs expose HTTP status through several shapes. Walk the
         # normal exception chain so lightweight wrapper errors do not hide it.
         status_code = None
@@ -2392,11 +2365,11 @@ class SessionRunner:
         if status_code is not None:
             error_dict["name"] = "APIError"
             error_dict["data"]["statusCode"] = status_code
-            
+
             # Determine if retryable based on status code
             is_retryable = status_code in {429, 500, 502, 503, 504}
             error_dict["data"]["isRetryable"] = is_retryable
-            
+
             # Extract response headers if available
             response = getattr(status_exception, "response", None)
             headers = getattr(response, "headers", None)
@@ -2405,7 +2378,7 @@ class SessionRunner:
                     error_dict["data"]["responseHeaders"] = dict(headers)
                 except (TypeError, ValueError):
                     pass
-        
+
         # Check for common retryable error patterns
         error_msg = str(exception).lower()
         if any(pattern in error_msg for pattern in [
@@ -2420,13 +2393,13 @@ class SessionRunner:
             error_dict["name"] = "APIError"
             error_dict["data"]["isRetryable"] = True
             error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
-        
+
         return error_dict
-    
+
     def _get_context_window_tokens(self) -> int:
         """Resolve the context window size for the current model."""
         try:
-            ctx, _, _ = self._ports.models.resolve_model_info(
+            ctx, _, _ = Provider.resolve_model_info(
                 self.provider_id,
                 self.model_id,
             )
@@ -2619,7 +2592,7 @@ class SessionRunner:
     ) -> List[ChatMessage]:
         """
         Convert messages to chat format with tool calls.
-        
+
         Ported from original MessageV2.toModelMessage() logic:
         - Include text parts
         - Include tool calls and results
@@ -2631,7 +2604,7 @@ class SessionRunner:
         tool_result_refs: List[Dict[str, Any]] = []
         turn_index = 0
         queued_user_message_ids: set[str] = set(getattr(self, "_queued_user_message_ids", set()) or set())
-        active_model = self._ports.models.resolve_model(
+        active_model = Provider.resolve_model(
             self.provider_id,
             self.model_id,
         )
@@ -2701,7 +2674,7 @@ class SessionRunner:
                 role="system",
                 content=system_content,
             ))
-        
+
         # Convert each message with parts
         for idx, msg in enumerate(messages):
             if idx < resume_message_index:
@@ -2712,7 +2685,7 @@ class SessionRunner:
             is_latest_user_turn = msg.id == last_user_msg_id
             # Get message parts
             parts = preloaded_parts[idx]
-            
+
             if not parts:
                 # Fallback: use text content only
                 content = await Message.get_text_content(msg)
@@ -2725,7 +2698,7 @@ class SessionRunner:
                         content=normalized_content,
                     ))
                 continue
-            
+
             # Build message content from parts
             if msg.role == MessageRole.USER or (isinstance(msg.role, str) and msg.role == "user"):
                 is_queued_user_turn = msg.id in queued_user_message_ids
@@ -2801,7 +2774,7 @@ class SessionRunner:
                         role="user",
                         content=user_text,
                     ))
-            
+
             elif msg.role == MessageRole.ASSISTANT or (isinstance(msg.role, str) and msg.role == "assistant"):
                 # Skip messages with errors (matching Flocks logic)
                 # Flocks: skip if error exists, UNLESS it's AbortedError with useful content
@@ -2811,7 +2784,7 @@ class SessionRunner:
                     if isinstance(msg.error, dict):
                         error_name = msg.error.get('name', '')
                         is_aborted_error = error_name in ('MessageAbortedError', 'AbortedError')
-                    
+
                     # If AbortedError, check if message has useful content
                     if is_aborted_error:
                         has_content = any(
@@ -2825,7 +2798,7 @@ class SessionRunner:
                     else:
                         # Non-AbortedError - skip
                         continue
-                
+
                 assistant_content_parts = []
                 assistant_reasoning_parts = []
                 assistant_reasoning_content_parts = []
@@ -2836,11 +2809,11 @@ class SessionRunner:
                 structured_tool_calls: List[Dict[str, Any]] = []
                 # Corresponding tool-result messages (role="tool")
                 pending_tool_results: List[ChatMessage] = []
-                
+
                 for part in parts:
                     if not hasattr(part, 'type'):
                         continue
-                    
+
                     # Text parts
                     if part.type == "text" and hasattr(part, 'text'):
                         if getattr(part, "ignored", False):
@@ -2891,13 +2864,13 @@ class SessionRunner:
                                 "type": "thinking",
                                 "thinking": part.text,
                             })
-                    
+
                     # Tool parts - use structured OpenAI function-calling format
                     elif part.type == "tool" and hasattr(part, 'state'):
                         tool_name = getattr(part, 'tool', 'unknown')
                         call_id = getattr(part, 'callID', None) or f"call_{id(part)}"
                         tool_input = getattr(part.state, 'input', {})
-                        
+
                         if part.state.status == "completed":
                             tool_output_str, was_dyn_truncated, persisted_placeholder = self._build_tool_output_text(
                                 part,
@@ -2911,7 +2884,7 @@ class SessionRunner:
                                     "context_window": ctx_window_tokens,
                                     "truncated_len": len(tool_output_str),
                                 })
-                            
+
                             # Build structured tool call for assistant message
                             args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
                             structured_tool_calls.append({
@@ -2939,7 +2912,7 @@ class SessionRunner:
                                 "compacted": bool(persisted_placeholder),
                                 "dirty": False,
                             })
-                            
+
                             log.debug("runner.to_chat_messages.tool_result_added", {
                                 "message_id": msg.id,
                                 "tool_name": tool_name,
@@ -2947,7 +2920,7 @@ class SessionRunner:
                                 "output_length": len(tool_output_str),
                                 "compacted": bool(persisted_placeholder),
                             })
-                        
+
                         elif part.state.status == "error":
                             tool_error = getattr(part.state, 'error', 'Unknown error')
                             args_str = json.dumps(tool_input, ensure_ascii=False) if not isinstance(tool_input, str) else tool_input
@@ -2965,7 +2938,7 @@ class SessionRunner:
                                 tool_call_id=call_id,
                                 name=tool_name,
                             ))
-                        
+
                         elif part.state.status == "running":
                             # Tool was interrupted (e.g., by user abort) before completing.
                             # Include it in chat context so the LLM knows this tool call was
@@ -2990,7 +2963,7 @@ class SessionRunner:
                                 "tool_name": tool_name,
                                 "call_id": call_id,
                             })
-                
+
                 has_assistant_reasoning = bool(
                     assistant_reasoning_parts
                     or assistant_reasoning_content_parts
@@ -3025,7 +2998,7 @@ class SessionRunner:
                         "parts_count": len(parts),
                         "has_error": hasattr(msg, 'error') and bool(msg.error),
                     })
-        
+
         budget_result = await self._apply_tool_result_budget(tool_result_refs, ctx_window_tokens)
         if budget_result.get("compacted"):
             log.info("runner.context_budget_enforced", {
@@ -3054,9 +3027,133 @@ class SessionRunner:
             source_message_count=len(messages),
             chat_message_count=len(chat_messages),
         )
-        
+
         return chat_messages
-    
+
+    def _build_model_request(
+        self,
+        *,
+        messages: List[ChatMessage],
+        tools: List[Dict[str, Any]],
+        agent: AgentInfo,
+    ) -> ModelRequest[ChatMessage]:
+        """Freeze the exact provider-bound input for same-model retries."""
+        from flocks.provider.options import build_provider_options
+
+        provider_tools_enabled = not self._should_use_text_tool_call_mode()
+        return ModelRequest(
+            provider_id=self.provider_id,
+            model_id=self.model_id,
+            messages=tuple(messages),
+            tools=tuple(tools),
+            options=build_provider_options(self.provider_id, self.model_id),
+            metadata={
+                "sessionID": self.session.id,
+                "workspace": self.session.directory,
+                "agent": agent.name,
+                "step": self._step,
+                "providerToolsEnabled": provider_tools_enabled,
+            },
+        )
+
+    @staticmethod
+    def _serialize_model_message(message: ChatMessage) -> Dict[str, Any]:
+        payload = message.model_dump(exclude_none=True)
+        if not payload.get("custom_settings"):
+            payload.pop("custom_settings", None)
+        return payload
+
+    async def _apply_before_model_hook(
+        self,
+        request: ModelRequest[ChatMessage],
+        hook_metadata: Dict[str, Any],
+    ) -> ModelRequest[ChatMessage]:
+        """Apply hook changes and freeze the request that will be sent."""
+        request_payload = {
+            "providerID": request.provider_id,
+            "modelID": request.model_id,
+            "messageCount": len(request.messages),
+            "messages": [
+                self._serialize_model_message(message)
+                for message in request.messages
+            ],
+            "toolCount": len(request.tools),
+            "tools": request.provider_tools(),
+            "providerOptions": request.provider_options(),
+            "providerToolsEnabled": bool(
+                request.metadata.get("providerToolsEnabled"),
+            ),
+        }
+        hook_input = {**hook_metadata, "request": request_payload}
+        started_at = time.perf_counter()
+        hook_context = await HookPipeline.run_llm_before(hook_input)
+        self._log_perf(
+            "runner.hook.llm_before.complete",
+            started_at,
+            message_count=len(request.messages),
+            tool_count=len(request.tools),
+        )
+
+        hook_output = getattr(hook_context, "output", {}) or {}
+        if hook_output.get("abort") or hook_output.get("blocked"):
+            reason = hook_output.get("reason") or "Model request blocked by hook"
+            raise RuntimeError(str(reason))
+        effective_input = getattr(hook_context, "input", hook_input)
+        effective_payload = hook_output.get("request")
+        if not isinstance(effective_payload, Mapping):
+            effective_payload = effective_input.get("request", request_payload)
+        if not isinstance(effective_payload, Mapping):
+            raise TypeError("llm_before hook request must be a mapping")
+
+        provider_id = str(
+            effective_payload.get("providerID", request.provider_id),
+        )
+        model_id = str(effective_payload.get("modelID", request.model_id))
+        if (provider_id, model_id) != (request.provider_id, request.model_id):
+            raise ValueError(
+                "llm_before hook cannot override ModelRoutingPolicy",
+            )
+
+        effective_messages: List[ChatMessage] = []
+        for message in effective_payload.get("messages", request.messages):
+            if isinstance(message, ChatMessage):
+                effective_messages.append(message)
+            elif isinstance(message, Mapping):
+                effective_messages.append(ChatMessage(**dict(message)))
+            else:
+                raise TypeError(
+                    "llm_before hook messages must be ChatMessage mappings",
+                )
+
+        effective_tools = effective_payload.get(
+            "tools",
+            request.provider_tools(),
+        )
+        if not isinstance(effective_tools, (list, tuple)):
+            raise TypeError("llm_before hook tools must be a sequence")
+        effective_options = effective_payload.get(
+            "providerOptions",
+            request.provider_options(),
+        )
+        if not isinstance(effective_options, Mapping):
+            raise TypeError("llm_before hook providerOptions must be a mapping")
+
+        metadata = dict(request.metadata)
+        metadata["providerToolsEnabled"] = bool(
+            effective_payload.get(
+                "providerToolsEnabled",
+                metadata.get("providerToolsEnabled"),
+            ),
+        )
+        return ModelRequest(
+            provider_id=request.provider_id,
+            model_id=request.model_id,
+            messages=tuple(effective_messages),
+            tools=tuple(dict(tool) for tool in effective_tools),
+            options=dict(effective_options),
+            metadata=metadata,
+        )
+
     async def _call_llm(
         self,
         provider: Any,
@@ -3067,16 +3164,17 @@ class SessionRunner:
     ) -> StepResult:
         """
         Call LLM and process response with event-driven streaming.
-        
+
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
-        def _serialize_message(message: ChatMessage) -> Dict[str, Any]:
-            payload = message.model_dump(exclude_none=True)
-            if not payload.get("custom_settings"):
-                payload.pop("custom_settings", None)
-            return payload
-
+        request = getattr(self, "_active_model_request", None)
+        if not isinstance(request, ModelRequest):
+            request = self._build_model_request(
+                messages=messages,
+                tools=tools,
+                agent=agent,
+            )
         def _build_llm_response_payload(
             *,
             content: str,
@@ -3097,6 +3195,51 @@ class SessionRunner:
                 ],
             }
 
+        llm_hook_metadata = {
+            "sessionID": self.session.id,
+            "messageID": assistant_msg.id,
+            "workspace": self.session.directory,
+            "agent": agent.name,
+            "step": self._step,
+            "model": {
+                "providerID": request.provider_id,
+                "modelID": request.model_id,
+            },
+        }
+        cached_request = self._hooked_model_requests.get(assistant_msg.id)
+        if cached_request is None:
+            llm_before_enabled = False
+            llm_after_enabled = False
+            try:
+                llm_before_enabled = (
+                    await HookPipeline.has_stage_handlers(
+                        HookStage.LLM_BEFORE,
+                        llm_hook_metadata,
+                    )
+                )
+                llm_after_enabled = (
+                    await HookPipeline.has_stage_handlers(
+                        HookStage.LLM_AFTER,
+                        llm_hook_metadata,
+                    )
+                )
+            except Exception as exc:
+                log.debug("runner.hook.stage_probe.error", {"error": str(exc)})
+            if llm_before_enabled:
+                request = await self._apply_before_model_hook(
+                    request,
+                    llm_hook_metadata,
+                )
+            self._hooked_model_requests[assistant_msg.id] = (
+                request,
+                llm_after_enabled,
+            )
+        else:
+            request, llm_after_enabled = cached_request
+        self._active_model_request = request
+        messages = request.provider_messages()
+        tools = request.provider_tools()
+
         # Create stream processor
         main_session_key = self.session.id
         try:
@@ -3116,6 +3259,14 @@ class SessionRunner:
             if self.callbacks.on_tool_start:
                 await self.callbacks.on_tool_start(tool_name, tool_input)
 
+        async def _on_tool_execution_end(
+            tool_name: str,
+            result: ToolResult,
+        ) -> None:
+            self._attempt_state.tool_execution_completed = True
+            if self.callbacks.on_tool_end:
+                await self.callbacks.on_tool_end(tool_name, result)
+
         turn_plan_file = getattr(self, "_turn_plan_file", None)
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
@@ -3128,7 +3279,7 @@ class SessionRunner:
             text_delta_callback=self.callbacks.on_text_delta,
             reasoning_delta_callback=self.callbacks.on_reasoning_delta,
             tool_start_callback=_on_tool_execution_start,
-            tool_end_callback=self.callbacks.on_tool_end,
+            tool_end_callback=_on_tool_execution_end,
             event_publish_callback=self.callbacks.event_publish_callback,
             session_key=self.session.id,
             main_session_key=main_session_key,
@@ -3146,11 +3297,13 @@ class SessionRunner:
             plan_relative_path=turn_plan_file.relative_path,
             plan_permission_path=turn_plan_file.permission_path,
         )
-        
-        # Build provider options (thinking / reasoning / max_tokens)
-        from flocks.provider.options import build_provider_options
-        provider_options = build_provider_options(self.provider_id, self.model_id)
-        provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
+
+        provider_options = request.provider_options()
+        provider_tools = (
+            tools
+            if request.metadata.get("providerToolsEnabled") and tools
+            else None
+        )
 
         # Clean up any leftover reasoning state from a previous (failed) call
         if hasattr(self, '_current_reasoning_id'):
@@ -3187,7 +3340,7 @@ class SessionRunner:
                     provider_options=provider_options,
                 )
                 trace_ctx = trace_scope(
-                    name="SessionRunner.step",
+                    name="StepEngine.step",
                     session_id=self.session.id,
                     tags=trace_tags,
                     input=request_payload,
@@ -3227,7 +3380,7 @@ class SessionRunner:
                 log.debug("runner.observability.init_failed", {"error": str(exc)})
                 trace_ctx = None
                 generation_ctx = None
-        
+
         # Validate messages - ensure we have at least one non-system message
         non_system_messages = [m for m in messages if m.role != "system"]
         if not non_system_messages:
@@ -3237,20 +3390,20 @@ class SessionRunner:
             })
             self._end_observability(generation_ctx, trace_ctx, output="No valid messages", level="ERROR")
             return StepResult(action="stop", content="", error="No valid messages to send to LLM")
-        
+
         log.debug("runner.call_llm.messages", {
             "total": len(messages),
             "non_system": len(non_system_messages),
             "roles": [m.role for m in messages],
         })
-        
+
         # Emit start event
         await processor.process_event(StartEvent())
-        
+
         # Lightweight counters instead of storing all chunks in memory
         chunk_counts = {"total": 0, "reasoning": 0, "text": 0, "tool": 0}
         stream_usage: Optional[Dict[str, int]] = None
-        
+
         # Stream response and convert chunks to events
         if provider_tools is None and tools:
             log.info("runner.text_tool_call_mode.enabled", {
@@ -3260,61 +3413,7 @@ class SessionRunner:
                 "tool_count": len(tools),
             })
 
-        llm_hook_metadata = {
-            "sessionID": self.session.id,
-            "messageID": assistant_msg.id,
-            "workspace": self.session.directory,
-            "agent": agent.name,
-            "step": self._step,
-            "model": {
-                "providerID": self.provider_id,
-                "modelID": self.model_id,
-            },
-        }
-        llm_before_enabled = False
-        llm_after_enabled = False
         self._llm_call_aborted = False
-        try:
-            llm_before_enabled = (
-                await self._ports.hooks.has_stage_handlers(
-                HookStage.LLM_BEFORE,
-                llm_hook_metadata,
-            )
-            )
-            llm_after_enabled = (
-                await self._ports.hooks.has_stage_handlers(
-                HookStage.LLM_AFTER,
-                llm_hook_metadata,
-            )
-            )
-        except Exception as exc:
-            log.debug("runner.hook.stage_probe.error", {"error": str(exc)})
-
-        if llm_before_enabled:
-            llm_before_hook_input = {
-                **llm_hook_metadata,
-                "request": {
-                    "messageCount": len(messages),
-                    "messages": [_serialize_message(message) for message in messages],
-                    "toolCount": len(tools),
-                    "tools": copy.deepcopy(tools),
-                    "providerOptions": dict(provider_options),
-                    "providerToolsEnabled": provider_tools is not None,
-                },
-            }
-            try:
-                hook_started_at = time.perf_counter()
-                await self._ports.hooks.run_llm_before(
-                    llm_before_hook_input,
-                )
-                self._log_perf(
-                    "runner.hook.llm_before.complete",
-                    hook_started_at,
-                    message_count=len(messages),
-                    tool_count=len(tools),
-                )
-            except Exception as exc:
-                log.debug("runner.hook.llm_before.error", {"error": str(exc)})
 
         llm_call_started_at = time.perf_counter()
         first_chunk_logged = False
@@ -3328,6 +3427,7 @@ class SessionRunner:
             "local_endpoint": stream_timeouts.is_local,
         })
         try:
+            self._attempt_state.request_sent = True
             async for chunk in _iter_with_chunk_timeout(
                 provider.chat_stream(
                     model_id=self.model_id,
@@ -3496,7 +3596,7 @@ class SessionRunner:
             )
             if llm_after_enabled:
                 try:
-                    await self._ports.hooks.run_llm_after(
+                    await HookPipeline.run_llm_after(
                         llm_hook_metadata,
                         {
                             "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
@@ -3512,7 +3612,7 @@ class SessionRunner:
                 except Exception as hook_exc:
                     log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
             raise
-        
+
         log.debug("runner.stream.summary", {
             "total_chunks": chunk_counts["total"],
             "reasoning_chunks": chunk_counts["reasoning"],
@@ -3524,11 +3624,11 @@ class SessionRunner:
         })
 
         await tool_accumulator.flush_remaining(stream_finish_reason)
-        
+
         # End text block if started
         if text_started:
             await processor.process_event(TextEndEvent())
-        
+
         # End any remaining reasoning block
         if hasattr(self, '_current_reasoning_id'):
             reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
@@ -3539,7 +3639,7 @@ class SessionRunner:
             delattr(self, '_current_reasoning_id')
             if hasattr(self, '_current_reasoning_metadata'):
                 delattr(self, '_current_reasoning_metadata')
-        
+
         # Emit finish event
         await processor.process_event(FinishEvent(
             finish_reason=processor.get_finish_reason()
@@ -3549,11 +3649,11 @@ class SessionRunner:
         # streaming so sibling subagents can start in the same assistant turn.
         # Drain them here before exposing tool results to the next loop step.
         await processor.drain_parallel_tool_calls()
-        
+
         # Get processed content
         content = processor.get_text_content()
         reasoning = processor.get_reasoning_content()
-        
+
         # Update message tokens if provider reported usage
         tokens_update = self._build_tokens_update(stream_usage)
         if tokens_update:
@@ -3570,7 +3670,7 @@ class SessionRunner:
                 })
             except Exception as e:
                 log.warn("runner.stream.usage_update_failed", {"error": str(e)})
-        
+
         # Log summary
         log.debug("runner.stream.complete", {
             "text_length": len(content),
@@ -3578,7 +3678,7 @@ class SessionRunner:
             "tool_calls": len(processor.tool_calls),
             "usage": stream_usage,
         })
-        
+
         # Update assistant message with content
         if content:
             await Message.update(
@@ -3587,7 +3687,7 @@ class SessionRunner:
                 content=content,
             )
         self._llm_call_aborted = aborted_during_stream
-        
+
         # Note: Tools were already executed synchronously during streaming
         # Build tool call list for result
         tool_calls_for_result = [
@@ -3608,7 +3708,7 @@ class SessionRunner:
         if llm_after_enabled:
             try:
                 hook_started_at = time.perf_counter()
-                await self._ports.hooks.run_llm_after(
+                await HookPipeline.run_llm_after(
                     llm_hook_metadata,
                     {
                         "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
@@ -3634,7 +3734,7 @@ class SessionRunner:
                 )
             except Exception as exc:
                 log.debug("runner.hook.llm_after.error", {"error": str(exc)})
-        
+
         if tool_calls_for_result:
             response_payload = self._build_langfuse_response_payload(
                 action="continue",
@@ -3660,7 +3760,7 @@ class SessionRunner:
                 tool_calls=tool_calls_for_result,
                 usage=stream_usage,
             )
-        
+
         response_payload = self._build_langfuse_response_payload(
             action="stop",
             content=content,
@@ -3680,7 +3780,7 @@ class SessionRunner:
             trace_output=response_payload,
         )
         return StepResult(action=result_action, content=content, usage=stream_usage)
-    
+
     @staticmethod
     def _end_observability(
         generation_ctx: Any,
@@ -3767,41 +3867,3 @@ class SessionRunner:
             always=list(getattr(request, "always", None) or []),
             tool={"name": request.permission},
         )
-
-
-async def run_session(
-    session: SessionInfo,
-    provider_id: Optional[str] = None,
-    model_id: Optional[str] = None,
-    agent_name: Optional[str] = None,
-    callbacks: Optional[RunnerCallbacks] = None,
-) -> Optional[MessageInfo]:
-    """
-    Run a session to completion.
-
-    Delegates to SessionLoop which is the single authoritative execution path.
-
-    Args:
-        session: Session to run
-        provider_id: Provider ID
-        model_id: Model ID
-        agent_name: Agent name
-        callbacks: RunnerCallbacks (wrapped into LoopCallbacks)
-
-    Returns:
-        Last assistant message
-    """
-    from flocks.session.session_loop import SessionLoop, LoopCallbacks
-
-    loop_callbacks = LoopCallbacks(
-        runner_callbacks=callbacks,
-        event_publish_callback=callbacks.event_publish_callback if callbacks else None,
-    )
-    result = await SessionLoop.run(
-        session_id=session.id,
-        provider_id=provider_id,
-        model_id=model_id,
-        agent_name=agent_name,
-        callbacks=loop_callbacks,
-    )
-    return result.last_message

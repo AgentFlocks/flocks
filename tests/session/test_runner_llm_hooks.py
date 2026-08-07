@@ -1,4 +1,4 @@
-"""Tests for LLM lifecycle hooks in SessionRunner and HookPipeline."""
+"""Tests for LLM lifecycle hooks in StepEngine and HookPipeline."""
 
 from __future__ import annotations
 
@@ -8,11 +8,11 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import flocks.session.runner as runner_mod
+import flocks.session.runtime.step_engine as runner_mod
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.provider.provider import ChatMessage
 from flocks.session.streaming.stream_processor import StreamProcessor
-from flocks.session.runner import SessionRunner
+from flocks.session.runtime.step_engine import StepEngine
 from flocks.session.session import SessionInfo
 from flocks.tool.registry import ToolResult
 
@@ -27,8 +27,8 @@ def _make_session(session_id: str = "ses_runner_llm_hooks") -> SessionInfo:
     )
 
 
-def _make_runner(session_id: str = "ses_runner_llm_hooks") -> SessionRunner:
-    return SessionRunner(
+def _make_runner(session_id: str = "ses_runner_llm_hooks") -> StepEngine:
+    return StepEngine(
         session=_make_session(session_id),
         provider_id="anthropic",
         model_id="claude-sonnet",
@@ -179,7 +179,7 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
         AsyncMock(side_effect=_after),
     )
     monkeypatch.setattr(
-        runner_mod.SessionRunner,
+        runner_mod.StepEngine,
         "_end_observability",
         staticmethod(lambda *args, **kwargs: None),
     )
@@ -274,7 +274,7 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         AsyncMock(side_effect=_after),
     )
     monkeypatch.setattr(
-        runner_mod.SessionRunner,
+        runner_mod.StepEngine,
         "_end_observability",
         staticmethod(lambda *args, **kwargs: None),
     )

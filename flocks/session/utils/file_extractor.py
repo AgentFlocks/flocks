@@ -1,7 +1,7 @@
 """
 File content extraction utilities for session message processing.
 
-Extracted from SessionRunner to keep file-handling concerns separate
+Extracted from StepEngine to keep file-handling concerns separate.
 from session execution logic.
 """
 

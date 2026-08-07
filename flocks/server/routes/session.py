@@ -1733,30 +1733,24 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
 async def _abort_session_processing(sessionID: str) -> bool:
     """Abort active processing for a session and notify subscribers.
 
-    Aborts both the SessionLoop (sets abort_event so the next step check
-    stops the loop) and the SessionRunner (stops the current LLM stream).
+    Aborts SessionLoop, which owns the active StepEngine abort signal.
     Also auto-rejects any pending Question tool requests so the question
     handler polling loop unblocks immediately instead of timing out.
 
     Cascades abort to all child sub-agent sessions (synchronous subtasks
     and background tasks) so they stop together with the parent.
     """
-    from flocks.session.runner import SessionRunner
     from flocks.session.session_loop import SessionLoop
     from flocks.server.routes.question import reject_session_questions
 
     # Abort the loop-level context (propagates to runner via shared abort_event)
     loop_aborted = SessionLoop.abort(sessionID)
 
-    # Also cancel through the runner's own path (sets status to idle)
-    SessionRunner.cancel(sessionID)
-
     # Unblock any pending Question tool waiting for user input
     questions_rejected = await reject_session_questions(sessionID)
 
     # --- Cascade abort to child sub-agent sessions ---
     children_loops_aborted = SessionLoop.abort_children(sessionID)
-    children_runners_cancelled = SessionRunner.cancel_children(sessionID)
 
     # Cancel background sub-agent tasks spawned by this session
     bg_cancelled = 0
@@ -1771,7 +1765,6 @@ async def _abort_session_processing(sessionID: str) -> bool:
         "loop_aborted": loop_aborted,
         "questions_rejected": questions_rejected,
         "children_loops_aborted": children_loops_aborted,
-        "children_runners_cancelled": children_runners_cancelled,
         "bg_tasks_cancelled": bg_cancelled,
     })
 
@@ -1828,7 +1821,7 @@ class InitRequest(BaseModel):
 )
 async def initialize_session(sessionID: str, request: InitRequest, http_request: Request) -> bool:
     """Initialize session"""
-    from flocks.session.runner import SessionRunner
+    from flocks.session.actions import render_session_command
 
     current_user = require_user(http_request)
     session = await _get_session_by_id_unfiltered(sessionID)
@@ -1840,12 +1833,10 @@ async def initialize_session(sessionID: str, request: InitRequest, http_request:
     _require_session_write_access(session, current_user)
 
     # Execute INIT command
-    await SessionRunner.command(
+    await render_session_command(
         session_id=sessionID,
         command="init",
         arguments="",
-        message_id=request.messageID,
-        model=f"{request.providerID}/{request.modelID}",
     )
     
     log.info("session.initialized", {"session_id": sessionID})
@@ -3460,7 +3451,6 @@ async def _process_session_message(
     from flocks.agent.registry import Agent
     from flocks.provider.provider import Provider
     from flocks.session.session_loop import SessionLoop, LoopCallbacks
-    from flocks.session.runner import RunnerCallbacks
     import time
     import os
 
@@ -4903,7 +4893,7 @@ class ShellRequest(BaseModel):
 )
 async def run_shell_command(sessionID: str, request: ShellRequest, http_request: Request):
     """Run shell command"""
-    from flocks.session.runner import SessionRunner
+    from flocks.session.actions import run_session_shell
 
     current_user = require_user(http_request)
     session = await _get_session_by_id_unfiltered(sessionID)
@@ -4914,17 +4904,12 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
         )
     _require_session_write_access(session, current_user)
 
-    model = None
-    if request.model:
-        model = {"providerID": request.model.providerID, "modelID": request.model.modelID}
-    
     try:
         async with Session.active_operation(sessionID):
-            result = await SessionRunner.shell(
+            result = await run_session_shell(
                 session_id=sessionID,
                 agent=request.agent,
                 command=request.command,
-                model=model,
             )
     except SessionNotFoundError as exc:
         raise HTTPException(

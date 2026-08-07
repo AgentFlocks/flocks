@@ -5,10 +5,10 @@ import pytest
 
 from flocks.agent.agent import AgentInfo
 from flocks.config.config import Config, ConfigInfo
-from flocks.hooks.pipeline import HookPipeline
+from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.provider.provider import ChatMessage, StreamChunk
 from flocks.session.message import Message, MessageRole
-from flocks.session.runner import SessionRunner
+from flocks.session.runtime.step_engine import StepEngine
 from flocks.session.session import Session
 
 
@@ -41,7 +41,7 @@ async def _run_call_llm_with_hooks(
         agent="rex",
     )
 
-    runner = SessionRunner(
+    runner = StepEngine(
         session=session,
         provider_id="test-provider",
         model_id="test-model",
@@ -113,6 +113,8 @@ async def test_call_llm_uses_full_hook_payloads_by_default(
     assert before_input["request"]["tools"][0]["function"]["name"] == "read"
     assert before_input["request"]["messageCount"] == 2
     assert before_input["request"]["toolCount"] == 1
+    assert before_input["request"]["providerID"] == "test-provider"
+    assert before_input["request"]["modelID"] == "test-model"
     assert "messageSummaries" not in before_input["request"]
     assert "toolSummaries" not in before_input["request"]
 
@@ -126,3 +128,72 @@ async def test_call_llm_uses_full_hook_payloads_by_default(
         "model",
     }
     assert "request" not in after_input
+
+
+@pytest.mark.asyncio
+async def test_before_model_hook_changes_the_real_provider_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = await Session.create(
+        project_id="test_project_hook_request",
+        directory="/test/hooks",
+    )
+    user_msg = await Message.create(
+        session_id=session.id,
+        role=MessageRole.USER,
+        content="hello",
+    )
+    assistant_msg = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="",
+        parentID=user_msg.id,
+        modelID="test-model",
+        providerID="test-provider",
+        agent="rex",
+    )
+    runner = StepEngine(
+        session=session,
+        provider_id="test-provider",
+        model_id="test-model",
+        agent_name="rex",
+    )
+    provider_calls: list[dict] = []
+
+    class ProviderStub:
+        async def chat_stream(self, **kwargs):  # noqa: ANN003
+            provider_calls.append(kwargs)
+            yield StreamChunk(delta="modified", finish_reason="stop")
+
+    async def before_model(input_data, output_data=None):  # noqa: ANN001, ANN202
+        del output_data
+        modified = dict(input_data["request"])
+        modified["messages"] = [
+            {"role": "user", "content": "rewritten by hook"},
+        ]
+        modified["tools"] = []
+        modified["providerOptions"] = {"temperature": 0.7}
+        return SimpleNamespace(
+            input=input_data,
+            output={"request": modified},
+        )
+
+    async def has_handlers(stage, _metadata):  # noqa: ANN001, ANN202
+        return stage == HookStage.LLM_BEFORE
+
+    monkeypatch.setattr(HookPipeline, "has_stage_handlers", has_handlers)
+    monkeypatch.setattr(HookPipeline, "run_llm_before", before_model)
+
+    result = await runner._call_llm(
+        provider=ProviderStub(),
+        messages=[ChatMessage(role="user", content="original")],
+        tools=[{"type": "function", "function": {"name": "read"}}],
+        agent=AgentInfo(name="rex"),
+        assistant_msg=assistant_msg,
+    )
+
+    assert result.content == "modified"
+    assert len(provider_calls) == 1
+    assert provider_calls[0]["messages"][0].content == "rewritten by hook"
+    assert provider_calls[0]["tools"] is None
+    assert provider_calls[0]["temperature"] == 0.7

@@ -39,6 +39,30 @@ from flocks.config.config import ChannelAccountConfig, ChannelConfig, ConfigInfo
 from flocks.utils.rate_limiter import AsyncTokenBucket
 
 
+@pytest.fixture
+def active_write_passthrough(monkeypatch):
+    """Execute channel writes while recording the lifecycle boundary."""
+    from flocks.session.session import Session
+
+    session_ids: list[str] = []
+
+    async def run_active_write(
+        _cls,
+        session_id,
+        operation,
+        **_kwargs,
+    ):
+        session_ids.append(session_id)
+        return await operation()
+
+    monkeypatch.setattr(
+        Session,
+        "run_active_write",
+        classmethod(run_active_write),
+    )
+    return session_ids
+
+
 # =====================================================================
 # Helpers — minimal concrete ChannelPlugin for testing
 # =====================================================================
@@ -1033,7 +1057,11 @@ class TestFeishuNativeCommands:
         assert delivered == ["已清空当前会话历史，共删除 3 条消息。"]
 
     @pytest.mark.asyncio
-    async def test_append_user_message_stores_feishu_media_part(self, monkeypatch):
+    async def test_append_user_message_stores_feishu_media_part(
+        self,
+        monkeypatch,
+        active_write_passthrough,
+    ):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.config.config import ChannelConfig
 
@@ -1081,9 +1109,14 @@ class TestFeishuNativeCommands:
         assert stored_part.filename == "diagram.png"
         assert stored_part.mime == "image/png"
         assert stored_part.url == "file:///tmp/diagram.png"
+        assert active_write_passthrough == ["session_1"]
 
     @pytest.mark.asyncio
-    async def test_append_user_message_accepts_windows_file_uri(self, monkeypatch):
+    async def test_append_user_message_accepts_windows_file_uri(
+        self,
+        monkeypatch,
+        active_write_passthrough,
+    ):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.config.config import ChannelConfig
 
@@ -1130,24 +1163,25 @@ class TestFeishuNativeCommands:
         assert stored_part.type == "file"
         assert stored_part.filename == "channel image.png"
         assert stored_part.mime == "image/png"
+        assert active_write_passthrough == ["session_1"]
 
 
 class TestMultimodalInput:
     @pytest.mark.asyncio
     async def test_runner_builds_multimodal_user_message_for_image_parts(self, tmp_path, monkeypatch):
         from flocks.session.message import FilePart, MessageRole, TextPart
-        from flocks.session.runner import SessionRunner
+        from flocks.session.runtime.step_engine import StepEngine
 
         image_path = tmp_path / "sample.png"
         image_path.write_bytes(b"image-bytes")
 
-        runner = SessionRunner(
+        runner = StepEngine(
             session=SimpleNamespace(id="session_1"),
             provider_id="anthropic",
         )
 
         monkeypatch.setattr(
-            "flocks.session.runner.Message.parts",
+            "flocks.session.runtime.step_engine.Message.parts",
             AsyncMock(
                 return_value=[
                     TextPart(
@@ -1211,18 +1245,18 @@ class TestMultimodalInput:
     @pytest.mark.asyncio
     async def test_runner_extracts_plain_text_file_content(self, tmp_path, monkeypatch):
         from flocks.session.message import FilePart, MessageRole
-        from flocks.session.runner import SessionRunner
+        from flocks.session.runtime.step_engine import StepEngine
 
         text_path = tmp_path / "notes.txt"
         text_path.write_text("line 1\nline 2", encoding="utf-8")
 
-        runner = SessionRunner(
+        runner = StepEngine(
             session=SimpleNamespace(id="session_1"),
             provider_id="anthropic",
         )
 
         monkeypatch.setattr(
-            "flocks.session.runner.Message.parts",
+            "flocks.session.runtime.step_engine.Message.parts",
             AsyncMock(
                 return_value=[
                     FilePart(
@@ -1250,18 +1284,18 @@ class TestMultimodalInput:
     @pytest.mark.asyncio
     async def test_runner_extracts_pdf_content(self, tmp_path, monkeypatch):
         from flocks.session.message import FilePart, MessageRole
-        from flocks.session.runner import SessionRunner
+        from flocks.session.runtime.step_engine import StepEngine
 
         pdf_path = tmp_path / "report.pdf"
         pdf_path.write_bytes(b"%PDF-test")
 
-        runner = SessionRunner(
+        runner = StepEngine(
             session=SimpleNamespace(id="session_1"),
             provider_id="anthropic",
         )
 
         monkeypatch.setattr(
-            "flocks.session.runner.Message.parts",
+            "flocks.session.runtime.step_engine.Message.parts",
             AsyncMock(
                 return_value=[
                     FilePart(
@@ -2001,7 +2035,11 @@ class TestAppendUserMessagePerChannel:
         assert store_part.await_args.args[2].type == "file"
 
     @pytest.mark.asyncio
-    async def test_wecom_pipeline_stores_file_part(self, monkeypatch):
+    async def test_wecom_pipeline_stores_file_part(
+        self,
+        monkeypatch,
+        active_write_passthrough,
+    ):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
         from flocks.config.config import ChannelConfig
 
@@ -2042,9 +2080,14 @@ class TestAppendUserMessagePerChannel:
         assert stored_part.filename == "report.pdf"
         assert stored_part.mime == "application/pdf"
         assert stored_part.url == "file:///tmp/report.pdf"
+        assert active_write_passthrough == ["s1"]
 
     @pytest.mark.asyncio
-    async def test_dingtalk_pipeline_stores_file_part(self, monkeypatch):
+    async def test_dingtalk_pipeline_stores_file_part(
+        self,
+        monkeypatch,
+        active_write_passthrough,
+    ):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
 
         created_message = SimpleNamespace(id="m1")
@@ -2082,9 +2125,14 @@ class TestAppendUserMessagePerChannel:
         stored_part = store_part.await_args_list[0].args[2]
         assert stored_part.type == "file"
         assert stored_part.filename == "image.png"
+        assert active_write_passthrough == ["s1"]
 
     @pytest.mark.asyncio
-    async def test_telegram_pipeline_stores_file_part(self, monkeypatch):
+    async def test_telegram_pipeline_stores_file_part(
+        self,
+        monkeypatch,
+        active_write_passthrough,
+    ):
         from flocks.channel.inbound.dispatcher import InboundDispatcher
 
         created_message = SimpleNamespace(id="m1")
@@ -2122,3 +2170,4 @@ class TestAppendUserMessagePerChannel:
         stored_part = store_part.await_args_list[0].args[2]
         assert stored_part.type == "file"
         assert stored_part.filename == "photo.jpg"
+        assert active_write_passthrough == ["s1"]

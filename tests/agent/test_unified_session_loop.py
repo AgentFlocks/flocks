@@ -2,9 +2,9 @@
 Tests for Phase 1: Unified UI entry via SessionLoop.
 
 Verifies that:
-1. RunnerCallbacks.event_publish_callback is passed through to StreamProcessor
-2. LoopCallbacks carries runner_callbacks and event_publish_callback
-3. SessionRunner uses explicit callbacks (doesn't override with CLI fallback)
+1. LoopCallbacks carries model, tool, and event callbacks directly
+2. StepEngine receives the same explicit callback object
+3. The runtime has no reverse dependency on CLI callback globals
 4. _resolve_model implements 5-level priority correctly
 """
 
@@ -14,77 +14,63 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
 
-from flocks.session.runner import RunnerCallbacks
 from flocks.session.session_loop import LoopCallbacks
 
 
-class TestRunnerCallbacksEventPublish:
-    """RunnerCallbacks should carry event_publish_callback."""
+class TestLoopCallbacksFields:
+    """LoopCallbacks should carry all runtime callbacks directly."""
 
     def test_event_publish_callback_field_exists(self):
-        cb = RunnerCallbacks()
+        cb = LoopCallbacks()
         assert hasattr(cb, 'event_publish_callback')
         assert cb.event_publish_callback is None
 
     def test_event_publish_callback_can_be_set(self):
         publish = AsyncMock()
-        cb = RunnerCallbacks(event_publish_callback=publish)
+        cb = LoopCallbacks(event_publish_callback=publish)
         assert cb.event_publish_callback is publish
 
-
-class TestLoopCallbacksFields:
-    """LoopCallbacks should carry event_publish_callback and runner_callbacks."""
-
-    def test_event_publish_callback_field(self):
-        cb = LoopCallbacks()
-        assert hasattr(cb, 'event_publish_callback')
-        assert cb.event_publish_callback is None
-
-    def test_runner_callbacks_field(self):
-        cb = LoopCallbacks()
-        assert hasattr(cb, 'runner_callbacks')
-        assert cb.runner_callbacks is None
-
-    def test_pass_runner_callbacks(self):
-        runner_cb = RunnerCallbacks(on_error=AsyncMock())
-        loop_cb = LoopCallbacks(runner_callbacks=runner_cb)
-        assert loop_cb.runner_callbacks is runner_cb
-        assert loop_cb.runner_callbacks.on_error is not None
+    def test_runtime_callbacks_are_flat(self):
+        on_text_delta = AsyncMock()
+        on_tool_start = AsyncMock()
+        callbacks = LoopCallbacks(
+            on_text_delta=on_text_delta,
+            on_tool_start=on_tool_start,
+        )
+        assert callbacks.on_text_delta is on_text_delta
+        assert callbacks.on_tool_start is on_tool_start
 
 
-class TestCallbackPrecedence:
-    """SessionRunner should not override explicit callbacks with CLI fallback."""
+class TestCallbackIdentity:
+    """The runtime should use the callbacks explicitly injected by callers."""
 
-    def test_explicit_callbacks_not_overridden(self):
-        """When event_publish_callback is set, CLI fallback should NOT be used."""
+    def test_explicit_callbacks_are_complete(self):
         publish = AsyncMock()
-        cb = RunnerCallbacks(event_publish_callback=publish)
-        
-        # Verify the check that _process_step uses
-        has_explicit = any([
-            cb.on_text_delta,
-            cb.on_tool_start,
-            cb.on_tool_end,
-            cb.on_error,
-            cb.event_publish_callback,
-        ])
-        assert has_explicit is True
-
-    def test_empty_callbacks_allows_cli_fallback(self):
-        """When no callbacks are set, CLI fallback should be used."""
-        cb = RunnerCallbacks()
-        has_explicit = any([
-            cb.on_text_delta,
-            cb.on_tool_start,
-            cb.on_tool_end,
-            cb.on_error,
-            cb.event_publish_callback,
-        ])
-        assert has_explicit is False
+        cb = LoopCallbacks(event_publish_callback=publish)
+        assert cb.event_publish_callback is publish
 
 
 class TestResolveModel:
     """Test the _resolve_model 5-level priority."""
+
+    @pytest.fixture(autouse=True)
+    def _active_write_passthrough(self, monkeypatch):
+        """Persist mocked route messages without requiring stored sessions."""
+        from flocks.session.session import Session
+
+        async def run_active_write(
+            _cls,
+            _session_id,
+            operation,
+            **_kwargs,
+        ):
+            return await operation()
+
+        monkeypatch.setattr(
+            Session,
+            "run_active_write",
+            classmethod(run_active_write),
+        )
 
     @pytest.mark.asyncio
     async def test_priority_1_request_model(self):

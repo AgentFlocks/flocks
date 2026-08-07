@@ -4,7 +4,7 @@ Provider-specific options builder.
 Centralises the logic for assembling thinking / reasoning / token-limit
 kwargs that get forwarded to each provider's ``chat_stream`` call.
 
-Both ``SessionRunner`` (session/runner.py) and ``AgentExecutor``
+Both ``StepEngine`` and ``AgentExecutor``
 (agent/runtime/executor.py) delegate to :func:`build_provider_options`
 so that provider rules are maintained in exactly one place.
 """
