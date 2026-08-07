@@ -167,6 +167,21 @@ interface EmailChannelConfig {
   defaultAgent?: string;
 }
 
+type EmailSecurityMode = 'ssl' | 'starttls' | 'insecure';
+type EmailProtocol = 'imap' | 'smtp';
+
+const EMAIL_DEFAULT_PORTS: Record<EmailProtocol, Record<EmailSecurityMode, number>> = {
+  imap: { ssl: 993, starttls: 143, insecure: 143 },
+  smtp: { ssl: 465, starttls: 587, insecure: 25 },
+};
+
+const EMAIL_SECURITY_BY_PORT: Record<EmailProtocol, Record<number, EmailSecurityMode>> = {
+  imap: { 993: 'ssl', 143: 'starttls' },
+  smtp: { 465: 'ssl', 587: 'starttls', 25: 'insecure' },
+};
+
+const LAST_SELECTED_CHANNEL_STORAGE_KEY = 'flocks:last-selected-channel';
+
 const EMAIL_HOST_PRESETS = [
   {
     id: 'gmail',
@@ -189,6 +204,8 @@ const EMAIL_HOST_PRESETS = [
     domains: ['163.com'],
     imapHost: 'imap.163.com',
     smtpHost: 'smtp.163.com',
+    smtpPort: 465,
+    smtpSecurity: 'ssl' as EmailSecurityMode,
   },
   {
     id: 'netease-126',
@@ -196,6 +213,8 @@ const EMAIL_HOST_PRESETS = [
     domains: ['126.com'],
     imapHost: 'imap.126.com',
     smtpHost: 'smtp.126.com',
+    smtpPort: 465,
+    smtpSecurity: 'ssl' as EmailSecurityMode,
   },
   {
     id: 'tencent-exmail',
@@ -252,6 +271,31 @@ function getEmailHostPreset(address: string | undefined) {
   return EMAIL_HOST_PRESETS.find((entry) => entry.domains.includes(domain));
 }
 
+function isNeteaseEmailAddress(address: string | undefined): boolean {
+  const preset = getEmailHostPreset(address);
+  return preset?.id === 'netease-163' || preset?.id === 'netease-126';
+}
+
+function readLastSelectedChannelId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_SELECTED_CHANNEL_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSelectedChannelId(channelId: string | null) {
+  try {
+    if (channelId) {
+      window.localStorage.setItem(LAST_SELECTED_CHANNEL_STORAGE_KEY, channelId);
+    } else {
+      window.localStorage.removeItem(LAST_SELECTED_CHANNEL_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures so channel settings remain usable.
+  }
+}
+
 function isEmailHostMismatch(
   address: string | undefined,
   host: string | undefined,
@@ -262,6 +306,37 @@ function isEmailHostMismatch(
   if (!preset || !normalizedHost) return false;
   const expectedHost = protocol === 'imap' ? preset.imapHost : preset.smtpHost;
   return normalizedHost !== expectedHost;
+}
+
+function applyEmailHostPreset(
+  config: EmailChannelConfig,
+  address: string | undefined
+): EmailChannelConfig {
+  const preset = getEmailHostPreset(address);
+  const previousPreset = getEmailHostPreset(config.address);
+  const next: EmailChannelConfig = { ...config, address };
+  if (!preset) return next;
+
+  const shouldReplaceImapHost =
+    !config.imapHost ||
+    (previousPreset && normalizeEmailHost(config.imapHost) === previousPreset.imapHost);
+  const shouldReplaceSmtpHost =
+    !config.smtpHost ||
+    (previousPreset && normalizeEmailHost(config.smtpHost) === previousPreset.smtpHost);
+  const shouldReplaceSmtpPort =
+    config.smtpPort == null ||
+    (previousPreset?.smtpPort != null && config.smtpPort === previousPreset.smtpPort) ||
+    (previousPreset?.smtpPort == null && config.smtpPort === 587);
+  const shouldReplaceSmtpSecurity =
+    config.smtpSecurity == null ||
+    (previousPreset?.smtpSecurity != null && config.smtpSecurity === previousPreset.smtpSecurity) ||
+    (previousPreset?.smtpSecurity == null && config.smtpSecurity === 'starttls');
+
+  if (shouldReplaceImapHost) next.imapHost = preset.imapHost;
+  if (shouldReplaceSmtpHost) next.smtpHost = preset.smtpHost;
+  if (preset.smtpPort != null && shouldReplaceSmtpPort) next.smtpPort = preset.smtpPort;
+  if (preset.smtpSecurity && shouldReplaceSmtpSecurity) next.smtpSecurity = preset.smtpSecurity;
+  return next;
 }
 
 interface WeixinChannelConfig {
@@ -665,12 +740,23 @@ function NumberInput({
   onChange: (v: number) => void;
   min?: number;
 }) {
+  const handleChange = (raw: string) => {
+    const digits = raw.replace(/[^\d]/g, '');
+    if (!digits) {
+      onChange(min ?? 0);
+      return;
+    }
+    const next = Number(digits);
+    onChange(min == null ? next : Math.max(min, next));
+  };
+
   return (
     <input
-      type="number"
+      type="text"
+      inputMode="numeric"
+      pattern="[0-9]*"
       value={value}
-      min={min}
-      onChange={(e) => onChange(Number(e.target.value))}
+      onChange={(e) => handleChange(e.target.value)}
       className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
     />
   );
@@ -1935,7 +2021,43 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
       onChange({ ...config, [key]: value }),
     [config, onChange]
   );
+  const setAddress = useCallback(
+    (value: string) => onChange(applyEmailHostPreset(config, value || undefined)),
+    [config, onChange]
+  );
+  const setSecurity = useCallback(
+    (
+      protocol: EmailProtocol,
+      security: EmailSecurityMode,
+    ) => {
+      const portKey = protocol === 'imap' ? 'imapPort' : 'smtpPort';
+      const securityKey = protocol === 'imap' ? 'imapSecurity' : 'smtpSecurity';
+      onChange({
+        ...config,
+        [securityKey]: security,
+        [portKey]: EMAIL_DEFAULT_PORTS[protocol][security],
+      });
+    },
+    [config, onChange]
+  );
+  const setPort = useCallback(
+    (
+      protocol: EmailProtocol,
+      port: number,
+    ) => {
+      const portKey = protocol === 'imap' ? 'imapPort' : 'smtpPort';
+      const securityKey = protocol === 'imap' ? 'imapSecurity' : 'smtpSecurity';
+      const security = EMAIL_SECURITY_BY_PORT[protocol][port];
+      onChange({
+        ...config,
+        [portKey]: port,
+        ...(security ? { [securityKey]: security } : {}),
+      });
+    },
+    [config, onChange]
+  );
   const emailHostPreset = getEmailHostPreset(config.address);
+  const showNeteaseSmtpSecurityHint = isNeteaseEmailAddress(config.address);
   const showImapHostWarning = isEmailHostMismatch(config.address, config.imapHost, 'imap');
   const showSmtpHostWarning = isEmailHostMismatch(config.address, config.smtpHost, 'smtp');
 
@@ -1945,7 +2067,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.address')} required hint={t('email.addressHint')}>
           <TextInput
             value={config.address ?? ''}
-            onChange={(v) => set('address', v || undefined)}
+            onChange={setAddress}
             placeholder="agent@example.com"
           />
         </FieldRow>
@@ -1975,7 +2097,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
           <Select
             value={config.imapSecurity ?? 'ssl'}
-            onChange={(v) => set('imapSecurity', v as EmailChannelConfig['imapSecurity'])}
+            onChange={(v) => setSecurity('imap', v as EmailSecurityMode)}
             options={[
               { value: 'ssl', label: t('email.securitySsl') },
               { value: 'starttls', label: t('email.securityStarttls') },
@@ -1986,7 +2108,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.imapPort')} hint={t('email.imapPortHint')}>
           <NumberInput
             value={config.imapPort ?? 993}
-            onChange={(v) => set('imapPort', v)}
+            onChange={(v) => setPort('imap', v)}
             min={1}
           />
         </FieldRow>
@@ -2006,18 +2128,23 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>
           <Select
             value={config.smtpSecurity ?? 'starttls'}
-            onChange={(v) => set('smtpSecurity', v as EmailChannelConfig['smtpSecurity'])}
+            onChange={(v) => setSecurity('smtp', v as EmailSecurityMode)}
             options={[
               { value: 'ssl', label: t('email.securitySsl') },
               { value: 'starttls', label: t('email.securityStarttls') },
               { value: 'insecure', label: t('email.securityInsecure') },
             ]}
           />
+          {showNeteaseSmtpSecurityHint && (
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
+              {t('email.neteaseSmtpSecurityHint')}
+            </p>
+          )}
         </FieldRow>
         <FieldRow label={t('email.smtpPort')} hint={t('email.smtpPortHint')}>
           <NumberInput
             value={config.smtpPort ?? 587}
-            onChange={(v) => set('smtpPort', v)}
+            onChange={(v) => setPort('smtp', v)}
             min={1}
           />
         </FieldRow>
@@ -3051,16 +3178,30 @@ export default function ChannelPage() {
       setChannelConfigs(configs);
       originalConfigsRef.current = JSON.parse(JSON.stringify(configs));
 
-      // Auto-select first channel
-      if (channelList.length > 0 && !selectedId) {
-        setSelectedId(channelList[0].id);
-      }
+      setSelectedId((current) => {
+        const channelIds = new Set(channelList.map((ch) => ch.id));
+        if (current && channelIds.has(current)) {
+          return current;
+        }
+
+        const stored = readLastSelectedChannelId();
+        const nextSelectedId = stored && channelIds.has(stored)
+          ? stored
+          : (channelList[0]?.id ?? null);
+        writeLastSelectedChannelId(nextSelectedId);
+        return nextSelectedId;
+      });
     } catch (err: any) {
       toast.error(t('loadFailed'), err.message);
     } finally {
       setLoading(false);
     }
-  }, [selectedId, toast, t]);
+  }, [toast, t]);
+
+  const handleSelectChannel = useCallback((channelId: string) => {
+    setSelectedId(channelId);
+    writeLastSelectedChannelId(channelId);
+  }, []);
 
   const fetchStatuses = useCallback(async (silent = false) => {
     try {
@@ -3345,7 +3486,7 @@ export default function ChannelPage() {
                 config={channelConfigs[ch.id] ?? { enabled: false }}
                 status={statuses[ch.id]}
                 isSelected={selectedId === ch.id}
-                onClick={() => setSelectedId(ch.id)}
+                onClick={() => handleSelectChannel(ch.id)}
               />
             ))}
           </div>

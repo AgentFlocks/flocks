@@ -72,6 +72,31 @@ def test_email_channel_meta_and_validate_config() -> None:
     assert error and "authservId" in error
 
 
+def test_validate_config_requires_netease_smtp_ssl_port() -> None:
+    plugin = EmailChannel()
+
+    error = plugin.validate_config({
+        "address": "agent@163.com",
+        "password": "pw",
+        "imapHost": "imap.163.com",
+        "smtpHost": "smtp.163.com",
+        "smtpPort": 587,
+        "smtpSecurity": "ssl",
+        "allowAll": True,
+    })
+
+    assert error == "NetEase 163/126 SMTP requires smtpPort=465 and smtpSecurity=ssl"
+    assert plugin.validate_config({
+        "address": "agent@163.com",
+        "password": "pw",
+        "imapHost": "imap.163.com",
+        "smtpHost": "smtp.163.com",
+        "smtpPort": 465,
+        "smtpSecurity": "ssl",
+        "allowAll": True,
+    }) is None
+
+
 def test_email_channel_registered_as_builtin() -> None:
     from flocks.channel.registry import ChannelRegistry
 
@@ -408,6 +433,7 @@ def test_fetch_new_messages_skips_malformed_imap_response(monkeypatch: pytest.Mo
     ])
 
     fake_imap = MagicMock()
+    fake_imap.select.return_value = ("OK", [b"2"])
     fake_imap.uid.side_effect = lambda command, *args: (
         ("OK", [b"1 2"]) if command == "search" else next(fetch_calls)
     )
@@ -422,6 +448,99 @@ def test_fetch_new_messages_skips_malformed_imap_response(monkeypatch: pytest.Mo
     assert len(messages) == 1
     _, inbound = messages[0]
     assert inbound.sender_id == "user@example.com"
+
+
+def test_fetch_new_messages_sends_imap_id_before_select(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    calls: list[str] = []
+
+    class FakeIMAP:
+        def login(self, *_args):
+            calls.append("login")
+            return "OK", [b"LOGIN completed"]
+
+        def xatom(self, name, *args):
+            calls.append(f"xatom:{name}")
+            assert args and '"name" "Flocks"' in args[0]
+            return "OK", [b"ID completed"]
+
+        def select(self, mailbox):
+            calls.append(f"select:{mailbox}")
+            return "OK", [b"0"]
+
+        def uid(self, command, *args):
+            calls.append(f"uid:{command}")
+            return "OK", [b""]
+
+        def logout(self):
+            calls.append("logout")
+
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: FakeIMAP())
+
+    assert plugin._fetch_new_messages() == []
+    assert calls[:4] == ["login", "xatom:ID", "select:INBOX", "uid:search"]
+
+
+def test_fetch_new_messages_reports_select_failure_without_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.login.return_value = ("OK", [b"LOGIN completed"])
+    fake_imap.xatom.return_value = ("OK", [b"ID completed"])
+    fake_imap.select.return_value = (
+        "NO",
+        [b"SELECT Unsafe Login. Please contact kefu@188.com for help"],
+    )
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: fake_imap)
+
+    with pytest.raises(RuntimeError, match="Unsafe Login"):
+        plugin._fetch_new_messages()
+
+    fake_imap.xatom.assert_called_once()
+    fake_imap.select.assert_called_once_with("INBOX")
+    fake_imap.uid.assert_not_called()
+
+
+def test_test_connections_labels_smtp_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+        "skipExistingOnStart": False,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.login.return_value = ("OK", [b"LOGIN completed"])
+    fake_imap.xatom.return_value = ("OK", [b"ID completed"])
+    fake_imap.select.return_value = ("OK", [b"0"])
+
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: fake_imap)
+    monkeypatch.setattr(
+        plugin,
+        "_connect_smtp",
+        lambda: (_ for _ in ()).throw(ConnectionError("Connection unexpectedly closed")),
+    )
+
+    with pytest.raises(RuntimeError, match="SMTP connection test failed"):
+        plugin._test_connections()
 
 
 def test_connect_smtp_starttls_fails_when_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,6 +673,7 @@ def test_fetch_new_messages_marks_seen_for_rejected_sender(monkeypatch: pytest.M
     })
 
     fake_imap = MagicMock()
+    fake_imap.select.return_value = ("OK", [b"1"])
     monkeypatch.setattr(
         "flocks.channel.builtin.email.channel.imaplib.IMAP4_SSL",
         lambda *args, **kwargs: fake_imap,
@@ -579,6 +699,7 @@ def test_fetch_new_messages_does_not_mark_seen_when_parse_fails(monkeypatch: pyt
     })
 
     fake_imap = MagicMock()
+    fake_imap.select.return_value = ("OK", [b"1"])
     fake_imap.uid.side_effect = lambda command, *args: (
         ("OK", [b"1"]) if command == "search" else ("OK", [(b"1 (BODY.PEEK[] {123})", b"invalid-bytes")])
     )

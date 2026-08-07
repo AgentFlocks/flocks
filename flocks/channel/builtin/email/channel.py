@@ -14,6 +14,7 @@ from email.mime.base import MIMEBase
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from email.utils import formatdate
+from flocks import __version__
 from flocks.channel.media_filename import sanitize_filename
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Optional
@@ -44,6 +45,13 @@ from .inbound import (
 log = Log.create(service="channel.email")
 
 SMTP_CONNECT_TIMEOUT = 30
+NETEASE_SMTP_HOSTS = {"smtp.163.com", "smtp.126.com"}
+IMAP_CLIENT_ID = (
+    '("name" "Flocks" '
+    f'"version" "{__version__}" '
+    '"vendor" "AgentFlocks" '
+    '"support-url" "https://github.com/AgentFlocks/flocks")'
+)
 
 
 class EmailChannel(ChannelPlugin):
@@ -99,6 +107,11 @@ class EmailChannel(ChannelPlugin):
             return "IMAP security must be one of: ssl, starttls, insecure"
         if cfg["smtpSecurity"] not in {"ssl", "starttls", "insecure"}:
             return "SMTP security must be one of: ssl, starttls, insecure"
+        if (
+            cfg["smtpHost"].lower() in NETEASE_SMTP_HOSTS
+            and (cfg["smtpPort"] != 465 or cfg["smtpSecurity"] != "ssl")
+        ):
+            return "NetEase 163/126 SMTP requires smtpPort=465 and smtpSecurity=ssl"
         if cfg["imapSecurity"] == "insecure" and not cfg["allowInsecureConnections"]:
             return "IMAP insecure mode requires allowInsecureConnections=true"
         if cfg["smtpSecurity"] == "insecure" and not cfg["allowInsecureConnections"]:
@@ -256,22 +269,32 @@ class EmailChannel(ChannelPlugin):
         cfg = self._resolved
         imap = self._connect_imap()
         try:
-            imap.login(cfg["address"], cfg["password"])
-            imap.select("INBOX")
-            if cfg["skipExistingOnStart"]:
-                status, data = imap.uid("search", None, "ALL")
-                if status == "OK" and data and data[0]:
-                    self._seen_uids.update(data[0].split())
-                    self._trim_seen_uids()
+            try:
+                imap.login(cfg["address"], cfg["password"])
+                self._identify_imap_client(imap)
+                self._select_inbox(imap)
+                if cfg["skipExistingOnStart"]:
+                    status, data = imap.uid("search", None, "ALL")
+                    if status == "OK" and data and data[0]:
+                        self._seen_uids.update(data[0].split())
+                        self._trim_seen_uids()
+            except Exception as exc:
+                raise RuntimeError(f"IMAP connection test failed: {exc}") from exc
         finally:
             try:
                 imap.logout()
             except Exception:
                 pass
 
-        smtp = self._connect_smtp()
         try:
-            smtp.login(cfg["address"], cfg["password"])
+            smtp = self._connect_smtp()
+        except Exception as exc:
+            raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
+        try:
+            try:
+                smtp.login(cfg["address"], cfg["password"])
+            except Exception as exc:
+                raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
         finally:
             try:
                 smtp.quit()
@@ -284,7 +307,8 @@ class EmailChannel(ChannelPlugin):
         imap = self._connect_imap()
         try:
             imap.login(cfg["address"], cfg["password"])
-            imap.select("INBOX")
+            self._identify_imap_client(imap)
+            self._select_inbox(imap)
             status, data = imap.uid("search", None, "UNSEEN")
             if status != "OK" or not data or not data[0]:
                 return parsed_messages
@@ -325,6 +349,43 @@ class EmailChannel(ChannelPlugin):
             except Exception:
                 pass
         return parsed_messages
+
+    def _identify_imap_client(self, imap: imaplib.IMAP4) -> None:
+        """Send IMAP ID for providers that gate mailbox access on client identity."""
+        try:
+            status, data = imap.xatom("ID", IMAP_CLIENT_ID)
+        except Exception as exc:
+            log.debug("email.imap.id_failed", {"error": str(exc)})
+            return
+        if status != "OK":
+            log.debug(
+                "email.imap.id_rejected",
+                {"status": status, "response": self._format_imap_response(data)},
+            )
+
+    def _select_inbox(self, imap: imaplib.IMAP4) -> None:
+        status, data = imap.select("INBOX")
+        if status == "OK":
+            return
+        response = self._format_imap_response(data)
+        raise RuntimeError(f"IMAP SELECT INBOX failed ({status}): {response}")
+
+    @staticmethod
+    def _format_imap_response(data: Any) -> str:
+        if isinstance(data, (list, tuple)):
+            parts = data
+        else:
+            parts = (data,)
+
+        rendered: list[str] = []
+        for part in parts:
+            if part is None:
+                continue
+            if isinstance(part, bytes):
+                rendered.append(part.decode("utf-8", errors="replace"))
+            else:
+                rendered.append(str(part))
+        return "; ".join(rendered) if rendered else "(empty response)"
 
     def _parse_and_authorize(
         self,
