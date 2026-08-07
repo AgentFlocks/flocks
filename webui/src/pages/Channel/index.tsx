@@ -149,7 +149,9 @@ interface EmailChannelConfig {
   enabled: boolean;
   address?: string;
   username?: string;
+  authMode?: EmailAuthMode;
   password?: string;
+  accessToken?: string;
   imapHost?: string;
   imapPort?: number;
   imapSecurity?: 'ssl' | 'starttls' | 'insecure';
@@ -170,6 +172,7 @@ interface EmailChannelConfig {
 
 type EmailSecurityMode = 'ssl' | 'starttls' | 'insecure';
 type EmailProtocol = 'imap' | 'smtp';
+type EmailAuthMode = 'password' | 'xoauth2';
 
 const EMAIL_DEFAULT_PORTS: Record<EmailProtocol, Record<EmailSecurityMode, number>> = {
   imap: { ssl: 993, starttls: 143, insecure: 143 },
@@ -442,6 +445,7 @@ function defaultSlackConfig(): SlackChannelConfig {
 function defaultEmailConfig(): EmailChannelConfig {
   return {
     enabled: false,
+    authMode: 'password',
     imapPort: 993,
     imapSecurity: 'ssl',
     smtpPort: 587,
@@ -2058,6 +2062,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
     [config, onChange]
   );
   const emailHostPreset = getEmailHostPreset(config.address);
+  const authMode = config.authMode ?? 'password';
   const showNeteaseSmtpSecurityHint = isNeteaseEmailAddress(config.address);
   const showImapHostWarning = isEmailHostMismatch(config.address, config.imapHost, 'imap');
   const showSmtpHostWarning = isEmailHostMismatch(config.address, config.smtpHost, 'smtp');
@@ -2079,13 +2084,33 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
             placeholder="username"
           />
         </FieldRow>
-        <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
-          <SecretInput
-            value={config.password ?? ''}
-            onChange={(v) => set('password', v || undefined)}
-            placeholder="app password"
+        <FieldRow label={t('email.authMode')} required hint={t('email.authModeHint')}>
+          <Select
+            value={authMode}
+            onChange={(v) => set('authMode', v as EmailAuthMode)}
+            options={[
+              { value: 'password', label: t('email.authModePassword') },
+              { value: 'xoauth2', label: t('email.authModeXoauth2') },
+            ]}
           />
         </FieldRow>
+        {authMode === 'xoauth2' ? (
+          <FieldRow label={t('email.accessToken')} required hint={t('email.accessTokenHint')}>
+            <SecretInput
+              value={config.accessToken ?? ''}
+              onChange={(v) => set('accessToken', v || undefined)}
+              placeholder="ya29..."
+            />
+          </FieldRow>
+        ) : (
+          <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
+            <SecretInput
+              value={config.password ?? ''}
+              onChange={(v) => set('password', v || undefined)}
+              placeholder="app password"
+            />
+          </FieldRow>
+        )}
       </Section>
 
       <Section title={t('email.servers')} description={t('email.serversDesc')}>

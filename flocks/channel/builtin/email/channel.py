@@ -94,13 +94,19 @@ class EmailChannel(ChannelPlugin):
         cfg = resolved_config(config)
         missing = [
             name
-            for name in ("address", "password", "imapHost", "smtpHost")
+            for name in ("address", "imapHost", "smtpHost")
             if not cfg.get(name)
         ]
+        if cfg["authMode"] == "password" and not cfg.get("password"):
+            missing.append("password")
+        if cfg["authMode"] == "xoauth2" and not cfg.get("accessToken"):
+            missing.append("accessToken")
         if missing:
             return "Missing required config: " + ", ".join(missing)
         if not is_valid_email(cfg["address"]):
             return "Invalid email address"
+        if cfg["authMode"] not in {"password", "xoauth2"}:
+            return "Email auth mode must be one of: password, xoauth2"
         if cfg["imapPort"] <= 0 or cfg["smtpPort"] <= 0:
             return "IMAP/SMTP ports must be positive integers"
         if cfg["imapSecurity"] not in {"ssl", "starttls", "insecure"}:
@@ -270,7 +276,7 @@ class EmailChannel(ChannelPlugin):
         imap = self._connect_imap()
         try:
             try:
-                imap.login(cfg["username"], cfg["password"])
+                self._authenticate_imap(imap)
                 self._identify_imap_client(imap)
                 self._select_inbox(imap)
                 if cfg["skipExistingOnStart"]:
@@ -292,7 +298,7 @@ class EmailChannel(ChannelPlugin):
             raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
         try:
             try:
-                smtp.login(cfg["username"], cfg["password"])
+                self._authenticate_smtp(smtp)
             except Exception as exc:
                 raise RuntimeError(f"SMTP connection test failed: {exc}") from exc
         finally:
@@ -306,7 +312,7 @@ class EmailChannel(ChannelPlugin):
         parsed_messages: list[tuple[bytes, InboundMessage]] = []
         imap = self._connect_imap()
         try:
-            imap.login(cfg["username"], cfg["password"])
+            self._authenticate_imap(imap)
             self._identify_imap_client(imap)
             self._select_inbox(imap)
             status, data = imap.uid("search", None, "UNSEEN")
@@ -497,6 +503,25 @@ class EmailChannel(ChannelPlugin):
             raise RuntimeError(f"IMAP STARTTLS not available: {response}")
         return imap
 
+    def _xoauth2_initial_response(self) -> str:
+        cfg = self._resolved
+        return f"user={cfg['username']}\x01auth=Bearer {cfg['accessToken']}\x01\x01"
+
+    def _authenticate_imap(self, imap: imaplib.IMAP4) -> None:
+        cfg = self._resolved
+        if cfg["authMode"] == "xoauth2":
+            response = self._xoauth2_initial_response().encode("utf-8")
+            imap.authenticate("XOAUTH2", lambda _challenge: response)
+            return
+        imap.login(cfg["username"], cfg["password"])
+
+    def _authenticate_smtp(self, smtp: smtplib.SMTP) -> None:
+        cfg = self._resolved
+        if cfg["authMode"] == "xoauth2":
+            smtp.auth("XOAUTH2", lambda _challenge=None: self._xoauth2_initial_response())
+            return
+        smtp.login(cfg["username"], cfg["password"])
+
     def _send_email(
         self,
         to_addr: str,
@@ -543,7 +568,7 @@ class EmailChannel(ChannelPlugin):
 
         smtp = self._connect_smtp()
         try:
-            smtp.login(cfg["username"], cfg["password"])
+            self._authenticate_smtp(smtp)
             smtp.send_message(msg)
         finally:
             try:
