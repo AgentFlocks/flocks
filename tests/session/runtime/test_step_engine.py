@@ -79,6 +79,25 @@ async def test_step_engine_executes_one_immutable_snapshot() -> None:
 
 
 @pytest.mark.asyncio
+async def test_step_engine_refreshes_memory_loaded_after_construction() -> None:
+    last_user = SimpleNamespace(id="user-1")
+    turn = _turn()
+    engine = StepEngine.from_turn(turn)
+    loaded_memory = {
+        "instructions": "remember this",
+        "main_memory": {"content": "project context", "inject": True},
+    }
+    turn.memory_bootstrap_data = loaded_memory
+
+    async def execute(_messages, _user):
+        assert engine._memory_bootstrap_data is loaded_memory
+        return StepResult(action="stop", content="done")
+
+    with patch.object(StepEngine, "_process_step", side_effect=execute):
+        await engine.run(_snapshot(last_user))
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("aborted", "expected_error"),
     [

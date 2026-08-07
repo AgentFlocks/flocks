@@ -32,7 +32,7 @@ from flocks.session.runtime.step_engine import (
     StepResult,
     ToolCall,
 )
-from flocks.session.runtime.session_turn import LoopCallbacks
+from flocks.session.runtime.session_turn import LoopCallbacks, LoopContext
 from flocks.session.prompt import SessionPrompt
 from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
 from flocks.session.session import Session, SessionInfo
@@ -2371,7 +2371,7 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     assert call_count == 6
     assert result.action == "stop"
     assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
-    runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
+    runner.callbacks.on_error.assert_not_awaited()
 
     final_update = update_mock.await_args_list[-1].kwargs
     assert final_update["finish"] == "error"
@@ -2529,7 +2529,7 @@ async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monk
 
 
 @pytest.mark.asyncio
-async def test_process_step_persists_visible_error_when_provider_missing(monkeypatch):
+async def test_step_boundary_reports_provider_missing_once(monkeypatch):
     runner = _make_runner("ses_runner_missing_provider_error")
     user = await Message.create(
         runner.session.id,
@@ -2560,6 +2560,19 @@ async def test_process_step_persists_visible_error_when_provider_missing(monkeyp
     )
 
     result = await runner._process_step(messages, user)
+    turn = LoopContext(
+        session=runner.session,
+        provider_id=runner.provider_id,
+        model_id=runner.model_id,
+        agent_name="rex",
+        callbacks=runner.callbacks,
+        session_store=SimpleNamespace(
+            get_messages=AsyncMock(
+                return_value=await Message.list(runner.session.id),
+            ),
+        ),
+    )
+    await turn.commit_step(result)
     messages_with_parts = await Message.list_with_parts(runner.session.id)
     assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
     visible_text_parts = [
@@ -2623,7 +2636,7 @@ async def test_process_step_persists_visible_error_when_provider_not_configured(
 
     assert result.action == "stop"
     assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
-    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert callback_errors == []
     assert assistant.info.finish == "error"
     assert assistant.info.error["name"] == "ProviderConfigurationError"
     assert visible_text_parts

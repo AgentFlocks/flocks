@@ -367,6 +367,7 @@ class StepEngine:
         )
         self._turn_additional_context = turn.turn_additional_context
         self._session_start_pending = turn.session_start_pending
+        self._memory_bootstrap_data = turn.memory_bootstrap_data
 
         task = asyncio.create_task(
             self._process_step(list(snapshot.messages), snapshot.last_user),
@@ -1338,8 +1339,6 @@ class StepEngine:
                 error_dict=error_dict,
                 visible_text=error_dict["data"]["displayMessage"],
             )
-            if self.callbacks.on_error:
-                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
             return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
 
         # Apply config-based provider options (api_key/base_url)
@@ -1378,8 +1377,6 @@ class StepEngine:
                 error_dict=error_dict,
                 visible_text=error_dict["data"]["displayMessage"],
             )
-            if self.callbacks.on_error:
-                await self.callbacks.on_error(error_dict["data"]["displayMessage"])
             return StepResult(action="stop", error=error_dict["data"]["displayMessage"])
 
         # Build prompts and tools
@@ -1695,8 +1692,6 @@ class StepEngine:
                                 decision=FailoverDecision(True, "empty_response"),
                                 attempts=empty_attempt,
                             )
-                        if self.callbacks.on_error:
-                            await self.callbacks.on_error(empty_error_msg)
                         await Message.update(
                             self.session.id,
                             assistant_msg.id,
@@ -1844,9 +1839,6 @@ class StepEngine:
                             decision=failover_decision,
                             attempts=error_attempt,
                         )
-
-                    if self.callbacks.on_error:
-                        await self.callbacks.on_error(final_error_message)
 
                     # Update assistant message with error (must be dict, not string)
                     await Message.update(
