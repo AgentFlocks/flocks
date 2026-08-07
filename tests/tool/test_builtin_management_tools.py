@@ -11,6 +11,25 @@ def test_flocks_mcp_is_registered_as_builtin_tool() -> None:
     assert tool.info.source in {None, "builtin"}
 
 
+def test_flocks_mcp_schema_exposes_actions_and_config_shape() -> None:
+    ToolRegistry.init()
+
+    schema = ToolRegistry.get_schema("flocks_mcp")
+
+    assert schema is not None
+    assert schema.properties["subcommand"]["enum"] == [
+        "list",
+        "add",
+        "remove",
+        "connect",
+        "disconnect",
+    ]
+    config_schema = schema.properties["config"]
+    assert config_schema["type"] == "object"
+    assert config_schema["additionalProperties"] is False
+    assert config_schema["properties"]["command"]["items"] == {"type": "string"}
+
+
 def test_skill_load_remains_registered_as_builtin_tool() -> None:
     ToolRegistry.init()
 

@@ -57,6 +57,7 @@ def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
     assert "memory" not in TOOL_TAGS
     assert "model_config" not in TOOL_TAGS
     assert "slash_command" not in TOOL_TAGS
+    assert "schedule_task_create" not in TOOL_TAGS
 
     for name in [
         "doc_parser",
@@ -71,6 +72,7 @@ def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
         "ssh_run_script",
         "flocks_mcp",
         "flocks_skills",
+        "schedule_task",
         "get_time",
     ]:
         assert name in TOOL_TAGS
