@@ -86,6 +86,15 @@ def test_task_tool_tags_reflect_agent_delegation() -> None:
     assert "planning" not in metadata.tags
 
 
+def test_schedule_task_and_todo_use_distinct_management_tags() -> None:
+    schedule_metadata = get_tool_catalog_metadata("schedule_task")
+    todo_metadata = get_tool_catalog_metadata("todo")
+
+    assert "scheduler-management" in schedule_metadata.tags
+    assert "task-management" not in schedule_metadata.tags
+    assert "task-management" in todo_metadata.tags
+
+
 def test_explicit_tags_are_merged_with_defaults() -> None:
     info = ToolInfo(
         name="websearch",

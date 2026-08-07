@@ -38,7 +38,7 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "websearch": ["web", "research"],
     "delegate_task": ["agent", "delegation"],
     "task": ["agent", "delegation"],
-    "schedule_task": ["scheduled-task", "task-management"],
+    "schedule_task": ["scheduled-task", "scheduler-management"],
     "todo": ["task-management", "progress-tracking"],
     "run_workflow": ["workflow", "execution"],
     "run_workflow_node": ["workflow", "execution"],
