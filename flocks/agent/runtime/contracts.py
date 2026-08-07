@@ -125,12 +125,42 @@ class ModelTurnSnapshot(Generic[MessageT]):
         )
 
 
+class TurnPreparationStatus(str, Enum):
+    """Host preparation result before the next model turn."""
+
+    READY = "ready"
+    CONTINUE = "continue"
+    COMPLETE = "complete"
+    FATAL = "fatal"
+
+
+@dataclass(frozen=True)
+class ModelTurnPreparation(Generic[MessageT]):
+    """Result of host-owned preparation at a model-turn boundary."""
+
+    status: TurnPreparationStatus
+    snapshot: Optional[ModelTurnSnapshot[MessageT]] = None
+    last_message: Optional[MessageT] = None
+    error: Optional[str] = None
+
+
 @dataclass(frozen=True)
 class QueuedInputBatch(Generic[MessageT]):
     """New input made visible to the loop at a model-turn boundary."""
 
     messages: tuple[MessageT, ...] = ()
     cursor: Optional[str] = None
+
+
+@dataclass(frozen=True)
+class ModelTurnBoundary(Generic[MessageT]):
+    """Committed session view after one model turn finishes."""
+
+    messages: tuple[MessageT, ...]
+    last_message: Optional[MessageT] = None
+    queued_inputs: QueuedInputBatch[MessageT] = field(
+        default_factory=QueuedInputBatch,
+    )
 
 
 @dataclass(frozen=True)

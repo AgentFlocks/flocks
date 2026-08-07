@@ -1,5 +1,6 @@
 """Reusable agent runtime contracts and control flow."""
 
+from flocks.agent.runtime.agent_loop import AgentLoop
 from flocks.agent.runtime.contracts import (
     AgentRunOutcome,
     AgentRunState,
@@ -7,28 +8,50 @@ from flocks.agent.runtime.contracts import (
     AttemptEffects,
     ContinuationDecision,
     FailoverDecision,
+    ModelTurnBoundary,
+    ModelTurnPreparation,
     ModelTurnSnapshot,
     QueuedInputBatch,
     RuntimeModel,
     StepFailure,
     StepResult,
     ToolCall,
+    TurnPreparationStatus,
 )
-from flocks.agent.runtime.ports import RuntimeServices, StepEngine
+from flocks.agent.runtime.ports import (
+    ExternalRuntimePorts,
+    HookPort,
+    ModelPort,
+    PromptPort,
+    RuntimeEventSink,
+    RuntimeServices,
+    StepEngine,
+    ToolPort,
+)
 
 __all__ = [
     "AgentRunOutcome",
     "AgentRunState",
     "AgentRunStatus",
+    "AgentLoop",
     "AttemptEffects",
     "ContinuationDecision",
     "FailoverDecision",
+    "ExternalRuntimePorts",
+    "HookPort",
+    "ModelPort",
+    "ModelTurnBoundary",
+    "ModelTurnPreparation",
     "ModelTurnSnapshot",
+    "PromptPort",
     "QueuedInputBatch",
     "RuntimeModel",
+    "RuntimeEventSink",
     "RuntimeServices",
     "StepEngine",
     "StepFailure",
     "StepResult",
     "ToolCall",
+    "ToolPort",
+    "TurnPreparationStatus",
 ]
