@@ -20,7 +20,20 @@ from typing import Optional, List, Dict, Any, Callable, Awaitable, Literal
 from dataclasses import dataclass, field
 from datetime import datetime
 
-from flocks.agent.runtime.contracts import ModelTurnSnapshot, RuntimeModel
+from flocks.agent.runtime.agent_loop import AgentLoop
+from flocks.agent.runtime.contracts import (
+    AgentRunState,
+    AgentRunStatus,
+    ContinuationDecision,
+    ModelTurnBoundary,
+    ModelTurnPreparation,
+    ModelTurnSnapshot,
+    QueuedInputBatch,
+    RuntimeModel,
+    StepResult,
+    TurnPreparationStatus,
+)
+from flocks.agent.runtime.ports import ExternalRuntimePorts
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
 from flocks.session.session import (
@@ -29,12 +42,11 @@ from flocks.session.session import (
     is_model_auto_session_category,
 )
 from flocks.session.message import Message, MessageInfo, MessageRole
-from flocks.session.core.status import SessionStatus, SessionStatusBusy, SessionStatusIdle
+from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.core.task_utils import fire_and_forget
 from flocks.session.core.turn_state import (
     set_turn_state,
     set_context_state,
-    clear_turn_state,
 )
 from flocks.session.lifecycle.compaction import (
     SessionCompaction,
@@ -110,6 +122,7 @@ class LoopContext:
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
     session_start_pending: bool = False
+    runtime_ports: Optional[ExternalRuntimePorts] = field(default=None, repr=False)
 
     @property
     def trace_step(self) -> int:
@@ -576,224 +589,32 @@ class SessionLoop:
         working_directory: Optional[str] = None,
         auto_failover: bool = False,
     ) -> LoopResult:
-        """
-        Run session loop
-        
-        Main entry point matching Flocks' SessionPrompt.loop()
-        
-        When provider_id/model_id are not provided, resolves from:
-        1. Session's stored model (if set during creation)
-        2. Global default LLM (default_models.llm -> config.model)
-        3. Environment variables
-        4. Hardcoded fallback
-        
-        Args:
-            session_id: Session ID to process
-            provider_id: Provider ID
-            model_id: Model ID
-            agent_name: Agent name (default: build)
-            callbacks: Loop callbacks
-            
-        Returns:
-            LoopResult with final state
-        """
-        # Check if already running.
-        # Return action="queued" (not "error") so the route layer knows to skip
-        # creating a spurious empty assistant message.  The new user message is
-        # already persisted in the DB; the active loop will pick it up on its
-        # next iteration once it finishes the current step.
-        if cls.is_running(session_id):
-            log.info("loop.already_running", {"session_id": session_id})
-            if auto_failover:
-                active_ctx = cls._active_loops.get(session_id)
-                if (
-                    active_ctx is not None
-                    and is_model_auto_session_category(
-                        getattr(active_ctx.session, "category", "user")
-                    )
-                ):
-                    active_ctx.auto_failover_allowed = True
-            return LoopResult(
-                action="queued",
-                error="Loop already running",
-            )
-        
-        # Get session
-        session = await Session.get_by_id(session_id)
-        if not session:
-            log.warning("loop.session_not_found", {"session_id": session_id})
-            return LoopResult(
-                action="error",
-                error=f"Session {session_id} not found",
-            )
-        if session.status != "active":
-            log.warning("loop.session_not_active", {
-                "session_id": session_id,
-                "status": session.status,
-            })
-            return LoopResult(
-                action="error",
-                error=f"Session {session_id} is {session.status}",
-            )
-        if working_directory:
-            session = session.model_copy(update={"directory": working_directory})
-        
-        # Resolve model when not explicitly provided
-        if not provider_id or not model_id:
-            resolved_provider, resolved_model = await cls._resolve_model(
-                session, provider_id, model_id
-            )
-            provider_id = provider_id or resolved_provider
-            model_id = model_id or resolved_model
-        
-        primary_model = RuntimeModel(
-            provider_id=provider_id,
-            model_id=model_id,
-        )
-        model_candidates = [primary_model]
-        candidate_index = 0
-        auto_failover = bool(
-            auto_failover
-            and is_model_auto_session_category(
-                getattr(session, "category", "user")
-            )
+        """Run one session through the lifecycle-owned SessionHost."""
+        from flocks.session.session_host import (
+            SessionHost,
+            SessionHostDependencies,
         )
 
-        # Keep the in-memory session aligned with the runtime model so
-        # downstream helpers (title generation, compaction checks, etc.) see
-        # the model actually selected for this loop iteration. Unpinned
-        # sessions must not persist these values; otherwise switching the
-        # global default model would keep older sessions stuck on stale data.
-        if provider_id:
-            session.provider = provider_id
-        if model_id:
-            session.model = model_id
-        
-        # Create SessionContext interface for decoupled access
-        from flocks.session.core.context import DefaultSessionContext
-        session_ctx = DefaultSessionContext(session)
-        
-        # Compute trace step offset from existing assistant messages so
-        # observability step numbers are cumulative across the whole session.
-        trace_offset = 0
-        try:
-            existing_msgs = await Message.list(session_id)
-            trace_offset = sum(1 for m in existing_msgs if m.role == "assistant")
-        except Exception as _trace_err:
-            log.debug("loop.trace_offset.error", {"error": str(_trace_err)})
-        
-        # Create context
-        ctx = LoopContext(
-            session=session,
+        host = SessionHost(
+            dependencies=SessionHostDependencies(
+                create_context=LoopContext,
+                create_callbacks=LoopCallbacks,
+                create_result=LoopResult,
+                resolve_model=cls._resolve_model,
+                run_logical_turn=cls._run_loop,
+                publish_session_status=cls._publish_session_status,
+            ),
+            active_contexts=cls._active_loops,
+        )
+        return await host.run(
+            session_id=session_id,
             provider_id=provider_id,
             model_id=model_id,
-            agent_name=agent_name or session.agent or "rex",
-            session_ctx=session_ctx,
-            trace_step_offset=trace_offset,
+            agent_name=agent_name,
+            callbacks=callbacks,
+            working_directory=working_directory,
             auto_failover=auto_failover,
-            auto_failover_allowed=auto_failover,
-            model_candidates=model_candidates,
-            candidate_index=candidate_index,
-            session_start_pending=trace_offset == 0,
         )
-        
-        # Register under the same lock used by archive/delete. This closes the
-        # gap where archival could commit after the status check above but
-        # before the loop became visible to the lifecycle stop logic.
-        async with Session.lifecycle_lock(session_id):
-            latest_session = await Session.get_by_id(session_id)
-            if latest_session is None:
-                log.warning("loop.session_not_found_before_register", {
-                    "session_id": session_id,
-                })
-                return LoopResult(
-                    action="error",
-                    error=f"Session {session_id} not found",
-                )
-            if latest_session.status != "active":
-                log.warning("loop.session_not_active_before_register", {
-                    "session_id": session_id,
-                    "status": latest_session.status,
-                })
-                return LoopResult(
-                    action="error",
-                    error=f"Session {session_id} is {latest_session.status}",
-                )
-            if Session.is_lifecycle_transitioning(session_id):
-                return LoopResult(
-                    action="error",
-                    error=f"Session {session_id} is changing lifecycle state",
-                )
-            if cls.is_running(session_id):
-                return LoopResult(
-                    action="queued",
-                    error="Loop already running",
-                )
-            cls._active_loops[session_id] = ctx
-        
-        # Set status to busy
-        SessionStatus.set(session_id, SessionStatusBusy())
-        await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "busy")
-        
-        # Mark orphaned running tool parts as error (e.g. from server restart).
-        # Wrapped in try/except so cleanup failures never block the session loop.
-        try:
-            from flocks.session.orphan_tools import abort_orphan_running_parts
-
-            await abort_orphan_running_parts(session_id)
-        except Exception as exc:
-            log.warn("loop.orphan_cleanup_failed", {
-                "session_id": session_id,
-                "error": str(exc),
-            })
-        
-        try:
-            # Run loop iteration
-            result = await cls._run_loop(ctx, callbacks or LoopCallbacks())
-            return result
-        except Exception as e:
-            log.error("loop.error", {"session_id": session_id, "error": str(e)})
-            # Report error to callbacks so CLI/TUI can display it
-            if callbacks and callbacks.on_error:
-                try:
-                    await callbacks.on_error(str(e))
-                except Exception as _cb_err:
-                    log.debug("loop.error.callback_failed", {"error": str(_cb_err)})
-            try:
-                from flocks.bus.bus import Bus
-                from flocks.bus.events import SessionError
-                await Bus.publish(SessionError, {
-                    "sessionID": session_id,
-                    "error": str(e),
-                })
-            except Exception as exc:
-                log.warn("loop.error.event_error", {"error": str(exc)})
-            return LoopResult(
-                action="error",
-                error=str(e),
-                provider_id=ctx.provider_id,
-                model_id=ctx.model_id,
-            )
-        finally:
-            # Clean up
-            if session_id in cls._active_loops:
-                del cls._active_loops[session_id]
-            clear_turn_state(session_id)
-            
-            # Set status to idle
-            SessionStatus.set(session_id, SessionStatusIdle())
-            await cls._publish_session_status(callbacks or LoopCallbacks(), session_id, "idle")
-            
-            # Touch session (update timestamp)
-            await Session.touch(session.project_id, session_id)
-
-            # Publish idle event
-            try:
-                from flocks.bus.bus import Bus
-                from flocks.bus.events import SessionIdle
-                await Bus.publish(SessionIdle, {"sessionID": session_id})
-            except Exception as exc:
-                log.warn("loop.idle.event_error", {"error": str(exc)})
     
     @staticmethod
     async def _resolve_model(
@@ -1281,152 +1102,1138 @@ class SessionLoop:
         )
 
     @classmethod
+    async def _process_model_step(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        snapshot: ModelTurnSnapshot[MessageInfo],
+    ) -> StepResult:
+        """Run one candidate attempt; provider-local retries stay in runner."""
+        from flocks.session.runner import RunnerCallbacks, SessionRunner
+        from flocks.session.step_engine import SessionStepEngine
+
+        runner_callbacks = callbacks.runner_callbacks
+        if runner_callbacks is None:
+            runner_callbacks = RunnerCallbacks()
+        if (
+            callbacks.event_publish_callback
+            and not runner_callbacks.event_publish_callback
+        ):
+            runner_callbacks.event_publish_callback = (
+                callbacks.event_publish_callback
+            )
+
+        runner = SessionRunner(
+            session=ctx.session,
+            provider_id=ctx.provider_id,
+            model_id=ctx.model_id,
+            agent_name=ctx.agent_name,
+            abort_event=ctx.abort_event,
+            callbacks=runner_callbacks,
+            session_ctx=ctx.session_ctx,
+            memory_bootstrap_data=ctx.memory_bootstrap_data,
+            static_cache=ctx.runner_static_cache,
+            defer_step_errors=ctx.auto_failover,
+            failover_available=(
+                ctx.auto_failover
+                and ctx.candidate_index + 1 < len(ctx.model_candidates)
+            ),
+            turn_additional_context=ctx.turn_additional_context,
+            session_start_pending=ctx.session_start_pending,
+            runtime_ports=ctx.runtime_ports,
+        )
+        step_engine = SessionStepEngine(runner)
+        result = await step_engine.run(snapshot)
+        if step_engine.session_start_fired:
+            ctx.session_start_pending = False
+        return result
+
+    @classmethod
+    def _create_host_step_engine(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+    ) -> Any:
+        """Compose one-candidate execution with host-owned model recovery."""
+        from flocks.session.runtime_services import SessionLoopStepEngine
+        from flocks.session.session_host import SessionHostStepEngine
+
+        return SessionHostStepEngine(
+            context=ctx,
+            callbacks=callbacks,
+            attempt_engine=SessionLoopStepEngine(ctx, callbacks, cls),
+            cooldowns=cls._auto_failover_cooldowns,
+            cooldown_factory=AutoFailoverCooldown,
+            select_candidate=cls._select_candidate,
+            finalize_failure=cls._finalize_deferred_failure,
+            publish_event=cls._publish_runtime_event,
+            rate_limit_cooldown_seconds=RATE_LIMIT_COOLDOWN_SECONDS,
+            chain_exhaustion_cooldown_seconds=(
+                CHAIN_EXHAUSTION_COOLDOWN_SECONDS
+            ),
+        )
+
+    @classmethod
     async def _process_step_with_failover(
         cls,
         ctx: LoopContext,
         callbacks: LoopCallbacks,
         messages: List[MessageInfo],
         last_user: MessageInfo,
-    ) -> Any:
-        """Run one logical step, moving across candidates without replaying output."""
-        from flocks.session.runner import RunnerCallbacks, SessionRunner
-        from flocks.session.step_engine import SessionStepEngine
+    ) -> StepResult:
+        """Compatibility entry point for host-owned cross-model recovery."""
+        snapshot = ModelTurnSnapshot(
+            session_id=ctx.session.id,
+            agent_name=ctx.agent_name,
+            active_model=RuntimeModel(ctx.provider_id, ctx.model_id),
+            model_turn_index=ctx.step,
+            trace_step=ctx.trace_step,
+            messages=tuple(messages),
+            last_user=last_user,
+        )
+        return await cls._create_host_step_engine(ctx, callbacks).run(snapshot)
 
-        while True:
-            runner_cbs = callbacks.runner_callbacks
-            if runner_cbs is None:
-                runner_cbs = RunnerCallbacks()
-            if callbacks.event_publish_callback and not runner_cbs.event_publish_callback:
-                runner_cbs.event_publish_callback = callbacks.event_publish_callback
+    @staticmethod
+    def _log_step_complete(ctx: LoopContext, duration_ms: int) -> None:
+        """Record model-turn latency from the session StepEngine adapter."""
+        log.debug(
+            "loop.step_complete",
+            {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "duration_ms": duration_ms,
+            },
+        )
 
-            runner = SessionRunner(
-                session=ctx.session,
-                provider_id=ctx.provider_id,
-                model_id=ctx.model_id,
-                agent_name=ctx.agent_name,
-                abort_event=ctx.abort_event,
-                callbacks=runner_cbs,
-                session_ctx=ctx.session_ctx,
-                memory_bootstrap_data=ctx.memory_bootstrap_data,
-                static_cache=ctx.runner_static_cache,
-                defer_step_errors=ctx.auto_failover,
-                failover_available=(
-                    ctx.auto_failover
-                    and ctx.candidate_index + 1 < len(ctx.model_candidates)
-                ),
-                turn_additional_context=ctx.turn_additional_context,
-                session_start_pending=ctx.session_start_pending,
+    @classmethod
+    async def _complete_model_turn(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        state: AgentRunState[MessageInfo],
+        step_result: StepResult,
+    ) -> ModelTurnBoundary[MessageInfo]:
+        """Expose the persisted state written by one completed model turn."""
+        if callbacks.on_step_end:
+            await callbacks.on_step_end(ctx.step)
+
+        if step_result.error and callbacks.on_error:
+            await callbacks.on_error(step_result.error)
+
+        if ctx.session_ctx:
+            post_messages = await ctx.session_ctx.get_messages()
+        else:
+            post_messages = await Message.list(ctx.session.id)
+
+        last_user = state.metadata.get("last_user")
+        last_message = next(
+            (
+                message
+                for message in reversed(post_messages)
+                if message.role == MessageRole.ASSISTANT
+                and (
+                    not ctx.auto_failover
+                    or last_user is None
+                    or getattr(message, "parentID", None) == last_user.id
+                )
+            ),
+            None,
+        )
+        state.metadata["last_message"] = last_message
+
+        queued_user = None
+        if last_user is not None:
+            queued_user = await cls._detect_queued_user_message(
+                ctx.session.id,
+                post_messages,
+                last_user.id,
+                last_message,
             )
-            step_engine = SessionStepEngine(runner)
-            snapshot = ModelTurnSnapshot(
+
+        if queued_user is not None:
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="queued_message",
+                queued_message_detected=True,
+            )
+            await cls._publish_runtime_event(
+                callbacks,
+                "turn.continued",
+                {
+                    **turn_state.model_dump(by_alias=True),
+                    "queuedUserMessageID": queued_user.id,
+                },
+            )
+            log.info(
+                "loop.continuing_for_queued_message",
+                {
+                    "session_id": ctx.session.id,
+                    "queued_user_id": queued_user.id,
+                    "last_assistant_id": (
+                        last_message.id if last_message else None
+                    ),
+                },
+            )
+        elif step_result.action == "continue":
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="tool_calls",
+                queued_message_detected=False,
+            )
+            await cls._publish_runtime_event(
+                callbacks,
+                "turn.continued",
+                turn_state.model_dump(by_alias=True),
+            )
+        elif step_result.error:
+            await cls._publish_turn_stopped(
+                callbacks,
+                ctx.session.id,
+                step=ctx.step,
+                stop_reason=step_result.error,
+            )
+
+        return ModelTurnBoundary(
+            messages=tuple(post_messages),
+            last_message=last_message,
+            queued_inputs=QueuedInputBatch(
+                messages=(queued_user,) if queued_user is not None else (),
+                cursor=queued_user.id if queued_user is not None else None,
+            ),
+        )
+
+    @classmethod
+    async def _resolve_continuation(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        state: AgentRunState[MessageInfo],
+        step_result: StepResult,
+    ) -> ContinuationDecision[MessageInfo]:
+        """Resolve goal and TurnFinish continuation after a natural stop."""
+        last_user = state.metadata.get("last_user")
+        last_message = state.metadata.get("last_message")
+        if last_user is None or last_message is None:
+            await cls._publish_turn_stopped(
+                callbacks,
+                ctx.session.id,
+                step=ctx.step,
+                stop_reason="stop",
+            )
+            return ContinuationDecision()
+
+        try:
+            content_result = Message.get_text_content(last_message)
+            last_response = (
+                await content_result
+                if inspect.isawaitable(content_result)
+                else content_result
+            )
+        except Exception as exc:
+            log.warn(
+                "goal.last_response.error",
+                {
+                    "session_id": ctx.session.id,
+                    "message_id": getattr(last_message, "id", None),
+                    "error": str(exc),
+                },
+            )
+            last_response = getattr(last_message, "content", "") or ""
+
+        pending_user_input = False
+        try:
+            from flocks.server.routes.question import has_pending_questions
+
+            pending_user_input = has_pending_questions(ctx.session.id)
+        except Exception as exc:
+            log.warn(
+                "goal.pending_question_check.error",
+                {"session_id": ctx.session.id, "error": str(exc)},
+            )
+
+        goal_decision = await GoalManager.evaluate_after_turn(
+            ctx.session.id,
+            str(last_response or ""),
+            pending_user_input=pending_user_input,
+            provider_id=ctx.provider_id,
+            model_id=ctx.model_id,
+        )
+        if (
+            goal_decision.status in {"completed", "blocked", "paused"}
+            and goal_decision.objective
+        ):
+            await cls._publish_runtime_event(
+                callbacks,
+                "session.goal.updated",
+                {
+                    "sessionID": ctx.session.id,
+                    "status": goal_decision.status,
+                    "objective": goal_decision.objective,
+                    "reason": goal_decision.reason,
+                },
+            )
+        if goal_decision.should_continue and goal_decision.continuation_prompt:
+            goal_user = await Message.create(
+                session_id=ctx.session.id,
+                role=MessageRole.USER,
+                content=goal_decision.continuation_prompt,
+                agent=(
+                    last_user.agent
+                    if hasattr(last_user, "agent")
+                    else ctx.agent_name
+                ),
+                model=(
+                    last_user.model
+                    if hasattr(last_user, "model")
+                    else {
+                        "providerID": ctx.provider_id,
+                        "modelID": ctx.model_id,
+                    }
+                ),
+                provider=(
+                    last_user.provider
+                    if hasattr(last_user, "provider")
+                    else ctx.provider_id
+                ),
+                synthetic=True,
+                part_metadata={
+                    "goalContinuation": True,
+                    "goalVerdict": goal_decision.verdict,
+                    "goalReason": goal_decision.reason,
+                },
+            )
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="goal",
+                queued_message_detected=False,
+            )
+            await cls._publish_runtime_event(
+                callbacks,
+                "turn.continued",
+                {
+                    **turn_state.model_dump(by_alias=True),
+                    "goalMessageID": goal_user.id,
+                    "goalVerdict": goal_decision.verdict,
+                },
+            )
+            log.info(
+                "loop.continuing_for_goal",
+                {
+                    "session_id": ctx.session.id,
+                    "goal_message_id": goal_user.id,
+                    "reason": goal_decision.reason,
+                },
+            )
+            return ContinuationDecision(
+                messages=(goal_user,),
+                reason="goal",
+            )
+
+        if (
+            not ctx.should_abort()
+            and getattr(last_message, "finish", None) == "stop"
+            and await cls._run_turn_finish_hook(
+                ctx,
+                callbacks,
+                last_user,
+                last_message,
+            )
+        ):
+            if ctx.session_ctx:
+                post_hook_messages = await ctx.session_ctx.get_messages()
+            else:
+                post_hook_messages = await Message.list(ctx.session.id)
+            existing_ids = {message.id for message in state.messages}
+            new_messages = tuple(
+                message
+                for message in post_hook_messages
+                if message.id not in existing_ids
+            )
+            return ContinuationDecision(
+                messages=new_messages,
+                reason="turn_finish_hook",
+            )
+
+        stop_reason = getattr(last_message, "finish", None) or "stop"
+        await cls._publish_turn_stopped(
+            callbacks,
+            ctx.session.id,
+            step=ctx.step,
+            stop_reason=stop_reason,
+        )
+        return ContinuationDecision()
+
+    @classmethod
+    async def _prepare_model_turn(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        state: AgentRunState[MessageInfo],
+    ) -> ModelTurnPreparation[MessageInfo]:
+        """Prepare one immutable model-turn snapshot from session state."""
+        SessionStatus.set(ctx.session.id, SessionStatusBusy())
+        ctx.step += 1
+        state.model_turn_index = ctx.step
+        turn_state = set_turn_state(
+            ctx.session.id,
+            step=ctx.step,
+            status="started",
+            queued_message_detected=False,
+        )
+        await cls._publish_runtime_event(
+            callbacks,
+            "turn.started",
+            turn_state.model_dump(by_alias=True),
+        )
+        log.info(
+            "loop.step",
+            {"session_id": ctx.session.id, "step": ctx.step},
+        )
+        if callbacks.on_step_start:
+            await callbacks.on_step_start(ctx.step)
+
+        messages_started_at = asyncio.get_running_loop().time()
+        if ctx.session_ctx:
+            messages = await ctx.session_ctx.get_messages()
+        else:
+            messages = await Message.list(ctx.session.id)
+        log.debug(
+            "loop.messages_loaded",
+            {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "message_count": len(messages),
+                "duration_ms": int(
+                    (asyncio.get_running_loop().time() - messages_started_at)
+                    * 1000
+                ),
+            },
+        )
+        if not messages:
+            log.info("loop.no_messages", {"session_id": ctx.session.id})
+            await cls._publish_turn_stopped(
+                callbacks,
+                ctx.session.id,
+                step=ctx.step,
+                stop_reason="no_messages",
+            )
+            return ModelTurnPreparation(status=TurnPreparationStatus.COMPLETE)
+
+        last_user: Optional[MessageInfo] = None
+        last_assistant: Optional[MessageInfo] = None
+        last_finished: Optional[MessageInfo] = None
+        tasks: List[tuple[str, Any]] = []
+        scan_started_at = asyncio.get_running_loop().time()
+        for message in reversed(messages):
+            if last_user is None and message.role == MessageRole.USER:
+                last_user = message
+            if last_assistant is None and message.role == MessageRole.ASSISTANT:
+                last_assistant = message
+            if (
+                last_finished is None
+                and message.role == MessageRole.ASSISTANT
+                and getattr(message, "finish", None)
+            ):
+                last_finished = message
+            if last_user is not None and last_finished is not None:
+                break
+            if last_finished is None:
+                for part in await Message.parts(message.id, ctx.session.id):
+                    if part.type == "compaction":
+                        tasks.append(("compaction", part))
+                    elif part.type == "subtask":
+                        tasks.append(("subtask", part))
+        log.debug(
+            "loop.message_scan_complete",
+            {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "task_count": len(tasks),
+                "duration_ms": int(
+                    (asyncio.get_running_loop().time() - scan_started_at) * 1000
+                ),
+            },
+        )
+
+        if last_user is None:
+            log.info(
+                "loop.no_user_message",
+                {
+                    "session_id": ctx.session.id,
+                    "message_count": len(messages),
+                    "roles": [
+                        str(getattr(message, "role", ""))
+                        for message in messages[-5:]
+                    ],
+                },
+            )
+            await cls._publish_turn_stopped(
+                callbacks,
+                ctx.session.id,
+                step=ctx.step,
+                stop_reason="no_user_message",
+            )
+            return ModelTurnPreparation(status=TurnPreparationStatus.COMPLETE)
+
+        last_assistant_parts = (
+            await Message.parts(last_assistant.id, ctx.session.id)
+            if last_assistant
+            else []
+        )
+        if cls._should_exit(last_user, last_assistant, last_assistant_parts):
+            log.info(
+                "loop.exit_condition",
+                {
+                    "session_id": ctx.session.id,
+                    "last_user_id": last_user.id,
+                    "last_assistant_id": (
+                        last_assistant.id if last_assistant else None
+                    ),
+                    "finish": last_assistant.finish if last_assistant else None,
+                    "has_tool_parts": any(
+                        getattr(part, "type", None) == "tool"
+                        for part in last_assistant_parts
+                    ),
+                },
+            )
+            return ModelTurnPreparation(
+                status=TurnPreparationStatus.COMPLETE,
+                last_message=last_assistant,
+            )
+
+        if await cls._prepare_auto_turn(ctx, last_user):
+            ctx.turn_additional_context = None
+            ctx.stop_hook_active = False
+            await cls._run_user_prompt_submit_hook(ctx, last_user)
+
+        state.current_user_id = last_user.id
+        state.metadata["last_user"] = last_user
+        await cls._prepare_memory(ctx)
+        cls._schedule_title_generation(ctx, callbacks, last_user, messages)
+
+        if tasks:
+            task_preparation = await cls._prepare_pending_task(
+                ctx,
+                callbacks,
+                messages,
+                last_user,
+                tasks.pop(),
+            )
+            if task_preparation is not None:
+                return task_preparation
+
+        context_preparation = await cls._prepare_context_window(
+            ctx,
+            callbacks,
+            messages,
+            last_user,
+            last_finished,
+        )
+        if context_preparation is not None:
+            return context_preparation
+
+        active_model = RuntimeModel(ctx.provider_id, ctx.model_id)
+        state.active_model = active_model
+        state.messages = list(messages)
+        return ModelTurnPreparation(
+            status=TurnPreparationStatus.READY,
+            snapshot=ModelTurnSnapshot(
                 session_id=ctx.session.id,
                 agent_name=ctx.agent_name,
-                active_model=RuntimeModel(
-                    provider_id=ctx.provider_id,
-                    model_id=ctx.model_id,
-                ),
+                active_model=active_model,
                 model_turn_index=ctx.step,
                 trace_step=ctx.trace_step,
                 messages=tuple(messages),
                 last_user=last_user,
+            ),
+        )
+
+    @staticmethod
+    async def _prepare_memory(ctx: LoopContext) -> None:
+        """Load memory once before the first model turn."""
+        if (
+            ctx.step != 1
+            or not ctx.session.memory_enabled
+            or ctx.memory_bootstrap_data is not None
+        ):
+            return
+        try:
+            from flocks.memory.bootstrap import MemoryBootstrap
+
+            ctx.memory_bootstrap_data = await MemoryBootstrap(
+                project_id=ctx.session.project_id,
+            ).bootstrap(load_daily=False)
+            log.info(
+                "loop.memory_bootstrap_done",
+                {
+                    "session_id": ctx.session.id,
+                    "has_main": (
+                        ctx.memory_bootstrap_data.get("main_memory") is not None
+                    ),
+                },
             )
-            step_result = await step_engine.run(snapshot)
-            if step_engine.session_start_fired:
-                ctx.session_start_pending = False
-            failure = step_result.failure
-            if not ctx.auto_failover or failure is None:
-                return step_result
+        except Exception as exc:
+            log.error("loop.memory_bootstrap_error", {"error": str(exc)})
 
-            next_index = ctx.candidate_index + 1
-            has_next = next_index < len(ctx.model_candidates)
-            if not failure.allow_fallback or not has_next:
-                if (
-                    ctx.model_candidate_policy == "automatic"
-                    and failure.allow_fallback
-                    and not has_next
-                    and ctx.candidate_index > 0
-                    and failure.reason not in {"rate_limit", "billing"}
-                ):
-                    expires_at = time.monotonic() + CHAIN_EXHAUSTION_COOLDOWN_SECONDS
-                    existing_cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
-                    if not (
-                        existing_cooldown
-                        and existing_cooldown.expires_at > expires_at
-                    ):
-                        cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
-                            model=ctx.model_candidates[ctx.candidate_index],
-                            primary=ctx.model_candidates[0],
-                            expires_at=expires_at,
-                            reason="chain_exhausted",
-                        )
-                await cls._finalize_deferred_failure(ctx, failure, last_user)
-                return step_result
+    @staticmethod
+    def _schedule_title_generation(
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        last_user: MessageInfo,
+        messages: List[MessageInfo],
+    ) -> None:
+        """Start optimistic first-turn title generation without blocking."""
+        if ctx.step != 1 or ctx.auto_failover:
+            return
+        try:
+            from flocks.session.lifecycle.title import SessionTitle
 
-            # A candidate may be removed only while its attempt is completely
-            # replay-safe. Failure to delete stops the switch to avoid leaving
-            # two assistant cards for one logical response.
-            if failure.assistant_message_id:
-                try:
-                    deleted = await Message.delete(
-                        ctx.session.id,
-                        failure.assistant_message_id,
-                    )
-                except Exception as exc:
-                    deleted = False
-                    log.error("session.model.fallback_cleanup_failed", {
-                        "session_id": ctx.session.id,
-                        "message_id": failure.assistant_message_id,
-                        "error": str(exc),
-                    })
-                if not deleted:
-                    await cls._finalize_deferred_failure(ctx, failure, last_user)
-                    return step_result
-                await cls._publish_runtime_event(callbacks, "message.removed", {
-                    "sessionID": ctx.session.id,
-                    "messageID": failure.assistant_message_id,
-                })
+            user_model = getattr(last_user, "model", None)
+            if isinstance(user_model, dict):
+                title_model_id = user_model.get("modelID", ctx.model_id)
+                title_provider_id = user_model.get(
+                    "providerID",
+                    ctx.provider_id,
+                )
+            else:
+                title_model_id = ctx.model_id
+                title_provider_id = ctx.provider_id
+            fire_and_forget(
+                SessionTitle.ensure_title(
+                    session_id=ctx.session.id,
+                    model_id=title_model_id,
+                    provider_id=title_provider_id,
+                    messages=messages,
+                    event_publish_callback=callbacks.event_publish_callback,
+                ),
+                label="title_generation",
+                name=f"title:{ctx.session.id}",
+            )
+        except Exception as exc:
+            log.error("loop.title_generation.error", {"error": str(exc)})
 
-            previous = ctx.model_candidates[ctx.candidate_index]
-            next_candidate = ctx.model_candidates[next_index]
+    @classmethod
+    async def _prepare_pending_task(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        task: tuple[str, Any],
+    ) -> Optional[ModelTurnPreparation[MessageInfo]]:
+        """Finish persisted subtask or compaction work before the model turn."""
+        task_type, task_part = task
+        if task_type == "subtask":
+            log.info(
+                "loop.subtask_detected",
+                {"session_id": ctx.session.id, "step": ctx.step},
+            )
+            await cls._execute_subtask(ctx, last_user, task_part)
+            return ModelTurnPreparation(status=TurnPreparationStatus.CONTINUE)
 
-            if ctx.model_candidate_policy == "automatic":
-                if ctx.candidate_index == 0 and failure.reason in {"rate_limit", "billing"}:
-                    cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
-                        model=next_candidate,
-                        primary=ctx.model_candidates[0],
-                        expires_at=time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS,
-                        reason=failure.reason,
-                    )
-                else:
-                    cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
-                    if cooldown and cooldown.expires_at > time.monotonic():
-                        cooldown.model = next_candidate
+        log.info(
+            "loop.compaction_pending",
+            {
+                "session_id": ctx.session.id,
+                "step": ctx.step,
+                "auto": getattr(task_part, "auto", False),
+            },
+        )
+        if callbacks.on_compaction:
+            await callbacks.on_compaction()
 
-            cls._select_candidate(ctx, next_index)
-            event_payload = {
-                "sessionID": ctx.session.id,
-                "from": {
-                    "providerID": previous.provider_id,
-                    "modelID": previous.model_id,
+        publish = callbacks.event_publish_callback
+        progress_callback = None
+        if publish is not None:
+
+            async def progress_callback(stage: str, data: dict) -> None:
+                await publish(
+                    "session.compaction_progress",
+                    {
+                        "sessionID": ctx.session.id,
+                        "stage": stage,
+                        "data": data,
+                    },
+                )
+
+        try:
+            compaction_result = await run_compaction(
+                ctx.session.id,
+                parent_message_id=last_user.id,
+                messages=messages,
+                provider_id=ctx.provider_id,
+                model_id=ctx.model_id,
+                auto=getattr(task_part, "auto", False),
+                event_publish_callback=publish,
+                status_after="busy",
+                policy=cls._build_compaction_policy(ctx),
+                progress_callback=progress_callback,
+            )
+            if compaction_result == "stop":
+                log.error(
+                    "loop.compaction_failed",
+                    {"session_id": ctx.session.id},
+                )
+                if callbacks.on_error:
+                    await callbacks.on_error("Compaction failed")
+                return ModelTurnPreparation(
+                    status=TurnPreparationStatus.COMPLETE,
+                )
+            if compaction_result == "skipped":
+                log.info(
+                    "loop.manual_compaction_skipped",
+                    {"session_id": ctx.session.id, "step": ctx.step},
+                )
+            return ModelTurnPreparation(status=TurnPreparationStatus.CONTINUE)
+        except Exception as exc:
+            log.error("loop.compaction_error", {"error": str(exc)})
+            if callbacks.on_error:
+                await callbacks.on_error(f"Compaction error: {exc}")
+            return ModelTurnPreparation(status=TurnPreparationStatus.COMPLETE)
+
+    @classmethod
+    async def _prepare_context_window(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        last_finished: Optional[MessageInfo],
+    ) -> Optional[ModelTurnPreparation[MessageInfo]]:
+        """Recover a near-overflow context before the next model turn."""
+        if last_finished is None or getattr(last_finished, "summary", False):
+            return None
+
+        model_context, model_output, model_input = Provider.resolve_model_info(
+            ctx.provider_id,
+            ctx.model_id,
+        )
+        if model_context <= 0:
+            return None
+
+        policy = CompactionPolicy.from_model(
+            context_window=model_context,
+            max_output_tokens=model_output or 4096,
+            max_input_tokens=model_input,
+        )
+        tokens = cls._normalise_token_usage(last_finished)
+        input_tokens = tokens.get("input", 0)
+        cache = tokens.get("cache") or {}
+        cache_read = cache.get("read", 0) if isinstance(cache, dict) else 0
+        output_tokens = tokens.get("output", 0)
+        reported_total = input_tokens + cache_read + output_tokens
+        if reported_total > 0:
+            ctx.last_observed_prompt_tokens = reported_total
+            log.info(
+                "loop.tokens_decision",
+                {
+                    "session_id": ctx.session.id,
+                    "source": "observed",
+                    "effective_tokens": input_tokens + cache_read,
+                    "overflow_threshold": policy.overflow_threshold,
                 },
-                "to": {
-                    "providerID": next_candidate.provider_id,
-                    "modelID": next_candidate.model_id,
-                },
-                "reason": failure.reason,
-                "candidateIndex": next_index,
+            )
+        else:
+            estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
+                ctx.session.id,
+                messages,
+                policy=policy,
+            )
+            tokens = {
+                "input": estimated_tokens,
+                "output": 0,
+                "cache": {"read": 0, "write": 0},
             }
-            log.warn("session.model.fallback", {
-                "from": event_payload["from"],
-                "to": event_payload["to"],
-                "reason": event_payload["reason"],
-                "candidateIndex": event_payload["candidateIndex"],
-            })
+            log.info(
+                "loop.tokens_decision",
+                {
+                    "session_id": ctx.session.id,
+                    "source": "estimated",
+                    "effective_tokens": estimated_tokens,
+                    "message_count": len(messages),
+                    "overflow_threshold": policy.overflow_threshold,
+                },
+            )
+
+        try:
+            cache = tokens.get("cache") or {}
+            current_input_tokens = tokens.get("input", 0) + (
+                cache.get("read", 0) if isinstance(cache, dict) else 0
+            )
+            recent_compaction = cls._has_recent_compaction_cooldown(ctx)
+            near_overflow = current_input_tokens >= policy.preemptive_threshold
+            if near_overflow and ctx.last_cleanup_step != ctx.step:
+                cleanup_result = await cls._prepare_tool_result_cleanup(
+                    ctx,
+                    callbacks,
+                    model_context,
+                    policy,
+                    current_input_tokens,
+                    recent_compaction,
+                )
+                if cleanup_result is not None:
+                    return cleanup_result
+
+            is_overflow = await SessionCompaction.is_overflow(
+                tokens=tokens,
+                model_context=model_context,
+                policy=policy,
+            )
+            if not is_overflow:
+                return None
+
+            log.info(
+                "loop.context_overflow_detected",
+                {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "tokens": tokens,
+                    "tier": policy.tier.value,
+                    "overflow_compaction_attempts": (
+                        ctx.overflow_compaction_attempts
+                    ),
+                },
+            )
+            if (
+                ctx.overflow_compaction_attempts
+                >= MAX_OVERFLOW_COMPACTION_ATTEMPTS
+            ):
+                await cls._report_compaction_exhausted(
+                    ctx,
+                    callbacks,
+                    tokens,
+                )
+                return ModelTurnPreparation(
+                    status=TurnPreparationStatus.COMPLETE,
+                )
+
+            if not ctx.tool_result_truncation_attempted:
+                ctx.tool_result_truncation_attempted = True
+                try:
+                    truncation_count = (
+                        await SessionCompaction.truncate_oversized_tool_outputs(
+                            ctx.session.id,
+                            context_window_tokens=model_context,
+                        )
+                    )
+                    if truncation_count > 0:
+                        log.info(
+                            "loop.oversized_tool_truncated",
+                            {
+                                "session_id": ctx.session.id,
+                                "truncated": truncation_count,
+                            },
+                        )
+                        estimated_tokens = (
+                            await SessionPrompt.estimate_full_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                policy=policy,
+                            )
+                        )
+                        still_overflow = await SessionCompaction.is_overflow(
+                            tokens={
+                                "input": estimated_tokens,
+                                "output": 0,
+                                "cache": {"read": 0, "write": 0},
+                            },
+                            model_context=model_context,
+                            policy=policy,
+                        )
+                        if not still_overflow:
+                            log.info(
+                                "loop.overflow_resolved_by_truncation",
+                                {"session_id": ctx.session.id},
+                            )
+                            return ModelTurnPreparation(
+                                status=TurnPreparationStatus.CONTINUE,
+                            )
+                except Exception as exc:
+                    log.warn(
+                        "loop.oversized_truncation_error",
+                        {"session_id": ctx.session.id, "error": str(exc)},
+                    )
+
+            return await cls._prepare_full_compaction(
+                ctx,
+                callbacks,
+                messages,
+                last_user,
+                policy,
+            )
+        except Exception as exc:
+            log.error(
+                "loop.compaction_overflow_check_error",
+                {"error": str(exc)},
+            )
+            return None
+
+    @staticmethod
+    def _normalise_token_usage(message: MessageInfo) -> Dict[str, Any]:
+        """Normalise provider token usage into the legacy mapping shape."""
+        raw_tokens = getattr(message, "tokens", None)
+        if not raw_tokens:
+            return {}
+        if isinstance(raw_tokens, dict):
+            return raw_tokens
+        if hasattr(raw_tokens, "model_dump"):
+            return raw_tokens.model_dump()
+        if hasattr(raw_tokens, "__dict__"):
+            return vars(raw_tokens)
+        return {}
+
+    @classmethod
+    async def _prepare_tool_result_cleanup(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        model_context: int,
+        policy: CompactionPolicy,
+        current_input_tokens: int,
+        recent_compaction: bool,
+    ) -> Optional[ModelTurnPreparation[MessageInfo]]:
+        """Apply the cheap tool-result cleanup before full compaction."""
+        try:
+            truncation_count = (
+                await SessionCompaction.truncate_oversized_tool_outputs(
+                    ctx.session.id,
+                    context_window_tokens=model_context,
+                )
+            )
+            ctx.last_cleanup_step = ctx.step
+            if truncation_count <= 0:
+                return None
+
+            set_context_state(
+                ctx.session.id,
+                tool_results_compacted=True,
+                last_compaction_step=ctx.last_compaction_step,
+                last_compaction_reason="pre_compact_cleanup",
+            )
             await cls._publish_runtime_event(
                 callbacks,
-                "session.model.fallback",
-                event_payload,
+                "context.compacted",
+                {
+                    "sessionID": ctx.session.id,
+                    "step": ctx.step,
+                    "reason": "pre_compact_cleanup",
+                    "truncatedToolResults": truncation_count,
+                    "cooldownActive": recent_compaction,
+                },
             )
+            log.info(
+                "loop.pre_compact_cleanup_applied",
+                {
+                    "session_id": ctx.session.id,
+                    "step": ctx.step,
+                    "truncated": truncation_count,
+                    "preemptive_threshold": policy.preemptive_threshold,
+                    "input_tokens": current_input_tokens,
+                    "cooldown_active": recent_compaction,
+                },
+            )
+            turn_state = set_turn_state(
+                ctx.session.id,
+                step=ctx.step,
+                status="continued",
+                continue_reason="pre_compact_cleanup",
+                queued_message_detected=False,
+            )
+            await cls._publish_runtime_event(
+                callbacks,
+                "turn.continued",
+                turn_state.model_dump(by_alias=True),
+            )
+            return ModelTurnPreparation(status=TurnPreparationStatus.CONTINUE)
+        except Exception as exc:
+            log.warn(
+                "loop.pre_compact_cleanup_error",
+                {"session_id": ctx.session.id, "error": str(exc)},
+            )
+            return None
+
+    @classmethod
+    async def _report_compaction_exhausted(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        tokens: Dict[str, Any],
+    ) -> None:
+        """Surface whether exhaustion came from context or provider health."""
+        history = _get_compaction_history(ctx.session.id)
+        provider_error = history.summary_last_error
+        in_cooldown = (
+            history.summary_cooldown_until > 0
+            and history.summary_cooldown_until > time.monotonic()
+        )
+        cooldown_seconds = max(
+            0,
+            round(history.summary_cooldown_until - time.monotonic()),
+        )
+        if in_cooldown or provider_error:
+            notice = (
+                "摘要模型暂时不可用，上下文压缩跳过了本轮压缩。"
+                + (
+                    f"冷却剩余约 {cooldown_seconds} 秒，"
+                    if in_cooldown
+                    else ""
+                )
+                + "建议稍后继续，或切换到其他模型重试。"
+            )
+            error = (
+                "Compaction skipped: summary provider unavailable "
+                f"({provider_error or 'cooldown active'})."
+                + (
+                    f" Cooldown expires in ~{cooldown_seconds}s."
+                    if in_cooldown
+                    else ""
+                )
+                + " Wait for the provider to recover or switch models."
+            )
+        else:
+            notice = (
+                "当前任务上下文过重，已经多次 compact 仍接近上限。"
+                "建议收敛工具输出、缩小搜索范围，或开启新会话。"
+            )
+            error = (
+                "Context overflow: prompt too large for the model after "
+                f"{ctx.overflow_compaction_attempts} compaction attempts. "
+                "Try starting a new session or use a larger-context model."
+            )
+
+        await cls._publish_session_notice(
+            callbacks,
+            ctx.session.id,
+            level="warning",
+            message=notice,
+            details={
+                "attempts": ctx.overflow_compaction_attempts,
+                "maxAttempts": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+                "tokens": tokens,
+                "providerError": provider_error or None,
+                "cooldownRemainingSeconds": (
+                    cooldown_seconds if in_cooldown else 0
+                ),
+            },
+        )
+        log.error(
+            "loop.overflow_compaction_exhausted",
+            {
+                "session_id": ctx.session.id,
+                "attempts": ctx.overflow_compaction_attempts,
+                "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+                "tokens": tokens,
+                "in_cooldown": in_cooldown,
+                "provider_error": provider_error or None,
+            },
+        )
+        if callbacks.on_error:
+            await callbacks.on_error(error)
+
+    @classmethod
+    async def _prepare_full_compaction(
+        cls,
+        ctx: LoopContext,
+        callbacks: LoopCallbacks,
+        messages: List[MessageInfo],
+        last_user: MessageInfo,
+        policy: CompactionPolicy,
+    ) -> ModelTurnPreparation[MessageInfo]:
+        """Run full compaction and request preparation to reload the session."""
+        ctx.overflow_compaction_attempts += 1
+        if ctx.overflow_compaction_attempts >= 2:
+            await cls._publish_session_notice(
+                callbacks,
+                ctx.session.id,
+                level="info",
+                message=(
+                    "本轮上下文持续接近模型上限，系统将优先尝试压缩历史工具输出。"
+                ),
+                details={
+                    "attempt": ctx.overflow_compaction_attempts,
+                    "threshold": policy.overflow_threshold,
+                    "buffer": policy.overflow_buffer,
+                },
+            )
+        log.warn(
+            "loop.overflow_compaction_attempt",
+            {
+                "session_id": ctx.session.id,
+                "attempt": ctx.overflow_compaction_attempts,
+                "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
+            },
+        )
+        if callbacks.on_compaction:
+            await callbacks.on_compaction()
+        await SessionCompaction.prune(ctx.session.id, policy=policy)
+
+        publish = callbacks.event_publish_callback
+        progress_callback = None
+        if publish is not None:
+
+            async def progress_callback(stage: str, data: dict) -> None:
+                await publish(
+                    "session.compaction_progress",
+                    {
+                        "sessionID": ctx.session.id,
+                        "stage": stage,
+                        "data": data,
+                    },
+                )
+
+        result = await run_compaction(
+            ctx.session.id,
+            parent_message_id=last_user.id,
+            messages=messages,
+            provider_id=ctx.provider_id,
+            model_id=ctx.model_id,
+            auto=True,
+            event_publish_callback=publish,
+            status_after="busy",
+            policy=policy,
+            progress_callback=progress_callback,
+        )
+        if result == "stop":
+            log.error(
+                "loop.compaction_failed",
+                {"session_id": ctx.session.id},
+            )
+            if callbacks.on_error:
+                await callbacks.on_error("Compaction failed")
+            return ModelTurnPreparation(status=TurnPreparationStatus.COMPLETE)
+        if result == "skipped":
+            log.info(
+                "loop.compaction_skipped",
+                {"session_id": ctx.session.id, "step": ctx.step},
+            )
+        else:
+            ctx.last_compaction_step = ctx.step
+            set_context_state(
+                ctx.session.id,
+                compaction_performed=True,
+                last_compaction_step=ctx.step,
+                last_compaction_reason="full_compaction",
+            )
+            await cls._publish_runtime_event(
+                callbacks,
+                "context.compacted",
+                {
+                    "sessionID": ctx.session.id,
+                    "step": ctx.step,
+                    "reason": "full_compaction",
+                    "attempt": ctx.overflow_compaction_attempts,
+                    "cooldownUntilStep": (
+                        ctx.step + POST_COMPACTION_COOLDOWN_STEPS
+                    ),
+                },
+            )
+        return ModelTurnPreparation(status=TurnPreparationStatus.CONTINUE)
 
     @classmethod
     async def _run_loop(
@@ -1434,880 +2241,58 @@ class SessionLoop:
         ctx: LoopContext,
         callbacks: LoopCallbacks,
     ) -> LoopResult:
-        """
-        Main loop iteration logic
-        
-        完全匹配 TUI SessionPrompt.loop() 的结构:
-        1. Get messages and analyze (lastUser, lastAssistant, lastFinished)
-        2. Check exit conditions
-        3. Generate title on first step
-        4. Check for pending tasks (subtask/compaction)
-        5. Check context overflow (compaction before step)
-        6. Process step (call LLM + tools)
-        7. Loop until complete
-        """
-        last_message: Optional[MessageInfo] = None
-        loop_error: Optional[str] = None
-        
-        while not ctx.should_abort():
-            # Set status to busy
-            SessionStatus.set(ctx.session.id, SessionStatusBusy())
-            
-            ctx.step += 1
-            turn_state = set_turn_state(
-                ctx.session.id,
-                step=ctx.step,
-                status="started",
-                queued_message_detected=False,
-            )
-            await cls._publish_runtime_event(callbacks, "turn.started", turn_state.model_dump(by_alias=True))
-            log.info("loop.step", {
-                "session_id": ctx.session.id,
-                "step": ctx.step,
-            })
-            
-            # Callback: step start
-            if callbacks.on_step_start:
-                await callbacks.on_step_start(ctx.step)
-            
-            # Get messages via SessionContext interface
-            messages_started_at = asyncio.get_event_loop().time()
-            if ctx.session_ctx:
-                messages = await ctx.session_ctx.get_messages()
-            else:
-                messages = await Message.list(ctx.session.id)
-            log.debug("loop.messages_loaded", {
-                "session_id": ctx.session.id,
-                "step": ctx.step,
-                "message_count": len(messages),
-                "duration_ms": int((asyncio.get_event_loop().time() - messages_started_at) * 1000),
-            })
-            if not messages:
-                log.info("loop.no_messages", {"session_id": ctx.session.id})
-                await cls._publish_turn_stopped(
-                    callbacks,
-                    ctx.session.id,
-                    step=ctx.step,
-                    stop_reason="no_messages",
-                )
-                break
-            
-            # Analyze messages (matching TUI lines 277-292)
-            last_user: Optional[MessageInfo] = None
-            last_assistant: Optional[MessageInfo] = None
-            last_finished: Optional[MessageInfo] = None
-            tasks: List[tuple[str, Any]] = []  # (type, part) - compaction or subtask
-            
-            scan_started_at = asyncio.get_event_loop().time()
-            for msg in reversed(messages):
-                # Find lastUser
-                if not last_user and msg.role == MessageRole.USER:
-                    last_user = msg
-                
-                # Find lastAssistant
-                if not last_assistant and msg.role == MessageRole.ASSISTANT:
-                    last_assistant = msg
-                
-                # Find lastFinished
-                if not last_finished and msg.role == MessageRole.ASSISTANT and hasattr(msg, 'finish') and msg.finish:
-                    last_finished = msg
-                
-                # Stop when we have both lastUser and lastFinished
-                if last_user and last_finished:
-                    break
-                
-                # Collect pending tasks before lastFinished
-                if not last_finished:
-                    parts = await Message.parts(msg.id, ctx.session.id)
-                    for part in parts:
-                        if part.type == "compaction":
-                            tasks.append(("compaction", part))
-                        elif part.type == "subtask":
-                            tasks.append(("subtask", part))
-            log.debug("loop.message_scan_complete", {
-                "session_id": ctx.session.id,
-                "step": ctx.step,
-                "task_count": len(tasks),
-                "duration_ms": int((asyncio.get_event_loop().time() - scan_started_at) * 1000),
-            })
-            
-            # Check if we have a user message
-            if not last_user:
-                log.info("loop.no_user_message", {
-                    "session_id": ctx.session.id,
-                    "message_count": len(messages),
-                    "roles": [str(getattr(msg, "role", "")) for msg in messages[-5:]],
-                })
-                await cls._publish_turn_stopped(
-                    callbacks,
-                    ctx.session.id,
-                    step=ctx.step,
-                    stop_reason="no_user_message",
-                )
-                break
+        """Run the host-neutral AgentLoop against session-owned adapters."""
+        from flocks.session.runtime_services import (
+            SessionRuntimeServices,
+            SessionStepCancelled,
+        )
 
-            last_assistant_parts = (
-                await Message.parts(last_assistant.id, ctx.session.id)
-                if last_assistant
-                else []
+        state = AgentRunState[MessageInfo](
+            session_id=ctx.session.id,
+            agent_name=ctx.agent_name,
+            active_model=RuntimeModel(ctx.provider_id, ctx.model_id),
+            model_turn_index=ctx.step,
+            trace_step_offset=ctx.trace_step_offset,
+            current_user_id=ctx.turn_user_id,
+        )
+        services = SessionRuntimeServices(ctx, callbacks, cls)
+        step_engine = cls._create_host_step_engine(ctx, callbacks)
+        try:
+            outcome = await AgentLoop(
+                step_engine,
+                services,
+                abort_requested=ctx.should_abort,
+            ).run(state)
+        except SessionStepCancelled:
+            log.info(
+                "loop.step_cancelled",
+                {"session_id": ctx.session.id, "step": ctx.step},
+            )
+            return LoopResult(
+                action="stop",
+                provider_id=ctx.provider_id,
+                model_id=ctx.model_id,
+                metadata={
+                    "steps": ctx.step,
+                    "session_id": ctx.session.id,
+                    "last_compaction_step": ctx.last_compaction_step,
+                    "aborted": True,
+                },
             )
 
-            # Check exit conditions (matching TUI lines 295-302)
-            if cls._should_exit(last_user, last_assistant, last_assistant_parts):
-                log.info("loop.exit_condition", {
-                    "session_id": ctx.session.id,
-                    "last_user_id": last_user.id,
-                    "last_assistant_id": last_assistant.id if last_assistant else None,
-                    "finish": last_assistant.finish if last_assistant else None,
-                    "has_tool_parts": any(
-                        getattr(part, "type", None) == "tool"
-                        for part in last_assistant_parts
-                    ),
-                })
-                last_message = last_assistant
-                break
-
-            if await cls._prepare_auto_turn(ctx, last_user):
-                ctx.turn_additional_context = None
-                ctx.stop_hook_active = False
-                await cls._run_user_prompt_submit_hook(ctx, last_user)
-            
-            # Bootstrap memory on first step (once per loop, stored in ctx)
-            if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
-                try:
-                    from flocks.memory.bootstrap import MemoryBootstrap
-                    ctx.memory_bootstrap_data = await MemoryBootstrap(
-                        project_id=ctx.session.project_id,
-                    ).bootstrap(load_daily=False)
-                    log.info("loop.memory_bootstrap_done", {
-                        "session_id": ctx.session.id,
-                        "has_main": ctx.memory_bootstrap_data.get("main_memory") is not None,
-                    })
-                except Exception as e:
-                    log.error("loop.memory_bootstrap_error", {"error": str(e)})
-
-            # Early title generation: fire concurrently with the first LLM call so
-            # the title is ready (or nearly so) by the time the response completes.
-            # This is an optimistic fast-path — CLISessionRunner._process_message()
-            # also calls generate_title_after_first_message() after the loop as a
-            # guaranteed safety net (handles single-run mode where asyncio cleanup
-            # may cancel this task before it finishes).
-            # generate_title_after_first_message is idempotent: if this task saves
-            # the title first, the safety-net call returns immediately.
-            if ctx.step == 1 and not ctx.auto_failover:
-                try:
-                    from flocks.session.lifecycle.title import SessionTitle
-                    # UserMessageInfo.model is Dict[str, str] {"providerID": ..., "modelID": ...}
-                    user_model = getattr(last_user, 'model', None) if last_user else None
-                    if isinstance(user_model, dict):
-                        title_model_id = user_model.get("modelID", ctx.model_id)
-                        title_provider_id = user_model.get("providerID", ctx.provider_id)
-                    else:
-                        title_model_id = ctx.model_id
-                        title_provider_id = ctx.provider_id
-                    fire_and_forget(
-                        SessionTitle.ensure_title(
-                            session_id=ctx.session.id,
-                            model_id=title_model_id,
-                            provider_id=title_provider_id,
-                            messages=messages,
-                            event_publish_callback=callbacks.event_publish_callback if callbacks else None,
-                        ),
-                        label="title_generation",
-                        name=f"title:{ctx.session.id}",
-                    )
-                except Exception as e:
-                    log.error("loop.title_generation.error", {"error": str(e)})
-            
-            # Check for pending tasks (matching TUI lines 314-493)
-            if tasks:
-                task_type, task_part = tasks.pop()
-                
-                # Handle pending subtask (matching TUI lines 316-481)
-                if task_type == "subtask":
-                    log.info("loop.subtask_detected", {
-                        "session_id": ctx.session.id,
-                        "step": ctx.step,
-                    })
-                    
-                    # Execute subtask using tool execution
-                    await cls._execute_subtask(ctx, last_user, task_part)
-                    
-                    # Continue to next iteration
-                    continue
-                
-                # Handle pending compaction (matching TUI lines 483-494)
-                elif task_type == "compaction":
-                    log.info("loop.compaction_pending", {
-                        "session_id": ctx.session.id,
-                        "step": ctx.step,
-                        "auto": getattr(task_part, 'auto', False),
-                    })
-                    
-                    # Callback: compaction
-                    if callbacks.on_compaction:
-                        await callbacks.on_compaction()
-                    
-                    # Build dynamic CompactionPolicy from model info
-                    compaction_policy = cls._build_compaction_policy(ctx)
-                    
-                    # Auto-compaction also surfaces a "Compacting..."
-                    # banner on the UI (driven by ``session.status`` →
-                    # ``compacting``), so we wire the same SSE progress
-                    # adapter as the manual ``/compact`` route.  The
-                    # closure captures ``ctx.session.id`` and the
-                    # publish callback explicitly to keep behaviour
-                    # identical between loop and route paths.
-                    _publish = callbacks.event_publish_callback if callbacks else None
-                    _session_id_for_progress = ctx.session.id
-                    progress_callback = None
-                    if _publish is not None:
-                        async def progress_callback(stage: str, data: dict) -> None:
-                            await _publish("session.compaction_progress", {
-                                "sessionID": _session_id_for_progress,
-                                "stage": stage,
-                                "data": data,
-                            })
-
-                    # Process compaction
-                    try:
-                        compaction_result = await run_compaction(
-                            ctx.session.id,
-                            parent_message_id=last_user.id,
-                            messages=messages,
-                            provider_id=ctx.provider_id,
-                            model_id=ctx.model_id,
-                            auto=getattr(task_part, 'auto', False),
-                            event_publish_callback=_publish,
-                            status_after="busy",
-                            policy=compaction_policy,
-                            progress_callback=progress_callback,
-                        )
-                        
-                        if compaction_result == "stop":
-                            log.error("loop.compaction_failed", {"session_id": ctx.session.id})
-                            if callbacks.on_error:
-                                await callbacks.on_error("Compaction failed")
-                            break
-
-                        if compaction_result == "skipped":
-                            log.info("loop.manual_compaction_skipped", {
-                                "session_id": ctx.session.id,
-                                "step": ctx.step,
-                            })
-
-                        # Continue after compaction (whether compacted or skipped)
-                        continue
-                        
-                    except Exception as e:
-                        log.error("loop.compaction_error", {"error": str(e)})
-                        if callbacks.on_error:
-                            await callbacks.on_error(f"Compaction error: {str(e)}")
-                        break
-            
-            # ----------------------------------------------------------------
-            # Context overflow detection & recovery
-            #
-            # Matches OpenClaw run.ts overflow recovery cascade:
-            #   1. Detect overflow
-            #   2. Try tool result truncation (once per run)
-            #   3. Full compaction (up to MAX_OVERFLOW_COMPACTION_ATTEMPTS)
-            #   4. Give up with error if still overflowing
-            # ----------------------------------------------------------------
-            if last_finished and not getattr(last_finished, 'summary', False):
-                # Get model context limit from flocks.json / provider registry
-                model_context, model_output, model_input = Provider.resolve_model_info(
-                    ctx.provider_id, ctx.model_id
-                )
-                
-                # Check for overflow using dynamic CompactionPolicy
-                if model_context > 0:
-                    compaction_policy = CompactionPolicy.from_model(
-                        context_window=model_context,
-                        max_output_tokens=model_output or 4096,
-                        max_input_tokens=model_input,
-                    )
-                    
-                    # Build tokens_dict from last_finished.tokens if available.
-                    # last_finished.tokens may be a TokenUsage Pydantic model (not a
-                    # plain dict), so we normalise it to a dict here to ensure the
-                    # provider-reported usage is actually read instead of silently
-                    # falling through to the chars/4 estimation path.
-                    tokens_dict = {}
-                    if hasattr(last_finished, 'tokens') and last_finished.tokens:
-                        raw_tok = last_finished.tokens
-                        if isinstance(raw_tok, dict):
-                            tokens_dict = raw_tok
-                        elif hasattr(raw_tok, 'model_dump'):
-                            tokens_dict = raw_tok.model_dump()
-                        elif hasattr(raw_tok, '__dict__'):
-                            tokens_dict = vars(raw_tok)
-
-                    # Check if provider returned actual usage data (not all zeros)
-                    input_tokens = tokens_dict.get("input", 0)
-                    _cache = tokens_dict.get("cache") or {}
-                    cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
-                    output_tokens = tokens_dict.get("output", 0)
-                    reported_total = input_tokens + cache_read + output_tokens
-
-                    # B3 — Observed-value-first token decision.  Always prefer
-                    # the provider's actual usage figure (input + cache_read)
-                    # over our synthetic estimate, because that is what the
-                    # next turn's prompt will be billed against.  Cache it on
-                    # the LoopContext so subsequent turns can reuse it as a
-                    # baseline.  Estimation only kicks in when the provider
-                    # genuinely reports no usage (all zero) — we feed the
-                    # compaction policy into ``estimate_full_context_tokens``
-                    # so it includes system-prompt + tool-schema overhead
-                    # and applies the 1.2 safety margin.
-                    if reported_total > 0:
-                        ctx.last_observed_prompt_tokens = input_tokens + cache_read + output_tokens
-                        log.info("loop.tokens_decision", {
-                            "session_id": ctx.session.id,
-                            "source": "observed",
-                            "effective_tokens": input_tokens + cache_read,
-                            "overflow_threshold": compaction_policy.overflow_threshold,
-                        })
-                    else:
-                        estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
-                            ctx.session.id,
-                            messages,
-                            policy=compaction_policy,
-                        )
-                        tokens_dict = {"input": estimated_tokens, "output": 0, "cache": {"read": 0, "write": 0}}
-                        log.info("loop.tokens_decision", {
-                            "session_id": ctx.session.id,
-                            "source": "estimated",
-                            "effective_tokens": estimated_tokens,
-                            "message_count": len(messages),
-                            "overflow_threshold": compaction_policy.overflow_threshold,
-                        })
-                    
-                    try:
-                        _tok_cache = tokens_dict.get("cache") or {}
-                        current_input_tokens = (
-                            tokens_dict.get("input", 0)
-                            + (_tok_cache.get("read", 0) if isinstance(_tok_cache, dict) else 0)
-                        )
-                        recent_compaction = cls._has_recent_compaction_cooldown(ctx)
-                        near_overflow = current_input_tokens >= compaction_policy.preemptive_threshold
-
-                        if near_overflow and ctx.last_cleanup_step != ctx.step:
-                            try:
-                                trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
-                                    ctx.session.id,
-                                    context_window_tokens=model_context,
-                                )
-                                ctx.last_cleanup_step = ctx.step
-                                if trunc_count > 0:
-                                    set_context_state(
-                                        ctx.session.id,
-                                        tool_results_compacted=True,
-                                        last_compaction_step=ctx.last_compaction_step,
-                                        last_compaction_reason="pre_compact_cleanup",
-                                    )
-                                    await cls._publish_runtime_event(callbacks, "context.compacted", {
-                                        "sessionID": ctx.session.id,
-                                        "step": ctx.step,
-                                        "reason": "pre_compact_cleanup",
-                                        "truncatedToolResults": trunc_count,
-                                        "cooldownActive": recent_compaction,
-                                    })
-                                    log.info("loop.pre_compact_cleanup_applied", {
-                                        "session_id": ctx.session.id,
-                                        "step": ctx.step,
-                                        "truncated": trunc_count,
-                                        "preemptive_threshold": compaction_policy.preemptive_threshold,
-                                        "input_tokens": current_input_tokens,
-                                        "cooldown_active": recent_compaction,
-                                    })
-                                    turn_state = set_turn_state(
-                                        ctx.session.id,
-                                        step=ctx.step,
-                                        status="continued",
-                                        continue_reason="pre_compact_cleanup",
-                                        queued_message_detected=False,
-                                    )
-                                    await cls._publish_runtime_event(
-                                        callbacks,
-                                        "turn.continued",
-                                        turn_state.model_dump(by_alias=True),
-                                    )
-                                    continue
-                            except Exception as trunc_err:
-                                log.warn("loop.pre_compact_cleanup_error", {
-                                    "session_id": ctx.session.id,
-                                    "error": str(trunc_err),
-                                })
-
-                        is_overflow = await SessionCompaction.is_overflow(
-                            tokens=tokens_dict,
-                            model_context=model_context,
-                            policy=compaction_policy,
-                        )
-                        
-                        if is_overflow:
-                            log.info("loop.context_overflow_detected", {
-                                "session_id": ctx.session.id,
-                                "step": ctx.step,
-                                "tokens": tokens_dict,
-                                "tier": compaction_policy.tier.value,
-                                "overflow_compaction_attempts": ctx.overflow_compaction_attempts,
-                            })
-
-                            # Check if we've exhausted compaction attempts
-                            # (matches OpenClaw MAX_OVERFLOW_COMPACTION_ATTEMPTS)
-                            if ctx.overflow_compaction_attempts >= MAX_OVERFLOW_COMPACTION_ATTEMPTS:
-                                # Distinguish "provider down / in cooldown" from
-                                # "context genuinely too large" so users get
-                                # actionable advice instead of a generic error.
-                                compaction_hist = _get_compaction_history(ctx.session.id)
-                                _provider_error = compaction_hist.summary_last_error
-                                _in_cooldown = (
-                                    compaction_hist.summary_cooldown_until > 0
-                                    and compaction_hist.summary_cooldown_until
-                                    > time.monotonic()
-                                )
-                                _cooldown_secs = max(
-                                    0,
-                                    round(compaction_hist.summary_cooldown_until
-                                          - time.monotonic()),
-                                )
-
-                                if _in_cooldown or _provider_error:
-                                    # Provider-side issue: cooldown still active
-                                    # or last call recorded an error.  Tell the
-                                    # user to wait / retry rather than open a new
-                                    # session (their context is fine).
-                                    _notice_msg = (
-                                        "摘要模型暂时不可用，上下文压缩跳过了本轮压缩。"
-                                        + (
-                                            f"冷却剩余约 {_cooldown_secs} 秒，"
-                                            if _in_cooldown else ""
-                                        )
-                                        + "建议稍后继续，或切换到其他模型重试。"
-                                    )
-                                    _error_msg = (
-                                        "Compaction skipped: summary provider unavailable "
-                                        f"({_provider_error or 'cooldown active'})."
-                                        + (
-                                            f" Cooldown expires in ~{_cooldown_secs}s."
-                                            if _in_cooldown else ""
-                                        )
-                                        + " Wait for the provider to recover or switch models."
-                                    )
-                                else:
-                                    # Context is genuinely too large even after
-                                    # repeated compaction — advise reducing scope.
-                                    _notice_msg = (
-                                        "当前任务上下文过重，已经多次 compact 仍接近上限。"
-                                        "建议收敛工具输出、缩小搜索范围，或开启新会话。"
-                                    )
-                                    _error_msg = (
-                                        "Context overflow: prompt too large for the model after "
-                                        f"{ctx.overflow_compaction_attempts} compaction attempts. "
-                                        "Try starting a new session or use a larger-context model."
-                                    )
-
-                                await cls._publish_session_notice(
-                                    callbacks,
-                                    ctx.session.id,
-                                    level="warning",
-                                    message=_notice_msg,
-                                    details={
-                                        "attempts": ctx.overflow_compaction_attempts,
-                                        "maxAttempts": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
-                                        "tokens": tokens_dict,
-                                        "providerError": _provider_error or None,
-                                        "cooldownRemainingSeconds": (
-                                            _cooldown_secs if _in_cooldown else 0
-                                        ),
-                                    },
-                                )
-                                log.error("loop.overflow_compaction_exhausted", {
-                                    "session_id": ctx.session.id,
-                                    "attempts": ctx.overflow_compaction_attempts,
-                                    "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
-                                    "tokens": tokens_dict,
-                                    "in_cooldown": _in_cooldown,
-                                    "provider_error": _provider_error or None,
-                                })
-                                if callbacks.on_error:
-                                    await callbacks.on_error(_error_msg)
-                                break
-
-                            # Recovery step 1: try truncating oversized tool
-                            # results (once per run, matches OpenClaw
-                            # toolResultTruncationAttempted)
-                            if not ctx.tool_result_truncation_attempted:
-                                ctx.tool_result_truncation_attempted = True
-                                try:
-                                    trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
-                                        ctx.session.id,
-                                        context_window_tokens=model_context,
-                                    )
-                                    if trunc_count > 0:
-                                        log.info("loop.oversized_tool_truncated", {
-                                            "session_id": ctx.session.id,
-                                            "truncated": trunc_count,
-                                        })
-                                        # Re-check overflow after truncation
-                                        # (B3) Reuse the active v2 policy so the
-                                        # re-estimate includes the same overhead
-                                        # + safety margin as the first decision.
-                                        re_est = await SessionPrompt.estimate_full_context_tokens(
-                                            ctx.session.id,
-                                            messages,
-                                            policy=compaction_policy,
-                                        )
-                                        re_tokens = {"input": re_est, "output": 0, "cache": {"read": 0, "write": 0}}
-                                        still_overflow = await SessionCompaction.is_overflow(
-                                            tokens=re_tokens,
-                                            model_context=model_context,
-                                            policy=compaction_policy,
-                                        )
-                                        if not still_overflow:
-                                            log.info("loop.overflow_resolved_by_truncation", {
-                                                "session_id": ctx.session.id,
-                                            })
-                                            # Do NOT reset overflow_compaction_attempts
-                                            # (matches OpenClaw OC-65)
-                                            continue
-                                except Exception as trunc_err:
-                                    log.warn("loop.oversized_truncation_error", {
-                                        "session_id": ctx.session.id,
-                                        "error": str(trunc_err),
-                                    })
-                            
-                            # Recovery step 2: full compaction
-                            ctx.overflow_compaction_attempts += 1
-                            if ctx.overflow_compaction_attempts >= 2:
-                                await cls._publish_session_notice(
-                                    callbacks,
-                                    ctx.session.id,
-                                    level="info",
-                                    message=(
-                                        "本轮上下文持续接近模型上限，系统将优先尝试压缩历史工具输出。"
-                                    ),
-                                    details={
-                                        "attempt": ctx.overflow_compaction_attempts,
-                                        "threshold": compaction_policy.overflow_threshold,
-                                        "buffer": compaction_policy.overflow_buffer,
-                                    },
-                                )
-                            log.warn("loop.overflow_compaction_attempt", {
-                                "session_id": ctx.session.id,
-                                "attempt": ctx.overflow_compaction_attempts,
-                                "max": MAX_OVERFLOW_COMPACTION_ATTEMPTS,
-                            })
-
-                            # --- Compaction start: notify all UIs ---
-                            if callbacks.on_compaction:
-                                await callbacks.on_compaction()
-                            
-                            # Prune first, then summarize
-                            await SessionCompaction.prune(
-                                ctx.session.id,
-                                policy=compaction_policy,
-                            )
-                            
-                            # Same SSE progress adapter as the manual
-                            # /compact route — mirrored here so the
-                            # overflow-driven path also drives the
-                            # multi-stage UI panel.
-                            _publish_overflow = callbacks.event_publish_callback if callbacks else None
-                            _session_id_overflow = ctx.session.id
-                            progress_callback_overflow = None
-                            if _publish_overflow is not None:
-                                async def progress_callback_overflow(stage: str, data: dict) -> None:
-                                    await _publish_overflow("session.compaction_progress", {
-                                        "sessionID": _session_id_overflow,
-                                        "stage": stage,
-                                        "data": data,
-                                    })
-
-                            # Trigger compaction (summarization + memory flush)
-                            compaction_result = await run_compaction(
-                                ctx.session.id,
-                                parent_message_id=last_user.id,
-                                messages=messages,
-                                provider_id=ctx.provider_id,
-                                model_id=ctx.model_id,
-                                auto=True,
-                                event_publish_callback=_publish_overflow,
-                                status_after="busy",
-                                policy=compaction_policy,
-                                progress_callback=progress_callback_overflow,
-                            )
-
-                            if compaction_result == "stop":
-                                log.error("loop.compaction_failed", {"session_id": ctx.session.id})
-                                if callbacks.on_error:
-                                    await callbacks.on_error("Compaction failed")
-                                break
-
-                            if compaction_result == "skipped":
-                                # Anti-thrashing cooldown or summary-provider
-                                # cooldown fired — nothing was archived, do NOT
-                                # update last_compaction_step or publish the
-                                # compacted event (would mislead cooldown logic
-                                # and UI into thinking compaction succeeded).
-                                log.info("loop.compaction_skipped", {
-                                    "session_id": ctx.session.id,
-                                    "step": ctx.step,
-                                })
-                            else:
-                                # compaction_result == "continue": real success
-                                ctx.last_compaction_step = ctx.step
-                                set_context_state(
-                                    ctx.session.id,
-                                    compaction_performed=True,
-                                    last_compaction_step=ctx.step,
-                                    last_compaction_reason="full_compaction",
-                                )
-                                await cls._publish_runtime_event(callbacks, "context.compacted", {
-                                    "sessionID": ctx.session.id,
-                                    "step": ctx.step,
-                                    "reason": "full_compaction",
-                                    "attempt": ctx.overflow_compaction_attempts,
-                                    "cooldownUntilStep": ctx.step + POST_COMPACTION_COOLDOWN_STEPS,
-                                })
-                            
-                            # Continuation user message is now created inside
-                            # SessionCompaction.process() (matching Flocks).
-                            # Just continue — the new user message flips the
-                            # ID ordering so _should_exit() won't trigger.
-                            continue
-                    except Exception as e:
-                        log.error("loop.compaction_overflow_check_error", {"error": str(e)})
-            
-            # Process single step — wrap in a Task so abort() can cancel it immediately
-            # rather than waiting for the current tool call to finish.
-            step_task = asyncio.create_task(
-                cls._process_step_with_failover(
-                    ctx,
-                    callbacks,
-                    messages,
-                    last_user,
-                )
-            )
-            ctx._current_step_task = step_task
-            step_started_at = asyncio.get_event_loop().time()
-            try:
-                step_result = await step_task
-            except asyncio.CancelledError:
-                log.info("loop.step_cancelled", {"session_id": ctx.session.id, "step": ctx.step})
-                break
-            finally:
-                ctx._current_step_task = None
-                log.debug("loop.step_complete", {
-                    "session_id": ctx.session.id,
-                    "step": ctx.step,
-                    "duration_ms": int((asyncio.get_event_loop().time() - step_started_at) * 1000),
-                })
-            
-            # Callback: step end
-            if callbacks.on_step_end:
-                await callbacks.on_step_end(ctx.step)
-            
-            # Handle result
-            if step_result.action == "stop":
-                loop_error = step_result.error
-                # Report error if step failed
-                if step_result.error and callbacks.on_error:
-                    await callbacks.on_error(step_result.error)
-                
-                # Get last assistant message via SessionContext
-                if ctx.session_ctx:
-                    post_messages = await ctx.session_ctx.get_messages()
-                else:
-                    post_messages = await Message.list(ctx.session.id)
-                for msg in reversed(post_messages):
-                    if (
-                        msg.role == MessageRole.ASSISTANT
-                        and (
-                            not ctx.auto_failover
-                            or getattr(msg, "parentID", None) == last_user.id
-                        )
-                    ):
-                        last_message = msg
-                        break
-
-                queued_user = await cls._detect_queued_user_message(
-                    ctx.session.id,
-                    post_messages,
-                    last_user.id,
-                    last_message,
-                )
-                if queued_user is not None:
-                    turn_state = set_turn_state(
-                        ctx.session.id,
-                        step=ctx.step,
-                        status="continued",
-                        continue_reason="queued_message",
-                        queued_message_detected=True,
-                    )
-                    await cls._publish_runtime_event(callbacks, "turn.continued", {
-                        **turn_state.model_dump(by_alias=True),
-                        "queuedUserMessageID": queued_user.id,
-                    })
-                    log.info("loop.continuing_for_queued_message", {
-                        "session_id": ctx.session.id,
-                        "queued_user_id": queued_user.id,
-                        "last_assistant_id": last_message.id if last_message else None,
-                    })
-                    continue
-
-                if not step_result.error and last_message is not None:
-                    try:
-                        content_result = Message.get_text_content(last_message)
-                        last_response = (
-                            await content_result
-                            if inspect.isawaitable(content_result)
-                            else content_result
-                        )
-                    except Exception as exc:
-                        log.warn("goal.last_response.error", {
-                            "session_id": ctx.session.id,
-                            "message_id": getattr(last_message, "id", None),
-                            "error": str(exc),
-                        })
-                        last_response = getattr(last_message, "content", "") or ""
-                    pending_user_input = False
-                    try:
-                        from flocks.server.routes.question import has_pending_questions
-
-                        pending_user_input = has_pending_questions(ctx.session.id)
-                    except Exception as exc:
-                        log.warn("goal.pending_question_check.error", {
-                            "session_id": ctx.session.id,
-                            "error": str(exc),
-                        })
-                    goal_decision = await GoalManager.evaluate_after_turn(
-                        ctx.session.id,
-                        str(last_response or ""),
-                        pending_user_input=pending_user_input,
-                        provider_id=ctx.provider_id,
-                        model_id=ctx.model_id,
-                    )
-                    if goal_decision.status in {"completed", "blocked", "paused"} and goal_decision.objective:
-                        await cls._publish_runtime_event(callbacks, "session.goal.updated", {
-                            "sessionID": ctx.session.id,
-                            "status": goal_decision.status,
-                            "objective": goal_decision.objective,
-                            "reason": goal_decision.reason,
-                        })
-                    if goal_decision.should_continue and goal_decision.continuation_prompt:
-                        # Hermes-style goal continuation: append a user-role
-                        # prompt to history so the model continues, while
-                        # marking the part synthetic so UIs do not treat it as
-                        # user-authored text.
-                        goal_user = await Message.create(
-                            session_id=ctx.session.id,
-                            role=MessageRole.USER,
-                            content=goal_decision.continuation_prompt,
-                            agent=last_user.agent if hasattr(last_user, "agent") else ctx.agent_name,
-                            model=last_user.model if hasattr(last_user, "model") else {
-                                "providerID": ctx.provider_id,
-                                "modelID": ctx.model_id,
-                            },
-                            provider=last_user.provider if hasattr(last_user, "provider") else ctx.provider_id,
-                            synthetic=True,
-                            part_metadata={
-                                "goalContinuation": True,
-                                "goalVerdict": goal_decision.verdict,
-                                "goalReason": goal_decision.reason,
-                            },
-                        )
-                        turn_state = set_turn_state(
-                            ctx.session.id,
-                            step=ctx.step,
-                            status="continued",
-                            continue_reason="goal",
-                            queued_message_detected=False,
-                        )
-                        await cls._publish_runtime_event(callbacks, "turn.continued", {
-                            **turn_state.model_dump(by_alias=True),
-                            "goalMessageID": goal_user.id,
-                            "goalVerdict": goal_decision.verdict,
-                        })
-                        log.info("loop.continuing_for_goal", {
-                            "session_id": ctx.session.id,
-                            "goal_message_id": goal_user.id,
-                            "reason": goal_decision.reason,
-                        })
-                        continue
-
-                if (
-                    not step_result.error
-                    and not ctx.should_abort()
-                    and last_message is not None
-                    and getattr(last_message, "finish", None) == "stop"
-                    and await cls._run_turn_finish_hook(
-                        ctx,
-                        callbacks,
-                        last_user,
-                        last_message,
-                    )
-                ):
-                    continue
-
-                stop_reason = step_result.error or (getattr(last_message, "finish", None) if last_message else None) or "stop"
-                turn_state = set_turn_state(
-                    ctx.session.id,
-                    step=ctx.step,
-                    status="stopped",
-                    stop_reason=stop_reason,
-                    queued_message_detected=False,
-                )
-                await cls._publish_runtime_event(callbacks, "turn.stopped", turn_state.model_dump(by_alias=True))
-
-                break
-            
-            elif step_result.action == "continue":
-                if ctx.session_ctx:
-                    post_messages = await ctx.session_ctx.get_messages()
-                else:
-                    post_messages = await Message.list(ctx.session.id)
-                last_assistant_after_step = next(
-                    (
-                        msg for msg in reversed(post_messages)
-                        if msg.role == MessageRole.ASSISTANT
-                    ),
-                    None,
-                )
-                queued_user = await cls._detect_queued_user_message(
-                    ctx.session.id,
-                    post_messages,
-                    last_user.id,
-                    last_assistant_after_step,
-                )
-                turn_state = set_turn_state(
-                    ctx.session.id,
-                    step=ctx.step,
-                    status="continued",
-                    continue_reason="queued_message" if queued_user is not None else "tool_calls",
-                    queued_message_detected=queued_user is not None,
-                )
-                payload = turn_state.model_dump(by_alias=True)
-                if queued_user is not None:
-                    payload["queuedUserMessageID"] = queued_user.id
-                await cls._publish_runtime_event(callbacks, "turn.continued", payload)
-                # Continue to next iteration
-                continue
-            
-            else:
-                # Unknown action
-                log.warn("loop.unknown_action", {
-                    "session_id": ctx.session.id,
-                    "action": step_result.action,
-                })
-                break
-        
-        # Return result
+        loop_error = (
+            outcome.error
+            if outcome.status
+            in {
+                AgentRunStatus.RETRYABLE_FAILURE,
+                AgentRunStatus.FATAL_FAILURE,
+                AgentRunStatus.CONTEXT_OVERFLOW,
+            }
+            else None
+        )
         return LoopResult(
             action="error" if ctx.auto_failover and loop_error else "stop",
-            last_message=last_message,
+            last_message=outcome.last_message,
             error=loop_error if ctx.auto_failover else None,
             provider_id=ctx.provider_id,
             model_id=ctx.model_id,
@@ -2315,10 +2300,14 @@ class SessionLoop:
                 "steps": ctx.step,
                 "session_id": ctx.session.id,
                 "last_compaction_step": ctx.last_compaction_step,
-                **({"aborted": True} if ctx.should_abort() else {}),
+                **(
+                    {"aborted": True}
+                    if outcome.status == AgentRunStatus.ABORTED
+                    else {}
+                ),
             },
         )
-    
+
     @classmethod
     def _build_compaction_policy(cls, ctx: LoopContext) -> CompactionPolicy:
         """
