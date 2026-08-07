@@ -11,7 +11,7 @@ import pytest
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
 from flocks.memory.sync.indexer import MemoryIndexer
-from flocks.memory.types import MemoryScope
+from flocks.memory.types import MemoryScope, MemoryTimeRange
 from flocks.storage import (
     Storage,
     ensure_vector_tables,
@@ -135,6 +135,64 @@ async def test_memory_search_uses_global_and_current_project_scopes(
     assert {result["path"] for result in alpha_vector} == expected_alpha_paths
     assert {result["path"] for result in default_fts} == expected_global_paths
     assert {result["path"] for result in default_vector} == expected_global_paths
+
+
+@pytest.mark.asyncio
+async def test_memory_time_range_searches_only_matching_daily_files(
+    tmp_path: Path,
+) -> None:
+    db_path = tmp_path / "time-range.db"
+    await Storage.init(db_path)
+    records = [
+        ("global", "", "USER.md", "timeline user"),
+        ("global", "", "MEMORY.md", "timeline global"),
+        ("global", "", "daily/2026-08-01.md", "timeline old daily"),
+        ("global", "", "daily/2026-08-03.md", "timeline matching daily"),
+        ("global", "", "daily/2026-08-04.md", "timeline end daily"),
+        (
+            "project",
+            "prj_alpha",
+            "projects/prj_alpha/MEMORY.md",
+            "timeline project",
+        ),
+    ]
+    for scope, scope_id, path, text in records:
+        await replace_memory_file_index(
+            db_path,
+            file_entry=_file_entry(scope, scope_id, path),
+            chunks=[_chunk(scope, scope_id, path, text, [1.0, 0.0])],
+        )
+
+    time_range = MemoryTimeRange.from_strings("2026-08-02", "2026-08-04")
+
+    keyword_results = await fts_search(
+        db_path,
+        "prj_alpha",
+        "timeline",
+        time_range=time_range,
+    )
+    empty_query_results = await fts_search(
+        db_path,
+        "prj_alpha",
+        "",
+        time_range=time_range,
+    )
+    vector_results = await vector_search(
+        db_path,
+        "prj_alpha",
+        [1.0, 0.0],
+        time_range=time_range,
+    )
+
+    expected_paths = {"daily/2026-08-03.md"}
+    assert {result["path"] for result in keyword_results} == expected_paths
+    assert {result["path"] for result in empty_query_results} == expected_paths
+    assert {result["path"] for result in vector_results} == expected_paths
+
+
+def test_memory_time_range_rejects_reversed_bounds() -> None:
+    with pytest.raises(ValueError, match="start_time must be earlier"):
+        MemoryTimeRange.from_strings("2026-08-04", "2026-08-03")
 
 
 @pytest.mark.asyncio

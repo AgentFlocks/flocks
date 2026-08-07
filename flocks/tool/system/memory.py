@@ -68,15 +68,20 @@ def evict_session_memory(session_id: str) -> None:
     name="memory_search",
     description=(
         "Search USER, Global, Daily, and current Project Memory, plus optional "
-        "readable Session History from the current project."
+        "readable Session History from the current project. Use query only for "
+        "content keywords and start_time/end_time for time constraints. For a "
+        "time-only request, leave query empty."
     ),
     category=ToolCategory.SEARCH,
     parameters=[
         ToolParameter(
             name="query",
             type=ParameterType.STRING,
-            description="Natural language search query.",
-            required=True,
+            description=(
+                "Content keywords only. Leave empty to list records matching "
+                "the source and time filters."
+            ),
+            required=False,
         ),
         ToolParameter(
             name="max_results",
@@ -96,14 +101,35 @@ def evict_session_memory(session_id: str) -> None:
             description="Sources to search: ['memory', 'session'] (default: ['memory']).",
             required=False,
         ),
+        ToolParameter(
+            name="start_time",
+            type=ParameterType.STRING,
+            description=(
+                "Inclusive ISO 8601 start time or date. Timezone-less values use "
+                "the server's local timezone. Resolve relative time expressions "
+                "to an absolute value."
+            ),
+            required=False,
+        ),
+        ToolParameter(
+            name="end_time",
+            type=ParameterType.STRING,
+            description=(
+                "Exclusive ISO 8601 end time or date. Timezone-less values use "
+                "the server's local timezone."
+            ),
+            required=False,
+        ),
     ],
 )
 async def memory_search_tool(
     ctx: ToolContext,
-    query: str,
+    query: str = "",
     max_results: Optional[int] = None,
     min_score: Optional[float] = None,
     sources: Optional[List[str]] = None,
+    start_time: Optional[str] = None,
+    end_time: Optional[str] = None,
 ) -> ToolResult:
     memory, err = await _get_session_memory(ctx)
     if err:
@@ -119,6 +145,8 @@ async def memory_search_tool(
             max_results=max_results,
             min_score=min_score,
             sources=source_enums,
+            start_time=start_time,
+            end_time=end_time,
         )
 
         formatted = [

@@ -175,38 +175,6 @@ class MemoryAutoFlushConfig(BaseModel):
         2000,
         description="Reserved tokens"
     )
-    system_prompt: str = Field(
-        (
-            "Session nearing context limit. Perform only durable Memory "
-            "maintenance; the lifecycle will resume the current task."
-        ),
-        description="System prompt for memory flush"
-    )
-    user_prompt: str = Field(
-        """
-Preserve durable knowledge from this Session, then reply `NO_REPLY`.
-
-Classify each candidate in order:
-1. Secret, guess, transient state, one-off result, or cheaply rediscoverable
-   fact: skip it.
-2. Repeatable procedure: skip it; Dream self-improvement handles Skills.
-3. User information or preference: `USER.md`.
-4. Current-project-only knowledge: Project `MEMORY.md`.
-5. Cross-project declarative Agent or environment knowledge: Global `MEMORY.md`.
-6. Weak, unclear, or already represented knowledge: make no change.
-
-Store each accepted item in exactly one destination. Read the current file
-first; use `edit` for an existing file and `write` only when it is missing.
-Within Global `MEMORY.md`, use `Environment and Tools` for stable environment
-or tool facts, `Lessons and Corrections` for conventions and verified guidance,
-and `References` for cross-project external pointers. Within Project
-`MEMORY.md`, use `Project Context` for durable project facts, goals, decisions,
-and constraints, `Lessons and Corrections` for project-specific guidance and
-verified lessons, and `References` for project-specific external pointers.
-Never write or edit Daily Memory. Do not continue task work in this flush turn.
-""".strip(),
-        description="User prompt for memory flush"
-    )
 
 
 class MemoryDreamConfig(BaseModel):

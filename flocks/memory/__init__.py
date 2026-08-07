@@ -17,6 +17,7 @@ from flocks.memory.flush import MemoryFlush, extract_and_save
 from flocks.memory.types import (
     MemoryScope,
     MemorySource,
+    MemoryTimeRange,
     MemorySearchResult,
     MemorySyncProgress,
     MemoryProviderStatus,
@@ -60,6 +61,7 @@ __all__ = [
     # Types
     "MemoryScope",
     "MemorySource",
+    "MemoryTimeRange",
     "MemorySearchResult",
     "MemorySyncProgress",
     "MemoryProviderStatus",

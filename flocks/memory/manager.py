@@ -17,6 +17,7 @@ from flocks.memory.types import (
     MemorySearchResult,
     MemoryProviderStatus,
     MemorySyncProgress,
+    MemoryTimeRange,
 )
 from flocks.memory.config import MemoryConfig
 from flocks.memory.search.hybrid import HybridSearch, decorate_citations
@@ -385,11 +386,13 @@ class MemoryManager:
     
     async def search(
         self,
-        query: str,
+        query: str = "",
         max_results: Optional[int] = None,
         min_score: Optional[float] = None,
         sources: Optional[List[MemorySource]] = None,
         readable_session_ids: Optional[Set[str]] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
     ) -> List[MemorySearchResult]:
         """
         Search memory
@@ -400,6 +403,8 @@ class MemoryManager:
             min_score: Minimum similarity score (default from config)
             sources: Sources to search (default from config)
             readable_session_ids: Session IDs the caller may read
+            start_time: Inclusive ISO 8601 lower bound
+            end_time: Exclusive ISO 8601 upper bound
             
         Returns:
             List of search results
@@ -422,6 +427,7 @@ class MemoryManager:
             if min_score is not None
             else self.config.query.min_score
         )
+        time_range = MemoryTimeRange.from_strings(start_time, end_time)
 
         if sources is not None and MemorySource.SESSION in selected_sources:
             await self._persist_session_source()
@@ -444,6 +450,7 @@ class MemoryManager:
                         max_results=limit,
                         min_score=threshold,
                         sources=[MemorySource.MEMORY],
+                        time_range=time_range,
                     )
                 )
                 successful_sources += 1
@@ -467,6 +474,7 @@ class MemoryManager:
                         if readable_session_ids is not None
                         else set()
                     ),
+                    time_range=time_range,
                 )
                 results.extend(
                     MemorySearchResult(

@@ -10,7 +10,7 @@ import asyncio
 
 from flocks.provider import Provider
 from flocks.storage import Storage, vector_search, fts_search
-from flocks.memory.types import MemorySearchResult, MemorySource
+from flocks.memory.types import MemorySearchResult, MemorySource, MemoryTimeRange
 from flocks.memory.config import MemoryQueryConfig
 from flocks.memory.utils.text import extract_snippet
 from flocks.utils.log import Log
@@ -48,6 +48,7 @@ class HybridSearch:
         max_results: int,
         min_score: float,
         sources: List[MemorySource],
+        time_range: Optional[MemoryTimeRange] = None,
     ) -> List[MemorySearchResult]:
         """
         Execute hybrid search
@@ -57,6 +58,7 @@ class HybridSearch:
             max_results: Maximum results to return
             min_score: Minimum similarity score
             sources: Sources to search
+            time_range: Optional Session/Daily time filter
             
         Returns:
             List of search results
@@ -69,11 +71,26 @@ class HybridSearch:
         })
         
         try:
+            query = query.strip()
+            if not query:
+                results = await self._keyword_search(
+                    query="",
+                    max_results=max_results,
+                    sources=sources,
+                    time_range=time_range,
+                )
+                return [
+                    result
+                    for result in results
+                    if result.score >= min_score
+                ][:max_results]
+
             if self.provider_id is None:
                 results = await self._keyword_search(
                     query=query,
                     max_results=max_results,
                     sources=sources,
+                    time_range=time_range,
                 )
                 return [
                     result
@@ -88,6 +105,7 @@ class HybridSearch:
                         max_results=max_results,
                         min_score=min_score,
                         sources=sources,
+                        time_range=time_range,
                     )
                 except Exception as exc:
                     log.warn(
@@ -98,6 +116,7 @@ class HybridSearch:
                         query=query,
                         max_results=max_results,
                         sources=sources,
+                        time_range=time_range,
                     )
                     return [
                         result
@@ -114,11 +133,13 @@ class HybridSearch:
                     max_results=candidate_limit,
                     min_score=0.0,  # Don't filter yet, merge first
                     sources=sources,
+                    time_range=time_range,
                 ),
                 self._keyword_search(
                     query=query,
                     max_results=candidate_limit,
                     sources=sources,
+                    time_range=time_range,
                 ),
                 return_exceptions=True,
             )
@@ -182,6 +203,7 @@ class HybridSearch:
         max_results: int,
         min_score: float,
         sources: List[MemorySource],
+        time_range: Optional[MemoryTimeRange] = None,
     ) -> List[MemorySearchResult]:
         """Execute vector similarity search"""
         try:
@@ -203,6 +225,7 @@ class HybridSearch:
                 max_results=max_results,
                 min_score=min_score,
                 sources=[s.value for s in sources],
+                time_range=time_range,
             )
             
             # Convert to MemorySearchResult
@@ -228,6 +251,7 @@ class HybridSearch:
         query: str,
         max_results: int,
         sources: List[MemorySource],
+        time_range: Optional[MemoryTimeRange] = None,
     ) -> List[MemorySearchResult]:
         """Execute FTS5 keyword search"""
         try:
@@ -238,6 +262,7 @@ class HybridSearch:
                 query=query,
                 max_results=max_results,
                 sources=[s.value for s in sources],
+                time_range=time_range,
             )
             
             # Convert to MemorySearchResult

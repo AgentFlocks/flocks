@@ -1,6 +1,20 @@
 """Tests for bounded Memory snapshot injection."""
 
+from flocks.memory.bootstrap import MEMORY_INSTRUCTIONS
 from flocks.session.prompt import SessionPrompt
+
+
+def test_memory_guidance_has_two_management_sections() -> None:
+    assert MEMORY_INSTRUCTIONS.count("### Memory File Management") == 1
+    assert MEMORY_INSTRUCTIONS.count("### Memory Content Management") == 1
+    assert "### Memory Layers" not in MEMORY_INSTRUCTIONS
+    assert "### Available Tools" not in MEMORY_INSTRUCTIONS
+    assert "already injected above" not in MEMORY_INSTRUCTIONS
+    assert "USER.md / Identity and Context" in MEMORY_INSTRUCTIONS
+    assert "Global `MEMORY.md / Lessons and Corrections`" in MEMORY_INSTRUCTIONS
+    assert "Project `MEMORY.md / Project Context`" in MEMORY_INSTRUCTIONS
+    assert "current Session's registered Project" in MEMORY_INSTRUCTIONS
+    assert "do not promote project-specific content" in MEMORY_INSTRUCTIONS
 
 
 def test_prompt_bounds_memory_snapshots_and_preserves_structure() -> None:

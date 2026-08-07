@@ -8,7 +8,11 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
-from flocks.memory.config import MemoryConfig, resolve_memory_config
+from flocks.memory.config import (
+    MemoryAutoFlushConfig,
+    MemoryConfig,
+    resolve_memory_config,
+)
 from flocks.memory.evolution import (
     DreamTarget,
     EvolutionCheckpointStore,
@@ -221,8 +225,8 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
     assert "Assistant text is not" in DREAM_SYSTEM_PROMPT
     assert "not independent corroboration" in DREAM_SYSTEM_PROMPT
     assert "exactly one canonical destination" in DREAM_SYSTEM_PROMPT
-    assert "If it describes the user" in DREAM_SYSTEM_PROMPT
-    assert "true only for the current project" in DREAM_SYSTEM_PROMPT
+    assert "accepted user fact or preference" in DREAM_SYSTEM_PROMPT
+    assert "accepted current-project-only knowledge" in DREAM_SYSTEM_PROMPT
     assert "Project evidence belongs here by default" not in DREAM_SYSTEM_PROMPT
     assert "Global `Environment and Tools`" in DREAM_SYSTEM_PROMPT
     assert "Project `Project Context`" in DREAM_SYSTEM_PROMPT
@@ -236,7 +240,7 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
 def test_dream_prompt_integrates_memory_and_skill_decisions() -> None:
     assert "one integrated decision process" in DREAM_SYSTEM_PROMPT
     assert "metadata.managed_by: flocks" in DREAM_SYSTEM_PROMPT
-    assert "do not save it" in DREAM_SYSTEM_PROMPT
+    assert "Reject secrets" in DREAM_SYSTEM_PROMPT
     assert "Never modify or shadow" in DREAM_SYSTEM_PROMPT
     assert "built-in `skill-builder`" in DREAM_SYSTEM_PROMPT
     assert "unresolved failure" in DREAM_SYSTEM_PROMPT
@@ -245,6 +249,22 @@ def test_dream_prompt_integrates_memory_and_skill_decisions() -> None:
     assert "treat its current state as empty" in DREAM_SYSTEM_PROMPT
     assert "Use `bash` only for read-only inspection" in DREAM_SYSTEM_PROMPT
     assert "use `write` or `edit`" in DREAM_SYSTEM_PROMPT
+
+
+def test_dream_prompt_requires_admission_before_routing() -> None:
+    assert "research" in DREAM_SYSTEM_PROMPT
+    assert "authoritative" in DREAM_SYSTEM_PROMPT
+    assert "explicit user statement" in DREAM_SYSTEM_PROMPT
+    assert "repeated verified" in DREAM_SYSTEM_PROMPT
+    assert "ongoing need" in DREAM_SYSTEM_PROMPT
+    assert "specific pointer" in DREAM_SYSTEM_PROMPT
+    assert "Merely matching a destination or section" in DREAM_SYSTEM_PROMPT
+    assert "A URL appearing in evidence is not by itself" in DREAM_SYSTEM_PROMPT
+
+
+def test_auto_flush_config_has_no_unused_prompt_fields() -> None:
+    assert "system_prompt" not in MemoryAutoFlushConfig.model_fields
+    assert "user_prompt" not in MemoryAutoFlushConfig.model_fields
 
 
 def test_skill_catalog_budget_preserves_valid_complete_json_entries() -> None:

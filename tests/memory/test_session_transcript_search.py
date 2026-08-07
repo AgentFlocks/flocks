@@ -1,5 +1,6 @@
 """Session transcript FTS lifecycle tests."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 import sqlite3
 from unittest.mock import AsyncMock, Mock
@@ -12,7 +13,7 @@ from flocks.config.config import Config
 from flocks.memory.config import MemoryConfig
 from flocks.memory.manager import MemoryManager
 from flocks.memory.search.hybrid import HybridSearch
-from flocks.memory.types import MemorySearchResult
+from flocks.memory.types import MemorySearchResult, MemoryTimeRange
 from flocks.memory.types import MemorySource
 from flocks.provider import Provider
 from flocks.session.features.memory import SessionMemory
@@ -449,6 +450,71 @@ async def test_session_search_filters_readable_ids_within_project(
         max_results=10,
         readable_session_ids=set(),
     )
+
+
+@pytest.mark.asyncio
+async def test_session_search_filters_time_and_allows_empty_query(
+    tmp_path: Path,
+) -> None:
+    session = await _create_session(tmp_path, project_id="prj_alpha")
+    old_message = await Message.create(
+        session.id,
+        MessageRole.USER,
+        "time window marker old",
+    )
+    matching_message = await Message.create(
+        session.id,
+        MessageRole.ASSISTANT,
+        "time window marker matching",
+    )
+    end_message = await Message.create(
+        session.id,
+        MessageRole.USER,
+        "time window marker end",
+    )
+
+    def timestamp(day: int) -> int:
+        return int(datetime(2026, 8, day, tzinfo=UTC).timestamp() * 1000)
+
+    async with Storage.connect(Storage.get_db_path()) as db:
+        for message, created_at in [
+            (old_message, timestamp(1)),
+            (matching_message, timestamp(2)),
+            (end_message, timestamp(3)),
+        ]:
+            await db.execute(
+                """
+                UPDATE session_transcript_index_state
+                SET created_at = ?
+                WHERE message_id = ?
+                """,
+                (created_at, message.id),
+            )
+        await db.commit()
+
+    time_range = MemoryTimeRange.from_strings(
+        "2026-08-02T00:00:00Z",
+        "2026-08-03T00:00:00Z",
+    )
+    keyword_results = await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id=session.project_id,
+        query="time window marker",
+        max_results=10,
+        time_range=time_range,
+    )
+    empty_query_results = await session_fts_search(
+        db_path=Storage.get_db_path(),
+        project_id=session.project_id,
+        query="",
+        max_results=10,
+        time_range=time_range,
+    )
+
+    expected_path = f"sessions/{session.id}/messages/{matching_message.id}"
+    assert [result["path"] for result in keyword_results] == [expected_path]
+    assert [result["path"] for result in empty_query_results] == [expected_path]
+    assert empty_query_results[0]["text"] == "time window marker matching"
 
 
 @pytest.mark.asyncio

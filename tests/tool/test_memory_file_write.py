@@ -20,6 +20,16 @@ def test_memory_crud_tool_is_not_registered() -> None:
     assert "memory_search" in tools
 
 
+def test_memory_search_exposes_optional_time_range_and_query() -> None:
+    tool = next(
+        tool for tool in ToolRegistry.list_tools() if tool.name == "memory_search"
+    )
+    schema = tool.get_schema()
+
+    assert "query" not in schema.required
+    assert {"start_time", "end_time"} <= schema.properties.keys()
+
+
 @pytest.mark.parametrize(
     "relative_path",
     [
