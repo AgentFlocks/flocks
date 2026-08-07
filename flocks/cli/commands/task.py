@@ -45,11 +45,11 @@ def task_dashboard():
 
 async def _dashboard():
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    counts = await TaskManager.dashboard()
+    counts = await ScheduleTaskManager.dashboard()
 
     panel_lines = [
         f"🟢 Running:             {counts.get('running', 0)}",
@@ -63,7 +63,7 @@ async def _dashboard():
 
     console.print(Panel("\n".join(panel_lines), title="📋 Task Center", border_style="cyan"))
 
-    unviewed = await TaskManager.get_unviewed_results()
+    unviewed = await ScheduleTaskManager.get_unviewed_results()
     if unviewed:
         console.print()
         console.print("[bold]Unviewed completed tasks:[/bold]")
@@ -88,7 +88,7 @@ def task_list(
 
 async def _list_tasks(status_val, type_val, limit, fmt):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import SchedulerStatus, TaskStatus
     from flocks.task.store import TaskStore
     await TaskStore.init()
@@ -99,7 +99,7 @@ async def _list_tasks(status_val, type_val, limit, fmt):
             scheduler_status = SchedulerStatus.ACTIVE
         elif status_val in ("paused", "disabled"):
             scheduler_status = SchedulerStatus.DISABLED
-        tasks, total = await TaskManager.list_schedulers(status=scheduler_status, limit=limit)
+        tasks, total = await ScheduleTaskManager.list_schedulers(status=scheduler_status, limit=limit)
     else:
         task_status = None
         if status_val:
@@ -108,7 +108,7 @@ async def _list_tasks(status_val, type_val, limit, fmt):
                 task_status = TaskStatus(mapped_status)
             except ValueError as exc:
                 raise typer.BadParameter(f"Invalid execution status: {status_val}") from exc
-        tasks, total = await TaskManager.list_executions(
+        tasks, total = await ScheduleTaskManager.list_executions(
             status=task_status,
             limit=limit,
         )
@@ -160,13 +160,13 @@ def task_show(task_id: str = typer.Argument(..., help="Task ID")):
 
 async def _show_task(task_id: str):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.get_execution(task_id)
+    task = await ScheduleTaskManager.get_execution(task_id)
     if task is None:
-        task = await TaskManager.get_scheduler(task_id)
+        task = await ScheduleTaskManager.get_scheduler(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found[/red]")
         raise typer.Exit(1)
@@ -243,7 +243,7 @@ def task_create(
 
 async def _create_task(title, description, task_type, priority, mode, agent, workflow, skills, cron, prompt):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import (
         ExecutionMode,
         SchedulerMode,
@@ -270,7 +270,7 @@ async def _create_task(title, description, task_type, priority, mode, agent, wor
 
     source = TaskSource(user_prompt=prompt) if prompt else None
 
-    scheduler = await TaskManager.create_scheduler(
+    scheduler = await ScheduleTaskManager.create_scheduler(
         title=title,
         description=description,
         mode=scheduler_mode,
@@ -284,7 +284,7 @@ async def _create_task(title, description, task_type, priority, mode, agent, wor
     )
     console.print(f"[green]✅ Created scheduler:[/green] {scheduler.id}  {scheduler.title}")
     if trigger.run_immediately:
-        executions, _ = await TaskManager.list_scheduler_executions(scheduler.id, limit=1)
+        executions, _ = await ScheduleTaskManager.list_scheduler_executions(scheduler.id, limit=1)
         if executions:
             console.print(
                 f"[green]↳ execution:[/green] {executions[0].id}  ({executions[0].status.value})"
@@ -306,20 +306,20 @@ def task_queue(
 
 async def _queue(pause: bool, resume: bool):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
     if pause:
-        TaskManager.pause_queue()
+        ScheduleTaskManager.pause_queue()
         console.print("[yellow]Queue paused[/yellow]")
         return
     if resume:
-        TaskManager.resume_queue()
+        ScheduleTaskManager.resume_queue()
         console.print("[green]Queue resumed[/green]")
         return
 
-    qs = await TaskManager.queue_status()
+    qs = await ScheduleTaskManager.queue_status()
     console.print(Panel(
         f"Paused:         {qs['paused']}\n"
         f"Max concurrent: {qs['max_concurrent']}\n"
@@ -342,11 +342,11 @@ def task_scheduled():
 
 async def _scheduled():
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    tasks, _ = await TaskManager.list_schedulers(scheduled_only=True, limit=100)
+    tasks, _ = await ScheduleTaskManager.list_schedulers(scheduled_only=True, limit=100)
     if not tasks:
         console.print("[dim]No scheduled tasks[/dim]")
         return
@@ -384,11 +384,11 @@ def task_cancel(task_id: str = typer.Argument(..., help="Task ID")):
 
 async def _cancel(task_id: str):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.cancel_execution(task_id)
+    task = await ScheduleTaskManager.cancel_execution(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found[/red]")
         raise typer.Exit(1)
@@ -403,11 +403,11 @@ def task_retry(task_id: str = typer.Argument(..., help="Task ID")):
 
 async def _retry(task_id: str):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.retry_execution(task_id)
+    task = await ScheduleTaskManager.retry_execution(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found or not failed[/red]")
         raise typer.Exit(1)
@@ -422,13 +422,13 @@ def task_rerun(task_id: str = typer.Argument(..., help="Task ID")):
 
 async def _rerun(task_id: str):
     await Storage.init()
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.store import TaskStore
     await TaskStore.init()
 
-    task = await TaskManager.rerun_execution(task_id)
+    task = await ScheduleTaskManager.rerun_execution(task_id)
     if task is None:
-        task = await TaskManager.rerun_scheduler(task_id)
+        task = await ScheduleTaskManager.rerun_scheduler(task_id)
     if not task:
         console.print(f"[red]Task {task_id} not found[/red]")
         raise typer.Exit(1)

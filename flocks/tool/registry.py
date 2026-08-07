@@ -1652,7 +1652,7 @@ class ToolRegistry:
             # web/ — internet access
             ("flocks.tool.web", ["webfetch", "websearch"]),
             # agent/ — agent delegation/coordination
-            ("flocks.tool.agent", ["delegate_task", "task"]),
+            ("flocks.tool.agent", ["delegate_task"]),
             # task/ — task/workflow
             ("flocks.tool.task", [
                 "schedule_task_center",

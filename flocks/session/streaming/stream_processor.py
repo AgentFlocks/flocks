@@ -1549,7 +1549,7 @@ class StreamProcessor:
 
     def _should_run_tool_call_parallel(self, event: ToolCallEvent) -> bool:
         """Return true for independent foreground subagent tool-calls."""
-        if event.tool_name not in {"delegate_task", "task"}:
+        if event.tool_name != "delegate_task":
             return False
         tool_input = event.input if isinstance(event.input, dict) else {}
         if tool_input.get("run_in_background") is True:

@@ -60,7 +60,7 @@ class TaskScheduler:
             await asyncio.sleep(self._check_interval)
 
     async def _tick(self) -> None:
-        from .manager import TaskManager
+        from .schedule_task_manager import ScheduleTaskManager
 
         now = datetime.now(timezone.utc)
         schedulers = await TaskStore.list_due_schedulers()
@@ -77,7 +77,7 @@ class TaskScheduler:
                 if scheduler.mode == SchedulerMode.ONCE
                 else ExecutionTriggerType.SCHEDULED
             )
-            await TaskManager.create_execution_from_scheduler(
+            await ScheduleTaskManager.create_execution_from_scheduler(
                 scheduler,
                 trigger_type=trigger_type,
                 enqueue=True,

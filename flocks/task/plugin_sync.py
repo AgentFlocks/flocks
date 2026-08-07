@@ -12,7 +12,7 @@ log = Log.create(service="task.plugin.sync")
 
 
 async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import (
         ExecutionMode,
         SchedulerMode,
@@ -89,7 +89,7 @@ async def upsert_task_specs(specs: Sequence[TaskSpec]) -> int:
             log.warn("task.plugin.missing_cron", {"dedup_key": spec.dedup_key})
             continue
 
-        await TaskManager.create_scheduler(
+        await ScheduleTaskManager.create_scheduler(
             title=spec.title,
             description=spec.description,
             mode=SchedulerMode.CRON,

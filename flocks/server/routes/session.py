@@ -2075,15 +2075,6 @@ class AgentPartInput(BaseModel):
     name: str = Field(..., description="Agent name")
 
 
-class SubtaskPartInput(BaseModel):
-    """Subtask part input for API compatibility"""
-    type: Literal["subtask"] = "subtask"
-    id: Optional[str] = Field(None, description="Part ID")
-    agent: str = Field(..., description="Agent name")
-    prompt: str = Field(..., description="Subtask prompt")
-    description: Optional[str] = Field(None, description="Subtask description")
-
-
 class PromptRequest(BaseModel):
     """
     Request to send a prompt/message

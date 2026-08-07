@@ -30,10 +30,10 @@ def test_lsp_remains_non_native_by_default() -> None:
     assert tool.info.native is False
 
 
-def test_task_remains_non_native_when_declared() -> None:
+def test_delegate_task_remains_non_native_when_declared() -> None:
     ToolRegistry.init()
 
-    tool = ToolRegistry.get("task")
+    tool = ToolRegistry.get("delegate_task")
 
     assert tool is not None
     assert tool.info.native is False

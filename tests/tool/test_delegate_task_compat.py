@@ -20,9 +20,8 @@ class TestDelegateTaskTolerance:
         assert "Do not delegate trivial edits" in DESCRIPTION
         assert "The task requires multiple steps or research" not in DESCRIPTION
 
-    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
-    def test_delegate_schema_exposes_only_subagent_routing(self, tool_name):
-        schema = ToolRegistry.get_schema(tool_name)
+    def test_delegate_schema_exposes_only_subagent_routing(self):
+        schema = ToolRegistry.get_schema("delegate_task")
         assert schema is not None
         assert "prompt" in schema.required
         assert "subagent_type" in schema.properties
@@ -75,7 +74,6 @@ class TestDelegateTaskTolerance:
         permissions = create_session.await_args.kwargs["permission"]
         denied_permissions = {rule.permission for rule in permissions if rule.action == "deny"}
         assert "delegate_task" not in denied_permissions
-        assert "task" not in denied_permissions
 
     @pytest.mark.asyncio
     async def test_delegate_task_explicit_model_override_is_pinned(self):
@@ -115,10 +113,9 @@ class TestDelegateTaskTolerance:
         assert loop_run.await_args.kwargs["model_id"] == "claude-haiku-4-5"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
-    async def test_delegate_tools_reject_removed_category_parameter(self, tool_name):
+    async def test_delegate_task_rejects_removed_category_parameter(self):
         result = await ToolRegistry.execute(
-            tool_name,
+            "delegate_task",
             ctx=_make_ctx(),
             category="quick",
             prompt="Summarize the diff",
@@ -128,10 +125,9 @@ class TestDelegateTaskTolerance:
         assert "unknown parameters: category" in (result.error or "")
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
-    async def test_delegate_tools_accept_deprecated_command_parameter(self, tool_name):
+    async def test_delegate_task_accepts_deprecated_command_parameter(self):
         result = await ToolRegistry.execute(
-            tool_name,
+            "delegate_task",
             ctx=_make_ctx(),
             command="legacy-tracking-command",
             prompt="Summarize the diff",

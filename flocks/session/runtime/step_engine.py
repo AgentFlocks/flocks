@@ -2749,12 +2749,6 @@ class StepEngine:
                                 "type": "text",
                                 "text": "What did we do so far?",
                             })
-                        elif part.type == "subtask":
-                            user_content_parts.append("The following tool was executed by the user")
-                            user_content_blocks.append({
-                                "type": "text",
-                                "text": "The following tool was executed by the user",
-                            })
 
                 if user_content_blocks and any(
                     block.get("type") == "image"

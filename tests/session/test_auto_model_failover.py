@@ -1301,12 +1301,12 @@ def test_cooldown_is_cleared_when_primary_changes():
 
 
 @pytest.mark.asyncio
-async def test_synthetic_subtask_continuation_keeps_fallback(monkeypatch):
+async def test_synthetic_continuation_keeps_fallback(monkeypatch):
     ctx = _ctx(index=1)
     ctx.model_candidate_policy = "configured"
     ctx.turn_user_id = "msg_real"
     synthetic_user = SimpleNamespace(
-        id="msg_subtask_continue",
+        id="msg_synthetic_continue",
         model={"providerID": "primary", "modelID": "primary-model"},
     )
     monkeypatch.setattr(

@@ -158,7 +158,6 @@ class CommandConfig(BaseModel):
     description: Optional[str] = None
     agent: Optional[str] = None
     model: Optional[str] = None
-    subtask: Optional[bool] = None
 
 
 # ==================== Provider Configuration ====================

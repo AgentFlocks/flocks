@@ -312,7 +312,7 @@ async def schedule_task_create(
     enabled: Optional[bool] = None,
     action: Optional[str] = None,
 ) -> ToolResult:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import (
         SchedulerMode,
         TaskPriority,
@@ -362,7 +362,7 @@ async def schedule_task_create(
         user_prompt=user_prompt,
     )
 
-    scheduler = await TaskManager.create_scheduler(
+    scheduler = await ScheduleTaskManager.create_scheduler(
         title=title,
         description=description,
         mode=mode,
@@ -371,7 +371,7 @@ async def schedule_task_create(
         trigger=trigger,
     )
     if enabled is False:
-        scheduler = await TaskManager.disable_scheduler(scheduler.id) or scheduler
+        scheduler = await ScheduleTaskManager.disable_scheduler(scheduler.id) or scheduler
 
     display_tz = resolve_task_timezone_name(scheduler)
     output_lines = [
@@ -382,7 +382,7 @@ async def schedule_task_create(
         f"Priority: {scheduler.priority.value}",
     ]
     if scheduler.trigger.run_immediately:
-        executions, _ = await TaskManager.list_scheduler_executions(
+        executions, _ = await ScheduleTaskManager.list_scheduler_executions(
             scheduler.id,
             limit=1,
         )
@@ -486,7 +486,7 @@ async def schedule_task_list(
     type: Optional[str] = None,
     limit: int = 10,
 ) -> ToolResult:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import SchedulerStatus, TaskStatus
 
     if type is not None and type not in _VALID_TYPES:
@@ -534,7 +534,7 @@ async def schedule_task_list(
             scheduler_status = SchedulerStatus.ACTIVE
         elif status in ("disabled", "paused"):
             scheduler_status = SchedulerStatus.DISABLED
-        tasks, total = await TaskManager.list_schedulers(
+        tasks, total = await ScheduleTaskManager.list_schedulers(
             status=scheduler_status,
             scheduled_only=True,
             limit=limit,
@@ -552,7 +552,7 @@ async def schedule_task_list(
                     f"Valid values: {', '.join(s.value for s in TaskStatus)}."
                 ),
             )
-        tasks, total = await TaskManager.list_executions(
+        tasks, total = await ScheduleTaskManager.list_executions(
             status=task_status,
             limit=limit,
         )
@@ -583,13 +583,13 @@ async def schedule_task_list(
     ],
 )
 async def schedule_task_status(ctx: ToolContext, task_id: str) -> ToolResult:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    task = await TaskManager.get_execution(task_id)
+    task = await ScheduleTaskManager.get_execution(task_id)
     if task and task.delivery_status.value == "unread":
-        await TaskManager.mark_notified(task_id)
+        await ScheduleTaskManager.mark_notified(task_id)
     if task is None:
-        task = await TaskManager.get_scheduler(task_id)
+        task = await ScheduleTaskManager.get_scheduler(task_id)
     if task is None:
         return ToolResult(success=False, error=f"Task {task_id} not found")
 
@@ -738,7 +738,7 @@ async def schedule_task_update(
     user_prompt: Optional[str] = None,
     enabled: Optional[bool] = None,
 ) -> ToolResult:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import TaskPriority
 
     normalized_action = (action or "update").lower()
@@ -748,13 +748,13 @@ async def schedule_task_update(
         normalized_action = "enable"
 
     if normalized_action == "cancel":
-        task = await TaskManager.cancel_execution(task_id)
+        task = await ScheduleTaskManager.cancel_execution(task_id)
     elif normalized_action == "retry":
-        task = await TaskManager.retry_execution(task_id)
+        task = await ScheduleTaskManager.retry_execution(task_id)
     elif normalized_action == "disable":
-        task = await TaskManager.disable_scheduler(task_id)
+        task = await ScheduleTaskManager.disable_scheduler(task_id)
     elif normalized_action == "enable":
-        task = await TaskManager.enable_scheduler(task_id)
+        task = await ScheduleTaskManager.enable_scheduler(task_id)
     elif normalized_action == "update":
         fields = {}
         if priority:
@@ -764,7 +764,7 @@ async def schedule_task_update(
         if description is not None:
             fields["description"] = description
         try:
-            task = await TaskManager.update_scheduler_with_trigger(
+            task = await ScheduleTaskManager.update_scheduler_with_trigger(
                 task_id,
                 fields=fields,
                 cron=cron,
@@ -777,10 +777,10 @@ async def schedule_task_update(
         except ValueError as exc:
             return ToolResult(success=False, error=str(exc))
         if enabled is False:
-            task = await TaskManager.disable_scheduler(task_id) or task
+            task = await ScheduleTaskManager.disable_scheduler(task_id) or task
             normalized_action = "disable"
         elif enabled is True:
-            task = await TaskManager.enable_scheduler(task_id) or task
+            task = await ScheduleTaskManager.enable_scheduler(task_id) or task
             normalized_action = "enable"
     else:
         return ToolResult(success=False, error=f"Unknown action: {action}")
@@ -813,13 +813,13 @@ async def schedule_task_update(
     ],
 )
 async def schedule_task_delete(ctx: ToolContext, task_id: str) -> ToolResult:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.get_execution(task_id)
+    execution = await ScheduleTaskManager.get_execution(task_id)
     if execution is not None:
-        ok = await TaskManager.delete_execution(task_id)
+        ok = await ScheduleTaskManager.delete_execution(task_id)
     else:
-        ok = await TaskManager.delete_scheduler(task_id)
+        ok = await ScheduleTaskManager.delete_scheduler(task_id)
     if not ok:
         return ToolResult(success=False, error=f"Task {task_id} not found")
     return ToolResult(success=True, output=f"Task {task_id} deleted.")
@@ -843,11 +843,11 @@ async def schedule_task_delete(ctx: ToolContext, task_id: str) -> ToolResult:
     ],
 )
 async def schedule_task_rerun(ctx: ToolContext, task_id: str) -> ToolResult:
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    task = await TaskManager.rerun_execution(task_id)
+    task = await ScheduleTaskManager.rerun_execution(task_id)
     if task is None:
-        task = await TaskManager.rerun_scheduler(task_id)
+        task = await ScheduleTaskManager.rerun_scheduler(task_id)
     if not task:
         return ToolResult(success=False, error=f"Task {task_id} not found")
 

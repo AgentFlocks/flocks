@@ -145,10 +145,10 @@ def _parse_task_type(task_type: str) -> str:
 
 @router.get("/task-system/notice")
 async def get_task_system_notice():
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
     started_at = time.perf_counter()
-    notice = await TaskManager.get_task_page_notice()
+    notice = await ScheduleTaskManager.get_task_page_notice()
     log_route_timing(log, "task.notice.complete", started_at=started_at, extra={
         "has_notice": bool(notice),
     })
@@ -157,10 +157,10 @@ async def get_task_system_notice():
 
 @router.get("/task-system/dashboard")
 async def task_dashboard():
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
     started_at = time.perf_counter()
-    payload = await TaskManager.dashboard()
+    payload = await ScheduleTaskManager.dashboard()
     log_route_timing(log, "task.dashboard.complete", started_at=started_at, extra={
         "running": payload.get("running"),
         "queued": payload.get("queued"),
@@ -171,10 +171,10 @@ async def task_dashboard():
 
 @router.get("/task-system/queue/status")
 async def task_queue_status():
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
     started_at = time.perf_counter()
-    payload = await TaskManager.queue_status()
+    payload = await ScheduleTaskManager.queue_status()
     log_route_timing(log, "task.queue_status.complete", started_at=started_at, extra={
         "queued": payload.get("queued"),
         "running": payload.get("running"),
@@ -185,17 +185,17 @@ async def task_queue_status():
 
 @router.post("/task-system/queue/pause")
 async def pause_task_queue():
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    TaskManager.pause_queue()
+    ScheduleTaskManager.pause_queue()
     return {"paused": True}
 
 
 @router.post("/task-system/queue/resume")
 async def resume_task_queue():
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    TaskManager.resume_queue()
+    ScheduleTaskManager.resume_queue()
     return {"paused": False}
 
 
@@ -209,9 +209,9 @@ async def list_schedulers(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    items, total = await TaskManager.list_schedulers(
+    items, total = await ScheduleTaskManager.list_schedulers(
         status=_parse_scheduler_status_filter(status_filter),
         priority=_parse_priority(priority),
         scheduled_only=scheduled_only,
@@ -230,7 +230,7 @@ async def list_schedulers(
 
 @router.post("/task-schedulers", status_code=status.HTTP_201_CREATED)
 async def create_scheduler(req: SchedulerCreateRequest):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
     from flocks.task.models import (
         SchedulerMode,
         TaskSource,
@@ -268,7 +268,7 @@ async def create_scheduler(req: SchedulerCreateRequest):
             detail=str(exc),
         ) from exc
 
-    scheduler = await TaskManager.create_scheduler(
+    scheduler = await ScheduleTaskManager.create_scheduler(
         title=req.title,
         description=req.description,
         mode=mode,
@@ -289,9 +289,9 @@ async def create_scheduler(req: SchedulerCreateRequest):
 
 @router.get("/task-schedulers/{scheduler_id}")
 async def get_scheduler(scheduler_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    scheduler = await TaskManager.get_scheduler(scheduler_id)
+    scheduler = await ScheduleTaskManager.get_scheduler(scheduler_id)
     if not scheduler:
         raise HTTPException(404, "Task scheduler not found")
     return scheduler.model_dump(mode="json", by_alias=True)
@@ -299,7 +299,7 @@ async def get_scheduler(scheduler_id: str):
 
 @router.put("/task-schedulers/{scheduler_id}")
 async def update_scheduler(scheduler_id: str, req: SchedulerUpdateRequest):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
     fields = {k: v for k, v in req.model_dump(exclude_none=True).items()}
     if "priority" in fields:
@@ -313,7 +313,7 @@ async def update_scheduler(scheduler_id: str, req: SchedulerUpdateRequest):
     run_at = fields.pop("run_at", None)
     user_prompt = fields.pop("user_prompt", None)
     try:
-        scheduler = await TaskManager.update_scheduler_with_trigger(
+        scheduler = await ScheduleTaskManager.update_scheduler_with_trigger(
             scheduler_id,
             fields=fields,
             cron=cron,
@@ -335,18 +335,18 @@ async def update_scheduler(scheduler_id: str, req: SchedulerUpdateRequest):
 
 @router.delete("/task-schedulers/{scheduler_id}")
 async def delete_scheduler(scheduler_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    if not await TaskManager.delete_scheduler(scheduler_id):
+    if not await ScheduleTaskManager.delete_scheduler(scheduler_id):
         raise HTTPException(404, "Task scheduler not found")
     return {"ok": True}
 
 
 @router.post("/task-schedulers/{scheduler_id}/enable")
 async def enable_scheduler(scheduler_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    scheduler = await TaskManager.enable_scheduler(scheduler_id)
+    scheduler = await ScheduleTaskManager.enable_scheduler(scheduler_id)
     if not scheduler:
         raise HTTPException(404, "Task scheduler not found")
     return scheduler.model_dump(mode="json", by_alias=True)
@@ -354,9 +354,9 @@ async def enable_scheduler(scheduler_id: str):
 
 @router.post("/task-schedulers/{scheduler_id}/disable")
 async def disable_scheduler(scheduler_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    scheduler = await TaskManager.disable_scheduler(scheduler_id)
+    scheduler = await ScheduleTaskManager.disable_scheduler(scheduler_id)
     if not scheduler:
         raise HTTPException(404, "Task scheduler not found")
     return scheduler.model_dump(mode="json", by_alias=True)
@@ -368,9 +368,9 @@ async def list_scheduler_executions(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    items, total = await TaskManager.list_scheduler_executions(
+    items, total = await ScheduleTaskManager.list_scheduler_executions(
         scheduler_id, offset=offset, limit=limit
     )
     return PaginatedResponse(
@@ -383,9 +383,9 @@ async def list_scheduler_executions(
 
 @router.post("/task-schedulers/{scheduler_id}/run")
 async def run_scheduler(scheduler_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.rerun_scheduler(scheduler_id)
+    execution = await ScheduleTaskManager.rerun_scheduler(scheduler_id)
     if not execution:
         raise HTTPException(404, "Task scheduler not found")
     return execution.model_dump(mode="json", by_alias=True)
@@ -402,9 +402,9 @@ async def list_executions(
     offset: int = Query(0, ge=0),
     limit: int = Query(20, ge=1, le=100),
 ):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    items, total = await TaskManager.list_executions(
+    items, total = await ScheduleTaskManager.list_executions(
         scheduler_id=scheduler_id,
         status=_parse_execution_status_filter(status_filter),
         priority=_parse_priority(priority),
@@ -424,23 +424,23 @@ async def list_executions(
 
 @router.post("/task-executions/batch/cancel")
 async def batch_cancel(req: BatchRequest):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    return {"cancelled": await TaskManager.batch_cancel(req.execution_ids)}
+    return {"cancelled": await ScheduleTaskManager.batch_cancel(req.execution_ids)}
 
 
 @router.post("/task-executions/batch/delete")
 async def batch_delete(req: BatchRequest):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    return {"deleted": await TaskManager.batch_delete(req.execution_ids)}
+    return {"deleted": await ScheduleTaskManager.batch_delete(req.execution_ids)}
 
 
 @router.get("/task-executions/{execution_id}")
 async def get_execution(execution_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.get_execution(execution_id)
+    execution = await ScheduleTaskManager.get_execution(execution_id)
     if not execution:
         raise HTTPException(404, "Task execution not found")
     return execution.model_dump(mode="json", by_alias=True)
@@ -448,9 +448,9 @@ async def get_execution(execution_id: str):
 
 @router.post("/task-executions/{execution_id}/viewed")
 async def mark_execution_viewed(execution_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.mark_viewed(execution_id)
+    execution = await ScheduleTaskManager.mark_viewed(execution_id)
     if not execution:
         raise HTTPException(404, "Task execution not found")
     return execution.model_dump(mode="json", by_alias=True)
@@ -458,18 +458,18 @@ async def mark_execution_viewed(execution_id: str):
 
 @router.post("/task-executions/{execution_id}/cancel")
 async def cancel_execution(execution_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.cancel_execution(execution_id)
+    execution = await ScheduleTaskManager.cancel_execution(execution_id)
     if not execution:
         raise HTTPException(404, "Task execution not found")
     return execution.model_dump(mode="json", by_alias=True)
 
 @router.post("/task-executions/{execution_id}/retry")
 async def retry_execution(execution_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.retry_execution(execution_id)
+    execution = await ScheduleTaskManager.retry_execution(execution_id)
     if not execution:
         raise HTTPException(404, "Task execution not found")
     return execution.model_dump(mode="json", by_alias=True)
@@ -477,9 +477,9 @@ async def retry_execution(execution_id: str):
 
 @router.post("/task-executions/{execution_id}/rerun")
 async def rerun_execution(execution_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    execution = await TaskManager.rerun_execution(execution_id)
+    execution = await ScheduleTaskManager.rerun_execution(execution_id)
     if not execution:
         raise HTTPException(404, "Task execution not found")
     return execution.model_dump(mode="json", by_alias=True)
@@ -487,10 +487,9 @@ async def rerun_execution(execution_id: str):
 
 @router.delete("/task-executions/{execution_id}")
 async def delete_execution(execution_id: str):
-    from flocks.task.manager import TaskManager
+    from flocks.task.schedule_task_manager import ScheduleTaskManager
 
-    if not await TaskManager.delete_execution(execution_id):
+    if not await ScheduleTaskManager.delete_execution(execution_id):
         raise HTTPException(404, "Task execution not found")
     return {"ok": True}
-
 

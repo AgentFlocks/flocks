@@ -15,7 +15,7 @@ import pytest
 from flocks.tool.registry import ToolContext, ToolResult
 from flocks.tool.task.schedule_task_center import schedule_task_list
 
-_TM_PATH = "flocks.task.manager.TaskManager"
+_TM_PATH = "flocks.task.schedule_task_manager.ScheduleTaskManager"
 
 
 def _ctx() -> ToolContext:

@@ -1533,7 +1533,7 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_cache_fix",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -1546,7 +1546,7 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
     assert len(second_messages) == 2
     assert second_messages[0].role == "assistant"
     assert second_messages[0].tool_calls is not None
-    assert second_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert second_messages[0].tool_calls[0]["function"]["name"] == "delegate_task"
     assert second_messages[1].role == "tool"
     assert second_messages[1].tool_call_id == "call_cache_fix"
     assert second_messages[1].content == "Error: Tool execution was interrupted"
@@ -1603,7 +1603,7 @@ async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_reasoning_replay",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -1617,7 +1617,7 @@ async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
     assert chat_messages[0].role == "assistant"
     assert chat_messages[0].reasoning == "Need to call the tool first."
     assert chat_messages[0].tool_calls is not None
-    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "delegate_task"
     assert chat_messages[1].role == "tool"
     assert chat_messages[1].tool_call_id == "call_reasoning_replay"
 
@@ -1672,7 +1672,7 @@ async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_reasoning_metadata",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -1686,7 +1686,7 @@ async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata
     assert chat_messages[0].reasoning == "Need to call the tool first."
     assert chat_messages[0].reasoning_content == "Need to call the tool first."
     assert chat_messages[0].reasoning_source == "native_reasoning_content"
-    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "delegate_task"
 
 
 @pytest.mark.asyncio
@@ -1734,7 +1734,7 @@ async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monk
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_redacted_reasoning",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -1748,7 +1748,7 @@ async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monk
     assert chat_messages[0].custom_settings["anthropic_thinking_blocks"] == [
         {"type": "redacted_thinking", "data": "opaque_blob"}
     ]
-    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "delegate_task"
 
 
 @pytest.mark.asyncio
@@ -1796,7 +1796,7 @@ async def test_to_chat_messages_restores_signed_anthropic_thinking_blocks(monkey
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_signed_reasoning",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -1814,7 +1814,7 @@ async def test_to_chat_messages_restores_signed_anthropic_thinking_blocks(monkey
             "signature": "sig123",
         }
     ]
-    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "delegate_task"
 
 
 @pytest.mark.asyncio
@@ -1861,7 +1861,7 @@ async def test_to_chat_messages_restores_unsigned_anthropic_thinking_blocks(monk
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_unsigned_reasoning",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -1878,7 +1878,7 @@ async def test_to_chat_messages_restores_unsigned_anthropic_thinking_blocks(monk
             "thinking": "Unsigned plan before tool use.",
         }
     ]
-    assert chat_messages[0].tool_calls[0]["function"]["name"] == "task"
+    assert chat_messages[0].tool_calls[0]["function"]["name"] == "delegate_task"
 
 
 @pytest.mark.asyncio
@@ -1926,7 +1926,7 @@ async def test_runner_history_round_trip_formats_anthropic_payload(monkeypatch):
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_signed_reasoning",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},
@@ -2010,7 +2010,7 @@ async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution
             sessionID=session.id,
             messageID=assistant_message.id,
             callID="call_provider_specific_interleaved",
-            tool="task",
+            tool="delegate_task",
             state=ToolStateRunning(
                 input={"prompt": "continue"},
                 time={"start": 1},

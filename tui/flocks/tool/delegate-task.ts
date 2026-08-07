@@ -1,5 +1,5 @@
 import { Tool } from "./tool"
-import DESCRIPTION from "./task.txt"
+import DESCRIPTION from "./delegate-task.txt"
 import z from "zod"
 import { Session } from "../session"
 import { Bus } from "../bus"
@@ -20,7 +20,7 @@ const parameters = z.object({
   command: z.string().describe("The command that triggered this task").optional(),
 })
 
-export const TaskTool = Tool.define("task", async (ctx) => {
+export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
   const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
 
   // Filter agents by permissions if agent provided
@@ -41,7 +41,6 @@ export const TaskTool = Tool.define("task", async (ctx) => {
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
 
-      // Skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
         await ctx.ask({
           permission: "task",
