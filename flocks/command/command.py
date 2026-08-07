@@ -274,14 +274,21 @@ class Command:
             CommandDef(
                 name="tasks",
                 description="Show task center overview",
-                template="Use the schedule_task_list tool to show the current task center overview including running, queued, and recently completed tasks. Present the results clearly.",
+                template=(
+                    "Use schedule_task with action='list' and resource_type='execution' "
+                    "to show running, queued, and recently completed task executions. "
+                    "Present the results clearly."
+                ),
                 execution_kind="llm",
                 allow_attachments=True,
             ),
             CommandDef(
                 name="queue",
                 description="Show task queue status",
-                template="Use the schedule_task_list tool with status filter to show the current task queue status: running tasks, queued tasks, and queue configuration. Present the results clearly.",
+                template=(
+                    "Use schedule_task with action='list' and resource_type='execution' "
+                    "to show running and queued task executions. Present the results clearly."
+                ),
                 execution_kind="llm",
                 allow_attachments=True,
             ),

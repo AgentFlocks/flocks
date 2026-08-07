@@ -307,7 +307,7 @@ class TestRexPromptAwareness:
         assert 'skill_load(name="im-send")' not in prompt
         assert "### IM Send Protocol" not in prompt
         assert "Execute this exact sequence" not in prompt
-        assert "IM Session Resolution for schedule_task_create" not in prompt
+        assert "IM Session Resolution for schedule_task" not in prompt
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_workflow_section(self):

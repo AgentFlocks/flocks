@@ -20,27 +20,29 @@ from flocks.utils.log import Log
 
 log = Log.create(service="tool.apply_patch")
 
-DESCRIPTION = """Apply a patch to modify files.
+DESCRIPTION = """Apply one coordinated patch across multiple files.
 
-This tool is designed for advanced patch-based editing, supporting:
-- File creation (add)
-- File modification (update)
-- File deletion (delete)
-- File moves (update with move_path)
+Use this tool when a single change needs to modify multiple files, or when
+files must be added, deleted, or moved.
 
-Patch format:
+Do not use this tool when a dedicated tool is a better fit:
+- Change one existing file, including multiple disjoint replacements -> `edit`
+- Create one new file -> `write`
+
+`patchText` uses the Flocks patch format, not a standard git diff:
+
 *** Begin Patch
-*** Add File: path/to/new/file.py
-content of new file
-*** Update File: path/to/existing/file.py
-@@@ ... @@@
+*** Add File: path/to/new_file.py
+new file content
+*** Update File: path/to/existing_file.py
+@@ -10,3 +10,3 @@
+ context line
 -old line
 +new line
-*** Delete File: path/to/delete.py
-*** End Patch
-
-Use the edit tool for simple string replacements.
-Use apply_patch for complex multi-file changes."""
+ context line
+*** Update File: old/path.py -> new/path.py
+*** Delete File: path/to/deleted_file.py
+*** End Patch"""
 
 
 @dataclass

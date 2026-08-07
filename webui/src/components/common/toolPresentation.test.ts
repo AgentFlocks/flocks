@@ -37,12 +37,7 @@ const BUILT_IN_TOOLS = [
   'webfetch',
   'delegate_task',
   'task',
-  'schedule_task_create',
-  'schedule_task_list',
-  'schedule_task_status',
-  'schedule_task_update',
-  'schedule_task_delete',
-  'schedule_task_rerun',
+  'schedule_task',
   'todo',
   'run_workflow',
   'run_workflow_node',
@@ -85,9 +80,15 @@ describe('resolveToolPresentation', () => {
   it('uses dynamic skill, MCP, session, and device action names', () => {
     expect(resolveToolPresentation(
       'flocks_skills',
-      { input: { subcommand: 'install', args: 'agent-builder' } },
+      { input: { subcommand: 'install', source: 'agent-builder' } },
       zh,
     )).toMatchObject({ label: '安装技能', detail: 'agent-builder' });
+
+    expect(resolveToolPresentation(
+      'flocks_skills',
+      { input: { subcommand: 'find', query: 'malware analysis' } },
+      zh,
+    )).toMatchObject({ label: '搜索技能', detail: 'malware analysis' });
 
     expect(resolveToolPresentation(
       'flocks_mcp',
@@ -106,6 +107,39 @@ describe('resolveToolPresentation', () => {
       { input: { action: 'connectivity_test', device_name: 'SOC 主设备' } },
       zh,
     )).toMatchObject({ label: '检测设备连接', detail: 'SOC 主设备' });
+  });
+
+  it('uses the unified schedule task action and resource in its presentation', () => {
+    expect(resolveToolPresentation(
+      'schedule_task',
+      {
+        input: {
+          action: 'create',
+          resource_type: 'scheduler',
+          title: '每日巡检',
+          cron_description: '每天早上 8 点',
+        },
+      },
+      zh,
+    )).toMatchObject({
+      label: '创建定时任务',
+      detail: '每日巡检 · 每天早上 8 点',
+    });
+
+    expect(resolveToolPresentation(
+      'schedule_task',
+      {
+        input: {
+          action: 'status',
+          resource_type: 'execution',
+          task_id: 'exec_123',
+        },
+      },
+      en,
+    )).toMatchObject({
+      label: 'View task status',
+      detail: 'exec_123 · execution',
+    });
   });
 
   it('extracts concise targets instead of exposing raw input summaries', () => {
