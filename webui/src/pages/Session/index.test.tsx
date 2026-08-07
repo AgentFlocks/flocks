@@ -185,7 +185,11 @@ vi.mock('@/components/common/SessionChat', () => ({
     initialOptimisticMessage?: {
       id: string;
       sessionID: string;
-      parts: Array<{ type: string; text?: string }>;
+      parts: Array<{
+        type: string;
+        text?: string;
+        metadata?: { displayText?: string };
+      }>;
     } | null;
     focusMessageId?: string | null;
     model?: { providerID: string; modelID: string } | null;
@@ -230,6 +234,7 @@ vi.mock('@/components/common/SessionChat', () => ({
         data-initial-display={initialDisplayText ?? ''}
         data-optimistic-id={initialOptimisticMessage?.id ?? ''}
         data-optimistic-text={initialOptimisticMessage?.parts.find((part) => part.type === 'text')?.text ?? ''}
+        data-optimistic-display={initialOptimisticMessage?.parts.find((part) => part.type === 'text')?.metadata?.displayText ?? ''}
         data-focus-message={focusMessageId ?? ''}
       >
         {sessionId ?? 'no-session'}
@@ -2024,6 +2029,16 @@ describe('SessionPage session actions menu', () => {
             }),
           ]),
         }),
+      );
+    });
+    await waitFor(() => {
+      expect(screen.getByTestId('session-chat')).toHaveAttribute(
+        'data-optimistic-text',
+        'welcome.alertOperationsSuggestion',
+      );
+      expect(screen.getByTestId('session-chat')).toHaveAttribute(
+        'data-optimistic-display',
+        '@@flocks-instruction:welcome.alertOperations',
       );
     });
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('');

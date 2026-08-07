@@ -27,16 +27,20 @@ from flocks.utils.log import Log
 log = Log.create(service="tool.edit")
 
 
-DESCRIPTION = """Edit a single file using exact text replacement.
+DESCRIPTION = """Edit a single existing file using targeted text replacement.
 
-Usage:
-- Prefer `edits` for one or more disjoint replacements in the same file.
-- Every `edits[].oldString` is matched against the original file content, not after earlier edits are applied.
-- Do not use overlapping or nested edits. Merge nearby changes into one edit.
-- Legacy `oldString`/`newString`/`replaceAll` is still supported for single-edit callers.
-- Use `replaceAll` only with legacy single-edit arguments when you want to replace every occurrence in the file.
-- CRITICAL: match text exactly including whitespace and newlines.
-- The tool preserves the file's existing encoding and dominant line-ending style."""
+Use this tool for one or more changes within the same file.
+
+Do not use this tool when a dedicated tool is a better fit:
+- Create a new file -> `write`
+- Modify, add, delete, or move multiple files in one coordinated change -> `apply_patch`
+
+Usage notes:
+- Prefer `edits` for one or more disjoint replacements.
+- Every `edits[].oldString` is matched against the original file snapshot.
+- Each `oldString` must be unique, and edits must not overlap.
+- The tool preserves the file's encoding and line-ending style.
+- Legacy `oldString` / `newString` / `replaceAll` remains supported."""
 
 
 def normalize_line_endings(text: str) -> str:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import json as _json
 from concurrent.futures import TimeoutError as _FuturesTimeoutError
 from typing import Any, Callable, Dict, List, Optional
@@ -36,6 +37,14 @@ class FlocksToolAdapter:
 
     def _blocked(self, name: str) -> bool:
         return (name or "").strip() in WORKFLOW_TOOL_BLOCKLIST
+
+    def with_cancel_checker(
+        self,
+        cancel_checker: Optional[Callable[[], bool]],
+    ) -> "FlocksToolAdapter":
+        scoped = copy.copy(self)
+        scoped.cancel_checker = cancel_checker
+        return scoped
 
     def _execute_tool_async(self, name: str, ctx: ToolContext, kwargs: Dict[str, Any]) -> ToolResult:
         """

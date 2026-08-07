@@ -25,6 +25,8 @@ const STATIC_LABEL_KEYS: Record<string, string> = {
   webfetch: 'chat.tool.actions.fetchWeb',
   delegate_task: 'chat.tool.actions.delegateTask',
   task: 'chat.tool.actions.delegateTask',
+  schedule_task: 'chat.tool.actions.viewScheduledTask',
+  // Keep legacy labels so historical tool calls still render clearly.
   schedule_task_create: 'chat.tool.actions.createScheduledTask',
   schedule_task_list: 'chat.tool.actions.listScheduledTasks',
   schedule_task_status: 'chat.tool.actions.viewScheduledTask',
@@ -82,6 +84,18 @@ const ACTION_LABEL_KEYS: Record<string, Record<string, string>> = {
     remove: 'chat.tool.actions.removeMcpServer',
     connect: 'chat.tool.actions.connectMcpServer',
     disconnect: 'chat.tool.actions.disconnectMcpServer',
+  },
+  schedule_task: {
+    create: 'chat.tool.actions.createScheduledTask',
+    list: 'chat.tool.actions.listScheduledTasks',
+    status: 'chat.tool.actions.viewScheduledTask',
+    update: 'chat.tool.actions.updateScheduledTask',
+    enable: 'chat.tool.actions.updateScheduledTask',
+    disable: 'chat.tool.actions.updateScheduledTask',
+    cancel: 'chat.tool.actions.updateScheduledTask',
+    retry: 'chat.tool.actions.rerunScheduledTask',
+    delete: 'chat.tool.actions.deleteScheduledTask',
+    rerun: 'chat.tool.actions.rerunScheduledTask',
   },
   session_manage: {
     list: 'chat.tool.actions.listTasks',
@@ -251,10 +265,27 @@ function buildDetail(
     case 'skill_load':
       return stringValue(input, 'name', 'skill_name');
     case 'flocks_skills':
-      return stringValue(input, 'args');
+      return stringValue(input, 'query', 'source', 'skill_name');
     case 'memory_get':
     case 'memory_write':
       return stringValue(input, 'path');
+    case 'schedule_task':
+      if (input.action === 'create') {
+        return joinDetail(
+          stringValue(input, 'title'),
+          stringValue(input, 'cron_description', 'run_at', 'cron', 'schedule'),
+        );
+      }
+      if (input.action === 'list') {
+        return joinDetail(
+          stringValue(input, 'resource_type'),
+          stringValue(input, 'status'),
+        );
+      }
+      return joinDetail(
+        stringValue(input, 'title', 'task_id'),
+        stringValue(input, 'resource_type'),
+      );
     case 'schedule_task_create':
       return joinDetail(
         stringValue(input, 'title'),

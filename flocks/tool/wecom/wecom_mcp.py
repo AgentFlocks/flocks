@@ -341,7 +341,14 @@ async def _handle_list(category: str) -> str:
         "category": category,
         "count": len(tools),
         "tools": [
-            {"name": t.get("name"), "description": t.get("description", "")}
+            {
+                "name": t.get("name"),
+                "description": t.get("description", ""),
+                "inputSchema": t.get(
+                    "inputSchema",
+                    {"type": "object", "properties": {}},
+                ),
+            }
             for t in tools
         ],
     })
@@ -389,26 +396,10 @@ def _parse_args(args: Any) -> dict:
 @ToolRegistry.register_function(
     name="wecom_mcp",
     description=(
-        "调用企业微信 MCP Server，提供文档和智能表格的完整增删改查能力。\n\n"
-        "支持两种操作：\n"
-        "  list  — 列出指定品类的所有可用 MCP 工具\n"
-        "  call  — 调用指定品类的某个工具\n\n"
-        "常用品类（category）：\n"
-        "  doc     — 文档与智能表格操作（create_doc / smartsheet_* 系列）\n"
-        "  contact — 通讯录查询（get_userlist / getContact 等）\n\n"
-        "典型调用示例：\n"
-        "  列出 doc 品类所有工具：action=list, category=doc\n"
-        "  创建文档：action=call, category=doc, method=create_doc, "
-        "args={\"doc_type\":3,\"doc_name\":\"项目周报\"}\n"
-        "  创建智能表格：action=call, category=doc, method=create_doc, "
-        "args={\"doc_type\":10,\"doc_name\":\"任务跟踪\"}\n"
-        "  查询子表：action=call, category=doc, method=smartsheet_get_sheet, "
-        "args={\"docid\":\"DOCID\"}\n"
-        "  新增记录：action=call, category=doc, method=smartsheet_add_records, "
-        "args={\"docid\":\"DOCID\",\"sheet_id\":\"SHEETID\","
-        "\"records\":[{\"values\":{\"任务\":[{\"type\":\"text\",\"text\":\"完成报告\"}]}}]}\n\n"
-        "前置条件：企业微信 channel 必须已启用且 Bot 已连接；"
-        "企微账号需开通文档 MCP 能力（在企微管理后台申请）。"
+        "Discover and call tools provided by the connected WeCom MCP server. "
+        "Use action='list' to inspect method names and input schemas for a category, "
+        "then action='call' with the selected method and an args object. "
+        "Common categories are 'doc' and 'contact'."
     ),
     category=ToolCategory.CUSTOM,
     parameters=[
@@ -433,12 +424,10 @@ def _parse_args(args: Any) -> dict:
         ),
         ToolParameter(
             name="args",
-            type=ParameterType.STRING,
-            description=(
-                "调用参数，JSON 字符串或省略（action=call 时使用）。\n"
-                "示例：{\"doc_type\": 10, \"doc_name\": \"我的表格\"}"
-            ),
+            type=ParameterType.OBJECT,
+            description="MCP method arguments as an object; used with action=call.",
             required=False,
+            json_schema={"type": "object", "additionalProperties": True},
         ),
     ],
 )
@@ -447,7 +436,7 @@ async def wecom_mcp(
     action: str,
     category: str,
     method: Optional[str] = None,
-    args: Optional[str] = None,
+    args: Optional[Any] = None,
 ) -> ToolResult:
     """企业微信 MCP Tool — 文档与智能表格操作入口。"""
     try:

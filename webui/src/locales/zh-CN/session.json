@@ -183,7 +183,6 @@
       "close": "关闭",
       "full": "{{percent}}% 已用",
       "tokens": "~{{used}} / {{total}} Tokens",
-      "excludedTokens": "已排除 {{tokens}}",
       "noAttributedSegments": "暂无可归因明细",
       "breakdown": {
         "systemPrompt": "系统提示词",
