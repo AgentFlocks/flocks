@@ -335,9 +335,8 @@ class TestModelManager:
 
         # Verify it's in flocks.json
         data = ConfigWriter._read_raw()
-        assert "model_settings" in data
-        assert "openai/gpt-4o" in data["model_settings"]
-        assert data["model_settings"]["openai/gpt-4o"]["enabled"] is False
+        assert "model_settings" not in data
+        assert data["provider"]["openai"]["models"]["gpt-4o"]["enabled"] is False
 
     def test_default_model_persisted_in_flocks_json(self, temp_project):
         """Verify that default models are persisted in flocks.json."""

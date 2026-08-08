@@ -29,7 +29,8 @@ log = Log.create(service="provider.options")
 # ---------------------------------------------------------------------------
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
-DEFAULT_KIMI_K3_REASONING_EFFORT = "max"
+DEFAULT_REASONING_EFFORT = "high"
+DEFAULT_KIMI_K3_REASONING_EFFORT = DEFAULT_REASONING_EFFORT
 KIMI_K3_REASONING_EFFORTS = frozenset({"low", "high", "max"})
 
 _GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS = {
@@ -76,15 +77,15 @@ def _resolve_reasoning_enabled(provider_id: str, model_id: str) -> Optional[bool
 
 
 def _resolve_reasoning_effort(provider_id: str, model_id: str) -> Optional[str]:
-    """Read a model-level reasoning effort from flocks.json."""
+    """Read the effective reasoning effort from flocks.json."""
     try:
         from flocks.provider.model_manager import get_model_manager
 
-        setting = get_model_manager().get_setting(provider_id, model_id)
-        if not setting:
-            return None
-
-        value = (setting.default_parameters or {}).get("reasoning_effort")
+        default_parameters = get_model_manager().get_effective_default_parameters(
+            provider_id,
+            model_id,
+        )
+        value = default_parameters.get("reasoning_effort")
         return value.strip().lower() if isinstance(value, str) else None
     except Exception as exc:
         log.debug("options.reasoning_effort_setting_lookup_failed", {
@@ -370,7 +371,7 @@ def build_provider_options(
     # -- OpenAI reasoning (o1 / o3 / gpt-5) --------------------------------
     elif provider_id == "openai":
         if reasoning_enabled is not False and any(tag in model_lower for tag in ("o1", "o3", "gpt-5")):
-            options["reasoningEffort"] = "medium"
+            options["reasoningEffort"] = reasoning_effort or DEFAULT_REASONING_EFFORT
 
     # -- Google Gemini thinking ---------------------------------------------
     elif provider_id == "google":

@@ -2841,33 +2841,31 @@ function ModelDetailSheet({
   const handleSave = async () => {
     setLoading(true);
     try {
-      await Promise.all([
-        modelV2API.createDefinition(provider.id, {
-          model_id: model.id,
-          name: name.trim() || model.id,
-          context_window: parseInt(contextWindow) || undefined,
-          max_output_tokens: parseInt(maxOutput) || undefined,
-          supports_vision: supportsVision,
-          supports_tools: supportsTools,
-          supports_streaming: supportsStreaming,
-          supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
-          input_price: parseFloat(inputPrice) || 0,
-          output_price: parseFloat(outputPrice) || 0,
-          cache_read_price: cacheReadPrice.trim() === ''
-            ? null
-            : parseFloat(cacheReadPrice) || 0,
-          currency,
-        }),
-        modelSettingsAPI.update(provider.id, model.id, {
-          enabled,
-          default_parameters: modelSupportsReasoning
-            ? {
-              ...defaultParameters,
-              enable_thinking: supportsReasoning,
-            }
-            : undefined,
-        }),
-      ]);
+      await modelV2API.createDefinition(provider.id, {
+        model_id: model.id,
+        name: name.trim() || model.id,
+        context_window: parseInt(contextWindow) || undefined,
+        max_output_tokens: parseInt(maxOutput) || undefined,
+        supports_vision: supportsVision,
+        supports_tools: supportsTools,
+        supports_streaming: supportsStreaming,
+        supports_reasoning: modelSupportsReasoning ? modelSupportsReasoning : supportsReasoning,
+        input_price: parseFloat(inputPrice) || 0,
+        output_price: parseFloat(outputPrice) || 0,
+        cache_read_price: cacheReadPrice.trim() === ''
+          ? null
+          : parseFloat(cacheReadPrice) || 0,
+        currency,
+      });
+      await modelSettingsAPI.update(provider.id, model.id, {
+        enabled,
+        default_parameters: modelSupportsReasoning
+          ? {
+            ...defaultParameters,
+            enable_thinking: supportsReasoning,
+          }
+          : undefined,
+      });
       toast.success(t('credentialsSaved'));
       onSaved();
     } catch (e: any) {
