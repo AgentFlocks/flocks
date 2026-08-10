@@ -1,6 +1,6 @@
 # Flocks browser setup
 
-本地固定端口 CDP 设置：daemon 不存在/不通，active browser connection 不可用，或浏览器尚未以 remote debugging 参数启动。
+本地浏览器连接以复用用户当前 profile 为主。独立 profile 固定端口只用于当前 profile 授权并重试后仍无法连接的兜底场景。
 
 先区分两种情况：
 
@@ -11,13 +11,17 @@
 2. daemon 不存在/不通，且浏览器已运行或配置了 `BU_CDP_URL` / `BU_CDP_WS`：
    - 执行 `flocks browser --setup` 触发 attach，不要用短超时包装该命令。
 
-只有在错误明确指向 remote debugging 不可达、`DevToolsActivePort` 缺失、403 handshake 或 not live yet 时，才提示用户走本地固定端口流程：
+只有在错误明确指向 remote debugging 未启用、`DevToolsActivePort` 缺失、403 handshake 或 not live yet 时，才提示用户完成当前 profile 的授权：
 
 ```text
-不要从 chrome://inspect 查找 webSocketDebuggerUrl。关闭对应 Chromium 系浏览器后，使用非默认 --user-data-dir 和 --remote-debugging-port=9222 启动浏览器，再访问 http://127.0.0.1:9222/json/version 验证。
+打开对应浏览器的 inspect 页面（例如 chrome://inspect/#remote-debugging 或 edge://inspect/#remote-debugging），选择日常使用的 profile，并勾选或点击 Allow remote debugging。不要从 chrome://inspect 查找 webSocketDebuggerUrl；Flocks 会自行发现 endpoint。
 ```
 
-候选命令按平台选择一个即可；如果浏览器安装路径不同，替换可执行文件路径：
+用户完成 Allow 后，`flocks browser --setup` 会再次尝试 attach。不要要求用户先关闭日常浏览器，也不要默认创建独立 profile。
+
+## 独立 profile 兜底
+
+只有当前 profile 的 inspect/Allow 流程重试后仍失败，才提供以下独立 profile 方案。候选命令按平台选择一个即可；如果浏览器安装路径不同，替换可执行文件路径：
 
 Windows PowerShell：
 
@@ -46,7 +50,7 @@ chromium --remote-debugging-port=9222 --user-data-dir="$HOME/.flocks/chromium-de
 brave-browser --remote-debugging-port=9222 --user-data-dir="$HOME/.flocks/brave-debug-profile"
 ```
 
-输出命令后等待用户进一步指示，不要占用当前终端盲目重试。
+输出命令后等待用户进一步指示，不要占用当前终端盲目重试。不要把该方案描述成默认设置方式。
 
 当用户确认 `http://127.0.0.1:9222/json/version` 已可访问后:
 1. 执行 `flocks browser --setup` 触发 attach，不要用短超时包装该命令

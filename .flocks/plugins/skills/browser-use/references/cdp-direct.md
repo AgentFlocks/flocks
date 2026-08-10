@@ -350,13 +350,14 @@ print({"cookies": [c["name"] for c in cookies], "localStorage": js("Object.keys(
 
 1. 先运行 `flocks browser --doctor` 看版本、安装模式、daemon 和浏览器状态；不要只看退出码，优先读 `next action`，再看 `browser running`、`daemon alive`、`active browser connections`。
 2. `next action` 为 `attach`，或 `daemon alive` ok 但 `active browser connections` 为 0 时，不要先反复 `--setup`。先用一次实际命令触发连接/观察：`flocks browser -c 'print(page_info())'` 或 `flocks browser -c 'print(list_tabs(include_chrome=False))'`。
-3. 如果上一步失败或仍无连接，再执行 `flocks browser --reload` 清旧 daemon，然后执行 `flocks browser --setup`。若 setup 输出本地 remote debugging 不可达，按 `references/cdp-setup.md` 的固定端口流程处理。
+3. 如果上一步失败或仍无连接，再执行 `flocks browser --reload` 清旧 daemon，然后执行 `flocks browser --setup`；setup 会在需要时打开当前 profile 的 inspect 页面，用户完成 Allow 后会再尝试 attach。
 4. 首次安装、冷启动、daemon 不存在/不通，且浏览器已经运行或配置了 `BU_CDP_URL` / `BU_CDP_WS` 时，优先运行 `flocks browser --setup`。
-5. Chrome / Chromium / Edge / Brave 未运行且没有显式 CDP endpoint 时，按 `references/cdp-setup.md` 提供对应平台的 remote-debugging 启动命令。
-6. 只有在明确提示 remote debugging 不可达、`DevToolsActivePort` 缺失、403 handshake、remote-debugging page 或 not live yet 时，才让用户使用非默认 `--user-data-dir` 和 `--remote-debugging-port=9222` 启动 Chromium 系浏览器，并访问 `http://127.0.0.1:9222/json/version` 验证。
-7. 用户刚按固定端口流程启动浏览器时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
-8. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是浏览器正在启动，轮询等待，不要重启。
-9. stale websocket / stale socket 时执行一次：
+5. Chrome / Chromium / Edge / Brave 未运行且没有显式 CDP endpoint 时，只提示用户先启动浏览器，再重新运行 `flocks browser --setup`；不要默认要求关闭浏览器或创建独立 profile。
+6. 只有当前 profile 的 inspect/Allow 流程完成且重试仍失败时，才按 `references/cdp-setup.md` 的可选兜底方案使用非默认 `--user-data-dir` 和 `--remote-debugging-port=9222` 启动独立 Chromium 系浏览器。
+7. `chrome://inspect/#remote-debugging` / `edge://inspect/#remote-debugging` 用于为当前 profile 启用并允许 remote debugging；不要从 inspect 页面查找 `webSocketDebuggerUrl`，Flocks 会通过 `DevToolsActivePort` 和 `/json/version` 自行发现 endpoint。
+8. 用户刚按独立 profile 兜底流程启动浏览器时，不要立刻再次运行 `flocks browser --doctor`；先执行一次 `flocks browser --setup`，或直接执行 `flocks browser -c 'print(page_info())'` 触发 daemon attach，再用 `--doctor` 做只读确认。
+9. `connection refused`、`DevTools not live yet`、`/json/version` 404 通常是浏览器正在启动，轮询等待，不要重启。
+10. stale websocket / stale socket 时执行一次：
 
 ```bash
 flocks browser -c 'restart_daemon()'
