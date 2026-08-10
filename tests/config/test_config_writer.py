@@ -256,7 +256,7 @@ class TestConfigWriter:
 
 
 class TestConfigWriterModelSettings:
-    """Test provider-scoped model settings and legacy compatibility."""
+    """Test model_settings section CRUD."""
 
     def test_get_model_setting_empty(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
@@ -273,12 +273,6 @@ class TestConfigWriterModelSettings:
         assert setting is not None
         assert setting["enabled"] is False
         assert setting["default_parameters"]["temperature"] == 0.5
-        data = ConfigWriter._read_raw()
-        assert "model_settings" not in data
-        assert data["provider"]["openai"]["models"]["gpt-4o"] == {
-            "enabled": False,
-            "default_parameters": {"temperature": 0.5},
-        }
 
     def test_update_model_setting_merges(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
@@ -300,24 +294,6 @@ class TestConfigWriterModelSettings:
         ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
         assert ConfigWriter.remove_model_setting("openai", "gpt-4o") is True
         assert ConfigWriter.get_model_setting("openai", "gpt-4o") is None
-        assert "openai" not in ConfigWriter._read_raw()["provider"]
-
-    def test_remove_model_setting_preserves_model_definition(self, temp_project):
-        from flocks.config.config_writer import ConfigWriter
-
-        ConfigWriter.set_model_setting(
-            "anthropic",
-            "claude-sonnet-4-5",
-            {"enabled": False},
-        )
-
-        assert ConfigWriter.remove_model_setting(
-            "anthropic",
-            "claude-sonnet-4-5",
-        ) is True
-        assert ConfigWriter.get_provider_raw("anthropic")["models"] == {
-            "claude-sonnet-4-5": {"name": "Claude Sonnet 4.5"}
-        }
 
     def test_remove_nonexistent_model_setting(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
@@ -332,94 +308,6 @@ class TestConfigWriterModelSettings:
         assert "openai/gpt-4o" in all_settings
         assert "anthropic/claude-sonnet" in all_settings
         assert len(all_settings) == 2
-
-    def test_legacy_model_setting_remains_readable(self, temp_project):
-        from flocks.config.config_writer import ConfigWriter
-
-        data = ConfigWriter._read_raw()
-        data["model_settings"] = {
-            "anthropic/claude-sonnet-4-5": {
-                "enabled": False,
-                "default_parameters": {"reasoning_effort": "high"},
-            }
-        }
-        ConfigWriter._write_raw(data)
-
-        setting = ConfigWriter.get_model_setting(
-            "anthropic",
-            "claude-sonnet-4-5",
-        )
-
-        assert setting == {
-            "enabled": False,
-            "default_parameters": {"reasoning_effort": "high"},
-        }
-
-    def test_provider_model_setting_overrides_legacy_values(self, temp_project):
-        from flocks.config.config_writer import ConfigWriter
-
-        data = ConfigWriter._read_raw()
-        data["model_settings"] = {
-            "anthropic/claude-sonnet-4-5": {
-                "enabled": False,
-                "default_parameters": {
-                    "reasoning_effort": "high",
-                    "temperature": 0.4,
-                },
-            }
-        }
-        data["provider"]["anthropic"]["models"]["claude-sonnet-4-5"].update(
-            {
-                "enabled": True,
-                "default_parameters": {"reasoning_effort": "max"},
-            }
-        )
-        ConfigWriter._write_raw(data)
-
-        setting = ConfigWriter.get_model_setting(
-            "anthropic",
-            "claude-sonnet-4-5",
-        )
-
-        assert setting == {
-            "enabled": True,
-            "default_parameters": {
-                "reasoning_effort": "max",
-                "temperature": 0.4,
-            },
-        }
-
-    def test_updating_legacy_setting_migrates_it_to_provider_model(self, temp_project):
-        from flocks.config.config_writer import ConfigWriter
-
-        data = ConfigWriter._read_raw()
-        data["model_settings"] = {
-            "anthropic/claude-sonnet-4-5": {
-                "enabled": False,
-                "default_parameters": {
-                    "temperature": 0.4,
-                    "reasoning_effort": "high",
-                },
-            }
-        }
-        ConfigWriter._write_raw(data)
-
-        ConfigWriter.set_model_setting(
-            "anthropic",
-            "claude-sonnet-4-5",
-            {"default_parameters": {"reasoning_effort": "max"}},
-        )
-
-        data = ConfigWriter._read_raw()
-        assert data["provider"]["anthropic"]["models"]["claude-sonnet-4-5"] == {
-            "name": "Claude Sonnet 4.5",
-            "enabled": False,
-            "default_parameters": {
-                "temperature": 0.4,
-                "reasoning_effort": "max",
-            },
-        }
-        assert "model_settings" not in data
 
     def test_effective_default_parameters_follow_scope_precedence(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
@@ -438,9 +326,6 @@ class TestConfigWriterModelSettings:
                 }
             }
         }
-        data["provider"]["anthropic"]["models"]["claude-sonnet-4-5"]["default_parameters"] = {
-            "reasoning_effort": "max",
-        }
         ConfigWriter._write_raw(data)
 
         parameters = ConfigWriter.get_effective_model_default_parameters(
@@ -449,35 +334,11 @@ class TestConfigWriterModelSettings:
         )
 
         assert parameters == {
-            "reasoning_effort": "max",
+            "reasoning_effort": "high",
             "temperature": 0.1,
         }
 
-    def test_add_model_preserves_provider_scoped_settings(self, temp_project):
-        from flocks.config.config_writer import ConfigWriter
-
-        ConfigWriter.set_model_setting(
-            "anthropic",
-            "claude-sonnet-4-5",
-            {
-                "enabled": False,
-                "default_parameters": {"reasoning_effort": "high"},
-            },
-        )
-        ConfigWriter.add_model(
-            "anthropic",
-            "claude-sonnet-4-5",
-            {"name": "Updated Claude"},
-        )
-
-        model = ConfigWriter.get_provider_raw("anthropic")["models"]["claude-sonnet-4-5"]
-        assert model == {
-            "name": "Updated Claude",
-            "enabled": False,
-            "default_parameters": {"reasoning_effort": "high"},
-        }
-
-    def test_provider_model_settings_preserve_other_sections(self, temp_project):
+    def test_model_settings_preserve_other_sections(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
         ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
 

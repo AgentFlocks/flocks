@@ -36,59 +36,6 @@ _FALLBACK_CONFIG_TEMPLATES: Dict[str, Dict[str, Any]] = {
     },
 }
 
-_MODEL_SETTING_FIELDS = ("enabled", "credential_id", "default_parameters")
-
-
-def _extract_model_setting(model_config: Any) -> Dict[str, Any]:
-    """Extract user-setting fields from a provider model entry."""
-    if not isinstance(model_config, dict):
-        return {}
-    return {
-        field: model_config[field]
-        for field in _MODEL_SETTING_FIELDS
-        if field in model_config
-    }
-
-
-def _merge_model_settings(
-    legacy: Optional[Dict[str, Any]],
-    current: Optional[Dict[str, Any]],
-) -> Dict[str, Any]:
-    """Merge legacy and provider-scoped settings with current values winning."""
-    result = dict(legacy or {})
-    current = current or {}
-    legacy_parameters = result.get("default_parameters")
-    current_parameters = current.get("default_parameters")
-    if isinstance(legacy_parameters, dict) or isinstance(current_parameters, dict):
-        merged_parameters = dict(
-            legacy_parameters if isinstance(legacy_parameters, dict) else {}
-        )
-        if isinstance(current_parameters, dict):
-            merged_parameters.update(current_parameters)
-        result["default_parameters"] = merged_parameters
-    for field in ("enabled", "credential_id"):
-        if field in current:
-            result[field] = current[field]
-    return result
-
-
-def _get_model_setting_from_data(
-    data: Dict[str, Any],
-    provider_id: str,
-    model_id: str,
-) -> Dict[str, Any]:
-    """Resolve legacy and provider-scoped settings from already-read data."""
-    key = f"{provider_id}/{model_id}"
-    legacy_settings = data.get("model_settings")
-    legacy = legacy_settings.get(key) if isinstance(legacy_settings, dict) else None
-
-    providers = data.get("provider")
-    provider = providers.get(provider_id) if isinstance(providers, dict) else None
-    models = provider.get("models") if isinstance(provider, dict) else None
-    model = models.get(model_id) if isinstance(models, dict) else None
-    return _merge_model_settings(legacy, _extract_model_setting(model))
-
-
 def _get_example_config_dir() -> Path:
     """Return the bundled example directory used for first-run initialization."""
     return Path(__file__).resolve().parents[2] / ".flocks"
@@ -426,12 +373,7 @@ class ConfigWriter:
 
         if "models" not in pconfig:
             pconfig["models"] = {}
-        existing_model = pconfig["models"].get(model_id, {})
-        preserved_settings = _extract_model_setting(existing_model)
-        merged_model = dict(model_config)
-        for field, value in preserved_settings.items():
-            merged_model.setdefault(field, value)
-        pconfig["models"][model_id] = merged_model
+        pconfig["models"][model_id] = model_config
         data["provider"][provider_id] = pconfig
         cls._write_raw(data)
         log.info("config_writer.model_added", {
@@ -467,15 +409,16 @@ class ConfigWriter:
         return True
 
     # ------------------------------------------------------------------
-    # Model settings (provider-scoped with legacy read compatibility)
+    # Model settings (model_settings section)
     # ------------------------------------------------------------------
 
     @classmethod
     def get_model_setting(cls, provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
-        """Get model settings, preferring the provider-scoped model entry."""
+        """Get setting for a specific model from flocks.json model_settings section."""
         data = cls._read_raw()
-        merged = _get_model_setting_from_data(data, provider_id, model_id)
-        return merged or None
+        settings = data.get("model_settings", {})
+        key = f"{provider_id}/{model_id}"
+        return settings.get(key)
 
     @classmethod
     def set_model_setting(
@@ -484,55 +427,14 @@ class ConfigWriter:
         model_id: str,
         setting: Dict[str, Any],
     ) -> None:
-        """Set model settings inside provider.<id>.models.<id>."""
+        """Set or update model setting in flocks.json model_settings section."""
         data = cls._read_raw()
-        providers = data.get("provider")
-        if not isinstance(providers, dict):
-            providers = {}
-        provider = providers.get(provider_id)
-        if not isinstance(provider, dict):
-            provider = {}
-        models = provider.get("models")
-        if not isinstance(models, dict):
-            models = {}
-        model = models.get(model_id)
-        if not isinstance(model, dict):
-            model = {}
-
-        # A write to a legacy-only setting migrates its complete effective value
-        # into the provider model. Untouched legacy entries remain readable.
-        existing_setting = _get_model_setting_from_data(data, provider_id, model_id)
-        for field, value in existing_setting.items():
-            if field in _MODEL_SETTING_FIELDS:
-                model[field] = value
-
-        for field, value in setting.items():
-            if field not in _MODEL_SETTING_FIELDS:
-                continue
-            if field == "default_parameters" and isinstance(value, dict):
-                existing_parameters = model.get("default_parameters")
-                merged_parameters = dict(
-                    existing_parameters
-                    if isinstance(existing_parameters, dict)
-                    else {}
-                )
-                merged_parameters.update(value)
-                model[field] = merged_parameters
-            else:
-                model[field] = value
-        models[model_id] = model
-        provider["models"] = models
-        providers[provider_id] = provider
-        data["provider"] = providers
-
-        legacy_settings = data.get("model_settings")
-        legacy_key = f"{provider_id}/{model_id}"
-        if isinstance(legacy_settings, dict) and legacy_key in legacy_settings:
-            legacy_settings.pop(legacy_key)
-            if legacy_settings:
-                data["model_settings"] = legacy_settings
-            else:
-                data.pop("model_settings", None)
+        if "model_settings" not in data:
+            data["model_settings"] = {}
+        key = f"{provider_id}/{model_id}"
+        existing = data["model_settings"].get(key, {})
+        existing.update(setting)
+        data["model_settings"][key] = existing
         cls._write_raw(data)
         log.info("config_writer.model_setting_updated", {
             "provider_id": provider_id,
@@ -541,36 +443,14 @@ class ConfigWriter:
 
     @classmethod
     def remove_model_setting(cls, provider_id: str, model_id: str) -> bool:
-        """Remove provider-scoped and legacy settings for a model."""
+        """Remove a model setting from flocks.json."""
         data = cls._read_raw()
-        removed = False
-        providers = data.get("provider")
-        provider = providers.get(provider_id, {}) if isinstance(providers, dict) else {}
-        models = provider.get("models") if isinstance(provider, dict) else None
-        model = models.get(model_id) if isinstance(models, dict) else None
-        if isinstance(model, dict):
-            for field in _MODEL_SETTING_FIELDS:
-                if field in model:
-                    del model[field]
-                    removed = True
-            if removed and not model:
-                models.pop(model_id, None)
-                if not models:
-                    provider.pop("models", None)
-                if not provider:
-                    if isinstance(providers, dict):
-                        providers.pop(provider_id, None)
-        settings = data.get("model_settings")
+        settings = data.get("model_settings", {})
         key = f"{provider_id}/{model_id}"
-        if isinstance(settings, dict) and key in settings:
-            del settings[key]
-            removed = True
-            if settings:
-                data["model_settings"] = settings
-            else:
-                data.pop("model_settings", None)
-        if not removed:
+        if key not in settings:
             return False
+        del settings[key]
+        data["model_settings"] = settings
         cls._write_raw(data)
         return True
 
@@ -578,30 +458,7 @@ class ConfigWriter:
     def get_all_model_settings(cls) -> Dict[str, Dict[str, Any]]:
         """Get all model settings. Returns dict keyed by 'provider_id/model_id'."""
         data = cls._read_raw()
-        legacy_settings = data.get("model_settings")
-        result = {
-            key: dict(value)
-            for key, value in (
-                legacy_settings.items()
-                if isinstance(legacy_settings, dict)
-                else ()
-            )
-            if isinstance(value, dict)
-        }
-        providers = data.get("provider")
-        provider_items = providers.items() if isinstance(providers, dict) else ()
-        for provider_id, provider in provider_items:
-            if not isinstance(provider, dict):
-                continue
-            models = provider.get("models")
-            model_items = models.items() if isinstance(models, dict) else ()
-            for model_id, model in model_items:
-                current = _extract_model_setting(model)
-                if not current:
-                    continue
-                key = f"{provider_id}/{model_id}"
-                result[key] = _merge_model_settings(result.get(key), current)
-        return result
+        return data.get("model_settings", {})
 
     @classmethod
     def get_effective_model_default_parameters(
@@ -609,7 +466,7 @@ class ConfigWriter:
         provider_id: str,
         model_id: str,
     ) -> Dict[str, Any]:
-        """Resolve global, legacy, and provider-model parameter defaults."""
+        """Resolve global defaults with model-specific overrides."""
         data = cls._read_raw()
         result: Dict[str, Any] = {}
         default_models = data.get("default_models")
@@ -621,7 +478,8 @@ class ConfigWriter:
         if isinstance(global_parameters, dict):
             result.update(global_parameters)
 
-        setting = _get_model_setting_from_data(data, provider_id, model_id)
+        settings = data.get("model_settings", {})
+        setting = settings.get(f"{provider_id}/{model_id}", {})
         model_parameters = setting.get("default_parameters", {})
         if isinstance(model_parameters, dict):
             result.update(model_parameters)
@@ -892,8 +750,8 @@ class ConfigWriter:
     # ------------------------------------------------------------------
     #
     # User-level overlay for per-tool settings (currently: ``enabled``).
-    # This remains a flat map keyed by tool name; model settings now live
-    # directly under their provider model entries.
+    # The section mirrors ``model_settings`` for naming consistency —
+    # both are flat maps keyed by the entity's unique id.
     #
     # Why this exists:  YAML plugin tool files under
     # ``<project>/.flocks/plugins/tools/`` are tracked by git and may be
