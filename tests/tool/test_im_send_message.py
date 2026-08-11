@@ -51,6 +51,33 @@ def test_im_send_message_normalizes_wecom_aliases() -> None:
     assert _normalize_channel_type("wxwork") == "wecom"
 
 
+def test_im_send_message_normalizes_slack_aliases() -> None:
+    assert _normalize_channel_type("slack") == "slack"
+    assert _normalize_channel_type("sl") == "slack"
+
+
+def test_im_send_message_normalizes_telegram_whatsapp_email_aliases() -> None:
+    assert _normalize_channel_type("telegram") == "telegram"
+    assert _normalize_channel_type("tg") == "telegram"
+    assert _normalize_channel_type("tele") == "telegram"
+    assert _normalize_channel_type("whatsapp") == "whatsapp"
+    assert _normalize_channel_type("wa") == "whatsapp"
+    assert _normalize_channel_type("email") == "email"
+    assert _normalize_channel_type("mail") == "email"
+    assert _normalize_channel_type("邮件") == "email"
+
+
+def test_im_send_message_schema_mentions_extended_builtin_channels() -> None:
+    schema = ToolRegistry.get_schema("im_send_message")
+
+    assert schema is not None
+    channel_description = schema.properties["channel_type"]["description"]
+    tool_description = ToolRegistry.get("im_send_message").info.description
+    for channel in ("telegram", "whatsapp", "email", "slack"):
+        assert channel in channel_description.lower()
+        assert channel in tool_description.lower()
+
+
 @pytest.mark.asyncio
 async def test_im_send_message_requires_message_unless_resolve_only() -> None:
     result = await im_send_message(_ctx(), session_id="ses_target")

@@ -14,7 +14,7 @@ import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from flocks.config.config import Config
+from flocks.config.config import Config, normalize_fallback_provider_entries
 from flocks.utils.log import Log
 
 log = Log.create(service="config.writer")
@@ -29,7 +29,6 @@ _FALLBACK_CONFIG_TEMPLATES: Dict[str, Dict[str, Any]] = {
         "servers": [],
     },
 }
-
 
 def _get_example_config_dir() -> Path:
     """Return the bundled example directory used for first-run initialization."""
@@ -77,6 +76,8 @@ def ensure_config_files() -> None:
                 "error": str(e),
             })
 
+    ConfigWriter.ensure_memory_config()
+
 
 class ConfigWriter:
     """Atomic read-modify-write operations on the provider section of flocks.json."""
@@ -93,22 +94,70 @@ class ConfigWriter:
     @classmethod
     def _read_raw(cls) -> Dict[str, Any]:
         """Read flocks.json as raw dict (no secret resolution)."""
-        path = cls._get_config_path()
+        return cls._read_path_raw(cls._get_config_path())
+
+    @classmethod
+    def _read_path_raw(
+        cls,
+        path: Path,
+        *,
+        strict: bool = False,
+    ) -> Dict[str, Any]:
+        """Read a JSON/JSONC file without resolving secrets or references."""
         if not path.exists():
             return {}
         try:
             text = path.read_text(encoding="utf-8")
             if not text.strip():
                 return {}
-            return json.loads(text)
-        except (json.JSONDecodeError, OSError) as exc:
+            return Config.parse_jsonc(text, path)
+        except (ValueError, OSError) as exc:
             log.error("config_writer.read_failed", {"path": str(path), "error": str(exc)})
+            if strict:
+                raise ValueError(
+                    f"Unable to read config file {path}: {exc}"
+                ) from exc
             return {}
 
     @classmethod
-    def _write_raw(cls, data: Dict[str, Any]) -> None:
+    def get_fallback_override_source(cls) -> Optional[str]:
+        """Return a higher-priority source overriding the writable fallback list."""
+        writable_path = cls._get_config_path().resolve()
+        global_config = Config.get_global()
+
+        inline_content = global_config.config_content
+        if inline_content:
+            try:
+                inline_data = json.loads(inline_content)
+            except json.JSONDecodeError:
+                inline_data = None
+            if (
+                isinstance(inline_data, dict)
+                and inline_data.get("fallback_providers") is not None
+            ):
+                return "FLOCKS_CONFIG_CONTENT"
+
+        candidates = []
+        if global_config.config_path:
+            candidates.append(("FLOCKS_CONFIG", Path(global_config.config_path)))
+        candidates.append(("config.json", global_config.config_dir / "config.json"))
+
+        for source, path in candidates:
+            if not path.exists() or path.resolve() == writable_path:
+                continue
+            data = cls._read_path_raw(path, strict=True)
+            if data.get("fallback_providers") is not None:
+                return source
+        return None
+
+    @classmethod
+    def _write_raw(
+        cls,
+        data: Dict[str, Any],
+        path: Optional[Path] = None,
+    ) -> None:
         """Atomic write: write to tmp file then rename, then clear Config cache."""
-        path = cls._get_config_path()
+        path = path or cls._get_config_path()
         path.parent.mkdir(parents=True, exist_ok=True)
 
         # Atomic write via temp file in same directory
@@ -135,6 +184,62 @@ class ConfigWriter:
             pass
 
         log.debug("config_writer.written", {"path": str(path)})
+
+    @classmethod
+    def ensure_memory_config(cls) -> bool:
+        """Persist the editable Memory Search config when absent."""
+        path = Config.get_config_file()
+        try:
+            text = path.read_text(encoding="utf-8") if path.exists() else ""
+            data = json.loads(text) if text.strip() else {}
+        except (json.JSONDecodeError, OSError) as exc:
+            log.error(
+                "config_writer.memory_config_init_failed",
+                {"path": str(path), "error": str(exc)},
+            )
+            return False
+
+        if not isinstance(data, dict):
+            log.error(
+                "config_writer.memory_config_init_failed",
+                {"path": str(path), "error": "top-level config must be an object"},
+            )
+            return False
+        if "memory" in data:
+            return False
+
+        from flocks.memory.config import MemoryConfig
+
+        default_config = MemoryConfig()
+        data["memory"] = {
+            "search": {
+                "embedding": default_config.search.embedding.model_dump(
+                    mode="json",
+                    exclude_none=True,
+                ),
+            },
+        }
+        cls._write_raw(data, path=path)
+        log.info("config_writer.memory_config_initialized", {"path": str(path)})
+        return True
+
+    @classmethod
+    def enable_memory_source(cls, source: str) -> bool:
+        """Persist a Memory source without rewriting unrelated config."""
+        data = cls._read_raw()
+        memory = data.get("memory")
+        if not isinstance(memory, dict):
+            memory = {}
+        sources = memory.get("sources")
+        if not isinstance(sources, list):
+            sources = ["memory"]
+        if source in sources:
+            return False
+        memory["sources"] = [*sources, source]
+        data["memory"] = memory
+        cls._write_raw(data)
+        log.info("config_writer.memory_source_enabled", {"source": source})
+        return True
 
     # ------------------------------------------------------------------
     # Provider-level CRUD
@@ -399,6 +504,40 @@ class ConfigWriter:
         """Get all default model configs."""
         data = cls._read_raw()
         return data.get("default_models", {})
+
+    # ------------------------------------------------------------------
+    # Runtime model fallbacks (fallback_providers section)
+    # ------------------------------------------------------------------
+
+    @classmethod
+    def get_fallback_providers(cls) -> List[Dict[str, str]]:
+        """Return ordered, structurally valid runtime fallback models."""
+        data = cls._read_raw()
+        return normalize_fallback_provider_entries(
+            data.get("fallback_providers", [])
+        )
+
+    @classmethod
+    def set_fallback_providers(
+        cls,
+        fallbacks: List[Dict[str, str]],
+    ) -> None:
+        """Atomically replace the ordered runtime fallback model list."""
+        data = cls._read_path_raw(cls._get_config_path(), strict=True)
+        if fallbacks:
+            data["fallback_providers"] = [
+                {
+                    "provider_id": fallback["provider_id"],
+                    "model_id": fallback["model_id"],
+                }
+                for fallback in fallbacks
+            ]
+        else:
+            data.pop("fallback_providers", None)
+        cls._write_raw(data)
+        log.info("config_writer.fallback_providers_set", {
+            "count": len(fallbacks),
+        })
 
     # ------------------------------------------------------------------
     # MCP server CRUD (mcp section)

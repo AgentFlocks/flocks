@@ -48,7 +48,7 @@ def test_prepare_reasoning_uses_placeholder_for_strict_echo_provider():
 
     prepared = prepare_reasoning_for_replay(
         provider_id="deepseek",
-        model_id="deepseek-reasoner",
+        model_id="deepseek-v4-pro",
         message=message,
         interleaved={
             "field": "reasoning_content",
@@ -78,7 +78,7 @@ def test_prepare_reasoning_upgrades_whitespace_only_reasoning_content():
 
     prepared = prepare_reasoning_for_replay(
         provider_id="deepseek",
-        model_id="deepseek-reasoner",
+        model_id="deepseek-v4-pro",
         message=message,
         interleaved={
             "field": "reasoning_content",
@@ -132,7 +132,7 @@ def test_prepare_reasoning_drops_details_when_target_uses_reasoning_content():
 
     prepared = prepare_reasoning_for_replay(
         provider_id="deepseek",
-        model_id="deepseek-reasoner",
+        model_id="deepseek-v4-pro",
         message=message,
         interleaved={
             "field": "reasoning_content",

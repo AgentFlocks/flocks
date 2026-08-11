@@ -197,7 +197,11 @@ async def read_tool(
         ToolResult with file contents
     """
     try:
-        resolution = await resolve_tool_path(ctx, filePath)
+        resolution = await resolve_tool_path(
+            ctx,
+            filePath,
+            allow_host_memory=True,
+        )
     except ValueError as exc:
         return ToolResult(
             success=False,

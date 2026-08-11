@@ -77,7 +77,7 @@
     "retry": "Retry",
     "noFiles": "No memory files",
     "noMatch": "No matching results",
-    "readOnly": "Read-only · Written by agents",
+    "fileCount": "{{count}} files",
     "readFailed": "Read failed",
     "selectPrompt": "Select a file on the left to preview",
     "selectDesc": "Memory files are written automatically by agents like Rex to record task context and key information",

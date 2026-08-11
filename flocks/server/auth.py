@@ -12,7 +12,12 @@ from typing import Optional
 from fastapi import HTTPException, Request, Response, status
 from starlette.requests import HTTPConnection
 
-from flocks.auth.context import AuthUser, reset_current_auth_user, set_current_auth_user
+from flocks.auth.context import (
+    API_TOKEN_SERVICE_USER_ID,
+    AuthUser,
+    reset_current_auth_user,
+    set_current_auth_user,
+)
 from flocks.auth.service import AuthService
 from flocks.security import get_secret_manager
 
@@ -228,8 +233,8 @@ def _is_valid_api_token(token: Optional[str]) -> bool:
 def _build_api_token_user() -> AuthUser:
     """Synthetic service identity for API token clients."""
     return AuthUser(
-        id="api-token-service",
-        username="api-token-service",
+        id=API_TOKEN_SERVICE_USER_ID,
+        username=API_TOKEN_SERVICE_USER_ID,
         role="admin",
         status="active",
         must_reset_password=False,

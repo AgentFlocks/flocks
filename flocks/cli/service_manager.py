@@ -31,6 +31,7 @@ from flocks.cli.service_control import (
     read_logs,
     read_supervisor_status,
     request_restart,
+    request_restart_backend,
     request_stop,
     stream_logs,
     supervisor_is_running,
@@ -50,7 +51,7 @@ MAX_SERVICE_LOG_BYTES = 1024 * 1024 * 1024
 LOG_TRIM_CHUNK_BYTES = 1024 * 1024
 WEBUI_DIRECT_BACKEND_URLS_ENV = "FLOCKS_WEBUI_DIRECT_BACKEND_URLS"
 DEFAULT_FLOCKS_CONSOLE_BASE_URL = "https://portalflocks.threatbook.cn"
-DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "portalflocks.threatbook.cn"
+DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS = "127.0.0.1,localhost,portalflocks.threatbook.cn"
 MISSING_PORT_OWNER_TOOLS_WARNING = (
     "未检测到 lsof 或 fuser，无法解析端口占用 PID；将退回到 bind 检查。"
     "可尝试安装：apt/yum install lsof -y"
@@ -60,6 +61,7 @@ WINDOWS_FRONTEND_BUILD_ASSERTION_MARKERS = (
     "src\\win\\async.c",
     "src/win/async.c",
 )
+WEBUI_BUILD_IGNORED_DIRS = frozenset({"dist", "node_modules", ".vite"})
 WATCHDOG_PID_FILENAME = "watchdog.pid"
 SUPERVISOR_START_TIMEOUT_SECONDS = 180.0
 
@@ -87,21 +89,6 @@ class RuntimeRecord:
     port: int | None = None
     command: tuple[str, ...] = ()
     started_at: float | None = None
-
-
-@dataclass(frozen=True)
-class UpgradeRuntimeInfo:
-    payload_present: bool = False
-    pid_file_present: bool = False
-    upgrade_pid: int | None = None
-    frontend_host: str | None = None
-    frontend_port: int | None = None
-    listener_pids: tuple[int, ...] = ()
-    page_active: bool = False
-
-    @property
-    def has_artifacts(self) -> bool:
-        return self.payload_present or self.pid_file_present
 
 
 def repo_root() -> Path:
@@ -328,6 +315,8 @@ def get_node_major_version() -> int | None:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError:
         return None
@@ -528,6 +517,8 @@ def _windows_tasklist_process_name(pid: int) -> str | None:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return None
@@ -723,51 +714,6 @@ def _console_print(console, message: str) -> None:
     console.print(message)
 
 
-def _read_upgrade_runtime_info(frontend_port: int | None = None) -> UpgradeRuntimeInfo:
-    try:
-        from flocks.updater import updater as updater_module
-
-        payload = updater_module.read_upgrade_runtime_state(frontend_port=frontend_port)
-    except Exception:
-        return UpgradeRuntimeInfo(frontend_port=frontend_port)
-
-    listener_pids = tuple(int(pid) for pid in payload.get("listener_pids", []) if isinstance(pid, int))
-    return UpgradeRuntimeInfo(
-        payload_present=bool(payload.get("payload_present")),
-        pid_file_present=bool(payload.get("pid_file_present")),
-        upgrade_pid=payload.get("upgrade_pid") if isinstance(payload.get("upgrade_pid"), int) else None,
-        frontend_host=payload.get("frontend_host") if isinstance(payload.get("frontend_host"), str) else None,
-        frontend_port=payload.get("frontend_port") if isinstance(payload.get("frontend_port"), int) else frontend_port,
-        listener_pids=listener_pids,
-        page_active=bool(payload.get("page_active")),
-    )
-
-
-def _resolve_upgrade_runtime(console, *, frontend_port: int, attempt_recover: bool) -> dict[str, object]:
-    upgrade_info = _read_upgrade_runtime_info(frontend_port)
-    if not upgrade_info.has_artifacts:
-        return {"action": "noop", "error": None}
-
-    from flocks.updater import updater as updater_module
-
-    _console_print(console, "[flocks] 检测到升级临时页残留，正在尝试恢复或清理...")
-    result = updater_module.resolve_upgrade_runtime_state(
-        attempt_recover=attempt_recover,
-        frontend_port=upgrade_info.frontend_port or frontend_port,
-    )
-
-    action = str(result.get("action") or "noop")
-    error = result.get("error")
-    if action == "recovered":
-        _console_print(console, "[flocks] 已恢复未完成升级，正式 WebUI 将继续接管端口。")
-    elif action != "noop":
-        _console_print(console, "[flocks] 已清理升级临时页残留。")
-
-    if isinstance(error, str) and error:
-        _console_print(console, f"[flocks] 未完成升级的自动恢复失败，已清理临时升级页: {error}")
-    return result
-
-
 def cleanup_stale_pid_file(pid_file: Path) -> None:
     """Remove pid files that no longer point to running processes."""
     if not pid_file.exists():
@@ -838,6 +784,8 @@ def port_is_in_use(port: int, listeners: Sequence[int] | None = None) -> bool:
     current_listeners = list(listeners) if listeners is not None else port_owner_pids(port)
     if current_listeners:
         return True
+    if sys.platform == "win32":
+        return not _bind_port_available(port)
     if _port_owner_lookup_available():
         return False
     return not _bind_port_available(port)
@@ -944,6 +892,8 @@ def _process_list_pids() -> list[int]:
             check=False,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     else:
         completed = subprocess.run(
@@ -1042,17 +992,6 @@ def _is_running_status_response(response: httpx.Response) -> bool:
     return isinstance(payload, dict) and payload.get("status") == "running"
 
 
-def _is_healthy_status_response(response: httpx.Response) -> bool:
-    """Return True when the backend health endpoint reports healthy."""
-    if response.status_code != 200:
-        return False
-    try:
-        payload = response.json()
-    except ValueError:
-        return False
-    return isinstance(payload, dict) and payload.get("status") == "healthy"
-
-
 def wait_for_http(
     urls: Sequence[str],
     name: str,
@@ -1084,10 +1023,6 @@ class _StdoutConsole:
     def print(self, *args, **_kwargs) -> None:
         sys.stdout.write(" ".join(str(arg) for arg in args) + "\n")
         sys.stdout.flush()
-
-
-def _backend_health_url(host: str, port: int) -> str:
-    return f"http://{_format_host_for_url(access_host(host))}:{port}/api/health"
 
 
 def _terminate_process(
@@ -1178,16 +1113,47 @@ def _build_webui_dist(root: Path, config: ServiceConfig, console) -> None:
             raise ServiceError("WebUI 构建失败。")
 
 
+def _webui_needs_build(webui_dir: Path) -> bool:
+    """Return whether WebUI sources are newer than the production bundle."""
+    index_path = webui_dir / "dist" / "index.html"
+    if not index_path.is_file():
+        return True
+
+    built_at = index_path.stat().st_mtime_ns
+    if webui_dir.stat().st_mtime_ns > built_at:
+        return True
+
+    for current, directories, files in os.walk(webui_dir):
+        directories[:] = [name for name in directories if name not in WEBUI_BUILD_IGNORED_DIRS]
+        current_dir = Path(current)
+        try:
+            if any((current_dir / name).stat().st_mtime_ns > built_at for name in directories + files):
+                return True
+        except FileNotFoundError:
+            # A concurrent source edit is itself sufficient reason to rebuild.
+            return True
+    return False
+
+
 def _ensure_webui_dist(root: Path, config: ServiceConfig, console) -> None:
     """Ensure the FastAPI process can serve the production WebUI bundle."""
     from flocks.server.static_webui import WebUIDistMissingError, ensure_webui_dist_dir
 
+    webui_dir = root / "webui"
     try:
-        ensure_webui_dist_dir()
-        return
+        dist_dir = ensure_webui_dist_dir()
     except WebUIDistMissingError:
         if config.skip_frontend_build:
             raise
+    else:
+        source_dist_dir = webui_dir / "dist"
+        if (
+            config.skip_frontend_build
+            or not (webui_dir / "package.json").is_file()
+            or dist_dir != source_dist_dir.resolve()
+            or not _webui_needs_build(webui_dir)
+        ):
+            return
 
     _build_webui_dist(root, config, console)
     ensure_webui_dist_dir()
@@ -1582,7 +1548,6 @@ def _start_all_without_stop(config: ServiceConfig, console) -> None:
 
 def _start_all_unlocked(config: ServiceConfig, console, *, paths: RuntimePaths) -> None:
     """Ensure the supervisor daemon is running; caller must hold lifecycle lock."""
-    _resolve_upgrade_runtime(console, frontend_port=config.frontend_port, attempt_recover=False)
     if supervisor_is_running(paths):
         status = None
         try:
@@ -1633,6 +1598,21 @@ def restart_all(config: ServiceConfig, console) -> None:
     with service_lock(paths):
         _stop_all_unlocked(console, paths=paths)
         _start_all_unlocked(config, console, paths=paths)
+
+
+def restart_server(console) -> None:
+    """Restart only the backend through the running supervisor daemon."""
+    paths = ensure_runtime_dirs()
+    with service_lock(paths):
+        if not supervisor_is_running(paths):
+            raise ServiceError("Flocks daemon 未运行；请执行 `flocks restart` 进行全量重启。")
+        try:
+            status = request_restart_backend(paths=paths)
+        except Exception as error:
+            raise ServiceError(f"Flocks server 重启请求失败：{error}") from error
+        _print_status_payload(status.raw, console, include_daemon_step=False)
+        if not _startup_payload_is_ready(status.raw):
+            raise ServiceError(_startup_failure_message(status.raw))
 
 
 def _print_static_port_migration_hint(config: ServiceConfig, console) -> None:
@@ -2179,12 +2159,14 @@ def _run_windows_netstat(port: int) -> str:
         check=False,
         capture_output=True,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     )
     if completed.returncode != 0:
         return ""
     target = f":{port}"
     lines = []
-    for line in completed.stdout.splitlines():
+    for line in (completed.stdout or "").splitlines():
         if "LISTENING" not in line.upper():
             continue
         if target not in line:

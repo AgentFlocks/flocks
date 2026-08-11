@@ -52,17 +52,18 @@ def test_catalog_marks_tool_search_as_always_load() -> None:
 
 def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
     assert "read_file" not in TOOL_TAGS
+    assert "memory_get" not in TOOL_TAGS
+    assert "memory_write" not in TOOL_TAGS
     assert "memory" not in TOOL_TAGS
     assert "model_config" not in TOOL_TAGS
     assert "slash_command" not in TOOL_TAGS
+    assert "schedule_task_create" not in TOOL_TAGS
 
     for name in [
         "doc_parser",
         "lsp",
         "todo",
         "memory_search",
-        "memory_get",
-        "memory_write",
         "list_providers",
         "add_provider",
         "add_model",
@@ -71,6 +72,7 @@ def test_catalog_uses_real_builtin_tool_names_for_metadata_keys() -> None:
         "ssh_run_script",
         "flocks_mcp",
         "flocks_skills",
+        "schedule_task",
         "get_time",
     ]:
         assert name in TOOL_TAGS
@@ -82,6 +84,15 @@ def test_task_tool_tags_reflect_agent_delegation() -> None:
     assert "agent" in metadata.tags
     assert "delegation" in metadata.tags
     assert "planning" not in metadata.tags
+
+
+def test_schedule_task_and_todo_use_distinct_management_tags() -> None:
+    schedule_metadata = get_tool_catalog_metadata("schedule_task")
+    todo_metadata = get_tool_catalog_metadata("todo")
+
+    assert "scheduler-management" in schedule_metadata.tags
+    assert "task-management" not in schedule_metadata.tags
+    assert "task-management" in todo_metadata.tags
 
 
 def test_explicit_tags_are_merged_with_defaults() -> None:

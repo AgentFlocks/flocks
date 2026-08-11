@@ -87,6 +87,12 @@ class MCP:
         """
         manager = get_manager()
         return await manager.status()
+
+    @classmethod
+    def status_snapshot(cls) -> tuple[Dict[str, McpStatusInfo], bool]:
+        """Return current MCP status without starting uninitialized servers."""
+        manager = get_manager()
+        return manager.status_snapshot()
     
     @classmethod
     async def get_server_info(cls, name: str) -> Optional[McpServerInfo]:

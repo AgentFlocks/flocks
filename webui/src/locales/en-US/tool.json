@@ -562,6 +562,9 @@
 
   "alert": {
     "refreshFailed": "Refresh failed: {{error}}",
+    "refreshFailedTitle": "Tool refresh failed",
+    "refreshPartialTitle": "Tool refresh completed with warnings",
+    "refreshPartialDefault": "Some refresh stages reported errors. Available tools were updated.",
     "mcpAddSuccess": "MCP service added successfully",
     "addFailed": "Add failed: {{error}}",
     "mcpNameRequired": "Please enter MCP service name",
@@ -573,6 +576,7 @@
     "confirmDeleteCred": "Are you sure you want to delete credentials?",
     "credDeleted": "Credentials deleted",
     "deleteFailed": "Delete failed: {{error}}",
+    "deletePartialTitle": "Tool deleted with cleanup warnings",
     "unknownError": "Unknown error",
     "fillAllRequired": "Please fill in all required fields",
     "configFailed": "Configuration failed: {{error}}",

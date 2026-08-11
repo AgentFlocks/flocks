@@ -67,7 +67,11 @@ class _Recorder:
         self.real_provider.configure = self._original_configure
 
 
-def _build_fake_config(provider_id: str) -> Any:
+def _build_fake_config(
+    provider_id: str,
+    *,
+    model_first_chunk_timeout_s: int = 480,
+) -> Any:
     """Return a SimpleNamespace mimicking ``ConfigInfo`` shape needed by
     ``apply_config``: ``.provider`` dict -> ``.options`` (with model_dump)
     and ``.models``.
@@ -88,6 +92,7 @@ def _build_fake_config(provider_id: str) -> Any:
                 "supports_vision": False,
                 "supports_reasoning": False,
                 "max_tokens": 4096,
+                "stream_first_chunk_timeout_s": model_first_chunk_timeout_s,
             }
         )
     }
@@ -128,6 +133,9 @@ async def test_apply_config_is_idempotent_for_unchanged_input() -> None:
             "apply_config must not rebuild _config_models when the desired "
             "model list matches the existing one"
         )
+        assert provider.get_models()[0].custom_settings == {
+            "stream_first_chunk_timeout_s": 480,
+        }
 
 
 @pytest.mark.asyncio
@@ -171,3 +179,87 @@ async def test_apply_config_still_mutates_when_input_changes() -> None:
     assert rec.configure_calls == 1, (
         f"expected exactly 1 configure call on api_key change, got {rec.configure_calls}"
     )
+
+
+@pytest.mark.asyncio
+async def test_apply_config_rebuilds_models_when_stream_timeout_changes() -> None:
+    """A model timeout change must invalidate the model-list signature."""
+@pytest.mark.parametrize(
+    "options",
+    [
+        None,
+        SimpleNamespace(
+            model_dump=lambda exclude_none, by_alias: {
+                "api_key": " ",
+                "base_url": "",
+            }
+        ),
+    ],
+    ids=["missing-options", "empty-credentials"],
+)
+async def test_apply_config_loads_name_and_models_without_credentials(
+    options: Any,
+) -> None:
+    """Provider metadata must not depend on resolved credentials."""
+    Provider._ensure_initialized()
+    provider = Provider.get("openai-compatible")
+    assert provider is not None
+
+    first_cfg = _build_fake_config(
+        "openai-compatible",
+        model_first_chunk_timeout_s=480,
+    )
+    with patch("flocks.provider.provider.Config.get", return_value=first_cfg):
+        await Provider.apply_config(provider_id="openai-compatible")
+
+    second_cfg = _build_fake_config(
+        "openai-compatible",
+        model_first_chunk_timeout_s=600,
+    )
+    with patch(
+        "flocks.provider.provider.Config.get",
+        return_value=second_cfg,
+    ), _Recorder(provider) as rec:
+        await Provider.apply_config(provider_id="openai-compatible")
+
+    assert rec.models_assignments == 1
+    assert provider.get_models()[0].custom_settings == {
+        "stream_first_chunk_timeout_s": 600,
+    }
+    original_config = provider._config
+    original_models = list(getattr(provider, "_config_models", []) or [])
+    original_name = provider.name
+    model_id = f"credentialless-model-{id(options)}"
+    fake_cfg = SimpleNamespace(
+        provider={
+            "openai-compatible": SimpleNamespace(
+                name="Credentialless Provider",
+                options=options,
+                models={
+                    model_id: {
+                        "name": "Credentialless Model",
+                        "supports_tools": True,
+                    }
+                },
+            )
+        }
+    )
+
+    try:
+        with _Recorder(provider) as first:
+            await Provider.apply_config(fake_cfg, provider_id="openai-compatible")
+
+        assert first.configure_calls == 0
+        assert first.models_assignments == 1
+        assert provider.name == "Credentialless Provider"
+        assert [model.id for model in provider._config_models] == [model_id]
+
+        with _Recorder(provider) as second:
+            await Provider.apply_config(fake_cfg, provider_id="openai-compatible")
+
+        assert second.configure_calls == 0
+        assert second.models_assignments == 0
+    finally:
+        provider._config = original_config
+        provider._config_models = original_models
+        provider.name = original_name

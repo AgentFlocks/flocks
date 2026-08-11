@@ -10,6 +10,8 @@ Covers:
 - SessionRunner construction and abort behavior (from existing tests)
 """
 
+import httpcore
+import httpx
 import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
@@ -269,6 +271,51 @@ class TestExceptionToErrorDict:
         assert result["name"] == "APIError"
         assert result["data"]["isRetryable"] is True
         assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ReadError("", request=httpx.Request("GET", "https://example.test")),
+            httpx.RemoteProtocolError(
+                "",
+                request=httpx.Request("GET", "https://example.test"),
+            ),
+            httpcore.ReadError(),
+            httpcore.RemoteProtocolError(),
+        ],
+    )
+    def test_empty_transport_exception_is_retryable_connection_error(self, exc):
+        runner = _make_runner()
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["isConnectionError"] is True
+        assert result["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+        assert result["data"]["exceptionType"] == type(exc).__name__
+
+    def test_wrapped_transport_exception_is_retryable_connection_error(self):
+        runner = _make_runner()
+        transport_error = httpcore.ReadError()
+        exc = RuntimeError("stream failed")
+        exc.__cause__ = transport_error
+
+        result = runner._exception_to_error_dict(exc)
+
+        assert result["name"] == "APIError"
+        assert result["data"]["isRetryable"] is True
+        assert result["data"]["isConnectionError"] is True
+        assert result["data"]["exceptionType"] == "RuntimeError"
+        assert result["data"]["transportExceptionType"] == "ReadError"
+
+    def test_empty_non_transport_exception_is_not_retryable(self):
+        runner = _make_runner()
+
+        result = runner._exception_to_error_dict(RuntimeError())
+
+        assert result["name"] == "RuntimeError"
+        assert result["data"].get("isRetryable") is not True
 
     def test_exception_with_status_code_429(self):
         runner = _make_runner()
@@ -673,7 +720,15 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("bash", "memory_search", "read"),
+                prompt_tool_names=(
+                    "bash",
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
                 memory_bootstrap_data=memory_bootstrap_data,
                 tool_catalog_prompt_factory=lambda: "tool catalog",
                 device_asset_prompt_factory=device_mock,
@@ -931,7 +986,7 @@ class TestBuildSystemPrompts:
         custom_mock.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_includes_memory_guidance_when_memory_tools_loaded(self):
+    async def test_build_system_prompts_includes_filesystem_memory_guidance(self):
         session = _make_session("ses_prompts_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -958,7 +1013,14 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("memory_search", "read"),
+                prompt_tool_names=(
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
                 memory_bootstrap_data=runner._memory_bootstrap_data,
             )
 
@@ -993,7 +1055,7 @@ class TestBuildSystemPrompts:
         assert "PowerShell syntax" not in combined
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_skips_memory_guidance_without_memory_tools(self):
+    async def test_build_system_prompts_skips_memory_guidance_without_management_tools(self):
         session = _make_session("ses_prompts_no_memory_guidance")
         runner = SessionRunner(
             session=session,
@@ -1028,7 +1090,7 @@ class TestBuildSystemPrompts:
         assert "## MEMORY.md\n\nremembered context" in prompts
 
     @pytest.mark.asyncio
-    async def test_build_system_prompts_rebuilds_when_prompt_tool_names_change(self):
+    async def test_filesystem_memory_guidance_depends_on_tool_names(self):
         shared_cache = {}
         session = _make_session("ses_prompts_tool_names")
         runner = SessionRunner(
@@ -1057,7 +1119,14 @@ class TestBuildSystemPrompts:
                 agent_prompt=agent.prompt,
                 provider_id=runner.provider_id,
                 model_id=runner.model_id,
-                prompt_tool_names=("memory_search", "read"),
+                prompt_tool_names=(
+                    "edit",
+                    "glob",
+                    "grep",
+                    "memory_search",
+                    "read",
+                    "write",
+                ),
                 tool_revision=1,
                 memory_bootstrap_data=runner._memory_bootstrap_data,
                 static_cache=shared_cache,
@@ -1481,6 +1550,27 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
     assert second_messages[1].role == "tool"
     assert second_messages[1].tool_call_id == "call_cache_fix"
     assert second_messages[1].content == "Error: Tool execution was interrupted"
+
+
+@pytest.mark.asyncio
+async def test_to_chat_messages_excludes_ignored_assistant_text():
+    session = await Session.create(
+        project_id="test_runner_ignored_command_output",
+        directory="/tmp/runner-ignored-command-output",
+    )
+    assistant_message = await Message.create(
+        session_id=session.id,
+        role=MessageRole.ASSISTANT,
+        content="Available Tools\n" + ("x" * 400),
+        providerID="builtin",
+        modelID="command",
+        ignored=True,
+    )
+    runner = SessionRunner(session=session, static_cache={})
+
+    chat_messages = await runner._to_chat_messages([assistant_message], [])
+
+    assert chat_messages == []
 
 
 @pytest.mark.asyncio
@@ -2101,7 +2191,7 @@ async def test_to_chat_messages_skips_reasoning_only_aborted_assistant(monkeypat
 def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
     runner = _make_runner("ses_runner_interleaved_capability_key")
     runner.provider_id = "deepseek"
-    runner.model_id = "deepseek-reasoner"
+    runner.model_id = "deepseek-v4-pro"
 
     monkeypatch.setattr(SessionRunner, "_model_supports_vision", lambda self: False)
     monkeypatch.setattr(
@@ -2249,6 +2339,8 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     provider.is_configured.return_value = True
     assistant_msg = SimpleNamespace(id="msg_assistant_connection_error")
     update_mock = AsyncMock(return_value=None)
+    warn_log = MagicMock()
+    error_log = MagicMock()
     call_count = 0
 
     async def fake_call_llm(*_args, **_kwargs):
@@ -2271,10 +2363,12 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     monkeypatch.setattr(runner_mod.Message, "update", update_mock)
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
     monkeypatch.setattr(runner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(runner_mod.log, "warn", warn_log)
+    monkeypatch.setattr(runner_mod.log, "error", error_log)
 
     result = await runner._process_step([last_user], last_user)
 
-    assert call_count == 4
+    assert call_count == 6
     assert result.action == "stop"
     assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
     runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
@@ -2283,6 +2377,21 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     assert final_update["finish"] == "error"
     assert final_update["error"]["data"]["message"] == "Connection error."
     assert final_update["error"]["data"]["displayMessage"] == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+
+    retry_logs = [
+        call for call in warn_log.call_args_list
+        if call.args and call.args[0] == "runner.step.retry"
+    ]
+    max_retry_logs = [
+        call for call in error_log.call_args_list
+        if call.args and call.args[0] == "runner.step.max_retries_exceeded"
+    ]
+    assert len(retry_logs) == 5
+    assert len(max_retry_logs) == 1
+    assert not any(
+        call.args and call.args[0] == "runner.step.error"
+        for call in [*warn_log.call_args_list, *error_log.call_args_list]
+    )
 
 
 @pytest.mark.asyncio
@@ -2417,6 +2526,167 @@ async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monk
     deep_copy_mock.assert_not_called()
     run_before_mock.assert_not_awaited()
     run_after_mock.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_provider_missing(monkeypatch):
+    runner = _make_runner("ses_runner_missing_provider_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "missing-provider", "modelID": "missing-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None)
+    events = []
+    callback_errors = []
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    async def on_error(error):
+        callback_errors.append(error)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: None))
+
+    runner.provider_id = "missing-provider"
+    runner.model_id = "missing-model"
+    runner.callbacks = RunnerCallbacks(
+        on_error=on_error,
+        event_publish_callback=publish_event,
+    )
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text_parts = [
+        part for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    ]
+
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "ProviderUnavailableError"
+    assert visible_text_parts
+    assert visible_text_parts[0].text == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert any(event_name == "message.part.updated" for event_name, _payload in events)
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_provider_not_configured(monkeypatch):
+    runner = _make_runner("ses_runner_unconfigured_provider_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "unconfigured-provider", "modelID": "unconfigured-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None)
+    events = []
+    callback_errors = []
+
+    class UnconfiguredProvider:
+        def is_configured(self):
+            return False
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    async def on_error(error):
+        callback_errors.append(error)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: UnconfiguredProvider()))
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+
+    runner.provider_id = "unconfigured-provider"
+    runner.model_id = "unconfigured-model"
+    runner.callbacks = RunnerCallbacks(
+        on_error=on_error,
+        event_publish_callback=publish_event,
+    )
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text_parts = [
+        part for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    ]
+
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "ProviderConfigurationError"
+    assert visible_text_parts
+    assert visible_text_parts[0].text == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    assert any(event_name == "message.part.updated" for event_name, _payload in events)
+
+
+@pytest.mark.asyncio
+async def test_process_step_persists_visible_error_when_model_returns_empty_stream(monkeypatch):
+    runner = _make_runner("ses_runner_empty_stream_error")
+    user = await Message.create(
+        runner.session.id,
+        MessageRole.USER,
+        "hello",
+        agent="rex",
+        model={"providerID": "empty-provider", "modelID": "empty-model"},
+    )
+    messages = await Message.list(runner.session.id)
+    agent = SimpleNamespace(name="rex", tools=[], steps=5, prompt=None, model=None)
+    events = []
+
+    class EmptyProvider:
+        def is_configured(self):
+            return True
+
+        async def chat_stream(self, **kwargs):
+            del kwargs
+            if False:
+                yield None
+
+    async def publish_event(event_name, payload):
+        events.append((event_name, payload))
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: EmptyProvider()))
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
+
+    runner.provider_id = "empty-provider"
+    runner.model_id = "empty-model"
+    runner.callbacks = RunnerCallbacks(event_publish_callback=publish_event)
+
+    result = await runner._process_step(messages, user)
+    messages_with_parts = await Message.list_with_parts(runner.session.id)
+    assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
+    visible_text = "\n".join(
+        getattr(part, "text", "")
+        for part in assistant.parts
+        if getattr(part, "type", None) == "text" and getattr(part, "text", "").strip()
+    )
+
+    assert result.action == "stop"
+    assert "returned an empty response" in result.error
+    assert assistant.info.finish == "error"
+    assert assistant.info.error["name"] == "EmptyResponseError"
+    assert "returned an empty response" in visible_text
+    assert any(
+        event_name == "message.part.updated"
+        and "returned an empty response" in _payload["part"]["text"]
+        for event_name, _payload in events
+    )
 
 
 @pytest.mark.asyncio
@@ -2632,6 +2902,109 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     assert record_mock.await_count == 2
     record_mock.assert_any_await(first_usage, message_id=assistant_msg.id)
     record_mock.assert_any_await(second_usage, message_id=assistant_msg.id)
+
+
+@pytest.mark.asyncio
+async def test_process_step_retries_empty_transport_exception(monkeypatch):
+    runner = _make_runner("ses_runner_transport_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_transport_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_transport_retry")
+    call_llm_mock = AsyncMock(
+        side_effect=[
+            httpcore.ReadError(),
+            StepResult(action="stop", content="recovered"),
+        ]
+    )
+    sleep_mock = AsyncMock(return_value=None)
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner, "_call_llm", call_llm_mock)
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert result.content == "recovered"
+    assert call_llm_mock.await_count == 2
+    sleep_mock.assert_awaited_once()
+    runner.callbacks.on_error.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_process_step_does_not_retry_after_tool_execution_started(monkeypatch):
+    runner = _make_runner("ses_runner_tool_side_effect_no_retry")
+    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+
+    last_user = UserMessageInfo(
+        id="msg_user_tool_side_effect_no_retry",
+        sessionID=runner.session.id,
+        role="user",
+        time={"created": 1_000},
+        agent="rex",
+        model={"providerID": "openai", "modelID": "gpt-5"},
+    )
+    agent = SimpleNamespace(name="rex", steps=None, mode="primary", prompt="", tools=[])
+    provider = MagicMock()
+    provider.is_configured.return_value = True
+    assistant_msg = SimpleNamespace(id="msg_assistant_tool_side_effect_no_retry")
+    call_count = 0
+    sleep_mock = AsyncMock(return_value=None)
+
+    async def _call_llm(*_args, **_kwargs):
+        nonlocal call_count
+        call_count += 1
+        runner._attempt_state.tool_execution_started = True
+        raise httpcore.ReadError()
+
+    monkeypatch.setattr(runner_mod.Agent, "get", AsyncMock(return_value=agent))
+    monkeypatch.setattr(runner_mod.Provider, "get", lambda provider_id: provider)
+    monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        runner_mod.SessionPrompt,
+        "build_system_prompts",
+        AsyncMock(return_value=[]),
+    )
+    monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(
+        runner,
+        "_to_chat_messages",
+        AsyncMock(return_value=[SimpleNamespace(role="user", content="hi")]),
+    )
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", AsyncMock(return_value="hi"))
+    monkeypatch.setattr(runner_mod.Message, "create", AsyncMock(return_value=assistant_msg))
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+    monkeypatch.setattr(runner_mod.SessionRetry, "sleep", sleep_mock)
+    monkeypatch.setattr(runner, "_call_llm", _call_llm)
+
+    result = await runner._process_step([last_user], last_user)
+
+    assert call_count == 1
+    assert result.action == "stop"
+    assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
+    sleep_mock.assert_not_awaited()
 
 
 @pytest.mark.asyncio

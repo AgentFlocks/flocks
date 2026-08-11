@@ -39,6 +39,7 @@ class ChannelCapabilities:
     reactions: bool = False
     edit: bool = False
     rich_text: bool = False
+    self_managed_connection: bool = False
 
 
 @dataclass
@@ -84,6 +85,10 @@ class DeliveryResult:
     success: bool = True
     error: Optional[str] = None
     retryable: bool = False
+
+
+class NonRetryableChannelError(RuntimeError):
+    """Raised when reconnecting cannot fix a channel startup failure."""
 
 
 @dataclass
@@ -278,6 +283,7 @@ class ChannelPlugin(ABC):
 
     def mark_connected(self) -> None:
         self._status.connected = True
+        self._status.last_error = None
 
     def mark_disconnected(self, error: Optional[str] = None) -> None:
         self._status.connected = False

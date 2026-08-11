@@ -34,7 +34,10 @@ from flocks.tool.registry import (
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
 
-def _stub_api_tool(name: str, *, enabled: bool, provider: str = "onesec_api") -> Tool:
+_TEST_SERVICE_ID = "test_api_service"
+
+
+def _stub_api_tool(name: str, *, enabled: bool, provider: str = _TEST_SERVICE_ID) -> Tool:
     async def handler(ctx: ToolContext, value: str = "ok") -> ToolResult:
         return ToolResult(success=True, output=value)
 
@@ -45,6 +48,7 @@ def _stub_api_tool(name: str, *, enabled: bool, provider: str = "onesec_api") ->
             category=ToolCategory.CUSTOM,
             enabled=enabled,
             provider=provider,
+            source="api",
         ),
         handler=handler,
     )
@@ -58,7 +62,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     overlay/service-gate combinations without touching real plugin YAML.
     """
     config_dir = tmp_path / ".flocks" / "config"
-    config_dir.mkdir(parents=True)
+    config_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
 
     from flocks.config.config import Config
@@ -68,6 +72,9 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     saved_tools = dict(ToolRegistry._tools)
     saved_defaults = dict(ToolRegistry._enabled_defaults)
+    saved_failure_state = dict(ToolRegistry._failure_state)
+    saved_revision = ToolRegistry._revision
+    saved_config_state_token = ToolRegistry._config_state_token
     saved_initialized = ToolRegistry._initialized
 
     enabled_tool = _stub_api_tool("onesec_dns_test", enabled=True)
@@ -80,6 +87,7 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
         enabled_tool.info.name: True,
         disabled_tool.info.name: False,
     }
+    ToolRegistry._failure_state = {}
     # Skip plugin discovery — our stub registry is enough.
     ToolRegistry._initialized = True
 
@@ -100,10 +108,13 @@ def tool_client(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     ToolRegistry._tools = saved_tools
     ToolRegistry._enabled_defaults = saved_defaults
+    ToolRegistry._failure_state = saved_failure_state
+    ToolRegistry._revision = saved_revision
+    ToolRegistry._config_state_token = saved_config_state_token
     ToolRegistry._initialized = saved_initialized
 
 
-def _set_service(*, enabled: bool, sid: str = "onesec_api") -> None:
+def _set_service(*, enabled: bool, sid: str = _TEST_SERVICE_ID) -> None:
     from flocks.config.config_writer import ConfigWriter
     ConfigWriter.set_api_service(sid, {
         "apiKey": "{secret:test_key}",
@@ -192,6 +203,30 @@ class TestToolInfoResponse:
 
 
 class TestUpdateTool:
+    def test_manual_reenable_clears_repeated_failure_count(self, tool_client):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        revision_before = ToolRegistry.revision()
+        enabled_tool.info.enabled = False
+        ToolRegistry._failure_state[enabled_tool.info.name] = {
+            "key": "same-failure",
+            "count": ToolRegistry._failure_disable_threshold,
+        }
+        ToolRegistry._failure_state[enabled_tool.info.name] = {
+            "key": "same-failure",
+            "count": ToolRegistry._failure_disable_threshold,
+        }
+
+        res = client.patch(
+            f"/api/tools/{enabled_tool.info.name}",
+            json={"enabled": True},
+        )
+
+        assert res.status_code == 200
+        assert res.json()["enabled"] is True
+        assert enabled_tool.info.name not in ToolRegistry._failure_state
+        assert ToolRegistry.revision() == revision_before + 1
+
     def test_overlay_persisted_when_differs_from_default(self, tool_client):
         client, _, disabled_tool = tool_client
         _set_service(enabled=True)
@@ -312,7 +347,75 @@ class TestUpdateTool:
         delete_override.assert_not_awaited()
 
 
+class TestApiServiceToolSync:
+    def test_service_enable_does_not_resurrect_disabled_tool_overlay(
+        self,
+        tool_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        client.patch(f"/api/tools/{enabled_tool.info.name}", json={"enabled": False})
+        assert enabled_tool.info.enabled is False
+
+        from flocks.server.routes import provider as provider_routes
+
+        monkeypatch.setattr(
+            provider_routes,
+            "_get_api_service_tool_infos",
+            lambda _provider_id: [enabled_tool.info, tool_client[2].info],
+        )
+
+        matched = provider_routes._set_api_service_tools_enabled(_TEST_SERVICE_ID, True)
+
+        assert matched == 2
+        assert enabled_tool.info.enabled is False
+        assert _read_settings() == {enabled_tool.info.name: {"enabled": False}}
+
+    def test_service_state_change_bumps_tool_revision(
+        self,
+        tool_client,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        _, enabled_tool, disabled_tool = tool_client
+        _set_service(enabled=True)
+        revision_before = ToolRegistry.revision()
+        enabled_tool.info.enabled = False
+
+        from flocks.server.routes import provider as provider_routes
+
+        monkeypatch.setattr(
+            provider_routes,
+            "_get_api_service_tool_infos",
+            lambda _provider_id: [enabled_tool.info, disabled_tool.info],
+        )
+
+        provider_routes._set_api_service_tools_enabled(_TEST_SERVICE_ID, True)
+
+        assert enabled_tool.info.enabled is True
+        assert disabled_tool.info.enabled is False
+        assert enabled_tool.info.name not in ToolRegistry._failure_state
+        assert ToolRegistry.revision() == revision_before + 1
+
+
 class TestResetToolSetting:
+    def test_reset_reenable_clears_failure_count_and_bumps_revision(self, tool_client):
+        client, enabled_tool, _ = tool_client
+        _set_service(enabled=True)
+        client.patch(f"/api/tools/{enabled_tool.info.name}", json={"enabled": False})
+        ToolRegistry._failure_state[enabled_tool.info.name] = {
+            "key": "same-failure",
+            "count": ToolRegistry._failure_disable_threshold,
+        }
+        revision_before = ToolRegistry.revision()
+
+        res = client.post(f"/api/tools/{enabled_tool.info.name}/reset")
+
+        assert res.status_code == 200
+        assert res.json()["enabled"] is True
+        assert enabled_tool.info.name not in ToolRegistry._failure_state
+        assert ToolRegistry.revision() == revision_before + 1
+
     def test_reset_restores_default_and_removes_overlay(self, tool_client):
         client, _, disabled_tool = tool_client
         _set_service(enabled=True)

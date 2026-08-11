@@ -22,6 +22,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 import time
 import uuid
 from dataclasses import dataclass
@@ -42,6 +43,10 @@ from flocks.workflow.fs_store import read_workflow_from_fs
 from flocks.workflow.models import Workflow
 from flocks.workflow.runner import run_workflow
 from flocks.workflow.store import WorkflowStore
+from flocks.workflow.tool_context import (
+    build_workflow_tool_context,
+    cleanup_workflow_tool_context,
+)
 
 from flocks.ingest.kafka.constants import WORKFLOW_KAFKA_CONFIG_PREFIX
 from flocks.workflow.triggers.compat import legacy_kafka_trigger_from_config
@@ -76,6 +81,14 @@ _REQUEST_TIMEOUT_MS = 5000
 _FETCH_MAX_BYTES = 8 * 1024 * 1024
 _MAX_PARTITION_FETCH_BYTES = 4 * 1024 * 1024
 _MAX_POLL_RECORDS = 16
+
+
+def _worker_count_for_trigger(trigger: TriggerDefinition) -> int:
+    return min(_MAX_CONCURRENT_EXECUTIONS, max(1, int(trigger.concurrency.maxParallel)))
+
+
+def _queue_size_for_trigger(trigger: TriggerDefinition) -> int:
+    return min(_MAX_QUEUE_SIZE, max(1, int(trigger.concurrency.queueSize)))
 
 _KAFKA_STORAGE_LIST_KEYS = DEFAULT_LARGE_LIST_KEYS | frozenset(
     {
@@ -240,6 +253,10 @@ class KafkaManager:
         self._queues: dict[str, asyncio.Queue] = {}
         # Per-workflow fixed worker pool draining the queue
         self._worker_pools: dict[str, List[asyncio.Task]] = {}
+        # One cancellation event per consumer generation. It exists before
+        # workers start, closing the stop-vs-run-registration race.
+        self._generation_cancel_events: dict[str, threading.Event] = {}
+        self._draining_workers: dict[str, set[asyncio.Task]] = {}
         # Per-workflow consumer runtime status for the kafka-status API.
         # State values: "connecting" | "running" | "failed" | "stopped".
         self._status: dict[str, Dict[str, Any]] = {}
@@ -297,31 +314,67 @@ class KafkaManager:
             if not workflow_id:
                 continue
             if isinstance(data, dict) and data.get("enabled"):
-                await self.restart_workflow(workflow_id)
+                try:
+                    await self.restart_workflow(workflow_id, startup=True)
+                except Exception as exc:
+                    self._status[workflow_id] = {"state": "failed", "error": str(exc)}
+                    log.warning(
+                        "kafka.start_failed",
+                        {"workflow_id": workflow_id, "error": str(exc)},
+                    )
 
     async def stop_all(self) -> None:
         for workflow_id in list(self._tasks.keys()):
             await self.stop_workflow(workflow_id)
 
     async def _cleanup_runtime_resources(self, workflow_id: str) -> None:
-        # Cancel all worker pool tasks; pop first so callers observing a stopped
-        # consumer see an empty pool immediately.
+        abort = self._abort_events.get(workflow_id)
+        if abort is not None:
+            abort.set()
+        cancel_event = self._generation_cancel_events.pop(workflow_id, None)
+        if cancel_event is not None:
+            cancel_event.set()
+
+        # Let workers drain the current ``to_thread`` workflow after the
+        # cooperative cancellation signal. Pending workers stay tracked.
         pool = self._worker_pools.pop(workflow_id, None)
         if pool:
-            for worker in pool:
-                if not worker.done():
-                    worker.cancel()
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*pool, return_exceptions=True),
-                    timeout=5.0,
-                )
-            except (asyncio.TimeoutError, asyncio.CancelledError):
-                pass
+            _, pending = await asyncio.wait(pool, timeout=5.0)
+            self._track_draining_workers(workflow_id, pending)
 
         self._queues.pop(workflow_id, None)
         self._abort_events.pop(workflow_id, None)
         self._ready.pop(workflow_id, None)
+
+    def _track_draining_workers(
+        self,
+        workflow_id: str,
+        workers: set[asyncio.Task],
+    ) -> None:
+        if not workers:
+            return
+        bucket = self._draining_workers.setdefault(workflow_id, set())
+        bucket.update(workers)
+
+        def _discard(done: asyncio.Task) -> None:
+            current = self._draining_workers.get(workflow_id)
+            if current is None:
+                return
+            current.discard(done)
+            if not current:
+                self._draining_workers.pop(workflow_id, None)
+
+        for worker in workers:
+            worker.add_done_callback(_discard)
+
+    def _active_draining_workers(self, workflow_id: str) -> set[asyncio.Task]:
+        workers = self._draining_workers.get(workflow_id, set())
+        active = {worker for worker in workers if not worker.done()}
+        if active:
+            self._draining_workers[workflow_id] = active
+        else:
+            self._draining_workers.pop(workflow_id, None)
+        return active
 
     def get_consumer_status(self, workflow_id: str) -> Dict[str, Any]:
         """Return a snapshot of the consumer runtime state for ``workflow_id``.
@@ -360,7 +413,12 @@ class KafkaManager:
         if workflow_id in self._status:
             self._status[workflow_id] = {"state": "stopped", "error": None}
 
-    async def restart_workflow(self, workflow_id: str) -> Dict[str, Any]:
+    async def restart_workflow(
+        self,
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> Dict[str, Any]:
         """Restart the consumer and return its post-connect runtime status.
 
         Blocks until the consumer connects, the connection fails, or
@@ -368,6 +426,10 @@ class KafkaManager:
         surface connection errors to the user.
         """
         await self.stop_workflow(workflow_id)
+        if self._active_draining_workers(workflow_id):
+            error = "previous_workers_still_draining"
+            self._status[workflow_id] = {"state": "failed", "error": error}
+            return {"state": "failed", "error": error}
         try:
             data = await WorkflowStore.get_config(workflow_id, kind="workflow_kafka_config")
         except Exception as exc:
@@ -377,6 +439,21 @@ class KafkaManager:
             self._status[workflow_id] = {"state": "stopped", "error": None}
             return {"state": "stopped", "error": None}
 
+        # Load and cache the workflow JSON once; avoids a disk read per message.
+        wf_data = read_workflow_from_fs(workflow_id)
+        if not wf_data:
+            err = "workflow_not_found"
+            if startup:
+                self._status[workflow_id] = {"state": "stopped", "error": err}
+                log.info("kafka.workflow_not_found_on_start", {
+                    "workflow_id": workflow_id,
+                    "action": "stale_config_skipped",
+                })
+                return {"state": "stopped", "error": err}
+            self._status[workflow_id] = {"state": "failed", "error": err}
+            log.warning("kafka.workflow_not_found", {"workflow_id": workflow_id})
+            return {"state": "failed", "error": err}
+
         input_broker = str(data.get("inputBroker") or "").strip()
         input_topic = str(data.get("inputTopic") or "").strip()
         if not input_broker or not input_topic:
@@ -385,13 +462,6 @@ class KafkaManager:
             log.warning("kafka.config_incomplete", {"workflow_id": workflow_id})
             return {"state": "failed", "error": err}
 
-        # Load and cache the workflow JSON once; avoids a disk read per message.
-        wf_data = read_workflow_from_fs(workflow_id)
-        if not wf_data:
-            err = "workflow_not_found"
-            self._status[workflow_id] = {"state": "failed", "error": err}
-            log.warning("kafka.workflow_not_found_on_start", {"workflow_id": workflow_id})
-            return {"state": "failed", "error": err}
         workflow_json = wf_data.get("workflowJson")
         if not workflow_json:
             err = "workflow_json_missing"
@@ -410,11 +480,15 @@ class KafkaManager:
         group_id = str(data.get("inputGroupId") or "").strip() or f"flocks-consumer-{workflow_id}"
         configured_inputs = _strip_execution_only_comments(trigger.inputs if isinstance(trigger.inputs, dict) else {})
 
-        queue: asyncio.Queue = asyncio.Queue(maxsize=_MAX_QUEUE_SIZE)
+        queue_capacity = _queue_size_for_trigger(trigger)
+        worker_count = _worker_count_for_trigger(trigger)
+        queue: asyncio.Queue = asyncio.Queue(maxsize=queue_capacity)
         self._queues[workflow_id] = queue
 
         abort = asyncio.Event()
         self._abort_events[workflow_id] = abort
+        generation_cancel_event = threading.Event()
+        self._generation_cancel_events[workflow_id] = generation_cancel_event
 
         ready = asyncio.Event()
         self._ready[workflow_id] = ready
@@ -427,10 +501,9 @@ class KafkaManager:
             "groupId": group_id,
         }
 
-        # Fixed worker pool drains the queue (at most _MAX_CONCURRENT_EXECUTIONS
-        # concurrent runs).
+        # Trigger-configured worker pool, bounded by service safety caps.
         workers: List[asyncio.Task] = []
-        for i in range(_MAX_CONCURRENT_EXECUTIONS):
+        for i in range(worker_count):
             workers.append(
                 asyncio.create_task(
                     self._worker_loop(
@@ -441,6 +514,7 @@ class KafkaManager:
                         queue,
                         abort,
                         input_topic,
+                        generation_cancel_event,
                     ),
                     name=f"kafka-worker-{workflow_id}-{i}",
                 )
@@ -611,7 +685,13 @@ class KafkaManager:
         queue: asyncio.Queue,
         abort: asyncio.Event,
         source: str,
+        generation_cancel_event: Optional[threading.Event] = None,
     ) -> None:
+        run_cancel_event = (
+            generation_cancel_event
+            or self._generation_cancel_events.get(workflow_id)
+            or threading.Event()
+        )
         while not abort.is_set():
             try:
                 msg = await asyncio.wait_for(queue.get(), timeout=0.5)
@@ -630,6 +710,7 @@ class KafkaManager:
                     configured_inputs,
                     trigger=trigger,
                     source=source,
+                    generation_cancel_event=run_cancel_event,
                 )
             except asyncio.CancelledError:
                 return
@@ -649,7 +730,9 @@ class KafkaManager:
         *,
         trigger: Optional[TriggerDefinition] = None,
         source: Optional[str] = None,
+        generation_cancel_event: Optional[threading.Event] = None,
     ) -> None:
+        run_cancel_event = generation_cancel_event or threading.Event()
         trigger = trigger or TriggerDefinition.model_validate(
             {
                 "id": "kafka-default",
@@ -698,7 +781,12 @@ class KafkaManager:
                     input_keys=trigger_input_keys,
                 ),
             )
+            tool_context = None
             try:
+                tool_context = await build_workflow_tool_context(
+                    workflow_id=workflow_id,
+                    action_name=f"trigger:{trigger.type}",
+                )
                 result = await asyncio.to_thread(
                     run_workflow,
                     workflow=workflow_plan,
@@ -706,7 +794,9 @@ class KafkaManager:
                     run_id=exec_id,
                     trace=False,
                     execution_profile="high_frequency",
+                    cancel=run_cancel_event.is_set,
                     on_step_complete=step_recorder.on_step_complete,
+                    tool_context=tool_context,
                 )
                 status, error_msg = resolve_execution_outcome(result)
                 duration = time.time() - start_time
@@ -754,6 +844,7 @@ class KafkaManager:
                     }
                 )
             finally:
+                await cleanup_workflow_tool_context(tool_context)
                 try:
                     await record_execution_result(workflow_id, exec_id, exec_data)
                 except Exception as exc:

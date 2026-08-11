@@ -5,21 +5,30 @@
  */
 export interface Session {
   id: string;
-  slug: string;
+  slug?: string;
   projectID: string;
+  projectName?: string;
+  effectiveProjectID?: string;
   directory: string;
   parentID?: string;
   summary?: SessionSummary;
   title: string;
-  version: string;
+  version?: string;
   time: SessionTime;
   permission?: PermissionRule[];
   revert?: SessionRevert;
   /** Session category: 'user' | 'workflow' | 'task' | 'entity-config' | ... */
   category?: string;
+  /** Messaging channel bound to this session, when it originated from IM. */
+  channelID?: string;
+  /** Conversation type reported by the messaging channel binding. */
+  channelChatType?: 'direct' | 'group' | 'channel';
+  status?: 'active' | 'archived';
   provider?: string;
   model?: string;
   model_pinned?: boolean;
+  /** Runtime provider failover is enabled only after an explicit WebUI selection. */
+  model_auto?: boolean;
   ownerUserID?: string;
   ownerUsername?: string;
   canWrite?: boolean;
@@ -131,6 +140,11 @@ export interface MessagePart {
   toolCall?: ToolCall;
   toolResult?: ToolResult;
   thinking?: string;
+  time?: {
+    start: number;
+    end?: number;
+    compacted?: number;
+  };
   image?: {
     url: string;
     alt?: string;
@@ -203,6 +217,7 @@ export interface Tool {
   source: ToolSource;
   source_name?: string;
   parameters: ToolParameter[];
+  parameters_count?: number;
   enabled: boolean;
   /** Factory default from the YAML/registration source (no overlay applied). */
   enabled_default?: boolean;
@@ -396,12 +411,8 @@ export interface MCPCatalogStats {
 export interface ProviderCredentials {
   secret_id?: string | null;
   /**
-   * The actual API key value, when one exists.
-   * Note: For openai-compatible / custom-* providers configured WITHOUT an
-   * API key (internal no-auth gateways) the backend stores a sentinel value
-   * but returns ``api_key: null`` while still setting ``has_credential: true``
-   * and a real ``secret_id``. UI code should rely on ``has_credential`` (not
-   * ``api_key``) to decide whether a credential record exists.
+   * Raw API key returned only by the admin-only reveal endpoint. Ordinary LLM
+   * and API-service credential reads return null and expose only masked values.
    */
   api_key?: string | null;
   api_key_masked?: string | null;
@@ -409,6 +420,7 @@ export interface ProviderCredentials {
   secret_masked?: string | null;
   base_url?: string | null;
   username?: string | null;
+  /** Sensitive entries are masked on reads and must not be resubmitted unchanged. */
   fields?: Record<string, string | undefined>;
   secret_ids?: Record<string, string>;
   has_credential: boolean;
@@ -433,10 +445,11 @@ export interface ProviderInfoV2 {
   source: string;
   env: string[];
   key: string | null;
+  /** True only when the runtime has the credentials required by this provider. */
+  configured?: boolean;
   options: Record<string, any>;
   models: Record<string, ProviderModelInfo>;
   // Derived on frontend
-  configured?: boolean;
   modelCount?: number;
   category?: ProviderCategory;
 }
@@ -486,6 +499,7 @@ export interface ModelCapabilitiesV2 {
 
 export interface ModelLimitsV2 {
   context_window: number;
+  max_input_tokens?: number;
   max_output_tokens: number;
 }
 
@@ -514,6 +528,15 @@ export interface DefaultModelConfig {
   model_type: string;
   provider_id: string;
   model_id: string;
+}
+
+export interface FallbackModelRef {
+  provider_id: string;
+  model_id: string;
+}
+
+export interface FallbackModelsConfig {
+  fallback_providers: FallbackModelRef[];
 }
 
 /** Usage summary from /api/usage/summary */
@@ -582,6 +605,7 @@ export interface CustomModelCreate {
   supports_reasoning?: boolean;
   input_price?: number;
   output_price?: number;
+  cache_read_price?: number | null;
   currency?: string;
 }
 
@@ -598,6 +622,7 @@ export interface CustomModelInfo {
   supports_reasoning: boolean;
   input_price: number;
   output_price: number;
+  cache_read_price?: number | null;
   currency: string;
   created_at: string;
 }
@@ -655,11 +680,14 @@ export interface CatalogModel {
   };
   limits?: {
     context_window: number;
+    max_input_tokens?: number;
     max_output_tokens: number;
   };
   pricing?: {
     input: number;
     output: number;
+    cache_read?: number;
+    cache_write?: number;
     currency: string;
   };
 }

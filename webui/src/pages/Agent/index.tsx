@@ -1,40 +1,5 @@
 import { useState, useEffect, useMemo } from 'react';
 import { Bot, Plus, Cpu, RefreshCw, Pencil, Trash2, Shield, Zap, Loader2 } from 'lucide-react';
-
-// ---------------------------------------------------------------------------
-// Color helpers
-// ---------------------------------------------------------------------------
-
-// Muted-but-distinct palette — enough personality without being loud.
-const AGENT_PALETTE = [
-  '#3b82f6', // blue-500
-  '#8b5cf6', // violet-500
-  '#06b6d4', // cyan-500
-  '#10b981', // emerald-500
-  '#f59e0b', // amber-500
-  '#ef4444', // red-500
-  '#ec4899', // pink-500
-  '#6366f1', // indigo-500
-];
-
-function resolveAgentColor(agent: Agent): string {
-  if (agent.color) return agent.color;
-  let h = 0;
-  for (let i = 0; i < agent.name.length; i++) {
-    h = agent.name.charCodeAt(i) + ((h << 5) - h);
-  }
-  return AGENT_PALETTE[Math.abs(h) % AGENT_PALETTE.length];
-}
-
-/** hex → rgba string at `alpha` (0–1). Works for 3-char and 6-char hex. */
-function hexAlpha(hex: string, alpha: number): string {
-  const h = hex.replace('#', '');
-  const full = h.length === 3 ? h.split('').map(c => c + c).join('') : h;
-  const r = parseInt(full.slice(0, 2), 16);
-  const g = parseInt(full.slice(2, 4), 16);
-  const b = parseInt(full.slice(4, 6), 16);
-  return `rgba(${r},${g},${b},${alpha})`;
-}
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
@@ -110,7 +75,7 @@ export default function AgentPage() {
   if (loading) {
     return (
       <div className="flex items-center justify-center h-full">
-        <LoadingSpinner />
+        <LoadingSpinner delayMs={180} />
       </div>
     );
   }
@@ -506,7 +471,6 @@ function AgentCard({
   const { t } = useTranslation('agent');
   const displayName = getAgentDisplayName(agent, displayLang);
   const displayDesc = getAgentDisplayDescription(agent, displayLang);
-  const color = resolveAgentColor(agent);
   const showDelegatableToggle = agent.mode === 'subagent';
 
   return (
@@ -521,19 +485,12 @@ function AgentCard({
       `}
       onClick={onClick}
     >
-      {/* Top accent bar — 3 px strip, full-width, same radius as card */}
-      <div style={{ height: 3, backgroundColor: color }} />
-
       {/* Card body */}
-      <div className="flex-1 px-4 pt-3 pb-3 flex flex-col gap-2 min-w-0">
+      <div className="flex-1 px-4 pt-3 pb-2 flex flex-col gap-2 min-w-0">
         {/* Avatar + Name row */}
         <div className="flex items-start gap-2.5 min-w-0">
-          {/* Colored avatar */}
-          <div
-            className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5"
-            style={{ backgroundColor: hexAlpha(color, 0.12) }}
-          >
-            <Bot className="w-4 h-4" style={{ color }} />
+          <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0 mt-0.5 bg-gray-100">
+            <Bot className="w-4 h-4 text-gray-500" />
           </div>
 
           <div className="min-w-0 flex-1">
@@ -546,19 +503,19 @@ function AgentCard({
               {agent.native
                 ? (
                   <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                                   bg-blue-50 text-blue-600 border border-blue-200">
+                                   bg-blue-50 text-blue-600">
                     {t('badge.native')}
                   </span>
                 )
                 : (
                   <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium
-                                   bg-teal-50 text-teal-600 border border-teal-200">
+                                   bg-teal-50 text-teal-600">
                     {t('badge.custom')}
                   </span>
                 )
               }
               {agent.delegatable && (
-                <span className="inline-flex items-center px-1.5 py-0.5 rounded border border-gray-200 bg-gray-50 text-gray-500 text-[10px] font-medium">
+                <span className="inline-flex items-center px-1.5 py-0.5 rounded bg-gray-50 text-gray-500 text-[10px] font-medium">
                   {t('badge.delegatable')}
                 </span>
               )}
@@ -573,11 +530,8 @@ function AgentCard({
 
         {/* Model chip */}
         {agent.model && (
-          <div
-            className="self-start inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] text-gray-500"
-            style={{ backgroundColor: hexAlpha(color, 0.08), border: `1px solid ${hexAlpha(color, 0.2)}` }}
-          >
-            <Cpu className="w-3 h-3 shrink-0" style={{ color }} />
+          <div className="self-start inline-flex items-center gap-1 text-[10px] text-gray-400">
+            <Cpu className="w-3 h-3 shrink-0" />
             <span className="truncate max-w-[120px]">
               {agent.model.modelID}
             </span>
@@ -587,7 +541,7 @@ function AgentCard({
 
       {/* Footer — delete / enable / edit */}
       <div
-        className="border-t border-gray-100 px-3 py-1.5 flex items-center justify-between"
+        className="border-t border-gray-100 px-4 py-2 flex items-center justify-between"
         onClick={(e) => e.stopPropagation()}
       >
         {/* Delete — disabled for built-in agents */}

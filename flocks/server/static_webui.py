@@ -14,6 +14,12 @@ _INDEX_CACHE_CONTROL = "no-store"
 _ASSET_CACHE_CONTROL = "public, max-age=31536000, immutable"
 _STATIC_CACHE_CONTROL = "no-cache"
 _FINGERPRINT_RE = re.compile(r"(?:^|[.-])[0-9a-f]{8,}(?:[.-]|$)", re.IGNORECASE)
+_STATIC_MEDIA_TYPES = {
+    ".css": "text/css",
+    ".js": "application/javascript",
+    ".mjs": "application/javascript",
+    ".wasm": "application/wasm",
+}
 _PROTECTED_PREFIXES = (
     "/api",
     "/event",
@@ -107,7 +113,7 @@ def _resolve_existing_static_file(dist_dir: Path, path: str) -> Path | None:
 
 def _file_response(path: Path, *, cache_control: str) -> FileResponse:
     headers = {"Cache-Control": cache_control}
-    return FileResponse(path, headers=headers)
+    return FileResponse(path, headers=headers, media_type=_STATIC_MEDIA_TYPES.get(path.suffix.lower()))
 
 
 def _cache_control_for_file(path: str, file_path: Path) -> str:

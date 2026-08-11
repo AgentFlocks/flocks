@@ -66,7 +66,8 @@ const { workflowAPI, workflowAPIEndpoints } = vi.hoisted(() => ({
   },
 }));
 
-vi.mock('@/api/workflow', () => ({
+vi.mock('@/api/workflow', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('@/api/workflow')>()),
   workflowAPI,
   workflowAPIEndpoints,
 }));
@@ -104,6 +105,11 @@ vi.mock('react-i18next', () => ({
         'detail.run.driverLocal': '本地进程',
         'detail.run.driverDocker': 'Docker 容器',
         'detail.run.applyDriver': '应用运行方式',
+        'detail.run.applyPublishConfig': '应用发布设置',
+        'detail.run.servicePort': '监听端口',
+        'detail.run.servicePortPlaceholder': '自动分配',
+        'detail.run.servicePortDesc': '保存并复用端口',
+        'detail.run.servicePortInvalid': '端口无效',
         'detail.run.driverLocalDesc': 'local desc',
         'detail.run.driverDockerDesc': 'docker desc',
         'detail.run.apiKeyHide': '隐藏',
@@ -234,6 +240,20 @@ describe('IntegrationTab trigger workspace', () => {
     expect(screen.queryByText('Workflow Poller')).not.toBeInTheDocument();
   });
 
+  it('publishes the API service on a manually selected port', async () => {
+    const user = userEvent.setup();
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+
+    const apiCard = await screen.findByTestId('api-publish-card');
+    await user.click(within(apiCard).getByRole('button', { name: '配置' }));
+    await user.type(within(apiCard).getByRole('spinbutton', { name: '监听端口' }), '25000');
+    await user.click(within(apiCard).getByRole('button', { name: '发布' }));
+
+    await waitFor(() => {
+      expect(workflowAPI.publish).toHaveBeenCalledWith('wf-1', { driver: 'local', port: 25000 });
+    });
+  });
+
   it('renders runtime publish and trigger records with delete actions below the Rex guide', async () => {
     const user = userEvent.setup();
     const service = {
@@ -333,6 +353,7 @@ describe('IntegrationTab trigger workspace', () => {
     expect(within(triggerCard).queryByText('Inputs（JSON）')).not.toBeInTheDocument();
     await user.click(within(triggerCard).getByRole('button', { name: '配置' }));
     expect(within(triggerCard).getByText('Inputs（JSON）')).toBeInTheDocument();
+    expect(within(triggerCard).getByRole('option', { name: 'se' })).toBeInTheDocument();
     expect(within(triggerCard).getByText('Flocks辅助配置')).toBeInTheDocument();
     await user.click(within(triggerCard).getByRole('button', { name: '辅助配置' }));
     expect(onGuidePrompt).toHaveBeenCalledWith(
@@ -403,17 +424,44 @@ describe('IntegrationTab trigger workspace', () => {
     const apiCard = await screen.findByTestId('api-publish-card');
     await user.click(within(apiCard).getByRole('button', { name: '配置' }));
     await user.click(within(apiCard).getByRole('button', { name: 'Docker 容器' }));
-    expect(within(apiCard).getByRole('button', { name: '应用运行方式' })).toBeInTheDocument();
+    expect(within(apiCard).getByRole('button', { name: '应用发布设置' })).toBeInTheDocument();
 
-    await user.click(within(apiCard).getByRole('button', { name: '应用运行方式' }));
+    await user.click(within(apiCard).getByRole('button', { name: '应用发布设置' }));
 
     await waitFor(() => {
-      expect(workflowAPI.publish).toHaveBeenCalledWith('wf-1', { driver: 'docker' });
+      expect(workflowAPI.publish).toHaveBeenCalledWith('wf-1', { driver: 'docker', port: 8080 });
     });
     await waitFor(() => {
-      expect(within(apiCard).queryByRole('button', { name: '应用运行方式' })).not.toBeInTheDocument();
+      expect(within(apiCard).queryByRole('button', { name: '应用发布设置' })).not.toBeInTheDocument();
     });
     expect(within(apiCard).getByText('http://127.0.0.1:19000/invoke')).toBeInTheDocument();
+  });
+
+  it('does not silently treat a cleared persisted port as unchanged', async () => {
+    const user = userEvent.setup();
+    workflowAPI.getService.mockResolvedValue({
+      data: {
+        workflowId: 'wf-1',
+        workflowName: 'Demo Workflow',
+        serviceUrl: 'http://127.0.0.1:8080',
+        invokeUrl: 'http://127.0.0.1:8080/invoke',
+        apiKey: 'secret',
+        status: 'running',
+        publishedAt: Date.now(),
+        driver: 'local',
+        port: 8080,
+      },
+    });
+
+    render(<IntegrationTab workflow={workflow} onGuidePrompt={vi.fn()} />);
+
+    const apiCard = await screen.findByTestId('api-publish-card');
+    await user.click(within(apiCard).getByRole('button', { name: '配置' }));
+    await user.clear(within(apiCard).getByRole('spinbutton', { name: '监听端口' }));
+    await user.click(within(apiCard).getByRole('button', { name: '应用发布设置' }));
+
+    expect(screen.getByText('端口无效')).toBeInTheDocument();
+    expect(workflowAPI.publish).not.toHaveBeenCalled();
   });
 
   it('lets stopping supersede an in-flight driver switch publish', async () => {
@@ -448,7 +496,7 @@ describe('IntegrationTab trigger workspace', () => {
     const apiCard = await screen.findByTestId('api-publish-card');
     await user.click(within(apiCard).getByRole('button', { name: '配置' }));
     await user.click(within(apiCard).getByRole('button', { name: 'Docker 容器' }));
-    await user.click(within(apiCard).getByRole('button', { name: '应用运行方式' }));
+    await user.click(within(apiCard).getByRole('button', { name: '应用发布设置' }));
     expect(within(apiCard).getByRole('button', { name: '发布中，请稍候...' })).toBeInTheDocument();
 
     await user.click(within(apiCard).getByRole('button', { name: '停用' }));
@@ -696,7 +744,7 @@ describe('IntegrationTab trigger workspace', () => {
 
     render(<IntegrationTab workflow={workflow} />);
 
-    await user.click(await screen.findByRole('button', { name: '删除' }));
+    await user.click(await screen.findByRole('button', { name: '删除 Webhook Trigger' }));
 
     await waitFor(() => {
       expect(workflowAPI.deleteTrigger).toHaveBeenCalledWith('wf-1', 'hook-1');

@@ -4,13 +4,11 @@ service_id: sangfor_edr
 version: "1.0.0"
 integration_type: device
 description: >
-  Sangfor EDR WebCLI-backed integration. It can reuse an existing browser
-  storage state, or refresh auth-state by driving the real EDR login page
-  through browser daemon / CDP when credentials are configured.
+  Sangfor EDR integration with default HTTP login, explicitly selected
+  browser/CDP login, cookie/token validation, dashboard and threat-asset API collection.
 description_cn: >
-  Sangfor EDR WebCLI device integration. It reuses full browser auth-state
-  from manual login, or refreshes full browser auth-state through CDP-assisted
-  browser login when credentials are configured.
+  深信服 EDR 集成。默认通过 HTTP 登录，仅用户明确选择时使用 browser/CDP；
+  每次操作验证成套 Cookie/token，并通过 API 采集首页仪表盘和威胁资产分析。
 credential_fields:
   - key: base_url
     label: Base URL
@@ -33,7 +31,7 @@ credential_fields:
     secret_id: sangfor_edr_username
     input_type: text
     required: false
-    description: Optional. Stored for CDP-assisted browser login when auth-state is missing or expired.
+    description: Optional. Stored for default HTTP login and explicitly selected browser/CDP login.
   - key: password
     label: Password
     storage: secret
@@ -41,7 +39,7 @@ credential_fields:
     secret_id: sangfor_edr_password
     input_type: password
     required: false
-    description: Optional. Stored as a secret and used only to refresh browser auth-state.
+    description: Optional. Stored as a secret and used only to refresh EDR authentication.
   - key: auto_ocr_code
     label: Auto OCR Captcha
     storage: config
@@ -114,10 +112,10 @@ defaults:
   category: custom
   verify_ssl: false
 notes: |
-  The existing manual-login flow saves a full browser storageState containing
-  cookies and localStorage. When credentials are available, the automatic flow
-  also drives the real EDR login page through browser daemon / CDP and then
-  saves the same full browser storageState format.
+  All login methods save cookies to auth-state.json and login_token to Secret
+  Manager. Pairing metadata prevents dashboard and threat-asset APIs from mixing credentials
+  produced by different logins. Device URLs are normalized to scheme, host,
+  and port before use.
 
   If captcha OCR, MFA, page selector matching, or login success detection fails,
   keep the browser/manual login recovery path and save the resulting full

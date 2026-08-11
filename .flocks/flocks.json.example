@@ -39,6 +39,9 @@
     "readMaxBytes": 51200,
     "readMaxLineLength": 2000
   },
+  "toolFailure": {
+    "disableOnRepeatedFailure": true
+  },
   "sandbox": {
     "mode": "off",
     "scope": "agent",

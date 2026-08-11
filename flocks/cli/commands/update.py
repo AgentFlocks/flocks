@@ -35,7 +35,7 @@ def update_command(
 
 
 async def _update(check: bool, yes: bool, force: bool = False, region: str | None = None) -> None:
-    from flocks.updater import build_updated_frontend, check_update, perform_update, detect_deploy_mode
+    from flocks.updater import check_update, detect_deploy_mode, perform_update
     from flocks.cli.install_profile import is_cn_install_language
 
     if region is None and is_cn_install_language():
@@ -97,26 +97,15 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             console.print("[yellow]已取消[/yellow]")
             return
 
-    from flocks.cli.service_manager import ServiceError, stop_all
-
-    try:
-        stop_all(console)
-    except ServiceError as error:
-        console.print(f"[red]执行 flocks stop 失败：{error}[/red]")
-        raise typer.Exit(1)
-
-    append_upgrade_text_log(f"OK cli_update_stopped_services_before_upgrade version={version_to_apply}")
-    console.print("[green]✓ 已执行 flocks stop[/green]")
     console.print()
     stage_labels = {
         "fetching":    "下载最新源码包",
         "backing_up":  "备份当前版本",
-        "applying":    f"应用 v{info.latest_version}",
-        "syncing":     "同步依赖",
+        "applying":    "应用新版本",
         "restarting":  "重启服务",
         "done":        "完成",
     }
-    total_steps = 6
+    total_steps = 3
     seen_stages: set[str] = set()
     step = 0
     active_stage: str | None = None
@@ -137,8 +126,9 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
         tarball_url=info.tarball_url,
         bundle_sha256=info.bundle_sha256,
         bundle_format=info.bundle_format,
-        restart=False,
+        restart=True,
         region=region,
+        wait_for_handoff=True,
     ):
         if progress.stage == "error":
             _finish_active(success=False)
@@ -149,6 +139,9 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             _finish_active(success=True)
             continue
 
+        if progress.stage == "restarting":
+            continue
+
         if progress.stage not in seen_stages:
             _finish_active(success=True)
             seen_stages.add(progress.stage)
@@ -157,23 +150,8 @@ async def _update(check: bool, yes: bool, force: bool = False, region: str | Non
             console.print(f"[cyan][{step}/{total_steps}] {label}...[/cyan]  ", end="")
             active_stage = progress.stage
 
-    step += 1
-    console.print(f"[cyan][{step}/{total_steps}] 构建前端...[/cyan]  ", end="")
-    try:
-        await build_updated_frontend(region=region)
-    except Exception as error:
-        console.print("[red]✗[/red]")
-        console.print(f"\n[red]✗ 前端构建失败：{error}[/red]")
-        raise typer.Exit(1)
-    console.print("[green]✓[/green]")
-
-    step += 1
-    console.print(f"[cyan][{step}/{total_steps}] 完成[/cyan]  ", end="")
-    console.print("[green]✓[/green]")
-
     append_upgrade_text_log(f"OK cli_update_completed version={version_to_apply}")
     console.print(f"\n[green]✓ 升级完成 → v{version_to_apply}[/green]")
-    console.print("[dim]如需恢复服务，请执行 [bold]flocks start[/bold][/dim]")
 
 
 def _print_version_table(info) -> None:

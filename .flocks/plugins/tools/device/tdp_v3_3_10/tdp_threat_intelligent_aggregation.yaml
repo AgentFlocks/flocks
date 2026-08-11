@@ -1,0 +1,109 @@
+name: tdp_threat_intelligent_aggregation
+description: >
+  查询 TDP“威胁-智能聚合”中的聚合攻击事件及其详情。默认查询智能聚合后的攻击事件，也可查询指定聚合事件的
+  攻击成功统计、攻击时间线、攻击过程告警、结果分布、受攻击实体和攻击者 IP 信息。本 tool 不用于查询
+  “威胁-实时监控”中的威胁事件列表；该意图应使用 `tdp_threat_monitor_list`。优先使用顶层语义化参数，不要手写
+  `condition.id`、`condition.duration`、`condition.fuzzy` 这类嵌套字段；只有在显式参数未覆盖时才使用 `condition` / `page`。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        `incident_search` 查询智能聚合后的攻击事件列表；`top_attacked_entity` 查询指定聚合事件 TOP 受攻击域名或主机；
+        `attack_success` 查询指定聚合事件的攻击成功统计；`attack_timeline` 查询指定聚合事件的攻击过程时间线；
+        `attack_alert_list` 根据攻击过程返回的告警 ID 查询对应告警详情；`attack_result_distribution` 查询指定聚合事件中
+        成功、失败、尝试的数量分布；`attacker_ip_list` 查询指定聚合事件的攻击来源 IP；
+        `attacker_ip_detail` 查询指定聚合事件中指定攻击 IP 的情报和活跃时间段。
+      enum: [incident_search, top_attacked_entity, attack_success, attack_timeline, attack_alert_list, attack_result_distribution, attacker_ip_list, attacker_ip_detail]
+      default: incident_search
+    incident_id:
+      type: string
+      description: 智能聚合事件 ID，适用于除 `incident_search` 和 `attack_alert_list` 外的详情动作；应先从 `incident_search` 返回结果中获取。
+    time_from:
+      type: integer
+      description: 开始时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_from`。可以使用python datetime动态计算。
+    time_to:
+      type: integer
+      description: 结束时间戳，Unix 秒级时间戳，按动作写入根级或 `condition.time_to`。可以使用python datetime动态计算。
+    include_risk:
+      type: boolean
+      description: 是否包含风险告警；`attack_timeline` 写入根级，`attack_alert_list` 写入 `condition.include_risk`。
+    show_attack:
+      type: boolean
+      description: >
+        是否展示攻击过程，适用于 `attack_timeline`。handler 默认传 `true`；
+        若显式传 `false`，TDP 可能返回 `show_attack is false`。
+    include_action:
+      type: boolean
+      description: 是否包含敏感行为，适用于 `attack_alert_list`，会写入 `condition.include_action`。
+    alert_ids:
+      type: array
+      items:
+        type: string
+      description: 攻击过程返回的告警 ID 列表，适用于 `attack_alert_list`；会转换写入 `condition.id`。
+    attacker:
+      type: array
+      items:
+        type: string
+      description: 攻击者 IP 列表，适用于 `attacker_ip_detail`；通常先从 `attacker_ip_list` 返回结果中获取。
+    severity:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1, 2, 3, 4]
+      description: 严重级别列表，适用于 `incident_search`。
+    phase:
+      type: array
+      items:
+        type: string
+      description: 攻击阶段列表，适用于 `incident_search`，例如 `recon`、`exploit`、`control`、`attack_out`、`post_exploit`。
+    result:
+      type: array
+      items:
+        type: string
+        enum: [success, failed, unknown]
+      description: 攻击结果列表，适用于 `incident_search`。
+    is_target_attack:
+      type: boolean
+      description: 是否只看针对性攻击事件，适用于 `incident_search`。
+    begin_duration:
+      type: integer
+      description: 持续时间起始小时数，适用于 `incident_search`，会写入 `condition.duration.begin_duration`。
+    end_duration:
+      type: integer
+      description: 持续时间结束小时数，适用于 `incident_search`，会写入 `condition.duration.end_duration`。
+    keyword:
+      type: string
+      description: >
+        关键词搜索，适用于 `incident_search`。handler 会自动组装
+        `condition.fuzzy.fieldlist=["attacker_ip","host_ip","attack_name","attack_tool","incident_id"]`。
+    cur_page:
+      type: integer
+      description: 页码，适用于 `incident_search`、`attack_alert_list`、`attacker_ip_list`。
+    page_size:
+      type: integer
+      description: 每页条数，适用于 `incident_search`、`attack_alert_list`、`attacker_ip_list`。
+    sort_by:
+      type: string
+      description: 排序字段，适用于列表类 action。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，适用于列表类 action。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层参数未覆盖目标字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。`attack_alert_list` 如需复杂排序可直接透传。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: incident_list

@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException, status
 from httpx import AsyncClient
-from flocks.auth.context import AuthUser
+from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.session.core.status import SessionStatus, SessionStatusBusy
 from flocks.session.message import (
     Message,
     MessageRole,
+    PartTime,
+    ReasoningPart,
     ToolPart,
     ToolStateError,
     ToolStateRunning,
@@ -31,9 +33,50 @@ from flocks.session.message import (
 from flocks.session.orphan_tools import INTERRUPTED_TOOL_ERROR
 from flocks.session.session import Session
 
+
+def _use_webui_admin(monkeypatch: pytest.MonkeyPatch) -> AuthUser:
+    """Authenticate a route test as a browser user instead of the API token."""
+    from flocks.server.routes import session as session_routes
+
+    user = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+    monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+    return user
+
+
 # ===========================================================================
 # CRUD
 # ===========================================================================
+
+
+@pytest.mark.asyncio
+async def test_missing_session_directory_uses_cwd_and_publishes_notice(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import event as event_routes
+    from flocks.server.routes import session as session_routes
+
+    monkeypatch.chdir(tmp_path)
+    publish_event = AsyncMock()
+    monkeypatch.setattr(event_routes, "publish_event", publish_event)
+
+    working_directory = await session_routes._resolve_session_working_directory(
+        SimpleNamespace(
+            id="ses_missing_directory",
+            directory=str(tmp_path / "missing"),
+        ),
+    )
+
+    assert working_directory == str(tmp_path)
+    publish_event.assert_awaited_once_with(
+        "session.notice",
+        {
+            "sessionID": "ses_missing_directory",
+            "kind": "directory-fallback",
+            "storedDirectory": str(tmp_path / "missing"),
+            "fallbackDirectory": str(tmp_path),
+        },
+    )
 
 class TestSessionCRUD:
     """Basic create / read / update / delete for sessions."""
@@ -47,6 +90,23 @@ class TestSessionCRUD:
         assert data["id"].startswith("ses_")
         assert "projectID" in data
         assert "directory" in data
+
+    @pytest.mark.asyncio
+    async def test_create_ordinary_session_uses_process_cwd(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A task session must not resolve through a virtual default project."""
+        process_cwd = tmp_path / "server-cwd"
+        process_cwd.mkdir()
+        monkeypatch.chdir(process_cwd)
+
+        response = await client.post("/api/session", json={})
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()["directory"] == str(process_cwd)
 
     @pytest.mark.asyncio
     async def test_create_session_with_title(self, client: AsyncClient):
@@ -64,6 +124,185 @@ class TestSessionCRUD:
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["category"] == "workflow"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", [None, "entity-config", "workflow"])
+    async def test_create_session_with_manual_auto_mode(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        category: str | None,
+    ):
+        """Auto is persisted for supported WebUI conversation sessions."""
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        payload = {"title": "Auto Session", "model_auto": True}
+        if category is not None:
+            payload["category"] = category
+        resp = await client.post("/api/session", json=payload)
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["model_auto"] is True
+        assert resp.json()["model_pinned"] is False
+        assert resp.json()["category"] == (category or "user")
+
+    @pytest.mark.asyncio
+    async def test_create_unsupported_session_rejects_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.post(
+            "/api/session",
+            json={"category": "task", "model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert (
+            "only available for user, entity configuration, and workflow sessions"
+            in str(resp.json())
+        )
+        validate_auto.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_rejects_unavailable_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(False, "fallback_unavailable")),
+        )
+
+        resp = await client.post("/api/session", json={"model_auto": True})
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "fallback_unavailable" in str(resp.json())
+
+    @pytest.mark.asyncio
+    async def test_api_token_cannot_create_auto_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.post("/api/session", json={"model_auto": True})
+
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert "only be enabled from the WebUI" in str(resp.json())
+        validate_auto.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_create_session_with_api_token_is_system_owned(self, client: AsyncClient):
+        """API-token sessions have an explicit owner manageable by WebUI admins."""
+        resp = await client.post("/api/session", json={"title": "TUI Session"})
+
+        assert resp.status_code == status.HTTP_200_OK
+        session = await Session.get_by_id(resp.json()["id"])
+        assert session is not None
+        assert session.owner_user_id == API_TOKEN_SERVICE_USER_ID
+        assert session.owner_username == API_TOKEN_SERVICE_USER_ID
+
+    @pytest.mark.asyncio
+    async def test_create_session_with_local_user_keeps_owner(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Browser-authenticated sessions remain private to their local user."""
+        from flocks.server.routes import session as session_routes
+
+        user = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: user)
+
+        resp = await client.post("/api/session", json={"title": "WebUI Session"})
+
+        assert resp.status_code == status.HTTP_200_OK
+        session = await Session.get_by_id(resp.json()["id"])
+        assert session is not None
+        assert session.owner_user_id == user.id
+        assert session.owner_username == user.username
+
+    @pytest.mark.asyncio
+    async def test_webui_admin_can_manage_api_token_session(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A WebUI admin can list, continue, rename, and delete a TUI session."""
+        from flocks.server.routes import session as session_routes
+
+        create_resp = await client.post("/api/session", json={"title": "TUI Session"})
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+
+        admin = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true"},
+        )
+        assert list_resp.status_code == status.HTTP_200_OK
+        assert session_id in {session["id"] for session in list_resp.json()}
+
+        message_resp = await client.post(
+            f"/api/session/{session_id}/message",
+            json={
+                "parts": [{"type": "text", "text": "Continue from WebUI"}],
+                "noReply": True,
+            },
+        )
+        assert message_resp.status_code == status.HTTP_200_OK
+
+        child_resp = await client.post(
+            "/api/session",
+            json={"title": "WebUI child", "parentID": session_id},
+        )
+        assert child_resp.status_code == status.HTTP_200_OK
+        child = await Session.get_by_id(child_resp.json()["id"])
+        assert child is not None
+        assert child.owner_user_id == API_TOKEN_SERVICE_USER_ID
+        assert child.owner_username == API_TOKEN_SERVICE_USER_ID
+
+        rename_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"title": "Renamed in WebUI"},
+        )
+        assert rename_resp.status_code == status.HTTP_200_OK
+        assert rename_resp.json()["title"] == "Renamed in WebUI"
+
+        delete_resp = await client.delete(f"/api/session/{session_id}")
+        assert delete_resp.status_code == status.HTTP_200_OK
+        assert delete_resp.json() is True
 
     @pytest.mark.asyncio
     async def test_get_session_includes_persisted_goal(self, client: AsyncClient):
@@ -161,19 +400,566 @@ class TestSessionCRUD:
         row = next(item for item in data if item["id"] == user_id)
         assert set(row) == {
             "id",
+            "projectID",
+            "projectName",
+            "effectiveProjectID",
+            "directory",
             "title",
             "time",
             "category",
+            "channelID",
+            "channelChatType",
+            "status",
             "parentID",
             "provider",
             "model",
             "model_pinned",
+            "model_auto",
+            "ownerUserID",
+            "ownerUsername",
             "canWrite",
             "canDelete",
             "isShared",
         }
+        assert row["projectID"]
+        assert row["directory"]
+        assert "ownerUsername" in row
         assert "goal" not in row
         assert "summary" not in row
+
+    @pytest.mark.asyncio
+    async def test_manager_list_includes_channel_metadata_and_legacy_title(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post("/api/session", json={"title": "[Wecom] room-1"})
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        list_bindings_mock = AsyncMock(return_value=[SimpleNamespace(
+            session_id=session_id,
+            channel_id="wecom",
+            chat_id="room-1",
+            chat_type="group",
+        )])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == session_id)
+        assert row["channelID"] == "wecom"
+        assert row["channelChatType"] == "group"
+        assert row["title"] == "[Wecom] 你是谁"
+        assert session_id in list_bindings_mock.await_args.kwargs["session_ids"]
+
+    @pytest.mark.asyncio
+    async def test_manager_list_recognizes_legacy_direct_title_with_sender_name(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "[Telegram] DM — Alice"},
+        )
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            AsyncMock(return_value=[SimpleNamespace(
+                session_id=session_id,
+                channel_id="telegram",
+                chat_id="12345",
+                chat_type="direct",
+            )]),
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == session_id)
+        assert row["title"] == "[Telegram] 你是谁"
+
+    @pytest.mark.asyncio
+    async def test_manager_search_matches_derived_channel_title_before_pagination(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        session_resp = await client.post("/api/session", json={"title": "[Wecom] room-1"})
+        session_id = session_resp.json()["id"]
+        await Message.create(
+            session_id=session_id,
+            role=MessageRole.USER,
+            content="你是谁",
+        )
+        decoy_resp = await client.post(
+            "/api/session",
+            json={"title": "Unrelated newer session"},
+        )
+        decoy_id = decoy_resp.json()["id"]
+        list_bindings_mock = AsyncMock(return_value=[SimpleNamespace(
+            session_id=session_id,
+            channel_id="wecom",
+            chat_id="room-1",
+            chat_type="group",
+        )])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={
+                "view": "list",
+                "manager": "true",
+                "roots": "true",
+                "search": "你是谁",
+                "limit": "1",
+                "offset": "0",
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert [item["id"] for item in response.json()] == [session_id]
+        assert response.json()[0]["title"] == "[Wecom] 你是谁"
+        queried_session_ids = list_bindings_mock.await_args.kwargs["session_ids"]
+        assert session_id in queried_session_ids
+        assert decoy_id in queried_session_ids
+
+    @pytest.mark.asyncio
+    async def test_channel_binding_lookup_batches_large_session_lists(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.channel.inbound.session_binding import SessionBindingService
+        from flocks.server.routes.session import _latest_channel_bindings
+
+        list_bindings_mock = AsyncMock(return_value=[])
+        monkeypatch.setattr(
+            SessionBindingService,
+            "list_bindings",
+            list_bindings_mock,
+        )
+
+        await _latest_channel_bindings([f"ses-{index}" for index in range(1001)])
+
+        assert list_bindings_mock.await_count == 3
+        assert all(
+            len(call.kwargs["session_ids"]) <= 500
+            for call in list_bindings_mock.await_args_list
+        )
+
+    @pytest.mark.asyncio
+    async def test_archive_hides_session_preserves_history_and_restores_tree(self, client: AsyncClient):
+        parent_resp = await client.post("/api/session", json={"title": "Archive Parent"})
+        parent_id = parent_resp.json()["id"]
+        project_id = parent_resp.json()["projectID"]
+        child_resp = await client.post(
+            "/api/session",
+            json={"title": "Archive Child", "parentID": parent_id},
+        )
+        child_id = child_resp.json()["id"]
+        await client.post(
+            f"/api/session/{parent_id}/message",
+            json={"parts": [{"type": "text", "text": "keep this history"}], "noReply": True},
+        )
+
+        archive_resp = await client.post(f"/api/session/{parent_id}/archive")
+
+        assert archive_resp.status_code == status.HTTP_200_OK
+        assert archive_resp.json()["status"] == "archived"
+        archived_parent = await Session.get(project_id, parent_id)
+        archived_child = await Session.get(project_id, child_id)
+        assert archived_parent is not None and archived_parent.status == "archived"
+        assert archived_child is not None and archived_child.status == "archived"
+        assert len(await Message.list(parent_id)) == 1
+
+        active_list = await client.get("/api/session", params={"status": "active"})
+        archived_list = await client.get(
+            "/api/session",
+            params={"status": "archived", "view": "list", "manager": "true", "roots": "true"},
+        )
+        assert parent_id not in {item["id"] for item in active_list.json()}
+        assert parent_id in {item["id"] for item in archived_list.json()}
+        assert child_id not in {item["id"] for item in archived_list.json()}
+        archived_row = next(item for item in archived_list.json() if item["id"] == parent_id)
+        assert archived_row["canWrite"] is False
+
+        get_resp = await client.get(f"/api/session/{parent_id}")
+        update_resp = await client.patch(f"/api/session/{parent_id}", json={"title": "Blocked"})
+        message_resp = await client.post(
+            f"/api/session/{parent_id}/message",
+            json={"parts": [{"type": "text", "text": "blocked"}], "noReply": True},
+        )
+        assert get_resp.status_code == status.HTTP_404_NOT_FOUND
+        assert update_resp.status_code == status.HTTP_409_CONFLICT
+        assert message_resp.status_code == status.HTTP_409_CONFLICT
+
+        child_restore_resp = await client.post(f"/api/session/{child_id}/restore")
+        late_child_resp = await client.post(
+            "/api/session",
+            json={"title": "Late Child", "parentID": parent_id},
+        )
+        assert child_restore_resp.status_code == status.HTTP_409_CONFLICT
+        assert late_child_resp.status_code == status.HTTP_409_CONFLICT
+
+        restore_resp = await client.post(f"/api/session/{parent_id}/restore")
+        assert restore_resp.status_code == status.HTTP_200_OK
+        assert restore_resp.json()["status"] == "active"
+        restored_child = await Session.get(project_id, child_id)
+        assert restored_child is not None and restored_child.status == "active"
+        assert len(await Message.list(parent_id)) == 1
+
+    @pytest.mark.asyncio
+    async def test_archive_cancels_route_background_work(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        started = asyncio.Event()
+        stopped = asyncio.Event()
+
+        async def background_work() -> None:
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+
+        session_routes._schedule_background_coro(
+            background_work(),
+            session_id=session_id,
+            action="test.background",
+        )
+        await started.wait()
+
+        response = await client.post(f"/api/session/{session_id}/archive")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert stopped.is_set()
+
+    @pytest.mark.asyncio
+    async def test_list_status_filter_applies_before_pagination(self, client: AsyncClient):
+        archived_resp = await client.post("/api/session", json={"title": "Archived First"})
+        active_resp = await client.post("/api/session", json={"title": "Active Second"})
+        assert (await client.post(f"/api/session/{archived_resp.json()['id']}/archive")).status_code == 200
+
+        response = await client.get(
+            "/api/session",
+            params={"status": "active", "limit": "1", "offset": "0"},
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        assert [item["id"] for item in response.json()] == [active_resp.json()["id"]]
+
+    @pytest.mark.asyncio
+    async def test_archived_manager_admin_sees_all_and_member_only_owns(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        alice = AuthUser(id="usr_alice", username="alice", role="member", status="active")
+        bob = AuthUser(id="usr_bob", username="bob", role="member", status="active")
+        admin = AuthUser(id="usr_admin", username="admin", role="admin", status="active")
+        alice_session = await Session.create(
+            project_id="archive_permissions",
+            directory="/tmp",
+            title="Alice archive",
+            owner_user_id=alice.id,
+            owner_username=alice.username,
+        )
+        bob_session = await Session.create(
+            project_id="archive_permissions",
+            directory="/tmp",
+            title="Bob shared archive",
+            owner_user_id=bob.id,
+            owner_username=bob.username,
+            metadata={"shared_local": True},
+        )
+        assert await Session.archive(alice_session.project_id, alice_session.id) is True
+        assert await Session.archive(bob_session.project_id, bob_session.id) is True
+
+        params = {
+            "status": "archived",
+            "view": "list",
+            "manager": "true",
+            "roots": "true",
+        }
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: admin)
+        admin_response = await client.get("/api/session", params=params)
+
+        assert admin_response.status_code == status.HTTP_200_OK
+        admin_rows = {row["id"]: row for row in admin_response.json()}
+        assert {alice_session.id, bob_session.id}.issubset(admin_rows)
+        assert admin_rows[alice_session.id]["ownerUsername"] == "alice"
+        assert admin_rows[bob_session.id]["ownerUsername"] == "bob"
+
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: alice)
+        member_response = await client.get("/api/session", params=params)
+
+        assert member_response.status_code == status.HTTP_200_OK
+        assert [row["id"] for row in member_response.json()] == [alice_session.id]
+
+        ordinary_archived_response = await client.get(
+            "/api/session",
+            params={"status": "archived", "view": "list", "roots": "true"},
+        )
+        assert ordinary_archived_response.status_code == status.HTTP_200_OK
+        assert [row["id"] for row in ordinary_archived_response.json()] == [
+            alice_session.id
+        ]
+
+        all_status_response = await client.get(
+            "/api/session",
+            params={"status": "all", "view": "list", "roots": "true"},
+        )
+        assert bob_session.id not in {
+            row["id"] for row in all_status_response.json()
+        }
+
+    @pytest.mark.asyncio
+    async def test_archive_rejects_tree_with_descendant_owned_by_another_user(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.auth.context import reset_current_auth_user, set_current_auth_user
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session import SessionInfo
+        from flocks.storage.storage import Storage
+
+        alice = AuthUser(id="usr_alice", username="alice", role="member", status="active")
+        parent = await Session.create(
+            project_id="archive_mixed_owner_tree",
+            directory="/tmp",
+            title="Alice parent",
+            owner_user_id=alice.id,
+            owner_username=alice.username,
+        )
+        child = SessionInfo(
+            projectID=parent.project_id,
+            directory=parent.directory,
+            title="Bob child",
+            parentID=parent.id,
+            ownerUserID="usr_bob",
+            ownerUsername="bob",
+        )
+        await Storage.set(
+            f"session:{child.project_id}:{child.id}",
+            child,
+            "session",
+        )
+        Session.invalidate_cache()
+        monkeypatch.setattr(session_routes, "require_user", lambda _request: alice)
+
+        token = set_current_auth_user(alice)
+        try:
+            response = await client.post(f"/api/session/{parent.id}/archive")
+        finally:
+            reset_current_auth_user(token)
+
+        assert response.status_code == status.HTTP_403_FORBIDDEN
+        stored_parent = await Storage.get(
+            f"session:{parent.project_id}:{parent.id}",
+            SessionInfo,
+        )
+        stored_child = await Storage.get(
+            f"session:{child.project_id}:{child.id}",
+            SessionInfo,
+        )
+        assert stored_parent is not None and stored_parent.status == "active"
+        assert stored_child is not None and stored_child.status == "active"
+
+    @pytest.mark.asyncio
+    async def test_create_session_in_user_managed_project(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Session creation can target a user-managed project."""
+        worktree = tmp_path / "labs"
+        worktree.mkdir()
+        monkeypatch.setenv("FLOCKS_PROJECT_ROOTS", str(tmp_path))
+        project_resp = await client.post(
+            "/api/project",
+            json={"name": "Labs", "worktree": str(worktree)},
+        )
+        assert project_resp.status_code == status.HTTP_200_OK
+        project = project_resp.json()
+
+        session_resp = await client.post(
+            "/api/session",
+            json={"title": "Project Session", "projectID": project["id"]},
+        )
+        assert session_resp.status_code == status.HTTP_200_OK
+        assert session_resp.json()["projectID"] == project["id"]
+
+        list_resp = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "roots": "true", "limit": "100"},
+        )
+        row = next(item for item in list_resp.json() if item["id"] == session_resp.json()["id"])
+        assert row["projectID"] == project["id"]
+        assert row["projectName"] == "Labs"
+        assert row["effectiveProjectID"] == project["id"]
+        assert row["directory"] == project["worktree"]
+
+    @pytest.mark.asyncio
+    async def test_legacy_session_is_grouped_under_tasks_without_rewrite(
+        self,
+        client: AsyncClient,
+        tmp_path,
+    ):
+        """Legacy project IDs are projected to Tasks while storage stays unchanged."""
+        legacy = await Session.create(
+            project_id="legacy-git-project",
+            directory=str(tmp_path),
+            title="Legacy Session",
+        )
+
+        response = await client.get(
+            "/api/session",
+            params={
+                "view": "list",
+                "manager": "true",
+                "roots": "true",
+                "projectID": "tasks",
+            },
+        )
+
+        assert response.status_code == status.HTTP_200_OK
+        row = next(item for item in response.json() if item["id"] == legacy.id)
+        assert row["projectID"] == "legacy-git-project"
+        assert row["effectiveProjectID"] == "tasks"
+        stored = await Session.get("legacy-git-project", legacy.id)
+        assert stored is not None
+        assert stored.project_id == "legacy-git-project"
+
+    @pytest.mark.asyncio
+    async def test_deleted_project_sessions_are_archived_and_restorable(
+        self,
+        client: AsyncClient,
+        tmp_path,
+    ):
+        """Deleting a project archives its sessions and restoring one revives the project."""
+        worktree = tmp_path / "removable-project"
+        worktree.mkdir()
+        project_response = await client.post(
+            "/api/project",
+            json={"name": "Removable", "worktree": str(worktree)},
+        )
+        project = project_response.json()
+        session_response = await client.post(
+            "/api/session",
+            json={"title": "Keep Me", "projectID": project["id"]},
+        )
+        session_id = session_response.json()["id"]
+
+        delete_response = await client.delete(f"/api/project/{project['id']}")
+        assert delete_response.status_code == status.HTTP_200_OK
+        assert worktree.exists()
+
+        session_get_response = await client.get(f"/api/session/{session_id}")
+        assert session_get_response.status_code == status.HTTP_404_NOT_FOUND
+
+        tasks_response = await client.get(
+            "/api/session",
+            params={"view": "list", "manager": "true", "projectID": "tasks"},
+        )
+        assert all(item["id"] != session_id for item in tasks_response.json())
+        archived = await Session.get(project["id"], session_id)
+        assert archived is not None and archived.status == "archived"
+
+        restore_response = await client.post(f"/api/session/{session_id}/restore")
+        assert restore_response.status_code == status.HTTP_200_OK
+        assert restore_response.json()["status"] == "active"
+        assert [item["id"] for item in (await client.get("/api/project")).json()] == [project["id"]]
+
+    @pytest.mark.asyncio
+    async def test_restore_rolls_project_back_when_session_restore_fails(
+        self,
+        client: AsyncClient,
+        tmp_path,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        worktree = tmp_path / "restore-rollback"
+        worktree.mkdir()
+        project = (
+            await client.post(
+                "/api/project",
+                json={"name": "Rollback", "worktree": str(worktree)},
+            )
+        ).json()
+        session_id = (
+            await client.post(
+                "/api/session",
+                json={"title": "Rollback Me", "projectID": project["id"]},
+            )
+        ).json()["id"]
+        assert (await client.delete(f"/api/project/{project['id']}")).status_code == 200
+
+        async def fail_unarchive(_project_id: str, _session_id: str) -> bool:
+            return False
+
+        monkeypatch.setattr(Session, "unarchive", fail_unarchive)
+        response = await client.post(f"/api/session/{session_id}/restore")
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert (await client.get("/api/project")).json() == []
+        archived = await Session.get(project["id"], session_id)
+        assert archived is not None and archived.status == "archived"
+
+    @pytest.mark.asyncio
+    async def test_restore_rejects_missing_managed_project_metadata(
+        self,
+        client: AsyncClient,
+    ):
+        session = await Session.create(
+            project_id="prj_missing_restore_metadata",
+            directory="/tmp",
+            title="Missing project metadata",
+        )
+        assert await Session.archive(session.project_id, session.id) is True
+
+        response = await client.post(f"/api/session/{session.id}/restore")
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        archived = await Session.get(session.project_id, session.id)
+        assert archived is not None and archived.status == "archived"
 
     @pytest.mark.asyncio
     async def test_get_session(self, client: AsyncClient, session_id: str):
@@ -181,6 +967,135 @@ class TestSessionCRUD:
         resp = await client.get(f"/api/session/{session_id}")
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["id"] == session_id
+
+    @pytest.mark.asyncio
+    async def test_context_usage_keeps_inflight_task_after_cancelled_request(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.context_usage import ContextUsageSnapshot
+
+        session_routes._context_usage_cache.clear()
+        session_routes._context_usage_inflight.clear()
+
+        calls = 0
+        started = asyncio.Event()
+        release = asyncio.Event()
+        session = SimpleNamespace(time=SimpleNamespace(updated=123), provider=None, model=None)
+
+        async def fake_build_context_usage_snapshot(session_id: str, *, session=None):
+            nonlocal calls
+            calls += 1
+            started.set()
+            await release.wait()
+            return ContextUsageSnapshot(
+                sessionID=session_id,
+                usedTokens=42,
+                contextWindow=100,
+                estimatedTokens=42,
+            )
+
+        monkeypatch.setattr(
+            session_routes,
+            "build_context_usage_snapshot",
+            fake_build_context_usage_snapshot,
+        )
+
+        first = asyncio.create_task(
+            session_routes._cached_context_usage_snapshot("ses_context_cancel", session=session)
+        )
+        second = None
+        try:
+            await started.wait()
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+
+            second = asyncio.create_task(
+                session_routes._cached_context_usage_snapshot("ses_context_cancel", session=session)
+            )
+            await asyncio.sleep(0)
+            assert calls == 1
+
+            release.set()
+            snapshot = await asyncio.wait_for(second, timeout=1)
+            assert snapshot.used_tokens == 42
+
+            cached = await session_routes._cached_context_usage_snapshot("ses_context_cancel", session=session)
+            assert cached.used_tokens == 42
+            assert calls == 1
+        finally:
+            release.set()
+            if second is not None and not second.done():
+                await asyncio.wait_for(second, timeout=1)
+            session_routes._context_usage_cache.clear()
+            session_routes._context_usage_inflight.clear()
+
+    @pytest.mark.asyncio
+    async def test_context_usage_keeps_newer_cache_when_older_task_finishes_late(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.context_usage import ContextUsageSnapshot
+
+        session_routes._context_usage_cache.clear()
+        session_routes._context_usage_inflight.clear()
+
+        old_started = asyncio.Event()
+        new_started = asyncio.Event()
+        old_release = asyncio.Event()
+        new_release = asyncio.Event()
+        old_session = SimpleNamespace(time=SimpleNamespace(updated=100), provider=None, model=None)
+        new_session = SimpleNamespace(time=SimpleNamespace(updated=200), provider=None, model=None)
+
+        async def fake_build_context_usage_snapshot(session_id: str, *, session=None):
+            updated = session.time.updated
+            if updated == 100:
+                old_started.set()
+                await old_release.wait()
+            else:
+                new_started.set()
+                await new_release.wait()
+            return ContextUsageSnapshot(
+                sessionID=session_id,
+                usedTokens=updated,
+                contextWindow=1000,
+                estimatedTokens=updated,
+            )
+
+        monkeypatch.setattr(
+            session_routes,
+            "build_context_usage_snapshot",
+            fake_build_context_usage_snapshot,
+        )
+
+        old_task = asyncio.create_task(
+            session_routes._cached_context_usage_snapshot("ses_context_order", session=old_session)
+        )
+        new_task = asyncio.create_task(
+            session_routes._cached_context_usage_snapshot("ses_context_order", session=new_session)
+        )
+        try:
+            await old_started.wait()
+            await new_started.wait()
+
+            new_release.set()
+            new_snapshot = await asyncio.wait_for(new_task, timeout=1)
+            assert new_snapshot.used_tokens == 200
+
+            old_release.set()
+            old_snapshot = await asyncio.wait_for(old_task, timeout=1)
+            assert old_snapshot.used_tokens == 100
+
+            assert ("ses_context_order", 200) in session_routes._context_usage_cache
+            assert ("ses_context_order", 100) not in session_routes._context_usage_cache
+        finally:
+            old_release.set()
+            new_release.set()
+            session_routes._context_usage_cache.clear()
+            session_routes._context_usage_inflight.clear()
 
     @pytest.mark.asyncio
     async def test_get_session_not_found(self, client: AsyncClient):
@@ -197,6 +1112,195 @@ class TestSessionCRUD:
         )
         assert resp.status_code == status.HTTP_200_OK
         assert resp.json()["title"] == "Updated Title"
+
+    @pytest.mark.asyncio
+    async def test_update_session_auto_and_concrete_model_are_exclusive(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        auto_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+        assert auto_resp.status_code == status.HTTP_200_OK
+        assert auto_resp.json()["model_auto"] is True
+        assert auto_resp.json()["model_pinned"] is False
+
+        invalid_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={
+                "model_auto": True,
+                "provider": "openai",
+                "model": "gpt-4o",
+                "model_pinned": True,
+            },
+        )
+        assert invalid_resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+
+        concrete_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"provider": "openai", "model": "gpt-4o"},
+        )
+        assert concrete_resp.status_code == status.HTTP_200_OK
+        assert concrete_resp.json()["model_auto"] is False
+        assert concrete_resp.json()["model_pinned"] is True
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", ["entity-config", "workflow"])
+    async def test_update_supported_sidebar_session_allows_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        category: str,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        create_resp = await client.post(
+            "/api/session",
+            json={"title": "Sidebar Chat", "category": category},
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        resp = await client.patch(
+            f"/api/session/{create_resp.json()['id']}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_200_OK
+        assert resp.json()["category"] == category
+        assert resp.json()["model_auto"] is True
+        assert resp.json()["model_pinned"] is False
+
+    @pytest.mark.asyncio
+    async def test_update_session_rejects_unavailable_auto(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(False, "primary_provider_not_configured")),
+        )
+
+        resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_400_BAD_REQUEST
+        assert "primary_provider_not_configured" in str(resp.json())
+
+    @pytest.mark.asyncio
+    async def test_pinning_existing_auto_session_disables_auto(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        _use_webui_admin(monkeypatch)
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            AsyncMock(return_value=(True, "available")),
+        )
+        clear_state = MagicMock()
+        monkeypatch.setattr(SessionLoop, "clear_auto_failover_state", clear_state)
+        auto_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+        assert auto_resp.status_code == status.HTTP_200_OK
+
+        pin_resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_pinned": True},
+        )
+
+        assert pin_resp.status_code == status.HTTP_200_OK
+        assert pin_resp.json()["model_pinned"] is True
+        assert pin_resp.json()["model_auto"] is False
+        clear_state.assert_called_once_with(session_id)
+
+    @pytest.mark.asyncio
+    async def test_api_token_cannot_enable_auto_on_existing_session(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_403_FORBIDDEN
+        assert "only be enabled from the WebUI" in str(resp.json())
+        validate_auto.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_update_unsupported_session_rejects_auto(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        create_resp = await client.post(
+            "/api/session",
+            json={"title": "Non-user Session", "category": "task"},
+        )
+        assert create_resp.status_code == status.HTTP_200_OK
+        session_id = create_resp.json()["id"]
+        validate_auto = AsyncMock(return_value=(True, "available"))
+        monkeypatch.setattr(
+            SessionLoop,
+            "validate_auto_configuration",
+            validate_auto,
+        )
+
+        resp = await client.patch(
+            f"/api/session/{session_id}",
+            json={"model_auto": True},
+        )
+
+        assert resp.status_code == status.HTTP_422_UNPROCESSABLE_ENTITY
+        assert (
+            "only available for user, entity configuration, and workflow sessions"
+            in str(resp.json())
+        )
+        validate_auto.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_update_session_not_found(self, client: AsyncClient):
@@ -217,175 +1321,6 @@ class TestSessionCRUD:
         # Confirm it is gone
         get_resp = await client.get(f"/api/session/{session_id}")
         assert get_resp.status_code == status.HTTP_404_NOT_FOUND
-
-    @staticmethod
-    def _patch_delete_session_dependencies(
-        monkeypatch,
-        session_routes,
-        *,
-        session_id: str,
-        order: list[str],
-        session_list,
-    ) -> None:
-        async def fake_abort_session_processing(abort_session_id: str) -> bool:
-            order.append(f"abort:{abort_session_id}")
-            return True
-
-        async def fake_wait_for_sessions_idle(session_ids: list[str], timeout_s: float = 5.0) -> None:
-            order.append(f"wait:{','.join(session_ids)}")
-
-        async def fake_interaction_queue_clear(_session_id: str) -> None:
-            order.append("queue_clear")
-
-        async def fake_goal_clear(_session_id: str) -> None:
-            order.append("goal_clear")
-
-        async def fake_session_delete(_project_id: str, delete_session_id: str) -> bool:
-            assert delete_session_id == session_id
-            order.append("delete")
-            return True
-
-        monkeypatch.setattr(session_routes.Session, "list", session_list)
-        monkeypatch.setattr(
-            session_routes,
-            "_abort_session_processing",
-            fake_abort_session_processing,
-        )
-        monkeypatch.setattr(
-            session_routes,
-            "_wait_for_sessions_idle",
-            fake_wait_for_sessions_idle,
-        )
-        monkeypatch.setattr(
-            "flocks.session.interaction_queue.InteractionQueue.clear",
-            fake_interaction_queue_clear,
-        )
-        monkeypatch.setattr(
-            "flocks.session.goal.GoalManager.clear",
-            fake_goal_clear,
-        )
-        monkeypatch.setattr(session_routes.Session, "delete", fake_session_delete)
-
-    @pytest.mark.asyncio
-    async def test_delete_session_aborts_and_waits_before_delete(
-        self,
-        client: AsyncClient,
-        session_id: str,
-        monkeypatch,
-    ):
-        """DELETE waits for active processing to stop before clearing messages."""
-        from flocks.server.routes import session as session_routes
-
-        order: list[str] = []
-
-        async def fake_session_list(_project_id: str):
-            return []
-
-        self._patch_delete_session_dependencies(
-            monkeypatch,
-            session_routes,
-            session_id=session_id,
-            order=order,
-            session_list=fake_session_list,
-        )
-
-        resp = await client.delete(f"/api/session/{session_id}")
-
-        assert resp.status_code == status.HTTP_200_OK
-        assert resp.json() is True
-        assert order == [
-            f"abort:{session_id}",
-            "queue_clear",
-            "goal_clear",
-            f"wait:{session_id}",
-            "delete",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_delete_session_waits_for_descendant_loops_before_delete(
-        self,
-        client: AsyncClient,
-        session_id: str,
-        monkeypatch,
-    ):
-        """DELETE waits for child and grandchild loops before recursive delete."""
-        from flocks.server.routes import session as session_routes
-
-        child_id = "ses_delete_child_wait"
-        grandchild_id = "ses_delete_grandchild_wait"
-        order: list[str] = []
-
-        async def fake_session_list(_project_id: str):
-            return [
-                SimpleNamespace(id=child_id, parent_id=session_id),
-                SimpleNamespace(id=grandchild_id, parent_id=child_id),
-            ]
-
-        self._patch_delete_session_dependencies(
-            monkeypatch,
-            session_routes,
-            session_id=session_id,
-            order=order,
-            session_list=fake_session_list,
-        )
-
-        resp = await client.delete(f"/api/session/{session_id}")
-
-        assert resp.status_code == status.HTTP_200_OK
-        assert resp.json() is True
-        assert order == [
-            f"abort:{session_id}",
-            "queue_clear",
-            "goal_clear",
-            f"wait:{session_id}",
-            f"abort:{child_id}",
-            f"abort:{grandchild_id}",
-            f"wait:{child_id},{grandchild_id}",
-            "delete",
-        ]
-
-    @pytest.mark.asyncio
-    async def test_delete_session_aborts_descendant_that_appears_after_parent_wait(
-        self,
-        client: AsyncClient,
-        session_id: str,
-        monkeypatch,
-    ):
-        """DELETE re-collects descendants after parent abort to catch late children."""
-        from flocks.server.routes import session as session_routes
-
-        child_id = "ses_delete_late_child_wait"
-        list_calls = 0
-        order: list[str] = []
-
-        async def fake_session_list(_project_id: str):
-            nonlocal list_calls
-            list_calls += 1
-            if list_calls == 1:
-                return []
-            return [SimpleNamespace(id=child_id, parent_id=session_id)]
-
-        self._patch_delete_session_dependencies(
-            monkeypatch,
-            session_routes,
-            session_id=session_id,
-            order=order,
-            session_list=fake_session_list,
-        )
-
-        resp = await client.delete(f"/api/session/{session_id}")
-
-        assert resp.status_code == status.HTTP_200_OK
-        assert resp.json() is True
-        assert order == [
-            f"abort:{session_id}",
-            "queue_clear",
-            "goal_clear",
-            f"wait:{session_id}",
-            f"abort:{child_id}",
-            f"wait:{child_id}",
-            "delete",
-        ]
 
     @pytest.mark.asyncio
     async def test_delete_session_not_found(self, client: AsyncClient):
@@ -411,6 +1346,24 @@ class TestSessionMessages:
         assert len(data) == 0
 
     @pytest.mark.asyncio
+    async def test_list_messages_reports_storage_failure(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """A read failure must not look like a successfully empty history."""
+        monkeypatch.setattr(
+            Message,
+            "list_with_parts",
+            AsyncMock(side_effect=RuntimeError("storage unavailable")),
+        )
+
+        resp = await client.get(f"/api/session/{session_id}/message")
+
+        assert resp.status_code == status.HTTP_500_INTERNAL_SERVER_ERROR
+
+    @pytest.mark.asyncio
     async def test_send_message_noReply(self, client: AsyncClient, session_id: str):
         """POST /api/session/{id}/message with noReply=True stores without triggering LLM."""
         payload = {
@@ -427,6 +1380,32 @@ class TestSessionMessages:
             any(p.get("text") == "Hello!" for p in m.get("parts", []))
             for m in messages
         )
+
+    @pytest.mark.asyncio
+    async def test_list_messages_preserves_reasoning_part_time(
+        self,
+        client: AsyncClient,
+        session_id: str,
+    ):
+        """Reloaded message history retains timing needed by the process summary."""
+        message = await Message.create(session_id, MessageRole.ASSISTANT, "")
+        part = ReasoningPart(
+            id="part_timed_reasoning",
+            sessionID=session_id,
+            messageID=message.id,
+            text="Inspect the request.",
+            time=PartTime(start=1_000, end=4_500),
+        )
+        await Message.store_part(session_id, message.id, part)
+
+        response = await client.get(f"/api/session/{session_id}/message")
+
+        assert response.status_code == status.HTTP_200_OK
+        messages = response.json()
+        reloaded_message = next(item for item in messages if item["info"]["id"] == message.id)
+        reloaded_part = next(item for item in reloaded_message["parts"] if item["id"] == part.id)
+        assert reloaded_part["time"]["start"] == 1_000
+        assert reloaded_part["time"]["end"] == 4_500
 
     @pytest.mark.asyncio
     async def test_list_messages_keeps_running_tool_when_session_busy(
@@ -600,6 +1579,7 @@ class TestSessionLocalSharing:
         create_resp = await client.post("/api/session", json={"title": "share-session"})
         assert create_resp.status_code == status.HTTP_200_OK
         session_id = create_resp.json()["id"]
+        assert await Session.get_by_id(session_id) is not None
 
         share_resp = await client.post(f"/api/session/{session_id}/share-local")
         assert share_resp.status_code == status.HTTP_200_OK
@@ -700,6 +1680,47 @@ class TestSessionMessagesRemaining:
             json={"parts": [{"type": "text", "text": "Hi"}]},
         )
         assert resp.status_code == status.HTTP_404_NOT_FOUND
+
+    @pytest.mark.asyncio
+    async def test_message_is_not_persisted_if_session_archives_after_preflight(
+        self,
+        client: AsyncClient,
+        session_id: str,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.provider.provider import Provider
+        from flocks.server.routes import session as session_routes
+
+        apply_config_entered = asyncio.Event()
+        release_apply_config = asyncio.Event()
+        original_apply_config = Provider.apply_config
+
+        async def blocked_apply_config(*args, **kwargs):
+            await original_apply_config(*args, **kwargs)
+            apply_config_entered.set()
+            await release_apply_config.wait()
+
+        monkeypatch.setattr(Provider, "apply_config", blocked_apply_config)
+
+        message_task = asyncio.create_task(
+            client.post(
+                f"/api/session/{session_id}/message",
+                json={
+                    "parts": [{"type": "text", "text": "must not persist"}],
+                    "noReply": True,
+                },
+            )
+        )
+        await apply_config_entered.wait()
+        archive_response = await client.post(f"/api/session/{session_id}/archive")
+        restore_response = await client.post(f"/api/session/{session_id}/restore")
+        release_apply_config.set()
+        message_response = await message_task
+
+        assert archive_response.status_code == status.HTTP_200_OK
+        assert restore_response.status_code == status.HTTP_200_OK
+        assert message_response.status_code == status.HTTP_409_CONFLICT
+        assert await Message.list(session_id) == []
 
     @pytest.mark.asyncio
     async def test_resend_user_message_updates_text_and_truncates_followups(
@@ -1088,7 +2109,190 @@ class TestSessionMessagesRemaining:
             "agent_name": "rex",
             "provider_id": "openai",
             "model_id": "gpt-4.1",
+            "auto_failover": False,
         }
+
+    @pytest.mark.asyncio
+    async def test_auto_replay_reports_actual_fallback_model(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """Replay passes Auto authorization and publishes the recovered model."""
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import LoopResult, SessionLoop
+
+        user_message = SimpleNamespace(id="msg_user", agent="rex")
+        session = SimpleNamespace(id="ses_auto", directory="/tmp/project")
+        assistant = SimpleNamespace(
+            id="msg_assistant",
+            providerID="fallback",
+            modelID="fallback-model",
+            finish="stop",
+            tokens=None,
+            time={"created": 123},
+        )
+        run = AsyncMock(return_value=LoopResult(
+            action="stop",
+            last_message=assistant,
+            provider_id="fallback",
+            model_id="fallback-model",
+        ))
+        publish = AsyncMock()
+        context_usage = AsyncMock()
+
+        monkeypatch.setattr(SessionLoop, "run", run)
+        monkeypatch.setattr(
+            "flocks.session.lifecycle.revert.SessionRevert.cleanup",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.get_text_content",
+            AsyncMock(return_value="recovered"),
+        )
+        monkeypatch.setattr("flocks.server.routes.event.publish_event", publish)
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage,
+        )
+
+        result = await session_routes._run_existing_user_message(
+            session.id,
+            session,
+            user_message,
+            session.directory,
+            runtime={
+                "agent_name": "rex",
+                "provider_id": "primary",
+                "model_id": "primary-model",
+                "auto_failover": True,
+            },
+        )
+
+        assert result["status"] == "completed"
+        assert run.await_args.kwargs["auto_failover"] is True
+        completion = next(
+            call.args[1]
+            for call in publish.await_args_list
+            if call.args[0] == "message.updated"
+        )
+        assert completion["info"]["providerID"] == "fallback"
+        assert completion["info"]["modelID"] == "fallback-model"
+        assert context_usage.await_args.kwargs["provider_id"] == "fallback"
+        assert context_usage.await_args.kwargs["model_id"] == "fallback-model"
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("category", ["user", "entity-config", "workflow"])
+    async def test_prepare_auto_replay_defers_unavailable_primary_to_failover(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        category: str,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import SessionLoop
+
+        user_message = SimpleNamespace(agent="rex")
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(
+                model_auto=True,
+                category=category,
+            )),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.resolve_default_llm",
+            AsyncMock(return_value={
+                "provider_id": "primary",
+                "model_id": "primary-model",
+            }),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        validate = AsyncMock(return_value=(False, "provider_not_configured"))
+        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
+        monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
+        monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: None)
+        resolve = AsyncMock()
+        monkeypatch.setattr(session_routes, "_resolve_model", resolve)
+
+        runtime = await session_routes._prepare_replay_runtime("ses_auto", user_message)
+
+        assert runtime == {
+            "agent_name": "rex",
+            "provider_id": "primary",
+            "model_id": "primary-model",
+            "auto_failover": True,
+        }
+        validate.assert_not_awaited()
+        resolve.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_prepare_replay_ignores_auto_on_unsupported_session(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.server.routes import session as session_routes
+        from flocks.session.session_loop import SessionLoop
+
+        user_message = SimpleNamespace(agent="rex")
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(name="rex", model=None)),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(
+                model_auto=True,
+                category="task",
+            )),
+        )
+        resolve = AsyncMock(return_value=("direct", "direct-model", "session"))
+        monkeypatch.setattr(session_routes, "_resolve_model", resolve)
+        default_llm = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.config.config.Config.resolve_default_llm",
+            default_llm,
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=SimpleNamespace()),
+        )
+        validate = AsyncMock()
+        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider._ensure_initialized",
+            lambda: None,
+        )
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider.apply_config",
+            AsyncMock(),
+        )
+        monkeypatch.setattr(
+            "flocks.provider.provider.Provider.get",
+            lambda _provider_id: object(),
+        )
+
+        runtime = await session_routes._prepare_replay_runtime(
+            "ses_workflow",
+            user_message,
+        )
+
+        assert runtime == {
+            "agent_name": "rex",
+            "provider_id": "direct",
+            "model_id": "direct-model",
+            "auto_failover": False,
+        }
+        resolve.assert_awaited_once()
+        default_llm.assert_not_awaited()
+        validate.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_resend_uses_current_model_for_replay(
@@ -1323,7 +2527,11 @@ class TestSessionUtilities:
         monkeypatch.setattr(
             session_routes.Session,
             "get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(return_value=SimpleNamespace(
+                id=session_id,
+                directory="/tmp/project",
+                status="active",
+            )),
         )
         monkeypatch.setattr(session_routes, "abort_session", fake_abort_session)
         monkeypatch.setattr(session_routes, "_wait_for_session_idle", fake_wait_for_session_idle)

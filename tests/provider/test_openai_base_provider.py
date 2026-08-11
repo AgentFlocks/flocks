@@ -11,15 +11,23 @@ Tests various scenarios:
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch, MagicMock
 
+import httpx
 import pytest
+from openai import AsyncOpenAI
 
 import flocks.provider.sdk.openai_base as openai_base_module
 from flocks.provider.sdk.openai_base import (
     OpenAIBaseProvider,
+    LLMResponseTooLargeError,
+    ResponseBodyUnsupportedEncodingError,
+    ResponseBodyTooLargeError,
     build_reasoning_metadata,
+    create_chat_completion_with_fallbacks,
     extract_reasoning_content,
     extract_reasoning_content_with_source,
     extract_reasoning_details,
+    response_size_limit_hook,
+    resolve_max_response_bytes,
 )
 from flocks.provider.provider import ModelInfo, ModelCapabilities, ProviderConfig
 
@@ -54,6 +62,19 @@ class MockProviderPrefersCompletionTokens(MockProviderWithoutCatalog):
     PREFER_MAX_COMPLETION_TOKENS = True
 
 
+class _ChunkedAsyncStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.closed = False
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            yield chunk
+
+    async def aclose(self):
+        self.closed = True
+
+
 class TestOpenAIBaseProviderGetModels:
     """Test suite for get_models() method."""
 
@@ -65,6 +86,105 @@ class TestOpenAIBaseProviderGetModels:
         assert timeout.read == 180.0
         assert timeout.write == 1800.0
         assert timeout.pool == 60.0
+
+    def test_response_size_limit_defaults_and_allows_override(self, monkeypatch):
+        monkeypatch.delenv("FLOCKS_LLM_MAX_RESPONSE_BYTES", raising=False)
+        assert resolve_max_response_bytes() == 16 * 1024 * 1024
+
+        monkeypatch.setenv("FLOCKS_LLM_MAX_RESPONSE_BYTES", "12345")
+        assert resolve_max_response_bytes() == 12345
+        assert resolve_max_response_bytes({"max_response_bytes": 67890}) == 67890
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [200, 500])
+    async def test_response_size_limit_stops_success_and_error_bodies(self, status_code):
+        source = _ChunkedAsyncStream([b"1234", b"5678", b"9"])
+
+        async def handler(_request):
+            return httpx.Response(status_code, stream=source)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            event_hooks={"response": [response_size_limit_hook(8)]},
+        ) as client:
+            with pytest.raises(ResponseBodyTooLargeError, match="limit"):
+                await client.get("https://fake-model.test/v1/chat/completions")
+
+        assert source.closed is True
+
+    @pytest.mark.asyncio
+    async def test_response_size_limit_allows_body_at_exact_limit(self):
+        source = _ChunkedAsyncStream([b"1234", b"5678"])
+
+        async def handler(_request):
+            return httpx.Response(200, stream=source)
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            event_hooks={"response": [response_size_limit_hook(8)]},
+        ) as client:
+            response = await client.get("https://fake-model.test/v1/chat/completions")
+
+        assert response.content == b"12345678"
+
+    @pytest.mark.asyncio
+    async def test_large_error_body_surfaces_a_provider_error(self):
+        attempts = 0
+
+        async def handler(_request):
+            nonlocal attempts
+            attempts += 1
+            return httpx.Response(
+                500,
+                stream=_ChunkedAsyncStream([b'{"error":{"message":"', b"x" * 16]),
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            event_hooks={"response": [response_size_limit_hook(8)]},
+        ) as http_client:
+            client = AsyncOpenAI(
+                api_key="fake",
+                base_url="https://fake-model.test/v1",
+                http_client=http_client,
+                max_retries=0,
+            )
+            try:
+                with pytest.raises(LLMResponseTooLargeError, match="exceeded"):
+                    await create_chat_completion_with_fallbacks(
+                        client.chat.completions.create,
+                        {
+                            "model": "fake-model",
+                            "messages": [{"role": "user", "content": "test"}],
+                        },
+                        max_tokens=None,
+                        logger=Mock(),
+                        log_prefix="test",
+                    )
+            finally:
+                await client.close()
+
+        assert attempts == 1
+
+    @pytest.mark.asyncio
+    async def test_response_size_limit_rejects_compressed_body_before_reading(self):
+        source = _ChunkedAsyncStream([b"not read"])
+
+        async def handler(_request):
+            return httpx.Response(
+                200,
+                headers={"content-encoding": "gzip"},
+                stream=source,
+            )
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler),
+            event_hooks={"response": [response_size_limit_hook(8)]},
+        ) as client:
+            with pytest.raises(ResponseBodyUnsupportedEncodingError, match="identity"):
+                await client.get("https://fake-model.test/v1/chat/completions")
+
+        assert source.closed is True
     
     def test_get_models_with_catalog_success(self):
         """Test get_models() returns configured models."""
@@ -395,6 +515,7 @@ class TestOpenAIBaseProviderConfiguration:
             api_key="test-api-key",
             base_url="https://gateway.internal/v1",
             http_client=http_client,
+            max_retries=0,
         )
 
 
@@ -624,6 +745,54 @@ class TestOpenAIBaseProviderTemperature:
             "assistant": 1,
         }
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("model_id", "extra_body"),
+        [
+            ("kimi-k2.6", {"thinking": {"type": "enabled"}}),
+            ("kimi-k2.7-code", {"thinking": {"type": "enabled"}}),
+            ("kimi-k2.7-code-highspeed", {"thinking": {"type": "enabled"}}),
+            ("kimi-k3", {"reasoning_effort": "max"}),
+        ],
+    )
+    async def test_chat_logs_effective_extra_body_thinking_state(
+        self,
+        model_id,
+        extra_body,
+    ):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+        info = Mock()
+
+        from flocks.provider.provider import ChatMessage
+
+        with patch.object(openai_base_module, "log", Mock(info=info)):
+            await provider.chat(
+                model_id,
+                [ChatMessage(role="user", content="hello")],
+                extra_body=extra_body,
+            )
+
+        _event, payload = info.call_args.args
+        assert payload["thinking_enabled"] is True
+
+    @pytest.mark.asyncio
+    async def test_kimi_k3_uses_max_completion_tokens(self):
+        provider, create = self._build_provider_with_client()
+        create.return_value = self._mock_chat_response()
+
+        from flocks.provider.provider import ChatMessage
+
+        await provider.chat(
+            "kimi-k3",
+            [ChatMessage(role="user", content="hello")],
+            max_tokens=131072,
+        )
+
+        kwargs = create.await_args.kwargs
+        assert kwargs["max_completion_tokens"] == 131072
+        assert "max_tokens" not in kwargs
+
 
 class TestExtractReasoningContent:
     """Regression: some proxies send stream chunks with ``delta is None``."""
@@ -655,6 +824,108 @@ class TestExtractReasoningContent:
 async def _stream_from_chunks(*chunks):
     for chunk in chunks:
         yield chunk
+
+
+class TestOpenAIBaseProviderStreamingToolCalls:
+    @pytest.mark.asyncio
+    async def test_chat_stream_emits_name_only_marker_before_complete_tool_input(self):
+        provider = MockProviderWithoutCatalog()
+        create = AsyncMock()
+        provider._client = MagicMock()
+        provider._client.chat.completions.create = create
+
+        first_arguments = '{"filePath":"/tmp/report.md","content":"'
+        remaining_arguments = f'{"long content " * 500}"}}'
+        tool_start_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id="call_write",
+                                function=SimpleNamespace(
+                                    name="write",
+                                    arguments=first_arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        tool_arguments_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(
+                        content=None,
+                        tool_calls=[
+                            SimpleNamespace(
+                                index=0,
+                                id=None,
+                                function=SimpleNamespace(
+                                    name=None,
+                                    arguments=remaining_arguments,
+                                ),
+                            )
+                        ],
+                    ),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content=None, tool_calls=None),
+                    finish_reason="tool_calls",
+                )
+            ],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(
+            tool_start_chunk,
+            tool_arguments_chunk,
+            finish_chunk,
+        )
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "kimi-k2.7-code",
+                [ChatMessage(role="user", content="write a long file")],
+                tools=[{"type": "function", "function": {"name": "write"}}],
+            )
+        ]
+
+        assert len(chunks) == 2
+        assert chunks[0].finish_reason is None
+        assert chunks[0].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {"name": "write", "arguments": ""},
+            }
+        ]
+        assert chunks[1].finish_reason == "tool_calls"
+        assert chunks[1].tool_calls == [
+            {
+                "index": 0,
+                "id": "call_write",
+                "type": "function",
+                "function": {
+                    "name": "write",
+                    "arguments": first_arguments + remaining_arguments,
+                },
+            }
+        ]
 
 
 class TestOpenAIBaseProviderStreamingUsage:
@@ -714,6 +985,53 @@ class TestOpenAIBaseProviderStreamingUsage:
             "prompt_tokens": 11,
             "completion_tokens": 7,
             "total_tokens": 18,
+        }
+
+    @pytest.mark.asyncio
+    async def test_chat_stream_preserves_nested_reasoning_tokens(self):
+        provider, create = self._build_provider_with_stream()
+
+        content_chunk = SimpleNamespace(
+            choices=[
+                SimpleNamespace(
+                    delta=SimpleNamespace(content="hello", tool_calls=None),
+                    finish_reason=None,
+                )
+            ],
+            usage=None,
+        )
+        usage_chunk = SimpleNamespace(
+            choices=[],
+            usage=SimpleNamespace(
+                prompt_tokens=11,
+                completion_tokens=7,
+                total_tokens=18,
+                completion_tokens_details=SimpleNamespace(reasoning_tokens=5),
+            ),
+        )
+        finish_chunk = SimpleNamespace(
+            choices=[SimpleNamespace(delta=None, finish_reason="stop")],
+            usage=None,
+        )
+        create.return_value = _stream_from_chunks(
+            content_chunk, usage_chunk, finish_chunk
+        )
+
+        from flocks.provider.provider import ChatMessage
+
+        chunks = [
+            chunk
+            async for chunk in provider.chat_stream(
+                "gpt-5.6-luna",
+                [ChatMessage(role="user", content="hello")],
+            )
+        ]
+
+        assert chunks[-1].usage == {
+            "prompt_tokens": 11,
+            "completion_tokens": 2,
+            "total_tokens": 18,
+            "reasoning_tokens": 5,
         }
 
     @pytest.mark.asyncio

@@ -7,6 +7,7 @@ from contextlib import asynccontextmanager
 import os
 import shutil
 import sqlite3
+import threading
 import pytest
 from pathlib import Path
 import tempfile
@@ -15,6 +16,7 @@ from unittest.mock import AsyncMock, patch
 from pydantic import BaseModel
 
 from flocks.project.instance import Instance
+from flocks.storage import session_search as session_search_module
 from flocks.storage.storage import Storage
 from flocks.task.store import TaskStore
 from flocks.workflow.store import WorkflowStore
@@ -25,6 +27,58 @@ class StorageTestModel(BaseModel):
     id: str
     name: str
     value: int
+
+
+@pytest.mark.asyncio
+async def test_storage_init_continues_when_session_fts_is_unavailable(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        session_search_module,
+        "ensure_session_search_tables",
+        AsyncMock(return_value=False),
+    )
+
+    with patch.object(Storage, "_initialized", False), patch.object(
+        Storage,
+        "_db_path",
+        None,
+    ), patch.object(Storage, "_session_search_available", True):
+        await Storage.init(tmp_path / "fts-unavailable.db")
+
+        assert Storage._initialized
+        assert not Storage.session_search_available()
+
+
+@pytest.mark.asyncio
+async def test_storage_init_propagates_unexpected_session_schema_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    failure = RuntimeError("unexpected schema failure")
+    monkeypatch.setattr(
+        session_search_module,
+        "ensure_session_search_tables",
+        AsyncMock(side_effect=failure),
+    )
+
+    with patch.object(Storage, "_initialized", False), patch.object(
+        Storage,
+        "_db_path",
+        None,
+    ), patch.object(Storage, "_session_search_available", True):
+        with pytest.raises(RuntimeError, match="unexpected schema failure"):
+            await Storage.init(tmp_path / "broken-session-schema.db")
+
+
+def _require_sqlite_recover() -> None:
+    sqlite_bin = shutil.which("sqlite3")
+    if sqlite_bin is None:
+        pytest.skip("sqlite3 CLI is not available")
+    supported, reason = Storage._sqlite_recover_capability_sync(sqlite_bin)
+    if not supported:
+        pytest.skip(f"sqlite3 .recover is unavailable: {reason}")
 
 
 @pytest.fixture
@@ -58,6 +112,85 @@ async def test_storage_with_model(storage):
     assert retrieved.id == "test_1"
     assert retrieved.name == "Test"
     assert retrieved.value == 42
+
+
+@pytest.mark.asyncio
+async def test_storage_set_many_commits_all_entries(storage):
+    """Multiple values should be persisted by one batch operation."""
+    await storage.set_many([
+        ("batch-set:key1", {"value": 1}, "test"),
+        ("batch-set:key2", StorageTestModel(id="m2", name="Beta", value=2), "test_model"),
+    ])
+
+    assert await storage.get("batch-set:key1") == {"value": 1}
+    model = await storage.get("batch-set:key2", StorageTestModel)
+    assert model == StorageTestModel(id="m2", name="Beta", value=2)
+
+
+@pytest.mark.asyncio
+async def test_storage_set_many_rolls_back_all_entries(storage, monkeypatch):
+    """A failed entry must not leave an earlier entry committed."""
+    original_connect = Storage.connect
+
+    @asynccontextmanager
+    async def failing_connect(db_path=None):
+        async with original_connect(db_path) as connection:
+            original_execute = connection.execute
+            calls = 0
+
+            async def fail_second_insert(sql, parameters=None):
+                nonlocal calls
+                if "INSERT OR REPLACE INTO storage" in sql:
+                    calls += 1
+                    if calls == 2:
+                        raise sqlite3.OperationalError("injected batch failure")
+                return await original_execute(sql, parameters)
+
+            monkeypatch.setattr(connection, "execute", fail_second_insert)
+            yield connection
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Storage, "connect", failing_connect)
+        with pytest.raises(sqlite3.OperationalError, match="injected batch failure"):
+            await storage.set_many([
+                ("rollback:key1", {"value": 1}, "test"),
+                ("rollback:key2", {"value": 2}, "test"),
+            ])
+
+    assert await storage.get("rollback:key1") is None
+    assert await storage.get("rollback:key2") is None
+
+
+@pytest.mark.asyncio
+async def test_storage_mutate_many_rolls_back_sets_and_deletes(storage, monkeypatch):
+    """A failed mixed mutation must preserve every pre-transaction value."""
+    await storage.set("mixed:replace", {"value": "before"}, "test")
+    await storage.set("mixed:delete", {"value": "keep"}, "test")
+    original_connect = Storage.connect
+
+    @asynccontextmanager
+    async def failing_connect(db_path=None):
+        async with original_connect(db_path) as connection:
+            original_execute = connection.execute
+
+            async def fail_delete(sql, parameters=None):
+                if "DELETE FROM storage" in sql:
+                    raise sqlite3.OperationalError("injected mixed mutation failure")
+                return await original_execute(sql, parameters)
+
+            monkeypatch.setattr(connection, "execute", fail_delete)
+            yield connection
+
+    with monkeypatch.context() as patcher:
+        patcher.setattr(Storage, "connect", failing_connect)
+        with pytest.raises(sqlite3.OperationalError, match="injected mixed mutation failure"):
+            await storage.mutate_many(
+                set_entries=[("mixed:replace", {"value": "after"}, "test")],
+                delete_keys=["mixed:delete"],
+            )
+
+    assert await storage.get("mixed:replace") == {"value": "before"}
+    assert await storage.get("mixed:delete") == {"value": "keep"}
 
 
 @pytest.mark.asyncio
@@ -252,17 +385,22 @@ async def test_storage_init_quarantines_invalid_header_and_boots(tmp_path):
     with patch.object(Storage, "_initialized", False), \
          patch.object(Storage, "_db_path", None):
         await Storage.init(db_path)
-
-    # Fresh DB is now usable
-    await Storage.set("hello", {"value": 1})
-    assert await Storage.get("hello") == {"value": 1}
+        # Fresh DB is now usable before the patched global state is restored.
+        await Storage.set("hello", {"value": 1})
+        assert await Storage.get("hello") == {"value": 1}
 
     siblings = sorted(p.name for p in tmp_path.iterdir())
     assert "flocks.db" in siblings
     corrupt_files = [name for name in siblings if ".corrupt." in name]
     assert any(name.startswith("flocks.db.corrupt.") for name in corrupt_files), siblings
-    assert any(name.startswith("flocks.db-wal.corrupt.") for name in corrupt_files), siblings
-    assert any(name.startswith("flocks.db-shm.corrupt.") for name in corrupt_files), siblings
+    quarantined_main = next(
+        tmp_path / name
+        for name in corrupt_files
+        if name.startswith("flocks.db.corrupt.")
+        and not name.endswith(("-wal", "-shm"))
+    )
+    assert quarantined_main.with_name(quarantined_main.name + "-wal").exists()
+    assert quarantined_main.with_name(quarantined_main.name + "-shm").exists()
 
 
 @pytest.mark.asyncio
@@ -291,32 +429,63 @@ async def test_storage_init_recovers_when_pragma_reports_corruption(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_storage_get_recovers_corrupt_db_after_init(tmp_path):
-    """A request-time storage read should quarantine corruption and retry once."""
+async def test_storage_get_defers_corruption_recovery_until_restart(tmp_path):
+    """A request-time read must not replace a DB while the server is running."""
     db_path = tmp_path / "flocks.db"
 
     with patch.object(Storage, "_initialized", False), \
-         patch.object(Storage, "_db_path", None):
+         patch.object(Storage, "_db_path", None), \
+         patch.object(
+             Storage,
+             "_quarantine_corrupt_db",
+             side_effect=AssertionError("request-time recovery must not quarantine the live DB"),
+         ):
         await Storage.init(db_path)
         await Storage.set("hello", {"value": "before"})
 
-        db_path.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
-        db_path.with_name("flocks.db-wal").write_bytes(b"fake wal payload")
-        db_path.with_name("flocks.db-shm").write_bytes(b"fake shm payload")
+        corrupt_payload = Storage._SQLITE_MAGIC + b"\xff" * 2048
+        db_path.write_bytes(corrupt_payload)
 
-        assert await Storage.get("hello") is None
-        await Storage.set("hello", {"value": "after"})
-        assert await Storage.get("hello") == {"value": "after"}
+        with pytest.raises(sqlite3.DatabaseError):
+            await Storage.get("hello")
+
+        assert db_path.read_bytes() == corrupt_payload
 
     siblings = sorted(p.name for p in tmp_path.iterdir())
     assert "flocks.db" in siblings
-    assert any(name.startswith("flocks.db.corrupt.") for name in siblings), siblings
+    assert not any(".corrupt." in name for name in siblings), siblings
+
+
+def test_try_sqlite_recover_rejects_partial_output_on_failure(tmp_path):
+    quarantined = tmp_path / "flocks.db.corrupt.test"
+    quarantined.write_bytes(b"quarantined")
+    target = tmp_path / "flocks.db"
+    partial_failure = SimpleNamespace(
+        returncode=1,
+        stdout="BEGIN;\n",
+        stderr="sql error: no such table: sqlite_dbpage",
+    )
+
+    with patch(
+        "flocks.storage.storage.shutil.which",
+        return_value="/usr/bin/sqlite3",
+    ), patch.object(
+        Storage,
+        "_sqlite_recover_capability_sync",
+        return_value=(True, ""),
+    ), patch(
+        "flocks.storage.storage.subprocess.run",
+        return_value=partial_failure,
+    ):
+        assert Storage._try_sqlite_recover_sync(quarantined, target) is None
+
+    assert target.exists() is False
+    assert target.with_name("flocks.db.recovered").exists() is False
 
 
 def test_try_sqlite_recover_installs_recovered_db(tmp_path):
     """The lightweight `.recover` path should install a readable recovered DB."""
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is not available")
+    _require_sqlite_recover()
 
     quarantined = tmp_path / "flocks.db.corrupt.test"
     target = tmp_path / "flocks.db"
@@ -337,6 +506,8 @@ def test_try_sqlite_recover_installs_recovered_db(tmp_path):
             "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
             ("hello", '{"value": "recovered"}', "json", "old", "old"),
         )
+        conn.execute("CREATE TABLE lost_and_found (value TEXT NOT NULL)")
+        conn.execute("INSERT INTO lost_and_found VALUES ('business-data')")
         conn.commit()
     finally:
         conn.close()
@@ -349,15 +520,281 @@ def test_try_sqlite_recover_installs_recovered_db(tmp_path):
             ("hello",),
         ).fetchone()[0] == '{"value": "recovered"}'
         assert recovered.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
+        assert recovered.execute("SELECT value FROM lost_and_found").fetchone() == (
+            "business-data",
+        )
     finally:
         recovered.close()
+
+
+def test_sqlite_recover_reads_wal_paired_with_quarantined_main(tmp_path):
+    """A committed WAL must stay paired with the renamed main DB during recovery."""
+    _require_sqlite_recover()
+
+    source = tmp_path / "source.db"
+    source_conn = sqlite3.connect(source)
+    try:
+        assert source_conn.execute("PRAGMA journal_mode=WAL").fetchone()[0] == "wal"
+        source_conn.execute("PRAGMA wal_autocheckpoint=0")
+        source_conn.execute(
+            """
+            CREATE TABLE storage (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                type TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
+        source_conn.execute(
+            "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
+            ("wal-key", '{"value": "committed"}', "json", "old", "old"),
+        )
+        source_conn.commit()
+
+        db_path = tmp_path / "flocks.db"
+        shutil.copy2(source, db_path)
+        shutil.copy2(source.with_name("source.db-wal"), db_path.with_name("flocks.db-wal"))
+
+        quarantined = Storage._quarantine_corrupt_db(db_path)
+        assert quarantined is not None
+        paired_wal = quarantined.with_name(quarantined.name + "-wal")
+        assert paired_wal.exists()
+        assert not db_path.with_name("flocks.db-wal").exists()
+        quarantined_bytes = quarantined.read_bytes()
+        wal_bytes = paired_wal.read_bytes()
+
+        assert Storage._try_sqlite_recover_sync(quarantined, db_path) == db_path
+        assert quarantined.read_bytes() == quarantined_bytes
+        assert paired_wal.read_bytes() == wal_bytes
+        recovered = sqlite3.connect(db_path)
+        try:
+            assert recovered.execute(
+                "SELECT value FROM storage WHERE key = ?",
+                ("wal-key",),
+            ).fetchone()[0] == '{"value": "committed"}'
+        finally:
+            recovered.close()
+    finally:
+        source_conn.close()
+
+
+def test_quarantine_rolls_back_main_when_wal_cannot_be_paired(tmp_path, monkeypatch):
+    """A WAL rename failure must abort instead of recovering an incomplete snapshot."""
+
+    db_path = tmp_path / "flocks.db"
+    wal_path = tmp_path / "flocks.db-wal"
+    main_payload = b"SQLite format 3\x00" + b"main"
+    wal_payload = b"committed transactions"
+    db_path.write_bytes(main_payload)
+    wal_path.write_bytes(wal_payload)
+
+    real_rename = Path.rename
+
+    def fail_wal_rename(path: Path, target: Path) -> Path:
+        if path == wal_path:
+            raise OSError("simulated WAL rename failure")
+        return real_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", fail_wal_rename)
+
+    assert Storage._quarantine_corrupt_db(db_path) is None
+    assert db_path.read_bytes() == main_payload
+    assert wal_path.read_bytes() == wal_payload
+    assert not list(tmp_path.glob("flocks.db.corrupt.*"))
+
+
+@pytest.mark.asyncio
+async def test_recover_corrupt_primary_refuses_online_replacement(tmp_path):
+    """No partial connection barrier may advertise unsafe online recovery."""
+    db_path = tmp_path / "flocks.db"
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None), \
+         patch.object(Storage, "_corruption_recovery_generation", 0), \
+         patch.object(
+             Storage,
+             "_quarantine_corrupt_db",
+             side_effect=AssertionError("online recovery must fail before quarantine"),
+         ):
+        try:
+            await Storage.init(db_path)
+            inode_before = db_path.stat().st_ino
+            async with Storage.connect(db_path) as held:
+                await held.execute("CREATE TABLE recovery_probe (id TEXT PRIMARY KEY)")
+                await held.execute("INSERT INTO recovery_probe VALUES ('before')")
+                await held.commit()
+
+                with pytest.raises(Storage.StorageError, match="while Flocks is running"):
+                    await Storage.recover_corrupt_db(
+                        db_path,
+                        action="test.explicit_recovery",
+                        exc=sqlite3.DatabaseError("database disk image is malformed"),
+                    )
+
+                await held.execute("INSERT INTO recovery_probe VALUES ('after')")
+                await held.commit()
+
+            assert db_path.stat().st_ino == inode_before
+            with sqlite3.connect(db_path) as fresh:
+                rows = fresh.execute("SELECT id FROM recovery_probe ORDER BY id").fetchall()
+            assert rows == [("after",), ("before",)]
+        finally:
+            await Storage.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_live_database_path_disappearance_fails_closed(tmp_path):
+    """A moved live DB must not cause _ensure_init to create a second inode."""
+    from flocks.channel.inbound import session_binding
+
+    await session_binding.close_binding_db()
+    db_path = tmp_path / "flocks.db"
+    archived_path = tmp_path / "flocks.db.moved"
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None):
+        try:
+            await Storage.init(db_path)
+            held = await session_binding._get_db()
+            await held.execute("CREATE TABLE live_probe (value TEXT)")
+            await held.execute("INSERT INTO live_probe VALUES ('before')")
+            await held.commit()
+
+            db_path.rename(archived_path)
+            for suffix in ("-wal", "-shm"):
+                sidecar = db_path.with_name(db_path.name + suffix)
+                if sidecar.exists():
+                    sidecar.rename(archived_path.with_name(archived_path.name + suffix))
+
+            with pytest.raises(Storage.StorageError, match="active SQLite database disappeared"):
+                await Storage.set("must-not-create", {"value": 1})
+
+            assert not db_path.exists()
+            with pytest.raises(ValueError, match="no active connection"):
+                await held.execute("SELECT 1")
+        finally:
+            await session_binding.close_binding_db()
+            await Storage.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_live_database_inode_replacement_fails_closed(tmp_path):
+    """An atomic restore over the live path must not mix old and new DB handles."""
+    from flocks.channel.inbound import session_binding
+
+    await session_binding.close_binding_db()
+    db_path = tmp_path / "flocks.db"
+    archived_path = tmp_path / "flocks.db.before-restore"
+
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None), \
+         patch.object(Storage, "_db_identity", None):
+        try:
+            await Storage.init(db_path)
+            original_identity = Storage._db_identity
+            held = await session_binding._get_db()
+            await held.execute("CREATE TABLE live_probe (value TEXT)")
+            await held.execute("INSERT INTO live_probe VALUES ('old-inode')")
+            await held.commit()
+
+            db_path.rename(archived_path)
+            for suffix in ("-wal", "-shm"):
+                sidecar = db_path.with_name(db_path.name + suffix)
+                if sidecar.exists():
+                    sidecar.rename(archived_path.with_name(archived_path.name + suffix))
+            with sqlite3.connect(db_path) as replacement:
+                replacement.execute("CREATE TABLE restored_probe(value TEXT)")
+                replacement.execute("INSERT INTO restored_probe VALUES ('new-inode')")
+                replacement.commit()
+
+            assert Storage._file_identity(db_path) != original_identity
+            with pytest.raises(Storage.StorageError, match="different file identity"):
+                async with Storage.connect(db_path):
+                    pass
+            with pytest.raises(Storage.StorageError, match="different file identity"):
+                Storage.connect_sync(db_path)
+            with pytest.raises(Storage.StorageError, match="replaced on disk"):
+                await Storage.set("must-not-write", {"value": 1})
+            with pytest.raises(ValueError, match="no active connection"):
+                await held.execute("SELECT 1")
+
+            with sqlite3.connect(db_path) as replacement:
+                assert replacement.execute("SELECT value FROM restored_probe").fetchone() == (
+                    "new-inode",
+                )
+                assert not replacement.execute(
+                    "SELECT 1 FROM sqlite_schema WHERE name='storage'"
+                ).fetchone()
+        finally:
+            await session_binding.close_binding_db()
+            await Storage.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_recovery_waits_for_worker_to_finish():
+    """Cancellation must not release callers while a recovery thread still mutates files."""
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_worker() -> None:
+        started.set()
+        release.wait(timeout=5)
+
+    worker = asyncio.create_task(asyncio.to_thread(blocked_worker))
+    waiter = asyncio.create_task(Storage._wait_for_recovery_worker_on_cancel(worker))
+    assert await asyncio.to_thread(started.wait, 2)
+
+    waiter.cancel()
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert worker.done()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_startup_waits_for_recovery_thread(tmp_path, monkeypatch):
+    """The real Storage.init recovery branch must not leave a detached installer thread."""
+    db_path = tmp_path / "flocks.db"
+    db_path.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 4096)
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+
+    def blocked_recovery(_quarantined: Path, _target: Path) -> None:
+        started.set()
+        release.wait(timeout=5)
+        finished.set()
+
+    monkeypatch.setattr(Storage, "_try_sqlite_recover_sync", staticmethod(blocked_recovery))
+    with patch.object(Storage, "_initialized", False), \
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None), \
+         patch.object(Storage, "_db_identity", None):
+        init_task = asyncio.create_task(Storage.init(db_path))
+        assert await asyncio.to_thread(started.wait, 2)
+
+        init_task.cancel()
+        await asyncio.sleep(0)
+        assert not init_task.done()
+
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await init_task
+        assert finished.is_set()
 
 
 @pytest.mark.asyncio
 async def test_storage_init_recovers_real_malformed_sqlite_file(tmp_path):
     """Startup should recover a real DB that fails SQLite integrity checks."""
-    if shutil.which("sqlite3") is None:
-        pytest.skip("sqlite3 CLI is not available")
+    _require_sqlite_recover()
 
     db_path = tmp_path / "flocks.db"
     conn = sqlite3.connect(db_path)
@@ -412,42 +849,50 @@ async def test_storage_init_recovers_real_malformed_sqlite_file(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_storage_get_uses_recovered_db_before_empty_rebuild(tmp_path, monkeypatch):
-    """A recovered DB should be installed before retrying the failed read."""
+async def test_request_time_corruption_does_not_call_recover_corrupt_db(tmp_path):
+    """The generic request wrapper must surface corruption without replacing files."""
+
+    async def corrupt_operation():
+        raise sqlite3.DatabaseError("database disk image is malformed")
+
+    with patch.object(Storage, "recover_corrupt_db", new_callable=AsyncMock) as recover, \
+         patch.object(Storage._log, "error") as error_log:
+        with pytest.raises(sqlite3.DatabaseError, match="malformed"):
+            await Storage._run_with_corruption_recovery(
+                corrupt_operation,
+                db_path=tmp_path / "flocks.db",
+                action="test.request_read",
+            )
+
+    recover.assert_not_awaited()
+    assert error_log.call_args.args[0] == "storage.corruption.deferred_to_restart"
+
+
+@pytest.mark.asyncio
+async def test_request_time_corruption_is_recovered_only_after_restart(tmp_path):
+    """Close the fail-closed loop: no online swap, then startup recovery succeeds."""
     db_path = tmp_path / "flocks.db"
 
-    def fake_recover(quarantined_path: Path, target_path: Path):
-        assert quarantined_path.name.startswith("flocks.db.corrupt.")
-        conn = sqlite3.connect(target_path)
-        try:
-            conn.execute(
-                """
-                CREATE TABLE storage (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    type TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-                """
-            )
-            conn.execute(
-                "INSERT INTO storage (key, value, type, created_at, updated_at) VALUES (?, ?, ?, ?, ?)",
-                ("hello", '{"value": "recovered"}', "json", "old", "old"),
-            )
-            conn.commit()
-        finally:
-            conn.close()
-        return target_path
-
-    monkeypatch.setattr(Storage, "_try_sqlite_recover_sync", staticmethod(fake_recover))
-
     with patch.object(Storage, "_initialized", False), \
-         patch.object(Storage, "_db_path", None):
+         patch.object(Storage, "_db_path", None), \
+         patch.object(Storage, "_init_pid", None):
         await Storage.init(db_path)
-        db_path.write_bytes(Storage._SQLITE_MAGIC + b"\xff" * 2048)
+        await Storage.set("before", {"value": 1})
 
-        assert await Storage.get("hello") == {"value": "recovered"}
+        corrupt_payload = Storage._SQLITE_MAGIC + b"\xff" * 4096
+        db_path.write_bytes(corrupt_payload)
+        with pytest.raises(sqlite3.DatabaseError):
+            await Storage.get("before")
+        assert db_path.read_bytes() == corrupt_payload
+        assert not list(tmp_path.glob("flocks.db.corrupt.*"))
+
+        await Storage.shutdown()
+        await Storage.init(db_path)
+        await Storage.set("after", {"value": 2})
+        assert await Storage.get("after") == {"value": 2}
+        await Storage.shutdown()
+
+    assert list(tmp_path.glob("flocks.db.corrupt.*"))
 
 
 @pytest.mark.asyncio

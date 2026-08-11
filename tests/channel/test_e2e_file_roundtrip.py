@@ -47,7 +47,6 @@ from flocks.channel.base import (
 from flocks.channel.inbound.dispatcher import (
     InboundDispatcher,
     _download_channel_media,
-    _is_placeholder_text,
 )
 
 
@@ -342,8 +341,8 @@ class TestTelegramRoundTrip:
         # _download_file to use the server directly.
         async def fake_get_file_path(*, bot_token, api_base, file_id, timeout):
             return server.file_id_to_path[file_id], file_id
-        async def fake_download(*, bot_token, file_path, max_bytes, timeout):
-            return server.get(f"https://api.telegram.org/file/bot{bot_token}/{file_path}")._body
+        async def fake_download(*, download_base, file_path, max_bytes, timeout):
+            return server.get(f"{download_base.rstrip('/')}/{file_path}")._body
         monkeypatch.setattr(inbound_media, "_get_file_path", fake_get_file_path)
         monkeypatch.setattr(inbound_media, "_download_file", fake_download)
 

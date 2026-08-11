@@ -1,0 +1,106 @@
+name: tdp_threat_alert_host
+description: >
+  查询 TDP 告警主机相关数据。`alert_host_list` 返回告警主机列表；`host_threat_list`
+  返回指定告警主机的威胁列表，通常需要先从 `alert_host_list` 结果里取得 `assets_machine`。优先使用顶层语义化参数，不要手写
+  `condition` / `page`，只有在需要透传尚未覆盖的底层字段时才使用这两个高级兼容参数。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: tdp_api
+
+inputSchema:
+  type: object
+  properties:
+    action:
+      type: string
+      description: >
+        `alert_host_list` 查询告警主机列表，可按严重级别、威胁性质、威胁类型、业务组和关键词筛选；
+        `host_threat_list` 查询指定 `asset_machine` 的威胁列表，级联场景可额外传 `device_id`。
+      enum: [alert_host_list, host_threat_list]
+      default: alert_host_list
+    time_from:
+      type: integer
+      description: 开始时间戳，Unix 秒级时间戳，会写入 `condition.time_from`。可以使用python datetime动态计算。
+    time_to:
+      type: integer
+      description: 结束时间戳，Unix 秒级时间戳，会写入 `condition.time_to`。可以使用python datetime动态计算。
+    asset_machine:
+      type: string
+      description: 资产机器标识，`host_threat_list` 必填；应从 `alert_host_list` 结果中的主机标识字段获取。
+    device_id:
+      type: string
+      description: 设备 ID，级联平台场景使用；非级联平台通常可省略。
+    severity:
+      type: array
+      items:
+        type: integer
+        enum: [0, 1, 2, 3, 4]
+      description: 告警严重级别列表；0=信息，1=低，2=中，3=高，4=严重。
+    threat_characters:
+      type: array
+      items:
+        type: string
+        enum: [is_compromised, is_connected, is_apt, is_lateral, is_in_success, is_attack_out, is_webshell, is_ransom]
+      description: 威胁性质列表，例如 `is_compromised`(已失陷)、`is_lateral`(内网渗透)、`is_webshell`(Webshell)。
+    direction:
+      type: array
+      items:
+        type: string
+        enum: [in, out, lateral]
+      description: 告警方向列表；`in`=外部攻击，`out`=失陷破坏，`lateral`=内网渗透。
+    threat_type:
+      type: array
+      items:
+        type: string
+      description: 威胁类型列表。`alert_host_list` 默认已覆盖全部常见威胁类型；仅在需要缩小范围时传入。
+    disposal_status:
+      type: array
+      items:
+        oneOf:
+          - type: integer
+          - type: string
+      description: 处置状态列表；支持 `1`、`3`、`3-1`、`3-2`、`3-3`。
+    asset_section:
+      type: array
+      items:
+        type: string
+      description: 主机类型列表，适用于 `alert_host_list`，常见值对应服务器或终端视角。
+    assets_group:
+      type: array
+      items:
+        type: integer
+      description: 业务组 ID 列表，适用于 `alert_host_list`。
+    host_type:
+      type: array
+      items:
+        type: string
+      description: 资产类型列表，适用于 `alert_host_list`。
+    keyword:
+      type: string
+      description: >
+        关键词搜索，适用于 `alert_host_list` 和 `host_threat_list`。handler 会自动组装固定的
+        `condition.fuzzy.fieldlist=["threat.name","external_ip","machine","assets.name","data","machine_name"]`。
+    cur_page:
+      type: integer
+      description: 页码，默认 1。
+    page_size:
+      type: integer
+      description: 每页条数，默认 20。
+    sort_by:
+      type: string
+      description: 排序字段。`alert_host_list` 默认按 `severity`，`host_threat_list` 默认按 `max_severity`。
+    sort_order:
+      type: string
+      enum: [asc, desc]
+      description: 排序方向，默认 `desc`。
+    condition:
+      type: object
+      description: 高级兼容参数。仅在顶层显式参数未覆盖某个底层 `condition.*` 字段时使用。
+    page:
+      type: object
+      description: 高级兼容分页参数。仅在需要传复杂 `page.sort` 时使用。
+  required: []
+handler:
+  type: script
+  script_file: tdp.handler.py
+  function: threat_host_list

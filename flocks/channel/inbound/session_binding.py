@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import time
 from dataclasses import dataclass
 from typing import Literal, Optional
@@ -28,6 +29,14 @@ from flocks.utils.id import Identifier
 from flocks.utils.log import Log
 
 log = Log.create(service="channel.binding")
+
+_CHANNEL_TITLE_PLACEHOLDER_RE = re.compile(
+    r"^\[(?:图片消息|文件消息|图片|文件|音频|语音消息|视频|圆形视频|"
+    r"贴纸(?: [^\]]*)?|动图|位置|联系人|Image|Attachment)"
+    r"(?::[^\]]*)?\](?:(?:\s*:\s*|\s+)(.*))?$",
+    re.IGNORECASE,
+)
+_CHANNEL_TITLE_MAX_LENGTH = 50
 
 # Supported group session scope values (mirrors FeishuGroupConfig.group_session_scope)
 GroupSessionScope = Literal["group", "group_sender", "group_topic", "group_topic_sender"]
@@ -86,8 +95,7 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
     ``Session.create`` cannot infer the owner from ``current_auth_user``.
     When an existing channel session is being replaced, preserve its owner.
     Otherwise, attach new channel sessions to the local admin if one exists.
-    Installs without local accounts remain ownerless for backward-compatible
-    no-login operation.
+    Installs without local accounts use the explicit system identity.
     """
     owner_user_id = getattr(source_session, "owner_user_id", None) if source_session else None
     owner_username = getattr(source_session, "owner_username", None) if source_session else None
@@ -103,7 +111,12 @@ async def resolve_channel_session_owner_kwargs(source_session=None) -> dict[str,
         from flocks.auth.service import AuthService
 
         if not await AuthService.has_users():
-            return {}
+            from flocks.auth.context import API_TOKEN_SERVICE_USER_ID
+
+            return {
+                "owner_user_id": API_TOKEN_SERVICE_USER_ID,
+                "owner_username": API_TOKEN_SERVICE_USER_ID,
+            }
         users = await AuthService.list_users()
     except Exception as exc:
         log.warn("channel.owner.resolve_failed", {"error": str(exc)})
@@ -135,6 +148,9 @@ async def _get_db() -> aiosqlite.Connection:
     """
     global _db_conn, _db_ready, _db_owner_pid
 
+    from flocks.storage.storage import Storage
+
+    await Storage._ensure_init()
     current_pid = os.getpid()
     if (
         _db_conn is not None
@@ -169,7 +185,6 @@ async def _get_db() -> aiosqlite.Connection:
             _db_ready = False
             _db_owner_pid = None
 
-        from flocks.storage.storage import Storage
         db_path = Storage.get_db_path()
         db_path.parent.mkdir(parents=True, exist_ok=True)
 
@@ -230,17 +245,28 @@ async def _migrate_legacy_binding_agent_ids(db: aiosqlite.Connection) -> None:
         })
 
 
+async def _close_binding_db_locked(*, suppress_errors: bool) -> None:
+    """Invalidate and close ``_db_conn`` while ``_init_lock`` is held."""
+
+    global _db_conn, _db_ready, _db_owner_pid
+
+    conn = _db_conn
+    _db_conn = None
+    _db_ready = False
+    _db_owner_pid = None
+    if conn is not None:
+        try:
+            await conn.close()
+        except Exception:
+            if not suppress_errors:
+                raise
+
+
 async def close_binding_db() -> None:
     """Close the persistent connection (call during shutdown)."""
-    global _db_conn, _db_ready, _db_owner_pid
-    if _db_conn is not None:
-        try:
-            await _db_conn.close()
-        except Exception:
-            pass
-        _db_conn = None
-        _db_ready = False
-        _db_owner_pid = None
+
+    async with _init_lock:
+        await _close_binding_db_locked(suppress_errors=True)
 
 
 class SessionBindingService:
@@ -275,23 +301,30 @@ class SessionBindingService:
         existing = await self._find_binding(
             msg.channel_id, msg.account_id, chat_id, thread_id,
         )
+        replaced_session = None
         if existing:
-            # Verify the bound session still exists (user may have deleted it via WebUI)
+            # Archived sessions are immutable history, not live conversation
+            # targets. Replace stale or inactive bindings before the dispatcher
+            # persists the inbound message.
             from flocks.session.session import Session as _Session
-            still_alive = await _Session.get_by_id(existing.session_id)
-            if still_alive:
+            bound_session = await _Session.get_by_id_unfiltered(existing.session_id)
+            if bound_session and bound_session.status == "active":
                 await self._touch(existing.session_id)
                 return existing
-            # Session was deleted — remove stale binding and fall through to create a new one
+            replaced_session = bound_session
             log.info("channel.binding.stale", {
                 "channel": msg.channel_id,
                 "chat_id": chat_id,
                 "old_session_id": existing.session_id,
+                "status": getattr(bound_session, "status", "missing"),
             })
             await self.unbind(existing.session_id)
 
         session_id = await self._create_session(
-            msg, default_agent=default_agent, directory=directory,
+            msg,
+            default_agent=default_agent,
+            directory=directory,
+            source_session=replaced_session,
         )
         now = time.time()
         binding = SessionBinding(
@@ -351,8 +384,11 @@ class SessionBindingService:
             ValueError: if *session_id* does not exist.
         """
         from flocks.session.session import Session as _Session
-        if not await _Session.get_by_id(session_id):
+        session = await _Session.get_by_id_unfiltered(session_id)
+        if not session:
             raise ValueError(f"Session '{session_id}' not found")
+        if session.status != "active":
+            raise ValueError(f"Session '{session_id}' is not active")
 
         now = time.time()
         binding = SessionBinding(
@@ -428,13 +464,25 @@ class SessionBindingService:
     async def list_bindings(
         self,
         channel_id: Optional[str] = None,
+        session_ids: Optional[list[str]] = None,
     ) -> list[SessionBinding]:
         db = await _get_db()
         sql = "SELECT * FROM channel_bindings"
-        params: tuple = ()
+        conditions: list[str] = []
+        params: list[str] = []
         if channel_id:
-            sql += " WHERE channel_id = ?"
-            params = (channel_id,)
+            conditions.append("channel_id = ?")
+            params.append(channel_id)
+        if session_ids is not None:
+            unique_session_ids = list(dict.fromkeys(session_ids))
+            if not unique_session_ids:
+                return []
+            conditions.append(
+                f"session_id IN ({','.join('?' for _ in unique_session_ids)})"
+            )
+            params.extend(unique_session_ids)
+        if conditions:
+            sql += " WHERE " + " AND ".join(conditions)
         sql += " ORDER BY last_message_at DESC"
 
         cursor = await db.execute(sql, params)
@@ -543,6 +591,7 @@ class SessionBindingService:
         msg: InboundMessage,
         default_agent: Optional[str] = None,
         directory: Optional[str] = None,
+        source_session=None,
     ) -> str:
         """Create a new Flocks Session and return its ID.
 
@@ -555,7 +604,7 @@ class SessionBindingService:
         from flocks.session.session import Session
 
         title = _build_title(msg)
-        owner_kwargs = await resolve_channel_session_owner_kwargs()
+        owner_kwargs = await resolve_channel_session_owner_kwargs(source_session)
         session = await Session.create(
             project_id="channel",
             directory=_resolve_session_directory(directory),
@@ -618,12 +667,55 @@ def _mark_cwd_fallback_warned() -> None:
     _CWD_FALLBACK_WARNED = True
 
 
-def _build_title(msg: InboundMessage) -> str:
+def is_channel_media_placeholder(text: str) -> bool:
+    """Return whether text is only a channel-generated media placeholder."""
+    match = _CHANNEL_TITLE_PLACEHOLDER_RE.fullmatch(text.strip())
+    return bool(match and not (match.group(1) or "").strip())
+
+
+def extract_channel_title_text(raw_text: str) -> str:
+    """Extract the first user-authored title candidate from channel text."""
+    for line in raw_text.splitlines():
+        candidate = line.strip()
+        if not candidate or candidate.startswith("__merge_forward_expand__"):
+            continue
+        if candidate == "[Merged forward message]":
+            continue
+        placeholder = _CHANNEL_TITLE_PLACEHOLDER_RE.fullmatch(candidate)
+        if placeholder:
+            caption = (placeholder.group(1) or "").strip()
+            if caption:
+                return caption
+            continue
+        return candidate
+    return ""
+
+
+def format_channel_title(channel_id: str, title_text: str) -> str:
+    """Add the channel prefix and apply the session-title length limit."""
+    title_text = title_text.strip()
+    if len(title_text) > _CHANNEL_TITLE_MAX_LENGTH:
+        title_text = title_text[:_CHANNEL_TITLE_MAX_LENGTH - 3] + "..."
+    return f"[{channel_id.capitalize()}] {title_text}"
+
+
+def _build_title_fallback(msg: InboundMessage) -> str:
     prefix = msg.channel_id.capitalize()
     if msg.chat_type == ChatType.DIRECT:
         who = msg.sender_name or msg.sender_id
         return f"[{prefix}] DM — {who}"
     return f"[{prefix}] {msg.chat_id}"
+
+
+def _build_title(msg: InboundMessage, text_override: Optional[str] = None) -> str:
+    if text_override is None:
+        raw_text = msg.mention_text or msg.text or ""
+    else:
+        raw_text = text_override
+    title_text = extract_channel_title_text(raw_text)
+    if title_text:
+        return format_channel_title(msg.channel_id, title_text)
+    return _build_title_fallback(msg)
 
 
 def _resolve_session_key(

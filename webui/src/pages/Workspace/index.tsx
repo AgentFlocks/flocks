@@ -1,20 +1,17 @@
-import { useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback, useMemo, useRef, useReducer } from 'react';
 import {
   FolderOpen, Upload, Download, Trash2, Edit3, Save,
   X, ChevronRight, ChevronLeft, ChevronDown, ChevronUp, RefreshCw, FolderPlus,
   Brain, AlertTriangle, Search, ArrowLeft, Maximize2,
   Code2, Eye, ZoomIn, ZoomOut,
 } from 'lucide-react';
-import * as pdfjsLib from 'pdfjs-dist';
-import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.min.mjs?url';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
 import LoadingSpinner from '@/components/common/LoadingSpinner';
 import { useToast } from '@/components/common/Toast';
 import { useConfirm } from '@/components/common/ConfirmDialog';
-import { StreamingMarkdown } from '@/components/common/StreamingMarkdown';
 import {
-  workspaceAPI, WorkspaceNode, formatBytes, formatDate, fileIcon,
+  workspaceAPI, WorkspaceNode, WorkspaceProject, formatBytes, formatDate, fileIcon,
 } from '@/api/workspace';
 
 // ─── Types ────────────────────────────────────────────────────────────────
@@ -52,7 +49,8 @@ const IMAGE_MIN_SCALE = 0.5;
 const IMAGE_MAX_SCALE = 3;
 const IMAGE_SCALE_STEP = 0.25;
 
-pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+const LazyStreamingMarkdown = lazy(() => import('@/components/common/StreamingMarkdown')
+  .then((module) => ({ default: module.StreamingMarkdown })));
 
 function getViewportWidth(): number {
   return typeof window === 'undefined' ? PREVIEW_PANEL_MIN_WIDTH * 2 : window.innerWidth;
@@ -361,6 +359,7 @@ function PdfPreview({
 
   useEffect(() => {
     let cancelled = false;
+    let loadingTask: any = null;
     setPdfDoc(null);
     setPageNumber(1);
     setPageCount(0);
@@ -370,26 +369,40 @@ function PdfPreview({
     setLoading(true);
     setError(null);
 
-    const loadingTask = pdfjsLib.getDocument({ url: previewUrl, withCredentials: true });
-    loadingTask.promise
-      .then((doc) => {
+    async function loadPdf() {
+      try {
+        const [pdfjsLib, pdfWorkerModule] = await Promise.all([
+          import('pdfjs-dist'),
+          import('pdfjs-dist/build/pdf.worker.min.mjs?url'),
+        ]);
         if (cancelled) {
           return;
         }
+
+        pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerModule.default;
+        loadingTask = pdfjsLib.getDocument({ url: previewUrl, withCredentials: true });
+        const doc = await loadingTask.promise;
+        if (cancelled) {
+          doc?.destroy?.();
+          return;
+        }
+
         setPdfDoc(doc);
         setPageCount(doc.numPages);
         setPagesToRender(new Set(Array.from({ length: Math.min(doc.numPages, PDF_RENDER_WINDOW + 1) }, (_, index) => index + 1)));
         setLoading(false);
-      })
-      .catch((e: any) => {
+      } catch (e: any) {
         if (cancelled) return;
         setError(e?.message ?? 'PDF preview failed');
         setLoading(false);
-      });
+      }
+    }
+
+    loadPdf();
 
     return () => {
       cancelled = true;
-      loadingTask.destroy();
+      loadingTask?.destroy?.();
     };
   }, [previewUrl]);
 
@@ -764,7 +777,9 @@ function RenderedPreview({
   if (kind === 'markdown') {
     return (
       <div className="h-full overflow-auto bg-white p-5">
-        <StreamingMarkdown content={content} isStreaming={false} />
+        <Suspense fallback={<div className="flex h-32 items-center justify-center"><LoadingSpinner /></div>}>
+          <LazyStreamingMarkdown content={content} isStreaming={false} />
+        </Suspense>
       </div>
     );
   }
@@ -1554,10 +1569,153 @@ function FilesTab() {
 
 type MemoryLoadState = 'idle' | 'loading' | 'error';
 
+function countMemoryFiles(nodes: WorkspaceNode[]): number {
+  return nodes.reduce((count, node) => (
+    count + (node.type === 'file' ? 1 : countMemoryFiles(node.children ?? []))
+  ), 0);
+}
+
+function collectMemoryFiles(nodes: WorkspaceNode[]): WorkspaceNode[] {
+  return nodes.flatMap((node) => (
+    node.type === 'file' ? [node] : collectMemoryFiles(node.children ?? [])
+  ));
+}
+
+function memoryPathParts(path: string): string[] {
+  return path.replace(/\\/g, '/').split('/');
+}
+
+function buildMemoryView(
+  nodes: WorkspaceNode[],
+  visibleProjects: WorkspaceProject[],
+): WorkspaceNode[] {
+  const userMemory = nodes.find((node) => node.path === 'USER.md');
+  const globalMemory = nodes.find((node) => node.path === 'MEMORY.md');
+  const projects = nodes.find((node) => node.path === 'projects');
+  const daily = nodes.find((node) => node.path === 'daily');
+  const projectById = new Map(visibleProjects.map((project) => [project.id, project]));
+  const view: WorkspaceNode[] = [];
+
+  if (userMemory) view.push(userMemory);
+  if (globalMemory) view.push(globalMemory);
+  if (projects) {
+    const projectMemories = collectMemoryFiles(projects.children ?? []).flatMap((node) => {
+      const pathParts = memoryPathParts(node.path);
+      const project = pathParts.length === 3 ? projectById.get(pathParts[1]) : undefined;
+      if (!project || pathParts[2] !== 'MEMORY.md') return [];
+      return [{
+        ...node,
+        project_name: project.name?.trim()
+          || project.worktree.split(/[\\/]/).filter(Boolean).pop()
+          || project.id,
+        project_worktree: project.worktree,
+      }];
+    });
+    view.push(...projectMemories);
+  }
+  if (daily) view.push(daily);
+  return view;
+}
+
+function memoryNodeLabel(node: WorkspaceNode): string {
+  if (node.project_name) return `${node.project_name} / MEMORY.md`;
+  const pathParts = memoryPathParts(node.path);
+  if (pathParts.length === 3 && pathParts[0] === 'projects') {
+    return `${pathParts[1]}/${pathParts[2]}`;
+  }
+  return node.name;
+}
+
+function filterMemoryTree(nodes: WorkspaceNode[], query: string): WorkspaceNode[] {
+  if (!query) return nodes;
+
+  return nodes.flatMap((node) => {
+    const searchableText = [node.path, node.project_name, node.project_worktree]
+      .filter(Boolean)
+      .join(' ')
+      .toLowerCase();
+    if (searchableText.includes(query)) return [node];
+    if (node.type === 'file') return [];
+
+    const children = filterMemoryTree(node.children ?? [], query);
+    return children.length > 0 ? [{ ...node, children }] : [];
+  });
+}
+
+interface MemoryTreeNodeProps {
+  node: WorkspaceNode;
+  depth: number;
+  expandedPaths: Set<string>;
+  forceExpanded: boolean;
+  selectedPath?: string;
+  onToggle: (path: string) => void;
+  onSelect: (node: WorkspaceNode) => void;
+}
+
+function MemoryTreeNode({
+  node,
+  depth,
+  expandedPaths,
+  forceExpanded,
+  selectedPath,
+  onToggle,
+  onSelect,
+}: MemoryTreeNodeProps) {
+  const { t } = useTranslation('workspace');
+  const isDirectory = node.type === 'directory';
+  const isExpanded = forceExpanded || expandedPaths.has(node.path);
+
+  return (
+    <div>
+      <button
+        type="button"
+        aria-expanded={isDirectory ? isExpanded : undefined}
+        onClick={() => (isDirectory ? onToggle(node.path) : onSelect(node))}
+        className={`w-full flex items-center gap-2 py-2.5 pr-3 border-t border-gray-50 text-left transition-colors ${
+          selectedPath === node.path ? 'bg-purple-50 text-purple-700' : 'hover:bg-gray-50 text-gray-700'
+        }`}
+        style={{ paddingLeft: `${12 + depth * 16}px` }}
+      >
+        {isDirectory ? (
+          isExpanded
+            ? <ChevronDown className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
+            : <ChevronRight className="w-3.5 h-3.5 flex-shrink-0 text-gray-400" />
+        ) : (
+          <span className="w-3.5 flex-shrink-0" />
+        )}
+        <span className="text-sm flex-shrink-0">{fileIcon(node)}</span>
+        <div className="flex-1 min-w-0">
+          <div className="text-sm font-medium truncate">{memoryNodeLabel(node)}</div>
+          {isDirectory ? (
+            <div className="text-xs text-gray-400">
+              {t('memory.fileCount', { count: countMemoryFiles(node.children ?? []) })}
+            </div>
+          ) : (
+            <div className="text-xs text-gray-400">{formatDate(node.modified_at)} · {formatBytes(node.size ?? 0)}</div>
+          )}
+        </div>
+      </button>
+      {isDirectory && isExpanded && (node.children ?? []).map((child) => (
+        <MemoryTreeNode
+          key={child.path}
+          node={child}
+          depth={depth + 1}
+          expandedPaths={expandedPaths}
+          forceExpanded={forceExpanded}
+          selectedPath={selectedPath}
+          onToggle={onToggle}
+          onSelect={onSelect}
+        />
+      ))}
+    </div>
+  );
+}
+
 function MemoryTab() {
-  const { error: toastError } = useToast();
+  const { success: toastSuccess, error: toastError } = useToast();
   const { t } = useTranslation('workspace');
   const [files, setFiles] = useState<WorkspaceNode[]>([]);
+  const [visibleProjects, setVisibleProjects] = useState<WorkspaceProject[]>([]);
   const [loadState, setLoadState] = useState<MemoryLoadState>('loading');
   const [selected, setSelected] = useState<WorkspaceNode | null>(null);
 
@@ -1567,16 +1725,24 @@ function MemoryTab() {
   const [content, setContent] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [previewLimitBytes, setPreviewLimitBytes] = useState<number | null>(null);
+  const [editing, setEditing] = useState(false);
+  const [editContent, setEditContent] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
   const [previewModalOpen, setPreviewModalOpen] = useState(false);
 
   const [search, setSearch] = useState('');
+  const [expandedPaths, setExpandedPaths] = useState<Set<string>>(new Set());
   const latestMemoryRequestIdRef = useRef(0);
 
   const load = useCallback(async () => {
     setLoadState('loading');
     try {
-      const res = await workspaceAPI.listMemory();
-      setFiles(Array.isArray(res.data) ? res.data : []);
+      const [memoryResponse, projectResponse] = await Promise.all([
+        workspaceAPI.listMemory(),
+        workspaceAPI.listVisibleProjects(),
+      ]);
+      setFiles(Array.isArray(memoryResponse.data) ? memoryResponse.data : []);
+      setVisibleProjects(Array.isArray(projectResponse.data) ? projectResponse.data : []);
       setLoadState('idle');
     } catch (e: any) {
       setLoadState('error');
@@ -1594,6 +1760,8 @@ function MemoryTab() {
     setContent(null);
     setTruncated(false);
     setPreviewLimitBytes(null);
+    setEditing(false);
+    setEditContent(null);
 
     if (!node.is_text_file) {
       setContentState('ready');
@@ -1619,7 +1787,48 @@ function MemoryTab() {
     }
   };
 
-  const filtered = files.filter((f) => f.path.toLowerCase().includes(search.toLowerCase()));
+  const handleSave = async () => {
+    if (!selected || editContent === null || truncated) return;
+    setSaving(true);
+    try {
+      await workspaceAPI.writeMemoryFile(selected.path, editContent);
+      const savedContent = editContent;
+      setContent(savedContent);
+      setEditing(false);
+      setEditContent(null);
+      setSelected((current) => current ? {
+        ...current,
+        size: new TextEncoder().encode(savedContent).length,
+        modified_at: Date.now() / 1000,
+      } : current);
+      toastSuccess(t('files.toast.saveSuccess'));
+      await load();
+    } catch (e: any) {
+      toastError(t('files.toast.saveFailed'), e?.response?.data?.detail ?? e.message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const normalizedSearch = search.trim().toLowerCase();
+  const memoryView = useMemo(
+    () => buildMemoryView(files, visibleProjects),
+    [files, visibleProjects],
+  );
+  const filtered = useMemo(
+    () => filterMemoryTree(memoryView, normalizedSearch),
+    [memoryView, normalizedSearch],
+  );
+  const fileCount = useMemo(() => countMemoryFiles(memoryView), [memoryView]);
+
+  const handleToggle = useCallback((path: string) => {
+    setExpandedPaths((current) => {
+      const next = new Set(current);
+      if (next.has(path)) next.delete(path);
+      else next.add(path);
+      return next;
+    });
+  }, []);
 
   return (
     <div className="flex h-full gap-4">
@@ -1627,7 +1836,7 @@ function MemoryTab() {
         <div className="px-3 py-2.5 border-b border-gray-100 flex items-center gap-2">
           <Brain className="w-4 h-4 text-purple-500 flex-shrink-0" />
           <span className="text-sm font-medium text-gray-700">{t('memory.title')}</span>
-          <span className="ml-auto text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{files.length}</span>
+          <span className="ml-auto text-xs text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded-full">{fileCount}</span>
           <button onClick={load} title={t('memory.refresh')} className="text-gray-400 hover:text-gray-600">
             <RefreshCw className="w-3.5 h-3.5" />
           </button>
@@ -1657,30 +1866,24 @@ function MemoryTab() {
           ) : filtered.length === 0 ? (
             <div className="flex flex-col items-center justify-center h-24 text-gray-400 text-sm">
               <Brain className="w-6 h-6 mb-1 opacity-40" />
-              {files.length === 0 ? t('memory.noFiles') : t('memory.noMatch')}
+              {memoryView.length === 0 ? t('memory.noFiles') : t('memory.noMatch')}
             </div>
           ) : (
-            filtered.map((f) => (
-              <button
-                key={f.path}
-                onClick={() => handleSelect(f)}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 border-t border-gray-50 text-left transition-colors ${
-                  selected?.path === f.path ? 'bg-purple-50 text-purple-700' : 'hover:bg-gray-50 text-gray-700'
-                }`}
-              >
-                <span className="text-sm flex-shrink-0">{fileIcon(f)}</span>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm font-medium truncate">{f.name}</div>
-                  <div className="text-xs text-gray-400">{formatDate(f.modified_at)} · {formatBytes(f.size ?? 0)}</div>
-                </div>
-              </button>
+            filtered.map((node) => (
+              <MemoryTreeNode
+                key={node.path}
+                node={node}
+                depth={0}
+                expandedPaths={expandedPaths}
+                forceExpanded={Boolean(normalizedSearch)}
+                selectedPath={selected?.path}
+                onToggle={handleToggle}
+                onSelect={handleSelect}
+              />
             ))
           )}
         </div>
 
-        <div className="px-3 py-2 border-t border-gray-100 text-xs text-gray-400">
-          {t('memory.readOnly')}
-        </div>
       </div>
 
       <div className="flex-1 min-w-0 bg-white rounded-xl border border-gray-200 flex flex-col overflow-hidden">
@@ -1688,9 +1891,47 @@ function MemoryTab() {
           <>
             <div className="flex items-center gap-3 px-4 py-2.5 border-b border-gray-100 flex-shrink-0">
               <span className="text-sm flex-shrink-0">{fileIcon(selected)}</span>
-              <span className="flex-1 text-sm font-medium text-gray-800 truncate">{selected.name}</span>
+              <div className="flex-1 min-w-0">
+                <div className="text-sm font-medium text-gray-800 truncate">
+                  {memoryNodeLabel(selected)}
+                </div>
+                {selected.project_worktree && (
+                  <div className="text-xs text-gray-400 truncate" title={selected.project_worktree}>
+                    {selected.project_worktree}
+                  </div>
+                )}
+              </div>
               <span className="text-xs text-gray-400">{formatBytes(selected.size ?? 0)}</span>
               <span className="text-xs text-gray-400">{formatDate(selected.modified_at)}</span>
+              {selected.is_text_file && !editing && !truncated && contentState === 'ready' && (
+                <button
+                  onClick={() => {
+                    setEditContent(content ?? '');
+                    setEditing(true);
+                  }}
+                  title={t('files.edit')}
+                  className="p-1.5 text-gray-400 hover:text-slate-700 hover:bg-slate-100 rounded"
+                >
+                  <Edit3 className="w-4 h-4" />
+                </button>
+              )}
+              {editing && (
+                <>
+                  <button onClick={handleSave} disabled={saving} title={t('files.save')} className="p-1.5 text-green-600 hover:bg-green-50 rounded">
+                    <Save className="w-4 h-4" />
+                  </button>
+                  <button
+                    onClick={() => {
+                      setEditing(false);
+                      setEditContent(null);
+                    }}
+                    title={t('files.cancel')}
+                    className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </>
+              )}
               <a href={workspaceAPI.memoryDownloadUrl(selected.path)} download={selected.name} title={t('files.download')} className="p-1.5 text-gray-400 hover:text-gray-600 hover:bg-gray-100 rounded">
                 <Download className="w-4 h-4" />
               </a>
@@ -1713,12 +1954,12 @@ function MemoryTab() {
                 <FilePreviewRenderer
                   node={selected}
                   content={content}
-                  editing={false}
-                  editContent={null}
+                  editing={editing}
+                  editContent={editContent}
                   truncated={truncated}
                   previewLimitBytes={previewLimitBytes}
                   fileAccess={MEMORY_PREVIEW_FILE_ACCESS}
-                  onEditChange={() => undefined}
+                  onEditChange={setEditContent}
                 />
               )}
             </div>

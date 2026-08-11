@@ -158,6 +158,31 @@ def test_new_tab_can_attach_in_background() -> None:
     assert {"meta": "register_managed_tab", "target_id": "target-1", "url": "https://example.com"} in sent
 
 
+def test_new_tab_does_not_reuse_bootstrap_tab() -> None:
+    calls = []
+
+    def fake_cdp(method, **kwargs):
+        calls.append((method, kwargs))
+        if method == "Target.createTarget":
+            return {"targetId": "new-1"}
+        if method == "Target.attachToTarget":
+            return {"sessionId": "session-1"}
+        return {}
+
+    with (
+        patch(
+            "flocks.browser.helpers.managed_tabs",
+            return_value=[{"targetId": "bootstrap-1", "url": "about:blank", "bootstrap": True}],
+        ),
+        patch("flocks.browser.helpers.cdp", side_effect=fake_cdp),
+        patch("flocks.browser.helpers._send", return_value={"session_id": "session-1"}),
+    ):
+        assert helpers.new_tab("https://example.com", activate=True) == "new-1"
+
+    assert ("Target.createTarget", {"url": "about:blank"}) in calls
+    assert ("Target.activateTarget", {"targetId": "new-1"}) in calls
+
+
 def test_close_tab_rejects_unmanaged_tabs_by_default() -> None:
     with (
         patch("flocks.browser.helpers._send", return_value={"tabs": []}),

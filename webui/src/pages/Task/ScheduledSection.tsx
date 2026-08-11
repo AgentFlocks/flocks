@@ -48,7 +48,7 @@ export default function ScheduledSection({ onRefreshGlobal }: { onRefreshGlobal:
     }
   };
 
-  if (loading && tasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner /></div>;
+  if (loading && tasks.length === 0) return <div className="flex justify-center py-12"><LoadingSpinner delayMs={180} /></div>;
   if (error) return <div className="text-center py-12 text-red-500">{error}</div>;
 
   return (

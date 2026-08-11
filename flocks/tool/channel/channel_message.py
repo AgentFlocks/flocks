@@ -1,8 +1,9 @@
 """
-channel_message tool — sends a message to the IM channel bound to a given session.
+channel_message tool — sends a message to the messaging channel bound to a given session.
 
 Looks up the SessionBinding for the given session_id to automatically resolve
-the target channel (WeCom / Feishu / DingTalk) and chat_id, so the caller
+the target channel (WeCom / Weixin / Feishu / DingTalk / Telegram / WhatsApp / Email / Slack)
+and chat_id, so the caller
 does not need to specify them manually.
 
 The optional channel_type parameter selects a specific channel when a session
@@ -25,6 +26,10 @@ _CHANNEL_ALIASES: dict[str, list[str]] = {
     "weixin": ["weixin", "微信", "wechat", "wx"],
     "feishu": ["feishu", "飞书", "lark"],
     "dingtalk": ["dingtalk", "钉钉", "dingding", "dingtalk-connector"],
+    "telegram": ["telegram", "tg", "tele"],
+    "whatsapp": ["whatsapp", "wa"],
+    "email": ["email", "mail", "邮件", "imap", "smtp"],
+    "slack": ["slack", "sl"],
 }
 
 
@@ -130,8 +135,9 @@ async def _http_session_send(
 @ToolRegistry.register_function(
     name="channel_message",
     description=(
-        "Send a message to the IM channel bound to a session. "
-        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk. "
+        "Send a message to the messaging channel bound to a session. "
+        "Channel types: WeCom/企业微信=wecom, Weixin/微信=weixin, Feishu=feishu, DingTalk=dingtalk, "
+        "Telegram=telegram, WhatsApp=whatsapp, Email/邮件=email, Slack=slack. "
         "Resolves the target channel and chat automatically from session_id. "
         "Use channel_type to target a specific channel when the session has multiple bindings."
     ),
@@ -153,9 +159,25 @@ async def _http_session_send(
             name="channel_type",
             type=ParameterType.STRING,
             required=False,
-            enum=["wecom", "weixin", "feishu", "dingtalk", "企微", "企业微信", "微信", "飞书", "钉钉"],
+            enum=[
+                "wecom",
+                "weixin",
+                "feishu",
+                "dingtalk",
+                "telegram",
+                "whatsapp",
+                "email",
+                "slack",
+                "企微",
+                "企业微信",
+                "微信",
+                "飞书",
+                "钉钉",
+                "邮件",
+            ],
             description=(
-                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, or dingtalk=钉钉. "
+                "Target channel: wecom=企业微信, weixin=微信, feishu=飞书, dingtalk=钉钉, "
+                "telegram=Telegram, whatsapp=WhatsApp, email=邮件, or slack=Slack. "
                 "Chinese aliases are accepted. "
                 "If omitted and the session has only one binding, that channel is used automatically. "
                 "If omitted and the session has multiple bindings, the message is sent to all of them."

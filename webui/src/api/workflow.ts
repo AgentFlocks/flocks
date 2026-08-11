@@ -171,6 +171,61 @@ export interface WorkflowJSON {
   metadata?: WorkflowMetadata;
 }
 
+export type WorkflowCapabilityState =
+  | 'unconfigured'
+  | 'starting'
+  | 'running'
+  | 'stopped'
+  | 'error';
+
+export interface WorkflowCapabilityStatus {
+  configured: boolean;
+  state: WorkflowCapabilityState;
+  count?: number;
+}
+
+export interface WorkflowTriggerStatusSummary {
+  id: string;
+  type: WorkflowTriggerType;
+  name?: string;
+  state: WorkflowCapabilityState;
+  rawState?: string;
+}
+
+export interface WorkflowTriggerCapabilityStatus extends WorkflowCapabilityStatus {
+  items?: WorkflowTriggerStatusSummary[];
+}
+
+export interface WorkflowIntegrationStatus {
+  api: WorkflowCapabilityStatus;
+  trigger: WorkflowTriggerCapabilityStatus;
+}
+
+export interface WorkflowStats {
+  callCount: number;
+  successCount: number;
+  errorCount: number;
+  totalRuntime: number;
+  avgRuntime: number;
+  thumbsUp: number;
+  thumbsDown: number;
+}
+
+export interface WorkflowSummary {
+  id: string;
+  name: string;
+  nameI18n?: Record<string, string>;
+  description?: string;
+  category: string;
+  status: 'draft' | 'active' | 'archived';
+  source?: 'project' | 'global';
+  createdAt: number;
+  updatedAt: number;
+  nodeCount: number;
+  integrationStatus?: WorkflowIntegrationStatus | null;
+  stats: WorkflowStats;
+}
+
 export interface Workflow {
   id: string;
   name: string;
@@ -185,15 +240,8 @@ export interface Workflow {
   createdBy?: string;
   createdAt: number;
   updatedAt: number;
-  stats: {
-    callCount: number;
-    successCount: number;
-    errorCount: number;
-    totalRuntime: number;
-    avgRuntime: number;
-    thumbsUp: number;
-    thumbsDown: number;
-  };
+  integrationStatus?: WorkflowIntegrationStatus | null;
+  stats: WorkflowStats;
 }
 
 export interface WorkflowExecutionStep {
@@ -262,9 +310,23 @@ export interface WorkflowService {
   publishedAt: number;
   containerName?: string;
   driver?: 'local' | 'docker';
+  port?: number;
 }
 
 export type WorkflowServiceDriver = 'local' | 'docker';
+
+export function resolveWorkflowServicePort(
+  service?: Pick<WorkflowService, 'port' | 'serviceUrl'> | null,
+): number | undefined {
+  if (service?.port && service.port >= 1 && service.port <= 65535) return service.port;
+  if (!service?.serviceUrl) return undefined;
+  try {
+    const port = Number(new URL(service.serviceUrl).port);
+    return port >= 1 && port <= 65535 ? port : undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export interface WorkflowIntegrationConfig {
   version: number;
@@ -379,6 +441,9 @@ export interface WorkflowPollerStatus {
 export const workflowAPI = {
   list: (params?: { category?: string; status?: string; excludeId?: string }) =>
     client.get<Workflow[]>('/api/workflow', { params }),
+
+  listSummaries: (params?: { category?: string; status?: string; excludeId?: string }) =>
+    client.get<WorkflowSummary[]>('/api/workflow-summaries', { params }),
   
   get: (id: string) =>
     client.get<Workflow>(`/api/workflow/${id}`),
@@ -444,7 +509,7 @@ export const workflowAPI = {
   export: (id: string) =>
     client.get<WorkflowJSON>(`/api/workflow/${id}/export`),
 
-  publish: (id: string, data?: { driver?: WorkflowServiceDriver }) =>
+  publish: (id: string, data?: { driver?: WorkflowServiceDriver; port?: number }) =>
     client.post<WorkflowService>(`/api/workflow/${id}/publish`, data, { timeout: 600000 }),
 
   unpublish: (id: string) =>

@@ -4,11 +4,13 @@ AI Provider management
 Manages different AI model providers (Anthropic, OpenAI, Google, etc.)
 """
 
-from typing import Dict, List, Optional, Any, AsyncIterator, Union
-from pydantic import BaseModel, Field, PrivateAttr
 from enum import Enum
+import json
 import os
 import threading
+from typing import Any, AsyncIterator, Dict, List, Optional, Union
+
+from pydantic import BaseModel, Field, PrivateAttr
 
 from flocks.utils.log import Log
 from flocks.config.config import Config
@@ -47,10 +49,17 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
         (
             pricing.get("input") if isinstance(pricing, dict) else None,
             pricing.get("output") if isinstance(pricing, dict) else None,
+            pricing.get("cache_read") if isinstance(pricing, dict) else None,
+            pricing.get("cache_write") if isinstance(pricing, dict) else None,
             pricing.get("currency") if isinstance(pricing, dict) else None,
         )
         if pricing is not None
         else None
+    )
+    custom_settings = json.dumps(
+        getattr(model, "custom_settings", None) or {},
+        default=str,
+        sort_keys=True,
     )
     explicit = tuple(sorted(getattr(model, "_explicit_keys", set()) or set()))
     return (
@@ -59,6 +68,7 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
         getattr(model, "provider_id", None),
         cap_sig,
         pricing_sig,
+        custom_settings,
         explicit,
     )
 
@@ -124,6 +134,7 @@ class ModelInfo(BaseModel):
     provider_id: str = Field(..., description="Provider ID")
     capabilities: ModelCapabilities = Field(default_factory=ModelCapabilities)
     pricing: Optional[Dict[str, Any]] = Field(None, description="Pricing info")
+    custom_settings: Dict[str, Any] = Field(default_factory=dict)
     _explicit_keys: set = PrivateAttr(default_factory=set)
     """Field names explicitly present in flocks.json (not defaults)."""
 
@@ -737,66 +748,72 @@ class Provider:
             if not provider:
                 continue
 
+            # Provider credentials/options are optional. Model definitions and
+            # display names below still need to load when credentials are
+            # unresolved or supplied outside the main config.
             options = getattr(pconfig, "options", None)
-            if not options:
-                continue
-
+            options_data: Optional[Dict[str, Any]] = None
             if hasattr(options, "model_dump"):
-                options_data = options.model_dump(exclude_none=True, by_alias=False)
+                options_data = options.model_dump(
+                    exclude_none=True,
+                    by_alias=False,
+                )
             elif isinstance(options, dict):
-                options_data = {k: v for k, v in options.items() if v is not None}
-            else:
-                continue
+                options_data = {
+                    key: value
+                    for key, value in options.items()
+                    if value is not None
+                }
 
-            # Handle both Python-style (api_key, base_url) and JS-style (apiKey, baseURL)
-            api_key = (
-                options_data.pop("api_key", None)
-                or options_data.pop("apiKey", None)
-            )
-            base_url = (
-                options_data.pop("base_url", None)
-                or options_data.pop("baseURL", None)
-            )
+            if options_data is not None:
+                # Handle both Python-style (api_key, base_url) and JS-style
+                # (apiKey, baseURL).
+                api_key = (
+                    options_data.pop("api_key", None)
+                    or options_data.pop("apiKey", None)
+                )
+                base_url = (
+                    options_data.pop("base_url", None)
+                    or options_data.pop("baseURL", None)
+                )
 
-            # Treat empty strings as None (e.g. unresolved {secret:xxx})
-            if isinstance(api_key, str) and not api_key.strip():
-                api_key = None
-            if isinstance(base_url, str) and not base_url.strip():
-                base_url = None
+                # Treat empty strings as None (e.g. unresolved {secret:xxx}).
+                if isinstance(api_key, str) and not api_key.strip():
+                    api_key = None
+                if isinstance(base_url, str) and not base_url.strip():
+                    base_url = None
 
-            # Also filter out remaining options that resolved to empty strings
-            options_data = {
-                k: v for k, v in options_data.items()
-                if not (isinstance(v, str) and not v.strip())
-            }
+                # Also filter out remaining options that resolved to empty strings.
+                options_data = {
+                    key: value
+                    for key, value in options_data.items()
+                    if not (isinstance(value, str) and not value.strip())
+                }
 
-            if api_key is None and base_url is None and not options_data:
-                continue
-
-            # ----- Idempotent ProviderConfig update -------------------------------
-            # ``apply_config`` is called from many hot paths: every session
-            # step (``session.runner._step``), every workflow ``llm.ask``,
-            # the ``/session/*`` HTTP routes, plus startup. When session and
-            # workflow run concurrently on different event loops they would
-            # otherwise rewrite the same ``provider._config`` repeatedly and
-            # race on the ``_config_models`` rebuild. Skip mutation whenever
-            # the desired config already matches.
-            desired_cfg = ProviderConfig(
-                provider_id=pid,
-                api_key=api_key,
-                base_url=base_url,
-                custom_settings=options_data,
-            )
-            current_cfg = provider._config
-            current_unchanged = (
-                current_cfg is not None
-                and getattr(current_cfg, "api_key", None) == desired_cfg.api_key
-                and getattr(current_cfg, "base_url", None) == desired_cfg.base_url
-                and (getattr(current_cfg, "custom_settings", None) or {})
-                == (desired_cfg.custom_settings or {})
-            )
-            if not current_unchanged:
-                provider.configure(desired_cfg)
+                if api_key is not None or base_url is not None or options_data:
+                    # ----- Idempotent ProviderConfig update -------------------
+                    # ``apply_config`` is called from many hot paths: every
+                    # session step, every workflow ``llm.ask``, HTTP routes,
+                    # and startup. Skip mutation whenever the desired config
+                    # already matches.
+                    desired_cfg = ProviderConfig(
+                        provider_id=pid,
+                        api_key=api_key,
+                        base_url=base_url,
+                        custom_settings=options_data,
+                    )
+                    current_cfg = provider._config
+                    current_unchanged = (
+                        current_cfg is not None
+                        and getattr(current_cfg, "api_key", None)
+                        == desired_cfg.api_key
+                        and getattr(current_cfg, "base_url", None)
+                        == desired_cfg.base_url
+                        and (getattr(current_cfg, "custom_settings", None) or {})
+                        == (desired_cfg.custom_settings or {})
+                    )
+                    if not current_unchanged:
+                        provider.configure(desired_cfg)
 
             # Update provider display name from flocks.json only for providers
             # that support custom naming (openai-compatible instances and custom-* providers).
@@ -834,13 +851,20 @@ class Provider:
                             # Create ModelInfo from config
                             _input_price = model_dict.get("input_price")
                             _output_price = model_dict.get("output_price")
+                            _cache_read_price = model_dict.get("cache_read_price")
                             _pricing = None
-                            if _input_price is not None or _output_price is not None:
+                            if (
+                                _input_price is not None
+                                or _output_price is not None
+                                or _cache_read_price is not None
+                            ):
                                 _pricing = {
                                     "input": float(_input_price or 0.0),
                                     "output": float(_output_price or 0.0),
                                     "currency": model_dict.get("currency", "USD"),
                                 }
+                                if _cache_read_price is not None:
+                                    _pricing["cache_read"] = float(_cache_read_price)
                             model_info = ModelInfo(
                                 id=model_id,
                                 name=model_dict.get("name", model_id),
@@ -855,6 +879,16 @@ class Provider:
                                     context_window=model_dict.get("context_window"),
                                 ),
                                 pricing=_pricing,
+                                custom_settings={
+                                    key: model_dict[key]
+                                    for key in (
+                                        "stream_first_chunk_timeout_s",
+                                        "streamFirstChunkTimeoutSeconds",
+                                        "stream_ongoing_chunk_timeout_s",
+                                        "streamOngoingChunkTimeoutSeconds",
+                                    )
+                                    if key in model_dict
+                                },
                             )
                             model_info._explicit_keys = _explicit_keys
                             desired_models.append(model_info)
@@ -1036,7 +1070,10 @@ class BaseProvider:
     
     def configure(self, config: ProviderConfig) -> None:
         """Configure the provider"""
+        config_changed = self._config != config
         self._config = config
+        if config_changed and hasattr(self, "_client"):
+            self._client = None
         self.log.info("provider.configured", {
             "provider_id": self.id,
             "has_api_key": config.api_key is not None,
@@ -1205,6 +1242,8 @@ class BaseProvider:
             pricing = PriceConfig(
                 input=model.pricing.get("input", 0.0),
                 output=model.pricing.get("output", 0.0),
+                cache_read=model.pricing.get("cache_read"),
+                cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
             )
         max_output = model.capabilities.max_tokens or 4096
@@ -1297,6 +1336,8 @@ class BaseProvider:
             overridden.pricing = PriceConfig(
                 input=model.pricing.get("input", 0.0),
                 output=model.pricing.get("output", 0.0),
+                cache_read=model.pricing.get("cache_read"),
+                cache_write=model.pricing.get("cache_write"),
                 currency=model.pricing.get("currency", "USD"),
             )
 

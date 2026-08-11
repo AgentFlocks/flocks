@@ -69,6 +69,92 @@ class TestDispatchUserInput:
         assert not llm
 
     @pytest.mark.asyncio
+    async def test_webui_direct_response_is_excluded_from_model_context(
+        self,
+        monkeypatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        created_messages = AsyncMock()
+        context_usage_update = AsyncMock()
+        published_events = []
+
+        async def fake_persist(
+            _session_id,
+            write,
+            *,
+            expected_generation=None,
+        ):
+            del expected_generation
+            return await write()
+
+        async def fake_dispatch(event, sink):
+            await sink.publish_direct_response(
+                event,
+                "Available Tools\n" + ("x" * 16_000),
+            )
+
+        async def fake_publish(event_type, properties):
+            published_events.append((event_type, properties))
+
+        monkeypatch.setattr(
+            "flocks.input.dispatcher.dispatch_user_input",
+            fake_dispatch,
+        )
+        monkeypatch.setattr(
+            "flocks.session.message.Message.create",
+            created_messages,
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            fake_publish,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_persist_active_session_write",
+            fake_persist,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_publish_context_usage_update",
+            context_usage_update,
+        )
+        monkeypatch.setattr(
+            session_routes.Session,
+            "lifecycle_generation",
+            lambda _session_id: 0,
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_direct_context",
+            text="/tools",
+            display_text="/tools",
+        )
+
+        await session_routes._dispatch_sse_input(
+            "ses_direct_context",
+            SimpleNamespace(id="ses_direct_context"),
+            event,
+            "/tmp/project",
+        )
+
+        assert created_messages.await_count == 2
+        assert all(
+            call.kwargs["ignored"] is True
+            for call in created_messages.await_args_list
+        )
+        text_part_events = [
+            properties["part"]
+            for event_type, properties in published_events
+            if event_type == "message.part.updated"
+        ]
+        assert len(text_part_events) == 2
+        assert all(part["ignored"] is True for part in text_part_events)
+        context_usage_update.assert_awaited_once()
+        assert "provider_id" not in context_usage_update.await_args.kwargs
+        assert "model_id" not in context_usage_update.await_args.kwargs
+
+    @pytest.mark.asyncio
     async def test_clear_uses_history_callback_without_direct_response(self):
         direct = []
         llm = []
@@ -289,6 +375,63 @@ class TestDispatchUserInput:
 
 class TestSessionRoutesUseDispatcher:
     @pytest.mark.asyncio
+    async def test_goal_mode_publishes_active_goal_before_llm(self, monkeypatch):
+        from flocks.input.events import UserInputEvent
+        from flocks.server.routes import session as session_routes
+
+        order = []
+        goal_state = SimpleNamespace(
+            status="active",
+            objective="fix tests",
+            last_reason=None,
+        )
+
+        async def publish(event_type, _properties):
+            if event_type == "session.goal.updated":
+                order.append("goal")
+
+        async def process(*_args, **_kwargs):
+            order.append("llm")
+
+        monkeypatch.setattr(
+            "flocks.command.direct.GoalManager.set_goal",
+            AsyncMock(return_value=goal_state),
+        )
+        monkeypatch.setattr(
+            "flocks.command.direct.GoalManager.goal_prompt",
+            MagicMock(return_value="goal prompt"),
+        )
+        monkeypatch.setattr(
+            "flocks.session.goal.GoalManager.get",
+            AsyncMock(return_value=goal_state),
+        )
+        monkeypatch.setattr(
+            "flocks.server.routes.event.publish_event",
+            publish,
+        )
+        monkeypatch.setattr(
+            session_routes,
+            "_process_session_message",
+            process,
+        )
+
+        await session_routes._dispatch_sse_input(
+            "ses_goal_mode",
+            SimpleNamespace(id="ses_goal_mode"),
+            UserInputEvent(
+                source_type="webui",
+                sessionID="ses_goal_mode",
+                text="/goal fix tests",
+                parts=[{"type": "text", "text": "fix tests"}],
+                display_text="fix tests",
+                executionMode="goal",
+            ),
+            "/tmp/project",
+        )
+
+        assert order == ["goal", "llm"]
+
+    @pytest.mark.asyncio
     async def test_prompt_async_routes_through_dispatcher(self, monkeypatch):
         from flocks.server.routes import session as session_routes
 
@@ -357,13 +500,13 @@ class TestPromptQueueRoutes:
         from flocks.server.routes import session as session_routes
         from flocks.session.utils.file_extractor import read_file_part_bytes
 
-        class FakeWorkspace:
-            def resolve_workspace_path(self, rel_path: str):
-                return tmp_path / rel_path
-
         monkeypatch.setattr(
             "flocks.workspace.manager.WorkspaceManager.get_instance",
-            lambda: FakeWorkspace(),
+            lambda: (_ for _ in ()).throw(PermissionError("workspace access denied")),
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get_data_path",
+            staticmethod(lambda: tmp_path),
         )
         data_url = "data:image/png;base64," + base64.b64encode(b"png-bytes").decode()
 
@@ -377,8 +520,21 @@ class TestPromptQueueRoutes:
         assert url.startswith("file://")
         assert read_file_part_bytes(url) == b"png-bytes"
 
+    def test_session_upload_path_rejects_traversal(self, monkeypatch, tmp_path):
+        from flocks.server.routes import session as session_routes
+
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get_data_path",
+            staticmethod(lambda: tmp_path),
+        )
+
+        with pytest.raises(ValueError, match="Invalid session ID"):
+            session_routes._session_uploads_dir("../outside")
+
     @pytest.mark.asyncio
-    async def test_prompt_async_queues_when_session_running_without_creating_message(self, monkeypatch):
+    async def test_prompt_async_queues_when_session_running_without_creating_message(
+        self, monkeypatch, tmp_path
+    ):
         from flocks.server.routes import session as session_routes
         from flocks.session.interaction_queue import InteractionQueue
 
@@ -388,7 +544,13 @@ class TestPromptQueueRoutes:
         message_create = AsyncMock()
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
         )
         monkeypatch.setattr("flocks.session.session_loop.SessionLoop.is_running", lambda _sid: True)
         monkeypatch.setattr("flocks.session.message.Message.create", message_create)
@@ -406,7 +568,7 @@ class TestPromptQueueRoutes:
         message_create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_prompt_queue_rejects_when_full(self, monkeypatch):
+    async def test_prompt_queue_rejects_when_full(self, monkeypatch, tmp_path):
         from fastapi import HTTPException
 
         from flocks.server.routes import session as session_routes
@@ -416,7 +578,13 @@ class TestPromptQueueRoutes:
         await InteractionQueue.clear(session_id)
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
         )
         monkeypatch.setattr("flocks.session.session_loop.SessionLoop.is_running", lambda _sid: True)
         monkeypatch.setattr(session_routes, "_publish_prompt_queue", AsyncMock())
@@ -434,7 +602,7 @@ class TestPromptQueueRoutes:
         assert exc_info.value.status_code == 409
 
     @pytest.mark.asyncio
-    async def test_run_now_aborts_and_schedules_drain(self, monkeypatch):
+    async def test_run_now_aborts_and_schedules_drain(self, monkeypatch, tmp_path):
         from flocks.server.routes import session as session_routes
         from flocks.session.interaction_queue import InteractionQueue
 
@@ -450,7 +618,13 @@ class TestPromptQueueRoutes:
         drain_mock = AsyncMock()
         monkeypatch.setattr(
             "flocks.session.session.Session.get_by_id",
-            AsyncMock(return_value=SimpleNamespace(id=session_id, directory="/tmp/project")),
+            AsyncMock(
+                return_value=SimpleNamespace(
+                    id=session_id,
+                    directory=str(tmp_path),
+                    status="active",
+                )
+            ),
         )
         monkeypatch.setattr("flocks.session.session_loop.SessionLoop.is_running", lambda _sid: True)
         monkeypatch.setattr(session_routes, "abort_session", abort_mock)
@@ -463,7 +637,7 @@ class TestPromptQueueRoutes:
         assert resp["status"] == "accepted"
         abort_mock.assert_awaited_once_with(session_id)
         wait_mock.assert_awaited_once_with(session_id)
-        drain_mock.assert_awaited_once_with(session_id, "/tmp/project")
+        drain_mock.assert_awaited_once_with(session_id, str(tmp_path.resolve()))
 
     @pytest.mark.asyncio
     async def test_scheduled_drain_retries_until_session_idle(self, monkeypatch):

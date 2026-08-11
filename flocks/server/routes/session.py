@@ -8,13 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import time
+from dataclasses import dataclass
+from pathlib import Path
 from typing import List, Optional, Any, Dict, Literal, Union, Tuple
 from fastapi import APIRouter, HTTPException, status, Query, Request
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field, ConfigDict
 
-from flocks.auth.context import get_current_auth_user, set_current_auth_user, reset_current_auth_user
+from flocks.auth.context import AuthUser, get_current_auth_user, reset_current_auth_user, set_current_auth_user
+from flocks.channel.base import ChatType
 from flocks.server.routes._timing import log_route_timing
 from flocks.audit import emit_audit_event
 from flocks.license import assert_license_active
@@ -23,12 +27,24 @@ from flocks.session.context_usage import (
     build_context_usage_snapshot,
     token_usage_to_dict,
 )
-from flocks.session.session import Session, SessionInfo as SessionModel
+from flocks.session.background_tasks import (
+    has_pending_session_tasks,
+    pending_background_tasks,
+    track_background_task,
+)
+from flocks.session.session import (
+    Session,
+    SessionInactiveError,
+    SessionInfo as SessionModel,
+    SessionNotFoundError,
+    is_model_auto_session_category,
+)
 from flocks.session.policy import SessionPolicy
+from flocks.session.execution_mode import SessionExecutionMode
 from flocks.utils.log import Log
 from flocks.utils.json_repair import parse_json_robust, repair_truncated_json
 from flocks.utils.monitor import get_monitor
-from flocks.server.auth import require_user
+from flocks.server.auth import API_TOKEN_SERVICE_USER_ID, require_user
 
 router = APIRouter()
 log = Log.create(service="session-routes")
@@ -36,7 +52,11 @@ log = Log.create(service="session-routes")
 # Default agent name constant
 DEFAULT_AGENT = "rex"
 DEFAULT_MESSAGE_PAGE_LIMIT = 50
-_DESCENDANT_ABORT_SCAN_LIMIT = 3
+_CHANNEL_BINDING_QUERY_BATCH_SIZE = 500
+_CONTEXT_USAGE_CACHE_TTL_SECONDS = 5.0
+_context_usage_cache: Dict[Tuple[str, int], Tuple[float, ContextUsageSnapshot]] = {}
+_context_usage_inflight: Dict[Tuple[str, int], asyncio.Task[ContextUsageSnapshot]] = {}
+_context_usage_cache_lock = asyncio.Lock()
 
 # File extensions that are safe to persist when materialising data-URL uploads.
 # Intentionally narrow: any extension outside this set is rejected to prevent
@@ -44,6 +64,111 @@ _DESCENDANT_ABORT_SCAN_LIMIT = 3
 # extension (e.g. a PNG named report.pdf.exe whose tail would otherwise be
 # ".exe").
 _UPLOAD_SAFE_EXTS = frozenset({"png", "jpg", "jpeg", "gif", "webp", "bmp", "pdf"})
+_UPLOAD_EXT_BY_MIME = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/gif": ".gif",
+    "image/webp": ".webp",
+    "image/bmp": ".bmp",
+    "application/pdf": ".pdf",
+}
+
+
+def _session_uploads_dir(session_id: str) -> Path:
+    """Return the application-owned upload directory for one session."""
+    from flocks.session.files import session_uploads_dir
+
+    return session_uploads_dir(session_id)
+
+
+def _materialize_data_url_part(
+    session_id: str,
+    data_url: str,
+    mime_hint: str,
+    filename_hint: Optional[str],
+    *,
+    failure_event: str = "session.prompt_queue.materialize_failed",
+) -> str:
+    """Persist a data URL under the application data directory."""
+    try:
+        import base64
+        from flocks.utils.id import Identifier
+
+        _header, _sep, encoded = data_url.partition(",")
+        if not encoded:
+            return data_url
+        raw_bytes = base64.b64decode(encoded)
+        uploads_root = _session_uploads_dir(session_id)
+        uploads_root.mkdir(parents=True, exist_ok=True)
+
+        ext = _UPLOAD_EXT_BY_MIME.get(mime_hint, "")
+        if not ext and filename_hint:
+            _, _, tail = filename_hint.rpartition(".")
+            if tail.lower() in _UPLOAD_SAFE_EXTS:
+                ext = "." + tail.lower()
+        target = uploads_root / f"{Identifier.create('part')}{ext}"
+        target.write_bytes(raw_bytes)
+        return target.resolve().as_uri()
+    except Exception as exc:
+        log.warn(failure_event, {
+            "sessionID": session_id,
+            "error": str(exc),
+        })
+        return data_url
+
+
+def _context_usage_cache_key(session_id: str, session: SessionModel) -> Tuple[str, int]:
+    return session_id, int(getattr(session.time, "updated", 0) or 0)
+
+
+async def _build_context_usage_for_cache(
+    key: Tuple[str, int],
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    current_task = asyncio.current_task()
+    try:
+        snapshot = await build_context_usage_snapshot(session_id, session=session)
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is not current_task:
+                return snapshot
+            for cache_key in [item for item in _context_usage_cache if item[0] == session_id and item[1] < key[1]]:
+                _context_usage_cache.pop(cache_key, None)
+            has_newer_cache = any(item[0] == session_id and item[1] > key[1] for item in _context_usage_cache)
+            if not has_newer_cache:
+                _context_usage_cache[key] = (
+                    time.monotonic() + _CONTEXT_USAGE_CACHE_TTL_SECONDS,
+                    snapshot.model_copy(deep=True),
+                )
+        return snapshot
+    finally:
+        async with _context_usage_cache_lock:
+            if _context_usage_inflight.get(key) is current_task:
+                _context_usage_inflight.pop(key, None)
+
+
+async def _cached_context_usage_snapshot(
+    session_id: str,
+    *,
+    session: SessionModel,
+) -> ContextUsageSnapshot:
+    key = _context_usage_cache_key(session_id, session)
+    now = time.monotonic()
+
+    async with _context_usage_cache_lock:
+        cached = _context_usage_cache.get(key)
+        if cached and cached[0] > now:
+            return cached[1].model_copy(deep=True)
+
+        task = _context_usage_inflight.get(key)
+        if task is None:
+            task = asyncio.create_task(_build_context_usage_for_cache(key, session_id, session=session))
+            _context_usage_inflight[key] = task
+
+    snapshot = await asyncio.shield(task)
+    return snapshot.model_copy(deep=True)
 
 # =============================================================================
 # Request/Response Models - API Compatible (camelCase)
@@ -72,9 +197,14 @@ class SessionCreateRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
     
     parentID: Optional[str] = Field(None, alias="parent_id", description="Parent session ID")
+    projectID: Optional[str] = Field(None, alias="project_id", description="Project ID")
     title: Optional[str] = Field(None, description="Session title")
     permission: Optional[List[PermissionRule]] = Field(None, description="Permission rules")
     category: Optional[str] = Field(None, description="Session category (e.g. 'user', 'workflow')")
+    model_auto: bool = Field(
+        False,
+        description="Enable WebUI runtime model failover for this session",
+    )
 
 
 class FileDiff(BaseModel):
@@ -118,6 +248,7 @@ class SessionResponse(BaseModel):
     id: str = Field(..., description="Session ID")
     slug: str = Field("", description="Session slug")
     projectID: str = Field(..., description="Project ID")
+    effectiveProjectID: str = Field(..., description="Project used for session manager grouping")
     directory: str = Field(..., description="Working directory")
     parentID: Optional[str] = Field(None, description="Parent session ID")
     summary: Optional[Dict[str, Any]] = Field(None, description="Session summary with diffs")
@@ -127,9 +258,11 @@ class SessionResponse(BaseModel):
     permission: Optional[List[Dict[str, Any]]] = Field(None, description="Permission rules")
     revert: Optional[Dict[str, Any]] = Field(None, description="Revert state")
     category: str = Field("user", description="Session category: user or task")
+    status: str = Field("active", description="Session status: active or archived")
     provider: Optional[str] = Field(None, description="Pinned provider ID")
     model: Optional[str] = Field(None, description="Pinned model ID")
     model_pinned: bool = Field(False, description="Whether provider/model are pinned for this session")
+    model_auto: bool = Field(False, description="Whether WebUI Auto mode is selected")
     ownerUserID: Optional[str] = Field(None, description="Session owner user id")
     ownerUsername: Optional[str] = Field(None, description="Session owner username")
     canWrite: bool = Field(False, description="Whether current user can continue this session")
@@ -143,31 +276,60 @@ class SessionListItem(BaseModel):
     model_config = ConfigDict(populate_by_name=True, by_alias=True)
 
     id: str
+    projectID: str
+    projectName: Optional[str] = None
+    effectiveProjectID: str
+    directory: str
     title: str
     time: SessionTime
     category: str = "user"
+    channelID: Optional[str] = None
+    channelChatType: Optional[ChatType] = None
+    status: str = "active"
     parentID: Optional[str] = None
     provider: Optional[str] = None
     model: Optional[str] = None
     model_pinned: bool = False
+    model_auto: bool = False
+    ownerUserID: Optional[str] = None
+    ownerUsername: Optional[str] = None
     canWrite: bool = False
     canDelete: bool = False
     isShared: bool = False
 
 
-def _session_to_response(session: SessionModel) -> SessionResponse:
+@dataclass(frozen=True)
+class _ChannelSessionBinding:
+    channel_id: str
+    chat_id: str
+    chat_type: ChatType
+
+
+def _session_to_response(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """
     Convert SessionModel to SessionResponse
     """
     current_user = get_current_auth_user()
-    can_write = SessionPolicy.can_write(session, current_user)
+    can_write = session.status == "active" and SessionPolicy.can_write(session, current_user)
     can_delete = SessionPolicy.can_delete(session, current_user)
-    is_shared = SessionPolicy.is_shared(session)
+    is_shared = SessionPolicy.is_shared(session, shared_project_ids)
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
 
     return SessionResponse(
         id=session.id,
         slug=session.slug,
         projectID=session.project_id,
+        effectiveProjectID=effective_project_id,
         directory=session.directory,
         title=session.title,
         version=session.version,
@@ -182,9 +344,11 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
         revert=session.revert.model_dump(by_alias=True) if session.revert else None,
         permission=[p.model_dump() for p in session.permission] if session.permission else None,
         category=session.category,
+        status=session.status,
         provider=session.provider,
         model=session.model,
         model_pinned=session.model_pinned,
+        model_auto=session.model_auto,
         ownerUserID=session.owner_user_id,
         ownerUsername=session.owner_username,
         canWrite=can_write,
@@ -193,12 +357,30 @@ def _session_to_response(session: SessionModel) -> SessionResponse:
     )
 
 
-def _session_to_list_item(session: SessionModel) -> SessionListItem:
+def _session_to_list_item(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+    project_name: Optional[str] = None,
+    channel_binding: Optional[_ChannelSessionBinding] = None,
+    title_override: Optional[str] = None,
+) -> SessionListItem:
     """Convert a session to the lightweight manager-list response shape."""
     current_user = get_current_auth_user()
+    from flocks.project.project import Project
+
+    if effective_project_id is None:
+        effective_project_id = Project.effective_project_id(
+            current_user.id if current_user else API_TOKEN_SERVICE_USER_ID,
+            session.project_id,
+        )
     return SessionListItem(
         id=session.id,
-        title=session.title,
+        projectID=session.project_id,
+        projectName=project_name,
+        effectiveProjectID=effective_project_id,
+        directory=session.directory,
+        title=title_override if title_override is not None else session.title,
         time=SessionTime(
             created=session.time.created,
             updated=session.time.updated,
@@ -206,19 +388,142 @@ def _session_to_list_item(session: SessionModel) -> SessionListItem:
             archived=session.time.archived,
         ),
         category=session.category,
+        channelID=channel_binding.channel_id if channel_binding else None,
+        channelChatType=channel_binding.chat_type if channel_binding else None,
+        status=session.status,
         parentID=session.parent_id,
         provider=session.provider,
         model=session.model,
         model_pinned=session.model_pinned,
-        canWrite=SessionPolicy.can_write(session, current_user),
+        model_auto=session.model_auto,
+        ownerUserID=session.owner_user_id,
+        ownerUsername=session.owner_username,
+        canWrite=session.status == "active" and SessionPolicy.can_write(session, current_user),
         canDelete=SessionPolicy.can_delete(session, current_user),
-        isShared=SessionPolicy.is_shared(session),
+        isShared=SessionPolicy.is_shared(session, shared_project_ids),
     )
 
 
-async def _session_to_response_with_goal(session: SessionModel) -> SessionResponse:
+async def _latest_channel_bindings(
+    session_ids: List[str],
+) -> Dict[str, _ChannelSessionBinding]:
+    """Return the most recently active channel metadata for each session."""
+    if not session_ids:
+        return {}
+    try:
+        from flocks.channel.inbound.session_binding import SessionBindingService
+
+        service = SessionBindingService()
+        unique_session_ids = list(dict.fromkeys(session_ids))
+        channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+        for start in range(0, len(unique_session_ids), _CHANNEL_BINDING_QUERY_BATCH_SIZE):
+            batch = unique_session_ids[start:start + _CHANNEL_BINDING_QUERY_BATCH_SIZE]
+            for binding in await service.list_bindings(session_ids=batch):
+                if binding.session_id in channel_bindings:
+                    continue
+                try:
+                    chat_type = ChatType(binding.chat_type)
+                except (TypeError, ValueError):
+                    log.warn("session.list.unknown_channel_chat_type", {
+                        "session_id": binding.session_id,
+                        "chat_type": str(binding.chat_type),
+                    })
+                    continue
+                channel_bindings[binding.session_id] = _ChannelSessionBinding(
+                    channel_id=binding.channel_id,
+                    chat_id=binding.chat_id,
+                    chat_type=chat_type,
+                )
+        return channel_bindings
+    except Exception as exc:
+        log.warn("session.list.channel_bindings_error", {"error": str(exc)})
+        return {}
+
+
+def _has_legacy_channel_title(
+    session: SessionModel,
+    binding: _ChannelSessionBinding,
+) -> bool:
+    """Return whether a stored title matches a legacy channel fallback."""
+    prefix = f"[{binding.channel_id.capitalize()}]"
+    if binding.chat_type == ChatType.DIRECT:
+        direct_prefix = f"{prefix} DM — "
+        title = session.title.strip()
+        return (
+            title.casefold().startswith(direct_prefix.casefold())
+            and bool(title[len(direct_prefix):].strip())
+        )
+    else:
+        expected = f"{prefix} {binding.chat_id}"
+    return session.title.strip().casefold() == expected.casefold()
+
+
+async def _first_user_channel_title(session_id: str) -> Optional[str]:
+    """Read the first valid user-authored text stored for a channel session."""
+    from flocks.channel.inbound.session_binding import extract_channel_title_text
+    from flocks.session.message import Message
+
+    messages = await Message.list(session_id, include_archived=True)
+    for message in messages:
+        if message.role != "user":
+            continue
+        with_parts = await Message.get_with_parts_lazy(session_id, message.id)
+        if not with_parts:
+            continue
+        raw_text = "\n".join(
+            part.text
+            for part in with_parts.parts
+            if part.type == "text"
+            and not getattr(part, "synthetic", False)
+            and getattr(part, "text", "")
+        )
+        title_text = extract_channel_title_text(raw_text)
+        if title_text:
+            return title_text
+    return None
+
+
+async def _legacy_channel_title_overrides(
+    sessions: List[SessionModel],
+    channel_bindings: Dict[str, _ChannelSessionBinding],
+) -> Dict[str, str]:
+    """Derive display titles for legacy fallback names without mutating storage."""
+    from flocks.channel.inbound.session_binding import format_channel_title
+
+    candidates = []
+    for session in sessions:
+        binding = channel_bindings.get(session.id)
+        if binding and _has_legacy_channel_title(session, binding):
+            candidates.append(session)
+
+    async def resolve(session: SessionModel) -> tuple[str, Optional[str]]:
+        try:
+            title_text = await _first_user_channel_title(session.id)
+            binding = channel_bindings[session.id]
+            title = (
+                format_channel_title(binding.channel_id, title_text)
+                if title_text
+                else None
+            )
+            return session.id, title
+        except Exception as exc:
+            log.warn("session.list.channel_title_override_error", {
+                "session_id": session.id,
+                "error": str(exc),
+            })
+            return session.id, None
+
+    resolved = await asyncio.gather(*(resolve(session) for session in candidates))
+    return {session_id: title for session_id, title in resolved if title is not None}
+
+
+async def _session_to_response_with_goal(
+    session: SessionModel,
+    effective_project_id: Optional[str] = None,
+    shared_project_ids: Optional[set[str]] = None,
+) -> SessionResponse:
     """Convert SessionModel to SessionResponse and attach persisted goal state."""
-    response = _session_to_response(session)
+    response = _session_to_response(session, effective_project_id, shared_project_ids)
     try:
         from flocks.session.goal import GoalManager
 
@@ -244,6 +549,33 @@ def _require_session_read_access(session: SessionModel, user) -> None:
 def _require_session_write_access(session: SessionModel, user) -> None:
     if not SessionPolicy.can_write(session, user):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可写，受邀用户为只读")
+    if session.status != "active":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="已归档会话不可修改，请先恢复")
+
+
+async def _persist_active_session_write(
+    session_id: str,
+    operation,
+    *,
+    expected_generation: Optional[int] = None,
+):
+    """Linearize a durable route write with archive/delete transitions."""
+    try:
+        return await Session.run_active_write(
+            session_id,
+            operation,
+            expected_generation=expected_generation,
+        )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {session_id} not found",
+        ) from exc
+    except SessionInactiveError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="已归档会话不可修改，请先恢复",
+        ) from exc
 
 
 async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
@@ -299,11 +631,54 @@ def _share_metadata(session: SessionModel, *, shared: bool, actor_user_id: str) 
 
 async def _get_session_by_id_unfiltered(session_id: str) -> Optional[SessionModel]:
     """Fetch session by id while bypassing policy filtering."""
-    token = set_current_auth_user(None)
+    return await Session.get_by_id_unfiltered(session_id)
+
+
+async def _resolve_session_working_directory(session: SessionModel) -> str:
+    """Keep a valid historical cwd, otherwise use the request context."""
+
+    if session.directory:
+        directory = Path(session.directory).expanduser()
+        if directory.is_dir() and os.access(directory, os.R_OK | os.X_OK):
+            return str(directory.resolve())
+
+    from flocks.project.instance import Instance
+
+    fallback_directory = Instance.get_directory() or os.getcwd()
+    fallback_path = Path(fallback_directory).expanduser()
+    if not fallback_path.is_dir() or not os.access(fallback_path, os.R_OK | os.X_OK):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="The session directory and current request directory are unavailable",
+        )
+    fallback_directory = str(fallback_path.resolve())
+
+    log.warn(
+        "session.directory.fallback",
+        {
+            "sessionID": session.id,
+            "stored_directory": session.directory,
+            "fallback_directory": fallback_directory,
+        },
+    )
     try:
-        return await Session.get_by_id(session_id)
-    finally:
-        reset_current_auth_user(token)
+        from flocks.server.routes.event import publish_event
+
+        await publish_event(
+            "session.notice",
+            {
+                "sessionID": session.id,
+                "kind": "directory-fallback",
+                "storedDirectory": session.directory,
+                "fallbackDirectory": fallback_directory,
+            },
+        )
+    except Exception as exc:
+        log.debug(
+            "session.directory.fallback_notice_failed",
+            {"sessionID": session.id, "error": str(exc)},
+        )
+    return fallback_directory
 
 
 async def _publish_context_usage_update(
@@ -383,35 +758,75 @@ async def list_sessions(
     view: Optional[Literal["list"]] = Query(None, description="Use lightweight list rows"),
     manager: Optional[bool] = Query(None, description="Apply session-manager visibility filters"),
     directory: Optional[str] = Query(None, description="Filter by project directory"),
+    projectID: Optional[str] = Query(None, description="Filter by effective project ID"),
     roots: Optional[bool] = Query(None, description="Only return root sessions (no parentID)"),
     start: Optional[int] = Query(None, description="Filter sessions updated on or after this timestamp"),
     search: Optional[str] = Query(None, description="Filter by title (case-insensitive)"),
     limit: Optional[int] = Query(None, ge=1, description="Maximum sessions to return"),
     offset: Optional[int] = Query(None, ge=0, description="Number of filtered sessions to skip"),
     category: Optional[str] = Query(None, description="Filter by category: user or task"),
+    session_status: Literal["active", "archived", "all"] = Query(
+        "active",
+        alias="status",
+        description="Filter by session status",
+    ),
 ) -> List[Union[SessionResponse, SessionListItem]]:
     """List all sessions with optional filters"""
     started_at = time.perf_counter()
-    _current_user = require_user(request)
+    current_user = require_user(request)
+    from flocks.project.project import (
+        DEFAULT_PROJECT_ID,
+        Project,
+        TASK_SESSION_GROUP_ID,
+    )
     list_started_at = time.perf_counter()
-    all_sessions = await Session.list_all()
+    all_sessions = await Session.list_all_unfiltered()
+    if session_status == "archived":
+        all_sessions.sort(
+            key=lambda item: item.time.archived or item.time.updated,
+            reverse=True,
+        )
     list_elapsed_ms = (time.perf_counter() - list_started_at) * 1000
+    visible_project_ids = Project.visible_project_ids(current_user.id)
+    shared_project_ids = Project.shared_project_ids()
     
-    filtered = []
-    term = search.lower() if search else None
+    eligible = []
+    eligible_project_ids: Dict[str, str] = {}
+    term = search.casefold() if search else None
     manager_categories = {"user", "workflow", "entity-config"}
-    skip_remaining = offset or 0
-    
+    project_names = Project.registered_project_names() if view == "list" else {}
+
     for session in all_sessions:
+        if session.status == "archived":
+            if current_user.role != "admin" and not SessionPolicy.is_owner(session, current_user):
+                continue
+        elif not SessionPolicy.can_read(
+            session,
+            current_user,
+            shared_project_ids=shared_project_ids,
+        ):
+            continue
         if _is_hidden_from_session_manager(session):
             continue
+        if session_status != "all" and session.status != session_status:
+            continue
         if directory is not None and session.directory != directory:
+            continue
+        effective_project_id = (
+            session.project_id
+            if session.project_id in visible_project_ids
+            else TASK_SESSION_GROUP_ID
+        )
+        requested_group_id = (
+            TASK_SESSION_GROUP_ID
+            if projectID == DEFAULT_PROJECT_ID
+            else projectID
+        )
+        if requested_group_id is not None and effective_project_id != requested_group_id:
             continue
         if (roots or manager) and session.parent_id:
             continue
         if start is not None and session.time.updated < start:
-            continue
-        if term is not None and term not in session.title.lower():
             continue
         if manager:
             if session.category not in manager_categories:
@@ -423,17 +838,54 @@ async def list_sessions(
             # exclude test sessions from the default listing
             continue
 
+        eligible.append(session)
+        eligible_project_ids[session.id] = effective_project_id
+
+    channel_bindings: Dict[str, _ChannelSessionBinding] = {}
+    channel_title_overrides: Dict[str, str] = {}
+    if view == "list" and term is not None:
+        # Search the same derived title that the lightweight list displays.
+        channel_bindings = await _latest_channel_bindings([session.id for session in eligible])
+        channel_title_overrides = await _legacy_channel_title_overrides(
+            eligible,
+            channel_bindings,
+        )
+
+    filtered = []
+    effective_project_ids: Dict[str, str] = {}
+    skip_remaining = offset or 0
+    for session in eligible:
+        searchable_title = channel_title_overrides.get(session.id, session.title)
+        if term is not None and term not in searchable_title.casefold():
+            continue
         if skip_remaining > 0:
             skip_remaining -= 1
             continue
-        
+
         filtered.append(session)
-        
+        effective_project_ids[session.id] = eligible_project_ids[session.id]
+
         if limit is not None and len(filtered) >= limit:
             break
 
     if view == "list":
-        response = [_session_to_list_item(s) for s in filtered]
+        if term is None:
+            channel_bindings = await _latest_channel_bindings([session.id for session in filtered])
+            channel_title_overrides = await _legacy_channel_title_overrides(
+                filtered,
+                channel_bindings,
+            )
+        response = [
+            _session_to_list_item(
+                s,
+                effective_project_id=effective_project_ids[s.id],
+                shared_project_ids=shared_project_ids,
+                project_name=project_names.get(s.project_id),
+                channel_binding=channel_bindings.get(s.id),
+                title_override=channel_title_overrides.get(s.id),
+            )
+            for s in filtered
+        ]
         log_route_timing(log, "session.list.light.complete", started_at=started_at, extra={
             "total": len(all_sessions),
             "count": len(response),
@@ -443,11 +895,20 @@ async def list_sessions(
             "offset": offset,
             "search": bool(search),
             "category": category,
+            "status": session_status,
+            "projectID": projectID,
             "list_ms": round(list_elapsed_ms, 2),
         })
         return response
 
-    response = [await _session_to_response_with_goal(s) for s in filtered]
+    response = [
+        await _session_to_response_with_goal(
+            s,
+            effective_project_ids[s.id],
+            shared_project_ids,
+        )
+        for s in filtered
+    ]
     log_route_timing(log, "session.list.complete", started_at=started_at, extra={
         "count": len(response),
         "roots": roots,
@@ -456,6 +917,8 @@ async def list_sessions(
         "offset": offset,
         "search": bool(search),
         "category": category,
+        "status": session_status,
+        "projectID": projectID,
         "list_ms": round(list_elapsed_ms, 2),
     })
     return response
@@ -472,19 +935,85 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     """Create a new session"""
     current_user = require_user(http_request)
     await assert_license_active(feature="session_create")
-    import os
-    
     if request is None:
         request = SessionCreateRequest()
-    
-    # Use Instance context if available, otherwise use cwd
+    if request.model_auto:
+        category = request.category if request.category is not None else "user"
+        if not is_model_auto_session_category(category):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Auto mode is only available for user, entity "
+                    "configuration, and workflow sessions"
+                ),
+            )
+        if current_user.id == API_TOKEN_SERVICE_USER_ID:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Auto mode can only be enabled from the WebUI",
+            )
+        from flocks.session.session_loop import SessionLoop
+
+        auto_available, auto_reason = await SessionLoop.validate_auto_configuration()
+        if not auto_available:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Auto mode is unavailable: {auto_reason}",
+            )
+
     from flocks.project.instance import Instance
-    try:
-        directory = Instance.directory
-        project_id = Instance.project.id if hasattr(Instance, 'project') else "default"
-    except Exception:
-        directory = os.getcwd()
-        project_id = "default"
+    from flocks.project.project import (
+        DEFAULT_PROJECT_ID,
+        Project,
+        ProjectDeletionError,
+        TASK_SESSION_GROUP_ID,
+    )
+
+    directory = Instance.get_directory() or os.getcwd()
+    instance_project = Instance.get_project()
+    project_id = instance_project.id if instance_project else DEFAULT_PROJECT_ID
+    parent_session: Optional[SessionModel] = None
+
+    # "default" is accepted for compatibility with older WebUI clients, but
+    # ordinary sessions use the current request context rather than a virtual
+    # project's worktree.
+    if request.projectID and request.projectID not in {
+        DEFAULT_PROJECT_ID,
+        TASK_SESSION_GROUP_ID,
+    }:
+        project = await Project.get(request.projectID, owner_id=current_user.id)
+        if not project:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Project {request.projectID} not found",
+            )
+        if project.path_status != "available":
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project directory is {project.path_status}",
+            )
+        project_id = project.id
+        directory = project.worktree
+
+    if request.parentID:
+        parent_session = await _get_session_by_id_unfiltered(request.parentID)
+        if parent_session is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Parent session {request.parentID} not found",
+            )
+        _require_session_write_access(parent_session, current_user)
+        if request.projectID and request.projectID not in {
+            DEFAULT_PROJECT_ID,
+            TASK_SESSION_GROUP_ID,
+            parent_session.project_id,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Parent and child sessions must belong to the same project",
+            )
+        project_id = parent_session.project_id
+        directory = parent_session.directory
     
     # Trigger command:new hook if creating from parent (like /new command)
     if request.parentID:
@@ -527,16 +1056,36 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             )
             for p in request.permission
         ]
-    
-    session = await Session.create(
-        project_id=project_id,
-        directory=directory,
-        title=request.title,
-        parent_id=request.parentID,
-        permission=permission,
-        owner_user_id=current_user.id,
-        **({"category": request.category} if request.category else {}),
-    )
+
+    if request.projectID and request.projectID not in {
+        DEFAULT_PROJECT_ID,
+        TASK_SESSION_GROUP_ID,
+    }:
+        project = await Project.get(request.projectID, owner_id=current_user.id)
+        if project is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Project {request.projectID} is no longer available",
+            )
+    try:
+        session = await Session.create(
+            project_id=project_id,
+            directory=directory,
+            title=request.title,
+            parent_id=request.parentID,
+            permission=permission,
+            owner_user_id=(parent_session.owner_user_id if parent_session else current_user.id),
+            owner_username=(parent_session.owner_username if parent_session else current_user.username),
+            model_auto=request.model_auto,
+            model_pinned=False,
+            **({"category": request.category} if request.category else {}),
+        )
+    except ProjectDeletionError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    Project.invalidate_session_stats()
 
     log.info("session.created", {"session_id": session.id})
     try:
@@ -549,7 +1098,7 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 "user_name": current_user.username,
                 "username": current_user.username,
                 "session_id": session.id,
-                "owner_user_id": current_user.id,
+                "owner_user_id": session.owner_user_id,
                 "project_id": session.project_id,
             },
         )
@@ -577,6 +1126,11 @@ async def get_session(sessionID: str, request: Request) -> SessionResponse:
             detail=f"Session {sessionID} not found"
         )
     _require_session_read_access(session, _current_user)
+    if session.status != "active":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
     return await _session_to_response_with_goal(session)
 
 
@@ -597,7 +1151,7 @@ async def get_session_context_usage(sessionID: str, request: Request) -> Context
             detail=f"Session {sessionID} not found",
         )
     _require_session_read_access(session, current_user)
-    snapshot = await build_context_usage_snapshot(sessionID, session=session)
+    snapshot = await _cached_context_usage_snapshot(sessionID, session=session)
     log_route_timing(log, "session.context_usage.complete", started_at=started_at, extra={
         "sessionID": sessionID,
         "source": snapshot.source,
@@ -680,139 +1234,206 @@ async def update_session_todos(sessionID: str, todos: List[TodoInfo], request: R
             detail=f"Session {sessionID} not found"
         )
     _require_session_write_access(session, _current_user)
+    lifecycle_generation = Session.lifecycle_generation(sessionID)
     try:
-        await Todo.update(
+        normalized_todos = [
+            SessionTodoInfo(**todo.model_dump(exclude_none=True))
+            for todo in todos
+        ]
+        await _persist_active_session_write(
             sessionID,
-            [SessionTodoInfo(**t.model_dump(exclude_none=True)) for t in todos],
+            lambda: Todo.update(sessionID, normalized_todos),
+            expected_generation=lifecycle_generation,
         )
         return todos
+    except HTTPException:
+        raise
     except Exception as e:
         log.error("session.todo.write_error", {"sessionID": sessionID, "error": str(e)})
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@router.post(
+    "/{sessionID}/archive",
+    response_model=SessionResponse,
+    summary="Archive session",
+    description="Archive a session and its descendants without deleting persisted data",
+)
+async def archive_session(sessionID: str, request: Request) -> SessionResponse:
+    current_user = require_user(request)
+    return await archive_session_for_user(sessionID, current_user)
+
+
+@router.post(
+    "/{sessionID}/restore",
+    response_model=SessionResponse,
+    summary="Restore session",
+    description="Restore an archived session and its descendants",
+)
+async def restore_session(sessionID: str, request: Request) -> SessionResponse:
+    current_user = require_user(request)
+    return await restore_session_for_user(sessionID, current_user)
+
+
+async def _manageable_session_tree(session: SessionModel, current_user: AuthUser) -> List[SessionModel]:
+    tree = await Session.collect_tree(session.project_id, session.id)
+    if any(not SessionPolicy.can_delete(item, current_user) for item in tree):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可管理归档会话")
+    return tree
+
+
+async def archive_session_for_user(session_id: str, current_user: AuthUser) -> SessionResponse:
+    """Stop and archive a complete session tree while retaining persisted data."""
+    session = await _get_session_by_id_unfiltered(session_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+    tree = await _manageable_session_tree(session, current_user)
+
+    auth_token = set_current_auth_user(current_user)
+    try:
+        archived_ok = await Session.archive(session.project_id, session.id)
+    finally:
+        reset_current_auth_user(auth_token)
+    if not archived_ok:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="会话归档失败")
+
+    from flocks.server.routes.event import publish_event
+
+    try:
+        await publish_event("session.updated", {"id": session_id, "status": "archived"})
+    except Exception as exc:
+        log.warn("session.archive.event_error", {"session_id": session_id, "error": str(exc)})
+    try:
+        await emit_audit_event("session_action", {
+            "action": "archive",
+            "actor_id": current_user.username,
+            "actor_name": current_user.username,
+            "user_name": current_user.username,
+            "username": current_user.username,
+            "session_id": session_id,
+            "owner_user_id": current_user.id,
+            "project_id": session.project_id,
+            "affected_sessions": len(tree),
+        })
+    except Exception:
+        pass
+
+    archived = await _get_session_by_id_unfiltered(session_id)
+    if archived is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="会话归档状态不可用")
+    return await _session_to_response_with_goal(archived)
+
+
+async def restore_session_for_user(session_id: str, current_user: AuthUser) -> SessionResponse:
+    """Restore a complete archived session tree."""
+    session = await _get_session_by_id_unfiltered(session_id)
+    if not session:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Session {session_id} not found")
+
+    tree = await _manageable_session_tree(session, current_user)
+    if session.parent_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只能从根任务恢复完整任务树",
+        )
+    project_owner_id = session.owner_user_id or current_user.id
+    auth_token = set_current_auth_user(current_user)
+    try:
+        try:
+            restored_ok = await Session.restore(
+                session.project_id,
+                session.id,
+                project_owner_id=project_owner_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=str(exc),
+            ) from exc
+    finally:
+        reset_current_auth_user(auth_token)
+    if not restored_ok:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="会话恢复失败")
+
+    from flocks.server.routes.event import publish_event
+
+    try:
+        await publish_event("session.updated", {"id": session_id, "status": "active"})
+    except Exception as exc:
+        log.warn("session.restore.event_error", {"session_id": session_id, "error": str(exc)})
+    try:
+        await emit_audit_event("session_action", {
+            "action": "restore",
+            "actor_id": current_user.username,
+            "actor_name": current_user.username,
+            "user_name": current_user.username,
+            "username": current_user.username,
+            "session_id": session_id,
+            "owner_user_id": current_user.id,
+            "project_id": session.project_id,
+            "affected_sessions": len(tree),
+        })
+    except Exception:
+        pass
+
+    restored = await _get_session_by_id_unfiltered(session_id)
+    if restored is None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="会话恢复状态不可用")
+    return await _session_to_response_with_goal(restored)
+
+
 @router.delete(
     "/{sessionID}",
     status_code=status.HTTP_200_OK,
-    summary="Delete session",
-    description="Delete session by ID",
+    summary="Permanently delete session",
+    description="Permanently delete a session tree and its persisted history",
 )
 async def delete_session(sessionID: str, request: Request) -> bool:
-    """Delete session by ID (returns true)"""
+    """Permanently delete a session by ID (returns true)."""
     current_user = require_user(request)
-    session = await _get_session_by_id_unfiltered(sessionID)
+    return await delete_session_for_user(sessionID, current_user)
+
+
+async def delete_session_for_user(session_id: str, current_user: AuthUser) -> bool:
+    """Permanently delete a session tree using the normal lifecycle cleanup."""
+    session = await _get_session_by_id_unfiltered(session_id)
     
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Session {sessionID} not found"
+            detail=f"Session {session_id} not found"
         )
     
-    if not SessionPolicy.can_delete(session, current_user):
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="仅会话所有者可删除会话")
+    tree = await _manageable_session_tree(session, current_user)
+    tree_ids = [item.id for item in tree]
 
-    from flocks.session.goal import GoalManager
-    from flocks.session.interaction_queue import InteractionQueue
-
-    await _abort_session_processing(sessionID)
-    await InteractionQueue.clear(sessionID)
-    await GoalManager.clear(sessionID)
-    await _wait_for_sessions_idle([sessionID])
-    await _abort_and_wait_descendant_sessions(session.project_id, sessionID)
-    await Session.delete(session.project_id, sessionID)
-
-    # Best-effort cleanup of any image/file uploads materialised for this
-    # session via ``_materialize_data_url_to_disk`` (see prompt_async).
-    # The session DB row is gone, so the on-disk bytes are now orphaned —
-    # remove them to keep the workspace tidy. We deliberately swallow any
-    # filesystem errors: deletion of the session record is the contract,
-    # the upload cleanup is incidental.
+    auth_token = set_current_auth_user(current_user)
     try:
-        import shutil
-        from flocks.workspace.manager import WorkspaceManager
-
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
-        if uploads_root.exists() and uploads_root.is_dir():
-            shutil.rmtree(uploads_root, ignore_errors=True)
-            log.info("session.uploads.cleaned", {
-                "session_id": sessionID,
-                "path": str(uploads_root),
-            })
-    except Exception as exc:
-        log.warn("session.uploads.cleanup_failed", {
-            "session_id": sessionID,
-            "error": str(exc),
-        })
-
-    log.info("session.deleted", {"session_id": sessionID})
+        deleted_ok = await Session.delete(session.project_id, session_id)
+    finally:
+        reset_current_auth_user(auth_token)
+    if not deleted_ok:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="会话永久删除失败")
+    log.info("session.deleted", {"session_id": session_id})
     try:
         await emit_audit_event(
             "session_action",
             {
-                "action": "delete",
+                "action": "permanent_delete",
                 "actor_id": current_user.username,
                 "actor_name": current_user.username,
                 "user_name": current_user.username,
                 "username": current_user.username,
-                "session_id": sessionID,
+                "session_id": session_id,
                 "owner_user_id": current_user.id,
                 "project_id": session.project_id,
+                "affected_sessions": len(tree_ids),
             },
         )
     except Exception:
         pass
     return True
-
-
-async def _collect_descendant_session_ids(project_id: str, session_id: str) -> List[str]:
-    """Return child session IDs in the same order Session.delete will recurse."""
-    sessions = await Session.list(project_id)
-    children_by_parent: Dict[str, List[str]] = {}
-    for child in sessions:
-        if child.parent_id is None:
-            continue
-        children_by_parent.setdefault(child.parent_id, []).append(child.id)
-
-    descendants: List[str] = []
-    seen: set[str] = set()
-
-    def visit(parent_id: str) -> None:
-        for child_id in children_by_parent.get(parent_id, []):
-            if child_id in seen:
-                continue
-            seen.add(child_id)
-            descendants.append(child_id)
-            visit(child_id)
-
-    visit(session_id)
-    return descendants
-
-
-async def _abort_and_wait_descendant_sessions(project_id: str, session_id: str) -> None:
-    """Abort descendants that exist after the parent stops and wait as a batch."""
-    known: set[str] = set()
-    latest: List[str] = []
-
-    for _ in range(_DESCENDANT_ABORT_SCAN_LIMIT):
-        latest = await _collect_descendant_session_ids(project_id, session_id)
-        new_ids = [sid for sid in latest if sid not in known]
-        for descendant_id in new_ids:
-            await _abort_session_processing(descendant_id)
-        known.update(new_ids)
-
-        if latest:
-            await _wait_for_sessions_idle(latest)
-
-        refreshed = await _collect_descendant_session_ids(project_id, session_id)
-        if set(refreshed).issubset(known):
-            return
-        latest = refreshed
-
-    log.warn("session.delete.descendants_unstable", {
-        "session_id": session_id,
-        "descendants": latest,
-    })
 
 
 class SessionUpdateRequest(BaseModel):
@@ -824,6 +1445,15 @@ class SessionUpdateRequest(BaseModel):
     provider: Optional[str] = Field(None, description="Pinned provider ID")
     model: Optional[str] = Field(None, description="Pinned model ID")
     model_pinned: Optional[bool] = Field(None, description="Whether provider/model are pinned for this session")
+    model_auto: Optional[bool] = Field(None, description="Whether WebUI Auto mode is selected")
+
+
+class SessionMoveProjectRequest(BaseModel):
+    """Request to move a complete task tree to a project."""
+
+    model_config = ConfigDict(populate_by_name=True)
+
+    project_id: str = Field(..., alias="projectID", description="Target project ID")
 
 
 @router.patch(
@@ -848,6 +1478,43 @@ async def update_session(
     current_user = require_user(http_request)
     _require_session_write_access(existing, current_user)
 
+    if request.model_auto is True and (
+        request.provider is not None
+        or request.model is not None
+        or request.model_pinned is True
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Auto mode cannot be combined with a pinned provider/model",
+        )
+    if request.model_auto is True:
+        if not is_model_auto_session_category(existing.category):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=(
+                    "Auto mode is only available for user, entity "
+                    "configuration, and workflow sessions"
+                ),
+            )
+        if current_user.id == API_TOKEN_SERVICE_USER_ID:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Auto mode can only be enabled from the WebUI",
+            )
+        from flocks.session.session_loop import SessionLoop
+
+        auto_available, auto_reason = await SessionLoop.validate_auto_configuration()
+        if not auto_available:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Auto mode is unavailable: {auto_reason}",
+            )
+    if (request.provider is None) != (request.model is None):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="provider and model must be updated together",
+        )
+
     updates = {}
     if request.title is not None:
         updates["title"] = request.title
@@ -859,6 +1526,15 @@ async def update_session(
         updates["model"] = request.model
     if request.model_pinned is not None:
         updates["model_pinned"] = request.model_pinned
+        if request.model_pinned:
+            updates["model_auto"] = False
+    if request.model_auto is not None:
+        updates["model_auto"] = request.model_auto
+        if request.model_auto:
+            updates["model_pinned"] = False
+    if request.provider is not None and request.model is not None:
+        updates["model_auto"] = False
+        updates["model_pinned"] = True
     
     session = await Session.update(
         project_id=existing.project_id,
@@ -871,9 +1547,117 @@ async def update_session(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
+
+    if (
+        request.model_auto is False
+        or request.model_pinned is True
+        or (request.provider is not None and request.model is not None)
+    ):
+        from flocks.session.session_loop import SessionLoop
+
+        SessionLoop.clear_auto_failover_state(sessionID)
     
     log.info("session.updated", {"session_id": sessionID})
     return await _session_to_response_with_goal(session)
+
+
+@router.patch(
+    "/{sessionID}/project",
+    response_model=SessionResponse,
+    summary="Move session to project",
+    description="Move a root session and all descendants to another project",
+)
+async def move_session_to_project(
+    sessionID: str,
+    request: SessionMoveProjectRequest,
+    http_request: Request,
+) -> SessionResponse:
+    """Move an idle root task tree into a writable project."""
+
+    existing = await _get_session_by_id_unfiltered(sessionID)
+    if existing is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Session {sessionID} not found",
+        )
+
+    current_user = require_user(http_request)
+    _require_session_write_access(existing, current_user)
+    if existing.parent_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="只能移动根任务及其完整任务树",
+        )
+
+    from flocks.project.project import Project
+
+    target_project = await Project.get(request.project_id, owner_id=current_user.id)
+    if target_project is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Project {request.project_id} not found",
+        )
+    if target_project.path_status != "available":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="目标项目目录不可用",
+        )
+    if existing.project_id == target_project.id:
+        return await _session_to_response_with_goal(existing)
+
+    tree = await Session.collect_tree(existing.project_id, existing.id)
+    if any(not SessionPolicy.can_write(item, current_user) for item in tree):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="仅任务所有者可移动完整任务树",
+        )
+
+    if any(_is_session_busy_for_move(item.id) for item in tree):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务正在运行，请等待任务完成或停止后再移动",
+        )
+    if any(item.revert is not None for item in tree):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务正在历史恢复状态，请先完成或取消恢复后再移动",
+        )
+
+    auth_token = set_current_auth_user(current_user)
+    try:
+        moved = await Session.move_to_project(
+            existing.project_id,
+            existing.id,
+            target_project_id=target_project.id,
+            target_directory=target_project.worktree,
+            target_owner_id=current_user.id,
+            additional_busy_check=_is_session_busy_for_move,
+        )
+    finally:
+        reset_current_auth_user(auth_token)
+    if moved is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="任务移动失败，请刷新后重试",
+        )
+
+    from flocks.server.routes.event import publish_event
+
+    try:
+        await publish_event("session.updated", {
+            "id": sessionID,
+            "projectID": target_project.id,
+        })
+    except Exception as exc:
+        log.warn("session.move_project.event_error", {
+            "session_id": sessionID,
+            "error": str(exc),
+        })
+
+    return await _session_to_response_with_goal(
+        moved,
+        effective_project_id=target_project.id,
+    )
 
 
 @router.post(
@@ -884,11 +1668,7 @@ async def update_session(
 )
 async def share_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -896,11 +1676,15 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=True, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -917,11 +1701,7 @@ async def share_session_local(sessionID: str, http_request: Request) -> SessionR
 )
 async def unshare_session_local(sessionID: str, http_request: Request) -> SessionResponse:
     current_user = require_user(http_request)
-    token = set_current_auth_user(current_user)
-    try:
-        existing = await Session.get_by_id(sessionID)
-    finally:
-        reset_current_auth_user(token)
+    existing = await _get_session_by_id_unfiltered(sessionID)
     if not existing:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -929,11 +1709,15 @@ async def unshare_session_local(sessionID: str, http_request: Request) -> Sessio
         )
     _require_session_write_access(existing, current_user)
     metadata = _share_metadata(existing, shared=False, actor_user_id=current_user.id)
-    session = await Session.update(
-        project_id=existing.project_id,
-        session_id=sessionID,
-        metadata=metadata,
-    )
+    token = set_current_auth_user(current_user)
+    try:
+        session = await Session.update(
+            project_id=existing.project_id,
+            session_id=sessionID,
+            metadata=metadata,
+        )
+    finally:
+        reset_current_auth_user(token)
     if not session:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -1159,11 +1943,13 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
         if msg.role == MessageRole.USER:
             current_agent = msg.agent or DEFAULT_AGENT
             break
+
+    working_directory = await _resolve_session_working_directory(session)
     
     async def _run_in_background():
         try:
             await Instance.provide(
-                directory=session.directory,
+                directory=working_directory,
                 init=instance_bootstrap,
                 fn=lambda: _run_session_compaction(
                     sessionID,
@@ -1172,6 +1958,7 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
                     explicit_model_id=request.modelID,
                     auto=request.auto,
                     event_publish_callback=publish_event,
+                    working_directory=working_directory,
                 ),
             )
         except Exception as e:
@@ -1188,8 +1975,11 @@ async def summarize_session(sessionID: str, request: SummarizeRequest, http_requ
                 },
             })
 
-    import asyncio
-    asyncio.create_task(_run_in_background())
+    _schedule_background_coro(
+        _run_in_background(),
+        session_id=sessionID,
+        action="session.summarize",
+    )
     
     log.info("session.summarized", {"session_id": sessionID})
     return True
@@ -1220,11 +2010,17 @@ async def revert_session(sessionID: str, request: RevertRequest, http_request: R
         )
     _require_session_write_access(session, current_user)
 
-    updated = await SessionRevert.revert(
-        session_id=sessionID,
-        message_id=request.messageID,
-        part_id=request.partID,
-    )
+    try:
+        updated = await SessionRevert.revert(
+            session_id=sessionID,
+            message_id=request.messageID,
+            part_id=request.partID,
+        )
+    except (ValueError, SessionInactiveError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     log.info("session.reverted", {"session_id": sessionID, "message_id": request.messageID})
     return await _session_to_response_with_goal(updated)
@@ -1315,6 +2111,11 @@ class PromptRequest(BaseModel):
     tools: Optional[Dict[str, bool]] = Field(None, description="Tool settings (deprecated)")
     system: Optional[str] = Field(None, description="System prompt override")
     variant: Optional[str] = Field(None, description="Model variant")
+    execution_mode: SessionExecutionMode = Field(
+        SessionExecutionMode.BUILD,
+        alias="executionMode",
+        description="Execution mode for this user turn",
+    )
 
 
 class UserMessageInfo(BaseModel):
@@ -1343,6 +2144,7 @@ class UserMessageInfo(BaseModel):
     tools: Optional[Dict[str, bool]] = None
     variant: Optional[str] = None
     compacted: Optional[bool] = None
+    executionMode: SessionExecutionMode = SessionExecutionMode.BUILD
 
 
 class AssistantMessageInfo(BaseModel):
@@ -1400,6 +2202,7 @@ class MessagePartInfo(BaseModel):
     sessionID: str
     type: str
     text: Optional[str] = None
+    time: Optional[Dict[str, Any]] = None
     synthetic: Optional[bool] = None
     tool: Optional[str] = None
     state: Optional[Dict[str, Any]] = None
@@ -1445,6 +2248,14 @@ def _part_to_response_info(
 ) -> MessagePartInfo:
     text_value = getattr(part, "text", None) if part.type in ("text", "reasoning", "thinking") else None
 
+    raw_time = getattr(part, "time", None)
+    if hasattr(raw_time, "model_dump"):
+        time_value = raw_time.model_dump()
+    elif isinstance(raw_time, dict):
+        time_value = raw_time
+    else:
+        time_value = None
+
     url_value = getattr(part, "url", None) if part.type == "file" else None
 
     state_value = None
@@ -1462,6 +2273,7 @@ def _part_to_response_info(
         sessionID=session_id,
         type=part.type,
         text=text_value,
+        time=time_value,
         synthetic=getattr(part, "synthetic", None),
         tool=getattr(part, "tool", None) if part.type == "tool" else None,
         state=state_value,
@@ -1499,6 +2311,11 @@ async def _message_to_response_info(msg: Any, *, cwd: str) -> MessageInfo:
             agent=getattr(msg, "agent", None) or DEFAULT_AGENT,
             model=model_info,
             compacted=getattr(msg, "compacted", None),
+            executionMode=getattr(
+                msg,
+                "executionMode",
+                SessionExecutionMode.BUILD,
+            ),
         )
 
     tokens_raw = getattr(msg, "tokens", None)
@@ -1645,9 +2462,10 @@ async def get_session_messages(
         return result
     except Exception as e:
         log.error("session.messages.error", {"error": str(e), "sessionID": sessionID})
-        if page or before is not None:
-            return MessagePage(sessionID=sessionID, items=[], hasMore=False, nextBefore=None)
-        return []
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to load session messages",
+        ) from e
 
 
 @router.get(
@@ -1818,12 +2636,14 @@ async def _publish_text_part_update(
     })
 
 
-def _track_background_task(task: "asyncio.Task[Any]") -> None:
+def _track_background_task(
+    task: "asyncio.Task[Any]",
+    *,
+    session_id: Optional[str] = None,
+) -> None:
     """Keep background tasks alive until completion."""
-    if not hasattr(router, "_pending_tasks"):
-        router._pending_tasks = set()
-    router._pending_tasks.add(task)
-    task.add_done_callback(lambda t: router._pending_tasks.discard(t))
+    track_background_task(task, session_id=session_id)
+    router._pending_tasks = pending_background_tasks()
 
 
 def _schedule_background_coro(
@@ -1866,13 +2686,13 @@ def _schedule_background_coro(
                     })
 
     task = asyncio.get_running_loop().create_task(_guarded_coro())
-    _track_background_task(task)
+    _track_background_task(task, session_id=session_id)
 
 
 async def _prepare_replay_runtime(
     session_id: str,
     user_message,
-) -> Dict[str, str]:
+) -> Dict[str, Any]:
     """Resolve replay runtime state before mutating session history."""
     from flocks.agent.registry import Agent
     from flocks.config.config import Config
@@ -1880,21 +2700,40 @@ async def _prepare_replay_runtime(
 
     agent_name = getattr(user_message, "agent", None) or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
-    # Replay should follow the model that is active *now* for this session
-    # (current session pin / current default / current agent override), not the
-    # historical model stored on the original user message being replayed.
-    dummy_request = type(
-        "_MessageReplayRequest",
-        (),
-        {"model": None, "agent": agent_name},
-    )()
-    provider_id, model_id, _ = await _resolve_model(dummy_request, agent, session_id)
+    session = await Session.get_by_id(session_id)
+    auto_failover = bool(
+        session
+        and is_model_auto_session_category(getattr(session, "category", "user"))
+        and getattr(session, "model_auto", False)
+    )
+    if auto_failover:
+        default_llm = await Config.resolve_default_llm()
+        if not default_llm:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Auto mode requires a configured default LLM",
+            )
+        provider_id = default_llm["provider_id"]
+        model_id = default_llm["model_id"]
+    else:
+        # Replay follows the model active *now*, not the model stored on the
+        # historical user message.
+        dummy_request = type(
+            "_MessageReplayRequest",
+            (),
+            {"model": None, "agent": agent_name},
+        )()
+        provider_id, model_id, _ = await _resolve_model(
+            dummy_request,
+            agent,
+            session_id,
+        )
 
     Provider._ensure_initialized()
     config = await Config.get()
     await Provider.apply_config(config, provider_id=provider_id)
     provider = Provider.get(provider_id)
-    if not provider:
+    if not provider and not auto_failover:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Provider {provider_id} not found",
@@ -1904,6 +2743,7 @@ async def _prepare_replay_runtime(
         "agent_name": agent_name,
         "provider_id": provider_id,
         "model_id": model_id,
+        "auto_failover": auto_failover,
     }
 
 
@@ -1912,7 +2752,7 @@ async def _run_existing_user_message(
     session,
     user_message,
     working_directory: str,
-    runtime: Optional[Dict[str, str]] = None,
+    runtime: Optional[Dict[str, Any]] = None,
 ):
     """Run SessionLoop using an already-persisted user message."""
     from flocks.server.routes.event import publish_event
@@ -1944,6 +2784,8 @@ async def _run_existing_user_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
+        auto_failover=bool(runtime.get("auto_failover", False)),
     )
 
     if result.action == "queued":
@@ -1963,6 +2805,8 @@ async def _run_existing_user_message(
     assistant_message_id = None
     created_ms = end_ms
     final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    actual_provider_id = result.provider_id or provider_id
+    actual_model_id = result.model_id or model_id
 
     if result.last_message:
         assistant_message_id = result.last_message.id
@@ -1971,6 +2815,14 @@ async def _run_existing_user_message(
         finish = getattr(result.last_message, "finish", None)
         if finish:
             finish_reason = finish
+        actual_provider_id = (
+            getattr(result.last_message, "providerID", None)
+            or actual_provider_id
+        )
+        actual_model_id = (
+            getattr(result.last_message, "modelID", None)
+            or actual_model_id
+        )
         result_time = getattr(result.last_message, "time", None)
         if isinstance(result_time, dict):
             created_ms = result_time.get("created", created_ms)
@@ -1990,8 +2842,8 @@ async def _run_existing_user_message(
             "role": "assistant",
             "time": {"created": created_ms, "completed": end_ms},
             "parentID": user_message.id,
-            "modelID": model_id,
-            "providerID": provider_id,
+            "modelID": actual_model_id,
+            "providerID": actual_provider_id,
             "mode": agent_name,
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
@@ -2004,8 +2856,8 @@ async def _run_existing_user_message(
         publish_event,
         session_id,
         session=session,
-        provider_id=provider_id,
-        model_id=model_id,
+        provider_id=actual_provider_id,
+        model_id=actual_model_id,
     )
 
     log.info("session.message.replay.completed", {
@@ -2073,7 +2925,15 @@ async def resend_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    try:
+        await SessionRevert.ensure_replayable(session, messageID)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_resend() -> None:
         runtime = await _prepare_replay_runtime(sessionID, message)
@@ -2168,7 +3028,15 @@ async def regenerate_session_message(
             detail="Session is currently generating a response",
         )
 
-    working_directory = session.directory or os.getcwd()
+    try:
+        await SessionRevert.ensure_replayable(session, parent_message_id)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+
+    working_directory = await _resolve_session_working_directory(session)
 
     async def _handle_regenerate() -> None:
         runtime = await _prepare_replay_runtime(sessionID, parent_message)
@@ -2232,8 +3100,28 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
         )
     current_user = require_user(http_request)
     _require_session_write_access(session, current_user)
+    lifecycle_generation = Session.lifecycle_generation(sessionID)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
+    _validate_execution_mode_request(request)
+    if request.execution_mode == SessionExecutionMode.GOAL:
+        from flocks.session.goal import GoalManager
+
+        objective = _extract_text_from_parts(request.parts).strip()
+        state = await GoalManager.set_goal(sessionID, objective)
+        await publish_event("session.goal.updated", {
+            "sessionID": sessionID,
+            "status": state.status,
+            "objective": state.objective,
+            "reason": state.last_reason,
+        })
+        request = request.model_copy(update={
+            "parts": _replace_text_parts(
+                request.parts,
+                GoalManager.goal_prompt(state.objective),
+            ),
+            "display_text": request.display_text or objective,
+        })
     
     log.info("session.message.send.processing", {
         "sessionID": sessionID,
@@ -2247,7 +3135,13 @@ async def send_session_message(sessionID: str, request: PromptRequest, http_requ
         result = await Instance.provide(
             directory=working_directory,
             init=instance_bootstrap,
-            fn=lambda: _process_session_message(sessionID, session, request, working_directory)
+            fn=lambda: _process_session_message(
+                sessionID,
+                session,
+                request,
+                working_directory,
+                lifecycle_generation=lifecycle_generation,
+            )
         )
         log.info("session.message.send.complete", {"sessionID": sessionID})
         return result
@@ -2417,6 +3311,7 @@ async def _run_session_compaction(
     auto: bool = False,
     event_publish_callback=None,
     focus_instruction: Optional[str] = None,
+    working_directory: Optional[str] = None,
 ) -> tuple[str, str, str]:
     """Execute session compaction directly without routing through the LLM loop.
 
@@ -2434,6 +3329,8 @@ async def _run_session_compaction(
     session = await Session.get_by_id(session_id)
     if not session:
         raise ValueError(f"Session {session_id} not found")
+    if working_directory:
+        session = session.model_copy(update={"directory": working_directory})
 
     await SessionRevert.cleanup(session)
     agent_name, provider_id, model_id = await _resolve_compaction_context(
@@ -2545,6 +3442,8 @@ async def _process_session_message(
     session,
     request: PromptRequest,
     working_directory: str,
+    *,
+    lifecycle_generation: Optional[int] = None,
 ):
     """
     Process session message within Instance context.
@@ -2564,6 +3463,9 @@ async def _process_session_message(
     from flocks.session.runner import RunnerCallbacks
     import time
     import os
+
+    if lifecycle_generation is None:
+        lifecycle_generation = Session.lifecycle_generation(sessionID)
     
     # Clean up revert state before processing (Flocks compatibility)
     await SessionRevert.cleanup(session)
@@ -2600,9 +3502,27 @@ async def _process_session_message(
     agent_name = request.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
-    provider_id, model_id, model_source = await _resolve_model(
-        request, agent, sessionID
+    auto_failover = bool(
+        is_model_auto_session_category(getattr(session, "category", "user"))
+        and getattr(session, "model_auto", False)
+        and not request.model
     )
+    if auto_failover:
+        from flocks.config.config import Config
+
+        default_llm = await Config.resolve_default_llm()
+        if not default_llm:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Auto mode requires a configured default LLM",
+            )
+        provider_id = default_llm["provider_id"]
+        model_id = default_llm["model_id"]
+        model_source = "auto_primary"
+    else:
+        provider_id, model_id, model_source = await _resolve_model(
+            request, agent, sessionID
+        )
     
     log.info("session.message.model", {
         "provider_id": provider_id,
@@ -2622,15 +3542,17 @@ async def _process_session_message(
             session.provider = provider_id
             session.model = model_id
             session.model_pinned = True
+            session.model_auto = False
+        SessionLoop.clear_auto_failover_state(sessionID)
     
     # Ensure providers are initialized and configured
     Provider._ensure_initialized()
     from flocks.config.config import Config
     config = await Config.get()
     await Provider.apply_config(config, provider_id=provider_id)
-    
+
     provider = Provider.get(provider_id)
-    if not provider:
+    if not provider and not auto_failover:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Provider {provider_id} not found"
@@ -2652,17 +3574,22 @@ async def _process_session_message(
     display_metadata = {"displayText": display_text} if display_text else None
 
     _is_no_reply = bool(request.noReply)
-    user_message = await Message.create(
-        session_id=sessionID,
-        role=MessageRole.USER,
-        content=text_content,
-        id=user_message_id,
-        time={"created": now_ms},
-        agent=agent_name,
-        model={"providerID": provider_id, "modelID": model_id},
-        part_id=user_part_id,
-        part_metadata=display_metadata,
-        synthetic=True if _is_no_reply else None,
+    user_message = await _persist_active_session_write(
+        sessionID,
+        lambda: Message.create(
+            session_id=sessionID,
+            role=MessageRole.USER,
+            content=text_content,
+            id=user_message_id,
+            time={"created": now_ms},
+            agent=agent_name,
+            model={"providerID": provider_id, "modelID": model_id},
+            executionMode=request.execution_mode,
+            part_id=user_part_id,
+            part_metadata=display_metadata,
+            synthetic=True if _is_no_reply else None,
+        ),
+        expected_generation=lifecycle_generation,
     )
     user_message_id = user_message.id
     
@@ -2674,6 +3601,7 @@ async def _process_session_message(
             "time": {"created": now_ms},
             "agent": agent_name,
             "model": {"providerID": provider_id, "modelID": model_id},
+            "executionMode": request.execution_mode.value,
         }
     })
     _part_event: dict = {
@@ -2704,51 +3632,6 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     from flocks.session.message import FilePart
 
-    def _materialize_data_url_to_disk(
-        data_url: str, mime_hint: str, filename_hint: Optional[str]
-    ) -> str:
-        """Decode a ``data:`` URL to ``~/.flocks/workspace/uploads/<session>/...``.
-
-        Returns a ``file://`` URL pointing at the persisted file. On failure
-        the original ``data:`` URL is returned unchanged (older code paths
-        still cope with that, just with the now-known token-cost penalty).
-        """
-        try:
-            import base64
-            from flocks.workspace.manager import WorkspaceManager
-
-            header, _, encoded = data_url.partition(",")
-            if not encoded:
-                return data_url
-            raw_bytes = base64.b64decode(encoded)
-
-            ws = WorkspaceManager.get_instance()
-            # Use resolve_workspace_path to guard against path traversal if
-            # sessionID were ever user-controlled (e.g. ../../../tmp/x).
-            uploads_root = ws.resolve_workspace_path(f"uploads/{sessionID}")
-            uploads_root.mkdir(parents=True, exist_ok=True)
-
-            ext_map = {
-                "image/png": ".png", "image/jpeg": ".jpg", "image/jpg": ".jpg",
-                "image/gif": ".gif", "image/webp": ".webp", "image/bmp": ".bmp",
-                "application/pdf": ".pdf",
-            }
-            ext = ext_map.get(mime_hint, "")
-            if not ext and filename_hint:
-                _, _, tail = filename_hint.rpartition(".")
-                if tail.lower() in _UPLOAD_SAFE_EXTS:
-                    ext = "." + tail.lower()
-            unique_name = f"{Identifier.create('part')}{ext}"
-            target = uploads_root / unique_name
-            target.write_bytes(raw_bytes)
-            return target.resolve().as_uri()
-        except Exception as exc:
-            log.warn("session.message.file_part.materialize_failed", {
-                "sessionID": sessionID,
-                "error": str(exc),
-            })
-            return data_url
-
     for raw_part in request.parts or []:
         part_type = raw_part.get("type")
         if part_type == "text":
@@ -2764,7 +3647,13 @@ async def _process_session_message(
                 continue
             # Materialize ``data:`` URLs to disk before persisting the part.
             if url.startswith("data:"):
-                url = _materialize_data_url_to_disk(url, mime, raw_part.get("filename"))
+                url = _materialize_data_url_part(
+                    sessionID,
+                    url,
+                    mime,
+                    raw_part.get("filename"),
+                    failure_event="session.message.file_part.materialize_failed",
+                )
             file_part_id = raw_part.get("id") or Identifier.create("part")
             file_part = FilePart(
                 id=file_part_id,
@@ -2774,7 +3663,11 @@ async def _process_session_message(
                 filename=raw_part.get("filename"),
                 url=url,
             )
-            await Message.add_part(sessionID, user_message_id, file_part)
+            await _persist_active_session_write(
+                sessionID,
+                lambda: Message.add_part(sessionID, user_message_id, file_part),
+                expected_generation=lifecycle_generation,
+            )
             await publish_event("message.part.updated", {
                 "part": {
                     "id": file_part_id,
@@ -2799,15 +3692,19 @@ async def _process_session_message(
             mock_msg_id = Identifier.ascending("message")
             mock_part_id = Identifier.ascending("part")
             mock_now = int(time.time() * 1000)
-            await Message.create(
-                session_id=sessionID,
-                role=MessageRole.ASSISTANT,
-                content=request.mockReply,
-                id=mock_msg_id,
-                time={"created": mock_now, "completed": mock_now},
-                parentID=user_message_id,
-                modelID="mock",
-                part_id=mock_part_id,
+            await _persist_active_session_write(
+                sessionID,
+                lambda: Message.create(
+                    session_id=sessionID,
+                    role=MessageRole.ASSISTANT,
+                    content=request.mockReply,
+                    id=mock_msg_id,
+                    time={"created": mock_now, "completed": mock_now},
+                    parentID=user_message_id,
+                    modelID="mock",
+                    part_id=mock_part_id,
+                ),
+                expected_generation=lifecycle_generation,
             )
             await publish_event("message.updated", {
                 "info": {
@@ -2867,6 +3764,8 @@ async def _process_session_message(
         model_id=model_id,
         agent_name=agent_name,
         callbacks=loop_callbacks,
+        working_directory=working_directory,
+        auto_failover=auto_failover,
     )
 
     # ------------------------------------------------------------------
@@ -2896,6 +3795,8 @@ async def _process_session_message(
     final_content = ""
     assistant_message_id = None
     final_tokens = {"input": 0, "output": 0, "reasoning": 0, "cache": {"read": 0, "write": 0}}
+    actual_provider_id = result.provider_id or provider_id
+    actual_model_id = result.model_id or model_id
     
     if result.last_message:
         assistant_message_id = result.last_message.id
@@ -2904,6 +3805,14 @@ async def _process_session_message(
         finish = getattr(result.last_message, 'finish', None)
         if finish:
             finish_reason = finish
+        actual_provider_id = (
+            getattr(result.last_message, "providerID", None)
+            or actual_provider_id
+        )
+        actual_model_id = (
+            getattr(result.last_message, "modelID", None)
+            or actual_model_id
+        )
     
     if result.action == "error":
         finish_reason = "error"
@@ -2921,8 +3830,8 @@ async def _process_session_message(
             "role": "assistant",
             "time": {"created": now_ms, "completed": end_ms},
             "parentID": user_message_id,
-            "modelID": model_id,
-            "providerID": provider_id,
+            "modelID": actual_model_id,
+            "providerID": actual_provider_id,
             "mode": agent_name,
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
@@ -2935,8 +3844,8 @@ async def _process_session_message(
         publish_event,
         sessionID,
         session=session,
-        provider_id=provider_id,
-        model_id=model_id,
+        provider_id=actual_provider_id,
+        model_id=actual_model_id,
     )
     
     # Collect parts for the response
@@ -2964,8 +3873,8 @@ async def _process_session_message(
         title_task = loop.create_task(
             SessionTitle.generate_title_after_first_message(
                 session_id=sessionID,
-                model_id=model_id,
-                provider_id=provider_id,
+                model_id=actual_model_id,
+                provider_id=actual_provider_id,
                 event_publish_callback=publish_event,
             )
         )
@@ -2983,8 +3892,8 @@ async def _process_session_message(
             "role": "assistant",
             "time": {"created": now_ms, "completed": end_ms},
             "parentID": user_message_id,
-            "modelID": model_id,
-            "providerID": provider_id,
+            "modelID": actual_model_id,
+            "providerID": actual_provider_id,
             "mode": agent_name,
             "agent": agent_name,
             "path": {"cwd": working_directory, "root": working_directory},
@@ -3118,6 +4027,32 @@ def _extract_text_from_parts(parts: List[Dict[str, Any]]) -> str:
     return "".join(part.get("text", "") for part in parts if part.get("type") == "text")
 
 
+def _validate_execution_mode_request(request: PromptRequest) -> None:
+    if request.execution_mode != SessionExecutionMode.GOAL:
+        return
+    objective = _extract_text_from_parts(request.parts).strip()
+    if not objective:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Goal mode requires a non-empty text objective",
+        )
+    if any(part.get("type") != "text" for part in request.parts):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Goal mode does not support attachments",
+        )
+
+
+def _event_text_for_execution_mode(
+    parts: List[Dict[str, Any]],
+    execution_mode: SessionExecutionMode,
+) -> str:
+    text = _extract_text_from_parts(parts)
+    if execution_mode == SessionExecutionMode.GOAL:
+        return f"/goal {text.strip()}"
+    return text
+
+
 def _replace_text_parts(
     parts: Optional[List[Dict[str, Any]]],
     text: str,
@@ -3182,6 +4117,19 @@ def _is_prompt_chain_active(session_id: str) -> bool:
     return session_id in getattr(router, "_prompt_queue_active_sessions", set())
 
 
+def _is_session_busy_for_move(session_id: str) -> bool:
+    """Cover loop execution and route-owned background work during a move."""
+
+    from flocks.session.session_loop import SessionLoop
+
+    return (
+        Session.has_active_operations(session_id)
+        or SessionLoop.is_running(session_id)
+        or _is_prompt_chain_active(session_id)
+        or has_pending_session_tasks(session_id)
+    )
+
+
 def _set_prompt_chain_active(session_id: str, active: bool) -> None:
     if not hasattr(router, "_prompt_queue_active_sessions"):
         router._prompt_queue_active_sessions = set()
@@ -3217,67 +4165,27 @@ def _materialize_queued_parts(session_id: str, parts: List[Dict[str, Any]]) -> L
     return prepared
 
 
-def _materialize_data_url_part(
-    session_id: str,
-    data_url: str,
-    mime_hint: str,
-    filename_hint: Optional[str],
-) -> str:
-    try:
-        import base64
-        from flocks.workspace.manager import WorkspaceManager
-        from flocks.utils.id import Identifier
-
-        _header, _sep, encoded = data_url.partition(",")
-        if not encoded:
-            return data_url
-        raw_bytes = base64.b64decode(encoded)
-        ws = WorkspaceManager.get_instance()
-        uploads_root = ws.resolve_workspace_path(f"uploads/{session_id}")
-        uploads_root.mkdir(parents=True, exist_ok=True)
-
-        ext_map = {
-            "image/png": ".png",
-            "image/jpeg": ".jpg",
-            "image/jpg": ".jpg",
-            "image/gif": ".gif",
-            "image/webp": ".webp",
-            "image/bmp": ".bmp",
-            "application/pdf": ".pdf",
-        }
-        ext = ext_map.get(mime_hint, "")
-        if not ext and filename_hint:
-            _, _, tail = filename_hint.rpartition(".")
-            if tail.lower() in _UPLOAD_SAFE_EXTS:
-                ext = "." + tail.lower()
-        target = uploads_root / f"{Identifier.create('part')}{ext}"
-        target.write_bytes(raw_bytes)
-        return target.resolve().as_uri()
-    except Exception as exc:
-        log.warn("session.prompt_queue.materialize_failed", {
-            "sessionID": session_id,
-            "error": str(exc),
-        })
-        return data_url
-
-
 def _event_from_queued_prompt(item, working_directory: str):
     from flocks.input.events import UserInputEvent
 
     return UserInputEvent(
         source_type="webui",
         sessionID=item.sessionID,
-        text=_extract_text_from_parts(item.parts),
+        text=_event_text_for_execution_mode(item.parts, item.executionMode),
         parts=[dict(part) for part in item.parts],
         agent=item.agent,
         model=item.model,
         variant=item.variant,
+        metadata={
+            "_sessionLifecycleGeneration": Session.lifecycle_generation(item.sessionID),
+        },
         display_text=item.display_text,
         messageID=item.messageID,
         noReply=item.noReply,
         mockReply=item.mockReply,
         tools=item.tools,
         system=item.system,
+        executionMode=item.executionMode,
         working_directory=working_directory,
     )
 
@@ -3414,39 +4322,50 @@ def _build_prompt_request_from_event(event, prompt_text: str, display_text: Opti
         noReply=event.no_reply,
         tools=event.tools,
         system=event.system,
+        execution_mode=event.execution_mode,
     )
 
 
 async def _dispatch_sse_input(sessionID: str, session, event, working_directory: str) -> None:
     import time as _time
 
-    from flocks.input.dispatcher import dispatch_user_input
+    from flocks.input.dispatcher import dispatch_user_input, parse_slash_command
     from flocks.input.output import SSEOutputSink
     from flocks.server.routes.event import publish_event
     from flocks.session.message import Message, MessageRole
     from flocks.utils.id import Identifier
 
     agent_name = event.agent or "rex"
+    lifecycle_generation = event.metadata.get("_sessionLifecycleGeneration")
+    if not isinstance(lifecycle_generation, int):
+        lifecycle_generation = Session.lifecycle_generation(sessionID)
 
     async def _create_user_message(
         user_text: str,
         model_info: Optional[Dict[str, str]] = None,
         *,
         agent_override: Optional[str] = None,
+        ignored: Optional[bool] = None,
     ) -> str:
         now_ms = int(_time.time() * 1000)
         user_msg_id = event.message_id or Identifier.create("message")
         user_part_id = Identifier.create("part")
         message_agent = agent_override or agent_name
-        await Message.create(
-            session_id=sessionID,
-            role=MessageRole.USER,
-            content=user_text,
-            id=user_msg_id,
-            time={"created": now_ms},
-            agent=message_agent,
-            **({"model": model_info} if model_info else {}),
-            part_id=user_part_id,
+        await _persist_active_session_write(
+            sessionID,
+            lambda: Message.create(
+                session_id=sessionID,
+                role=MessageRole.USER,
+                content=user_text,
+                id=user_msg_id,
+                time={"created": now_ms},
+                agent=message_agent,
+                executionMode=event.execution_mode,
+                **({"model": model_info} if model_info else {}),
+                ignored=ignored,
+                part_id=user_part_id,
+            ),
+            expected_generation=lifecycle_generation,
         )
         await publish_event("message.updated", {
             "info": {
@@ -3455,6 +4374,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "role": "user",
                 "time": {"created": now_ms},
                 "agent": message_agent,
+                "executionMode": event.execution_mode.value,
                 **({"model": model_info} if model_info else {}),
             }
         })
@@ -3465,6 +4385,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "sessionID": sessionID,
                 "type": "text",
                 "text": user_text,
+                **({"ignored": ignored} if ignored is not None else {}),
                 "time": {"start": now_ms},
             }
         })
@@ -3472,22 +4393,27 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
 
     async def _publish_direct_response(output_event, text: str) -> None:
         user_text = output_event.user_visible_text
-        parent_msg_id = await _create_user_message(user_text)
+        parent_msg_id = await _create_user_message(user_text, ignored=True)
         asst_now = int(_time.time() * 1000)
         asst_msg_id = Identifier.ascending("message")
         asst_part_id = Identifier.ascending("part")
-        await Message.create(
-            session_id=sessionID,
-            role=MessageRole.ASSISTANT,
-            content=text,
-            id=asst_msg_id,
-            time={"created": asst_now, "completed": asst_now},
-            parentID=parent_msg_id,
-            modelID="command",
-            providerID="builtin",
-            agent=agent_name,
-            finish="stop",
-            part_id=asst_part_id,
+        await _persist_active_session_write(
+            sessionID,
+            lambda: Message.create(
+                session_id=sessionID,
+                role=MessageRole.ASSISTANT,
+                content=text,
+                id=asst_msg_id,
+                time={"created": asst_now, "completed": asst_now},
+                parentID=parent_msg_id,
+                modelID="command",
+                providerID="builtin",
+                agent=agent_name,
+                finish="stop",
+                ignored=True,
+                part_id=asst_part_id,
+            ),
+            expected_generation=lifecycle_generation,
         )
         await publish_event("message.updated", {
             "info": {
@@ -3516,6 +4442,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 "sessionID": sessionID,
                 "type": "text",
                 "text": text,
+                "ignored": True,
                 "time": {"start": asst_now, "end": asst_now},
             }
         })
@@ -3523,13 +4450,29 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             publish_event,
             sessionID,
             session=session,
-            provider_id="builtin",
-            model_id="command",
         )
 
     async def _run_llm(output_event, prompt_text: str, display_text: Optional[str] = None) -> None:
+        parsed = parse_slash_command(output_event.text, output_event.metadata)
+        if parsed is not None and parsed.canonical_name == "goal":
+            from flocks.session.goal import GoalManager
+
+            state = await GoalManager.get(sessionID)
+            if state is not None:
+                await publish_event("session.goal.updated", {
+                    "sessionID": sessionID,
+                    "status": state.status,
+                    "objective": state.objective,
+                    "reason": state.last_reason,
+                })
         request = _build_prompt_request_from_event(output_event, prompt_text, display_text)
-        await _process_session_message(sessionID, session, request, working_directory)
+        await _process_session_message(
+            sessionID,
+            session,
+            request,
+            working_directory,
+            lifecycle_generation=lifecycle_generation,
+        )
 
     async def _clear_history() -> None:
         await _clear_session_history(sessionID)
@@ -3561,6 +4504,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             auto=False,
             event_publish_callback=publish_event,
             focus_instruction=focus_instruction,
+            working_directory=working_directory,
         )
         return True
 
@@ -3571,18 +4515,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         session_control=_run_session_control,
         clear_history=_clear_history,
     )
-    result = await dispatch_user_input(event, sink)
-    if result.command_name == "goal" and result.action == "llm":
-        from flocks.session.goal import GoalManager
-
-        state = await GoalManager.get(sessionID)
-        if state is not None:
-            await publish_event("session.goal.updated", {
-                "sessionID": sessionID,
-                "status": state.status,
-                "objective": state.objective,
-                "reason": state.last_reason,
-            })
+    await dispatch_user_input(event, sink)
 
 
 class PromptQueueUpdateRequest(BaseModel):
@@ -3592,24 +4525,34 @@ class PromptQueueUpdateRequest(BaseModel):
 async def _enqueue_prompt_request(
     session_id: str,
     request: PromptRequest,
+    *,
+    expected_generation: Optional[int] = None,
 ):
     from flocks.session.interaction_queue import InteractionQueue
 
+    _validate_execution_mode_request(request)
+    if expected_generation is None:
+        expected_generation = Session.lifecycle_generation(session_id)
     await _require_agent_usable_for_chat(request.agent)
     model = request.model.model_dump(by_alias=True) if request.model else None
     parts = _materialize_queued_parts(session_id, [dict(part) for part in request.parts])
-    return await InteractionQueue.enqueue(
+    return await _persist_active_session_write(
         session_id,
-        parts=parts,
-        agent=request.agent,
-        model=model,
-        variant=request.variant,
-        display_text=request.display_text,
-        message_id=request.messageID,
-        no_reply=request.noReply,
-        mock_reply=request.mockReply,
-        tools=request.tools,
-        system=request.system,
+        lambda: InteractionQueue.enqueue(
+            session_id,
+            parts=parts,
+            agent=request.agent,
+            model=model,
+            variant=request.variant,
+            display_text=request.display_text,
+            message_id=request.messageID,
+            no_reply=request.noReply,
+            mock_reply=request.mockReply,
+            tools=request.tools,
+            system=request.system,
+            execution_mode=request.execution_mode,
+        ),
+        expected_generation=expected_generation,
     )
 
 
@@ -3715,7 +4658,7 @@ async def run_prompt_queue_item_now(sessionID: str, queueID: str) -> Dict[str, A
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found",
         )
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     try:
         await InteractionQueue.promote(sessionID, queueID)
     except QueueItemNotFoundError as exc:
@@ -3756,8 +4699,10 @@ async def send_session_message_async(
     if http_request is not None:
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
+    lifecycle_generation = Session.lifecycle_generation(sessionID)
     
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
+    _validate_execution_mode_request(request)
     await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
@@ -3765,27 +4710,44 @@ async def send_session_message_async(
         "directory": working_directory,
     })
 
+    event_text = _event_text_for_execution_mode(
+        request.parts,
+        request.execution_mode,
+    )
+    event_display_text = request.display_text
+    if request.execution_mode == SessionExecutionMode.GOAL:
+        event_display_text = (
+            event_display_text
+            or _extract_text_from_parts(request.parts).strip()
+        )
+
     event = UserInputEvent(
         source_type="webui",
         sessionID=sessionID,
-        text=_extract_text_from_parts(request.parts),
+        text=event_text,
         parts=[dict(part) for part in request.parts],
         agent=request.agent,
         model=request.model.model_dump(by_alias=True) if request.model else None,
         variant=request.variant,
-        display_text=request.display_text,
+        metadata={"_sessionLifecycleGeneration": lifecycle_generation},
+        display_text=event_display_text,
         messageID=request.messageID,
         noReply=request.noReply,
         mockReply=request.mockReply,
         tools=request.tools,
         system=request.system,
+        executionMode=request.execution_mode,
         working_directory=working_directory,
     )
 
     existing_queue = await InteractionQueue.list(sessionID)
     if SessionLoop.is_running(sessionID) or existing_queue or _is_prompt_chain_active(sessionID):
         try:
-            item = await _enqueue_prompt_request(sessionID, request)
+            item = await _enqueue_prompt_request(
+                sessionID,
+                request,
+                expected_generation=lifecycle_generation,
+            )
         except QueueFullError as exc:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
         await _publish_prompt_queue(sessionID)
@@ -3853,13 +4815,15 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
     if http_request is not None:
         current_user = require_user(http_request)
         _require_session_write_access(session, current_user)
+    lifecycle_generation = Session.lifecycle_generation(sessionID)
 
-    working_directory = session.directory or os.getcwd()
+    working_directory = await _resolve_session_working_directory(session)
     await _require_agent_usable_for_chat(request.agent)
     raw_arguments = request.arguments
     if not raw_arguments and request.arguments_json is not None:
         raw_arguments = json.dumps(request.arguments_json, ensure_ascii=False)
     command_metadata: Dict[str, Any] = {}
+    command_metadata["_sessionLifecycleGeneration"] = lifecycle_generation
     if request.arguments_json is not None:
         command_metadata["commandArgumentsJson"] = request.arguments_json
 
@@ -3915,10 +4879,7 @@ async def send_session_command(sessionID: str, request: CommandRequest, http_req
 
     loop = asyncio.get_running_loop()
     task = loop.create_task(_handle_command())
-    if not hasattr(router, "_pending_tasks"):
-        router._pending_tasks = set()
-    router._pending_tasks.add(task)
-    task.add_done_callback(lambda t: router._pending_tasks.discard(t))
+    _track_background_task(task, session_id=sessionID)
 
     log.info("session.command.accepted", {
         "sessionID": sessionID,
@@ -3957,12 +4918,24 @@ async def run_shell_command(sessionID: str, request: ShellRequest, http_request:
     if request.model:
         model = {"providerID": request.model.providerID, "modelID": request.model.modelID}
     
-    result = await SessionRunner.shell(
-        session_id=sessionID,
-        agent=request.agent,
-        command=request.command,
-        model=model,
-    )
+    try:
+        async with Session.active_operation(sessionID):
+            result = await SessionRunner.shell(
+                session_id=sessionID,
+                agent=request.agent,
+                command=request.command,
+                model=model,
+            )
+    except SessionNotFoundError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=str(exc),
+        ) from exc
+    except SessionInactiveError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     log.info("session.shell.executed", {
         "sessionID": sessionID,
@@ -4177,7 +5150,11 @@ async def get_session_statistics(sessionID: str):
         raise HTTPException(status_code=500, detail=f"Failed to get session statistics: {str(e)}")
 
 
-async def _clear_session_history(sessionID: str) -> int:
+async def _clear_session_history(
+    sessionID: str,
+    *,
+    expected_generation: Optional[int] = None,
+) -> int:
     """Clear stored messages for a session and notify subscribed UIs."""
     session_info = await _get_session_by_id_unfiltered(sessionID)
     if not session_info:
@@ -4193,14 +5170,23 @@ async def _clear_session_history(sessionID: str) -> int:
 
     await abort_session(sessionID)
     await InteractionQueue.clear(sessionID)
-    await GoalManager.clear(sessionID)
     try:
         await _publish_prompt_queue(sessionID)
     except Exception as exc:
         log.warn("session.clear.prompt_queue_event_error", {"sessionID": sessionID, "error": str(exc)})
     await _wait_for_session_idle(sessionID)
 
-    deleted_count = await Message.clear(sessionID)
+    async def clear_persisted_history() -> int:
+        await GoalManager.clear(sessionID)
+        deleted_count = await Message.clear(sessionID)
+        await Session._clear_project_move_metadata_locked(sessionID)
+        return deleted_count
+
+    deleted_count = await _persist_active_session_write(
+        sessionID,
+        clear_persisted_history,
+        expected_generation=expected_generation,
+    )
     log.info("session.cleared", {"sessionID": sessionID, "deleted": deleted_count})
 
     try:
@@ -4231,7 +5217,10 @@ async def clear_session(sessionID: str, http_request: Request):
         current_user = require_user(http_request)
         _require_session_write_access(session_info, current_user)
 
-        deleted_count = await _clear_session_history(sessionID)
+        deleted_count = await _clear_session_history(
+            sessionID,
+            expected_generation=Session.lifecycle_generation(sessionID),
+        )
         return {
             "status": "success",
             "sessionID": sessionID,

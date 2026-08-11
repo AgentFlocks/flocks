@@ -53,13 +53,21 @@ function formatBytes(value?: number | null): string {
 
 interface UpdateModalProps {
   initialInfo?: VersionInfo | null;
+  forceInitialCheck?: boolean;
   edition?: UpdateEdition;
   canUpgrade?: boolean;
   onClose: () => void;
   onDismiss?: () => void;
 }
 
-export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrade = true, onClose, onDismiss }: UpdateModalProps) {
+export default function UpdateModal({
+  initialInfo,
+  forceInitialCheck = false,
+  edition = 'flocks',
+  canUpgrade = true,
+  onClose,
+  onDismiss,
+}: UpdateModalProps) {
   const { t, i18n } = useTranslation('update');
   const [info, setInfo] = useState<VersionInfo | null>(initialInfo ?? null);
   const [checking, setChecking] = useState(false);
@@ -83,11 +91,11 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
     setRestarting(val);
   };
 
-  const fetchVersion = useCallback(async () => {
+  const fetchVersion = useCallback(async (force = false) => {
     setChecking(true);
     setError(null);
     try {
-      const data = await checkUpdate(i18n.language, edition);
+      const data = await checkUpdate(i18n.language, edition, force);
       setInfo(data);
       if (data.error) setError(data.error);
     } catch (e: any) {
@@ -99,9 +107,9 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
 
   useEffect(() => {
     if (!initialInfo) {
-      fetchVersion();
+      void fetchVersion(forceInitialCheck);
     }
-  }, [fetchVersion, initialInfo]);
+  }, [fetchVersion, forceInitialCheck, initialInfo]);
 
   const handleUpgrade = useCallback(async () => {
     if (!info?.has_update) return;
@@ -407,7 +415,7 @@ export default function UpdateModal({ initialInfo, edition = 'flocks', canUpgrad
 
           <div className="flex items-center gap-2 px-4 pb-4">
             <button
-              onClick={fetchVersion}
+              onClick={() => void fetchVersion(true)}
               disabled={checking}
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-gray-600 bg-gray-100 hover:bg-gray-200 rounded-lg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
             >

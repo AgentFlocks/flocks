@@ -46,7 +46,7 @@ TOOL_PRUNE_POLICY: dict[str, int] = {
     # rediscover capabilities and usually makes things worse, not better.
     # ------------------------------------------------------------------
     "skill_load":          -1,
-    "memory_get":          -1,
+    "memory":              -1,
     "memory_search":       -1,
     "tool_search":         -1,
     "flocks_skills":       -1,

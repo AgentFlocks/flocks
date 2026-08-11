@@ -51,13 +51,7 @@ sibling tool calls in one assistant turn for parallel work.
         ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description="Delegatable agent name. Mutually exclusive with category.",
-            required=False,
-        ),
-        ToolParameter(
-            name="category",
-            type=ParameterType.STRING,
-            description="Delegate category. Mutually exclusive with subagent_type.",
+            description="Delegatable agent name. Required for new tasks; omit when continuing with session_id.",
             required=False,
         ),
         ToolParameter(
@@ -76,7 +70,7 @@ sibling tool calls in one assistant turn for parallel work.
         ToolParameter(
             name="command",
             type=ParameterType.STRING,
-            description="Optional command name for tracking",
+            description="Deprecated command name retained for caller compatibility",
             required=False,
         ),
         ToolParameter(
@@ -92,7 +86,6 @@ async def task_tool(
     description: Optional[str] = None,
     prompt: Optional[str] = None,
     subagent_type: Optional[str] = None,
-    category: Optional[str] = None,
     load_skills: Optional[list] = None,
     run_in_background: bool = False,
     session_id: Optional[str] = None,
@@ -106,7 +99,6 @@ async def task_tool(
         load_skills=load_skills,
         description=description,
         run_in_background=run_in_background,
-        category=category,
         subagent_type=subagent_type,
         session_id=session_id,
         command=command,

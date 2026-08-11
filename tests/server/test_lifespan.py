@@ -4,6 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from flocks.memory.config import MemoryConfig
 from flocks.server import app as app_module
 
 
@@ -19,7 +20,7 @@ class _DummyLogger:
 
 
 @pytest.mark.asyncio
-async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
+async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
@@ -27,14 +28,11 @@ async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
     def cleanup_replaced_files() -> None:
         events.append("cleanup_replaced_files")
 
-    def recover_upgrade_state() -> None:
-        events.append("recover_upgrade_state")
-
     async def fake_storage_init() -> None:
         return None
 
     async def fake_config_get():
-        return SimpleNamespace(memory=SimpleNamespace(enabled=False))
+        return SimpleNamespace(memory=MemoryConfig())
 
     async def fake_to_thread(func, *args, **kwargs):
         return func(*args, **kwargs)
@@ -56,13 +54,17 @@ async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
         "flocks.updater.updater",
         types.SimpleNamespace(
             cleanup_replaced_files=cleanup_replaced_files,
-            recover_upgrade_state=recover_upgrade_state,
         ),
     )
     monkeypatch.setitem(
         sys.modules,
         "flocks.config.config_writer",
         types.SimpleNamespace(ensure_config_files=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "flocks.hooks.builtin",
+        types.SimpleNamespace(register_builtin_hooks=lambda: None),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -149,4 +151,4 @@ async def test_lifespan_cleans_leftovers_before_recovering_upgrade_state(
     async with app_module.lifespan(SimpleNamespace()):
         pass
 
-    assert events == ["cleanup_replaced_files", "recover_upgrade_state"]
+    assert events == ["cleanup_replaced_files"]

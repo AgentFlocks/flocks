@@ -24,6 +24,7 @@ log = Log.create(service="tool.glob")
 
 # Constants
 MAX_FILES = 100
+_ripgrep_fallback_logged = False
 
 
 # Description matching Flocks' glob.txt
@@ -153,7 +154,11 @@ async def glob_tool(
         ToolResult with matching files
     """
     try:
-        resolution = await resolve_tool_path(ctx, path or ".")
+        resolution = await resolve_tool_path(
+            ctx,
+            path or ".",
+            allow_host_memory=True,
+        )
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=path or pattern)
 
@@ -195,7 +200,10 @@ async def glob_tool(
                     'mtime': mtime
                 })
         else:
-            log.warn("glob.ripgrep_not_found", {"fallback": "python_glob"})
+            global _ripgrep_fallback_logged
+            if not _ripgrep_fallback_logged:
+                _ripgrep_fallback_logged = True
+                log.info("glob.ripgrep_not_found", {"fallback": "python_glob"})
             
             for filepath in fallback_glob(search_path, pattern):
                 if len(files) >= MAX_FILES:

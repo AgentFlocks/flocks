@@ -23,6 +23,7 @@ declared in agent.yaml.
 from __future__ import annotations
 
 import importlib
+import inspect
 import shutil
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -223,8 +224,9 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
     """
     Scan agent directories and load all valid agents.
 
-    Scans built-in agents first, then user plugin agents, then project plugin
-    agents.  Name conflicts are skipped with a warning (first wins).
+    Scans built-in agents first, then user plugin agents, then project-bundled
+    agents. The first match wins, so user customizations take precedence over
+    project bundles while core built-ins remain protected.
 
     ``native`` is determined by the source directory, not by agent.yaml:
     - ``_BUILTIN_AGENTS_DIR``           → native=True
@@ -238,20 +240,21 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
     Returns:
         Dict mapping agent name → AgentInfo.
     """
-    # (directory, is_native) pairs — order determines first-wins conflict resolution
-    search_dirs: List[tuple[Path, bool]] = [(_BUILTIN_AGENTS_DIR, True)]
+    # (directory, is_native, source) tuples — order determines first-wins priority.
+    search_dirs: List[tuple[Path, bool, str]] = [(_BUILTIN_AGENTS_DIR, True, "builtin")]
     if _PLUGIN_AGENTS_DIR.exists():
-        search_dirs.append((_PLUGIN_AGENTS_DIR, False))
+        search_dirs.append((_PLUGIN_AGENTS_DIR, False, "user"))
     # Project-level plugin agents: resolved at call time because cwd is dynamic
     project_agents_dir = Path.cwd() / ".flocks" / "plugins" / "agents"
     if project_agents_dir.exists() and project_agents_dir != _PLUGIN_AGENTS_DIR:
-        search_dirs.append((project_agents_dir, True))
+        search_dirs.append((project_agents_dir, True, "project"))
     if dirs:
-        search_dirs.extend((d, False) for d in dirs)
+        search_dirs.extend((d, False, "extra") for d in dirs)
 
     result: Dict[str, AgentInfo] = {}
+    selected_sources: Dict[str, tuple[str, Path]] = {}
 
-    for scan_dir, is_native in search_dirs:
+    for scan_dir, is_native, source in search_dirs:
         if not scan_dir.is_dir():
             continue
         for agent_dir in _iter_agent_dirs(scan_dir):
@@ -259,13 +262,21 @@ def scan_and_load(dirs: Optional[List[Path]] = None) -> Dict[str, AgentInfo]:
             if agent is None:
                 continue
             if agent.name in result:
-                log.warn("agent.factory.name_conflict", {
+                selected_source, selected_dir = selected_sources[agent.name]
+                details = {
                     "name": agent.name,
-                    "existing_source": "previous scan",
-                    "skipped_source": str(agent_dir),
-                })
+                    "selected_source": selected_source,
+                    "selected_path": str(selected_dir),
+                    "skipped_source": source,
+                    "skipped_path": str(agent_dir),
+                }
+                if source != selected_source and source != "extra":
+                    log.info("agent.factory.lower_priority_skipped", details)
+                else:
+                    log.warn("agent.factory.name_conflict", details)
                 continue
             result[agent.name] = agent
+            selected_sources[agent.name] = (source, agent_dir)
             log.debug("agent.factory.loaded", {
                 "name": agent.name,
                 "dir": str(agent_dir),
@@ -286,14 +297,13 @@ def inject_dynamic_prompts(
     available_agents: list,
     tools: list,
     skills: list,
-    categories: list,
     workflows: Optional[list] = None,
 ) -> None:
     """
     Inject dynamic prompts for all agents that have a ``prompt_builder``.
 
     Dynamically imports each agent's prompt_builder module and calls its
-    ``inject(agent_info, available_agents, tools, skills, categories, workflows)``
+    ``inject(agent_info, available_agents, tools, skills, workflows)``
     function.  The inject function is expected to set ``agent_info.prompt``
     directly.
 
@@ -306,7 +316,29 @@ def inject_dynamic_prompts(
             module_path, func_name = agent.prompt_builder.rsplit(":", 1)
             module = importlib.import_module(module_path)
             inject_fn = getattr(module, func_name)
-            inject_fn(agent, available_agents, tools, skills, categories, workflows or [])
+            signature = inspect.signature(inject_fn)
+            positional_parameters = [
+                parameter
+                for parameter in signature.parameters.values()
+                if parameter.kind
+                in (
+                    inspect.Parameter.POSITIONAL_ONLY,
+                    inspect.Parameter.POSITIONAL_OR_KEYWORD,
+                )
+            ]
+            has_variadic_arguments = any(
+                parameter.kind == inspect.Parameter.VAR_POSITIONAL
+                for parameter in signature.parameters.values()
+            )
+            uses_legacy_signature = (
+                len(positional_parameters) >= 6
+                or (has_variadic_arguments and len(positional_parameters) <= 4)
+            )
+
+            inject_args = [agent, available_agents, tools, skills]
+            if uses_legacy_signature:
+                inject_args.append([])
+            inject_fn(*inject_args, workflows or [])
             log.debug("agent.factory.prompt_injected", {"name": name})
         except Exception as e:
             log.error("agent.factory.prompt_inject_error", {

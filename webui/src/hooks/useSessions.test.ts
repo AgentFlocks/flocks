@@ -5,6 +5,27 @@ import { sessionApi } from '@/api/session';
 import client from '@/api/client';
 import type { Message } from '@/types';
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function sessionListItem(id: string, projectID: string, updated = 1) {
+  return {
+    id,
+    projectID,
+    effectiveProjectID: projectID,
+    title: id,
+    time: { created: updated, updated },
+    category: 'user',
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Mocks — keep API calls from running in unit tests
 // ---------------------------------------------------------------------------
@@ -142,6 +163,9 @@ describe('applyMessagePartUpdate', () => {
 describe('updateMessagePart scheduling', () => {
   afterEach(() => {
     vi.clearAllMocks();
+    vi.mocked(client.get).mockReset();
+    vi.mocked(client.get).mockResolvedValue({ data: [] });
+    vi.useRealTimers();
   });
 
   it('keeps parentID from fetched messages for regenerate truncation', async () => {
@@ -236,7 +260,80 @@ describe('updateMessagePart scheduling', () => {
     expect((msg!.parts as any[])[0].text).toBe('hello world');
   });
 
-  it('resets known part tracking when session changes', async () => {
+  it('removes a failed assistant placeholder by message id', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({ id: 'keep' }));
+      result.current.addMessage(makeMsg({ id: 'remove-me' }));
+    });
+
+    await act(async () => {
+      result.current.removeMessage('remove-me');
+    });
+
+    expect(result.current.messages.map(message => message.id)).toEqual(['keep']);
+  });
+
+  it('applies every known part update without waiting for an animation frame', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    const part = { id: 'part-batched', messageID: 'msg-batched', sessionID: 'sess-1', type: 'text', text: 'h' };
+
+    await act(async () => {
+      result.current.updateMessagePart(part);
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('h');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'he' }, 'e');
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('he');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'hel' }, 'l');
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hel');
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'hello' }, 'lo');
+    });
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('hello');
+  });
+
+  it('commits the final delta before an immediately following finish update', async () => {
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    const part = {
+      id: 'part-final',
+      messageID: 'msg-final',
+      sessionID: 'sess-1',
+      type: 'text',
+      text: 'almost',
+    };
+    await act(async () => {
+      result.current.updateMessagePart(part);
+    });
+
+    await act(async () => {
+      result.current.updateMessagePart({ ...part, text: 'almost done' }, ' done');
+      result.current.updateMessage({
+        id: 'msg-final',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        finish: 'stop',
+      });
+    });
+
+    const message = result.current.messages.find((item) => item.id === 'msg-final');
+    expect((message?.parts as any[])[0].text).toBe('almost done');
+    expect(message?.finish).toBe('stop');
+  });
+
+  it('resets streamed messages when session changes', async () => {
     const { result, rerender } = renderHook(
       ({ id }: { id?: string }) => useSessionMessages(id),
       { initialProps: { id: 'sess-a' } },
@@ -250,12 +347,62 @@ describe('updateMessagePart scheduling', () => {
       result.current.updateMessagePart(part);
     });
 
-    // Switch to a different session — messages and knownPartIds should reset
+    // Switching sessions must clear streamed state before the next paint.
     await act(async () => {
       rerender({ id: 'sess-b' });
     });
 
     expect(result.current.messages).toHaveLength(0);
+  });
+
+  it('ignores a stale first-page response after switching sessions', async () => {
+    let resolveSessionA: (value: unknown) => void = () => {};
+    let resolveSessionB: (value: unknown) => void = () => {};
+    vi.mocked(client.get).mockImplementation((url: string) => new Promise((resolve) => {
+      if (url.includes('sess-a')) resolveSessionA = resolve;
+      if (url.includes('sess-b')) resolveSessionB = resolve;
+    }) as any);
+
+    const { result, rerender } = renderHook(
+      ({ id }: { id: string }) => useSessionMessages(id),
+      { initialProps: { id: 'sess-a' } },
+    );
+    await act(async () => {});
+
+    rerender({ id: 'sess-b' });
+    await act(async () => {});
+
+    await act(async () => {
+      resolveSessionB({
+        data: [{
+          info: {
+            id: 'msg-b',
+            sessionID: 'sess-b',
+            role: 'assistant',
+            time: { created: 200 },
+          },
+          parts: [],
+        }],
+      });
+    });
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+
+    await act(async () => {
+      resolveSessionA({
+        data: [{
+          info: {
+            id: 'msg-a',
+            sessionID: 'sess-a',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [],
+        }],
+      });
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-b']);
+    expect(result.current.loading).toBe(false);
   });
 
   it('replaceMessageText updates the targeted text part by partId', async () => {
@@ -362,6 +509,88 @@ describe('updateMessagePart scheduling', () => {
     ]);
     expect((result.current.messages[0].parts as any[])[0].text).toBe('hello');
     expect((result.current.messages[1].parts as any[])[0].text).toBe('new reply');
+  });
+
+  it('keeps one user message when refetch and delayed SSE reconcile its optimistic ID', async () => {
+    const optimisticId = 'msg_000000000001abcdefghijklmn';
+    vi.mocked(client.get).mockResolvedValueOnce({ data: [] });
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: optimisticId,
+        role: 'user',
+        timestamp: 100,
+        parts: [{
+          id: `temp-${optimisticId}-text`,
+          type: 'text',
+          text: '测试 question 工具',
+        }] as Message['parts'],
+      }));
+    });
+
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: {
+        items: [
+          {
+            info: {
+              id: optimisticId,
+              sessionID: 'sess-1',
+              role: 'user',
+              time: { created: 200 },
+            },
+            parts: [{
+              id: 'user-real-text',
+              messageID: optimisticId,
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '测试 question 工具',
+            }],
+          },
+          {
+            info: {
+              id: 'assistant-question',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              parentID: optimisticId,
+              time: { created: 201 },
+            },
+            parts: [{
+              id: 'question-part',
+              messageID: 'assistant-question',
+              sessionID: 'sess-1',
+              type: 'tool',
+              tool: 'question',
+              callID: 'question-call',
+              state: { status: 'running' },
+            }],
+          },
+        ],
+        hasMore: false,
+        nextBefore: null,
+      },
+    });
+
+    await act(async () => {
+      await result.current.refetch();
+      result.current.updateMessage({
+        id: optimisticId,
+        sessionID: 'sess-1',
+        role: 'user',
+        time: { created: 200 },
+      });
+    });
+
+    expect(result.current.messages.filter((message) => message.role === 'user'))
+      .toHaveLength(1);
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      optimisticId,
+      'assistant-question',
+    ]);
+    expect(result.current.messages[0].parts.map((part) => part.id)).toEqual([
+      'user-real-text',
+    ]);
   });
 
   it('truncateAfterMessage keeps the target by default', async () => {
@@ -473,58 +702,280 @@ describe('updateMessagePart scheduling', () => {
     expect((msg?.parts as any[])[0].state.status).toBe('completed');
   });
 
-  it('fetches the first message page and prepends older messages', async () => {
-    vi.mocked(client.get)
-      .mockResolvedValueOnce({
-        data: {
-          items: [{
-            info: {
-              id: 'msg-new',
-              sessionID: 'sess-1',
-              role: 'assistant',
-              time: { created: 200 },
-            },
-            parts: [],
-          }],
-          hasMore: true,
-          nextBefore: 'msg-new',
+  it('fetches the complete message history in one request', async () => {
+    vi.mocked(client.get).mockResolvedValueOnce({
+      data: [
+        {
+          info: {
+            id: 'msg-old',
+            sessionID: 'sess-1',
+            role: 'user',
+            time: { created: 100 },
+          },
+          parts: [{ id: 'part-old', type: 'text', text: 'old' }],
         },
-      } as any)
-      .mockResolvedValueOnce({
-        data: {
-          items: [{
-            info: {
-              id: 'msg-old',
-              sessionID: 'sess-1',
-              role: 'user',
-              time: { created: 100 },
-              model: { providerID: 'openai', modelID: 'gpt-4o' },
-            },
-            parts: [{ id: 'part-old', type: 'text', text: 'old' }],
-          }],
-          hasMore: false,
-          nextBefore: null,
+        {
+          info: {
+            id: 'msg-new',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            time: { created: 200 },
+          },
+          parts: [],
         },
-      } as any);
+      ],
+    } as any);
 
     const { result } = renderHook(() => useSessionMessages('sess-1'));
     await act(async () => {});
 
-    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-new']);
-    expect(result.current.hasMore).toBe(true);
+    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-old', 'msg-new']);
+    expect(client.get).toHaveBeenCalledOnce();
     expect(client.get).toHaveBeenCalledWith('/api/session/sess-1/message', {
-      params: { page: true, limit: 50, include_archived: true },
+      params: { include_archived: true },
+    });
+  });
+
+  it('removes messages that are absent from a complete refetch', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({
+        data: [{
+          info: {
+            id: 'msg-before-clear',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [{ id: 'part-before-clear', type: 'text', text: 'old result' }],
+        }],
+      } as any)
+      .mockResolvedValueOnce({ data: [] });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-before-clear']);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(result.current.messages).toEqual([]);
+  });
+
+  it('keeps the current history when a complete refetch fails', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({
+        data: [{
+          info: {
+            id: 'msg-before-error',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [{ id: 'part-before-error', type: 'text', text: 'keep me' }],
+        }],
+      } as any)
+      .mockRejectedValueOnce(new Error('storage unavailable'));
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-before-error']);
+    expect(result.current.error).toBe('storage unavailable');
+  });
+
+  it('keeps an optimistic local message until the complete history confirms it', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [] });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'msg-optimistic',
+        role: 'user',
+        parts: [{ id: 'temp-msg-optimistic-text', type: 'text', text: 'hello' } as any],
+      }));
+      await result.current.refetch();
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-optimistic']);
+  });
+
+  it('keeps an optimistic message when an older refetch resolves after SSE confirmation', async () => {
+    const olderRefetch = deferred<any>();
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: [] })
+      .mockReturnValueOnce(olderRefetch.promise);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'msg-racing',
+        role: 'user',
+        parts: [{ id: 'temp-msg-racing-text', type: 'text', text: 'hello' } as any],
+      }));
+    });
+
+    let refetchPromise: Promise<void> = Promise.resolve();
+    act(() => {
+      refetchPromise = result.current.refetch();
+    });
+    expect(client.get).toHaveBeenCalledTimes(2);
+
+    act(() => {
+      result.current.updateMessage({
+        id: 'msg-racing',
+        sessionID: 'sess-1',
+        role: 'user',
+        time: { created: 200 },
+      });
     });
 
     await act(async () => {
-      await result.current.loadOlder();
+      olderRefetch.resolve({ data: [] });
+      await refetchPromise;
     });
 
-    expect(result.current.messages.map((msg) => msg.id)).toEqual(['msg-old', 'msg-new']);
-    expect(result.current.hasMore).toBe(false);
-    expect(client.get).toHaveBeenLastCalledWith('/api/session/sess-1/message', {
-      params: { page: true, limit: 50, before: 'msg-new', include_archived: true },
+    expect(result.current.messages.map((message) => message.id)).toEqual(['msg-racing']);
+  });
+
+  it('keeps newer SSE message state when an older complete refetch resolves', async () => {
+    const olderRefetch = deferred<any>();
+    const staleMessage = {
+      info: {
+        id: 'msg-existing',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        time: { created: 100 },
+      },
+      parts: [{
+        id: 'part-existing',
+        messageID: 'msg-existing',
+        sessionID: 'sess-1',
+        type: 'text',
+        text: 'stale text',
+      }],
+    };
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: [staleMessage] })
+      .mockReturnValueOnce(olderRefetch.promise);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    let refetchPromise: Promise<void> = Promise.resolve();
+    act(() => {
+      refetchPromise = result.current.refetch();
     });
+
+    act(() => {
+      result.current.updateMessagePart({
+        id: 'part-existing',
+        messageID: 'msg-existing',
+        sessionID: 'sess-1',
+        type: 'text',
+        text: 'new streamed text',
+      }, 'new streamed text');
+      result.current.updateMessage({
+        id: 'msg-new-assistant',
+        sessionID: 'sess-1',
+        role: 'assistant',
+        time: { created: 200 },
+      });
+    });
+
+    await act(async () => {
+      olderRefetch.resolve({ data: [staleMessage] });
+      await refetchPromise;
+    });
+
+    expect(result.current.messages.map((message) => message.id)).toEqual([
+      'msg-existing',
+      'msg-new-assistant',
+    ]);
+    expect((result.current.messages[0].parts as any[])[0].text).toBe('new streamed text');
+  });
+
+  it('clears optimistic messages before applying an empty session history', async () => {
+    vi.mocked(client.get)
+      .mockResolvedValueOnce({ data: [] })
+      .mockResolvedValueOnce({ data: [] });
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+
+    await act(async () => {
+      result.current.addMessage(makeMsg({
+        id: 'msg-pending-clear',
+        role: 'user',
+        parts: [{ id: 'temp-msg-pending-clear-text', type: 'text', text: 'hello' } as any],
+      }));
+      result.current.clearMessages();
+      await result.current.refetch();
+    });
+
+    expect(result.current.messages).toEqual([]);
+  });
+
+  it('keeps messages empty when a request started before clear resolves late', async () => {
+    const pendingRequest = deferred<any>();
+    vi.mocked(client.get).mockReturnValueOnce(pendingRequest.promise);
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    expect(result.current.loading).toBe(true);
+
+    act(() => {
+      result.current.clearMessages();
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+
+    await act(async () => {
+      pendingRequest.resolve({
+        data: [{
+          info: {
+            id: 'msg-deleted-before-response',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            time: { created: 100 },
+          },
+          parts: [{ id: 'part-deleted-before-response', type: 'text', text: 'stale' }],
+        }],
+      });
+      await pendingRequest.promise;
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+  });
+
+  it('resets a previous loading error when messages are cleared', async () => {
+    vi.mocked(client.get).mockRejectedValueOnce(new Error('storage unavailable'));
+
+    const { result } = renderHook(() => useSessionMessages('sess-1'));
+    await act(async () => {});
+    expect(result.current.error).toBe('storage unavailable');
+
+    act(() => {
+      result.current.clearMessages();
+    });
+
+    expect(result.current.messages).toEqual([]);
+    expect(result.current.error).toBeNull();
+    expect(result.current.loading).toBe(false);
+    expect(client.get).toHaveBeenCalledOnce();
   });
 
 });
@@ -630,15 +1081,262 @@ describe('useSessions list loading', () => {
     await act(async () => {});
 
     expect(result.current.loading).toBe(false);
+    expect(result.current.refreshing).toBe(false);
     expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
 
     rerender({ search: 'triage' });
 
     expect(result.current.loading).toBe(false);
+    expect(result.current.refreshing).toBe(true);
     expect(result.current.sessions.map((session) => session.id)).toEqual(['session-1']);
 
     await act(async () => {
       resolveSearch([]);
     });
+    expect(result.current.refreshing).toBe(false);
+  });
+
+  it('loads and tracks pages independently for each project', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.projectID === 'default') {
+        return Array.from({ length: 100 }, (_, index) => ({
+          id: `default-${index}`,
+          projectID: 'legacy-project',
+          effectiveProjectID: 'default',
+          title: `Default ${index}`,
+          time: { created: index, updated: index },
+          category: 'user',
+        })) as any;
+      }
+      return [{
+        id: 'labs-1',
+        projectID: 'prj_labs',
+        effectiveProjectID: 'prj_labs',
+        title: 'Labs',
+        time: { created: 1, updated: 1 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(101);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: false,
+    });
+  });
+
+  it('uses a custom page size for project session pagination', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(12);
+    expect(result.current.hasMoreByProject).toEqual({
+      default: true,
+      prj_labs: true,
+    });
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 6,
+      offset: 6,
+    }));
+  });
+
+  it('preserves each project loaded depth during a background refetch', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => (
+      Array.from({ length: params.limit }, (_, index) => ({
+        id: `${params.projectID}-${params.offset + index}`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: `Session ${params.offset + index}`,
+        time: { created: index, updated: index },
+        category: 'user',
+      })) as any
+    ));
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 6,
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+    expect(result.current.sessions).toHaveLength(18);
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'default',
+      limit: 6,
+      offset: 0,
+    }));
+    expect(sessionApi.list).toHaveBeenCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      limit: 12,
+      offset: 0,
+    }));
+    expect(result.current.sessions).toHaveLength(18);
+  });
+
+  it('uses the selected project offset when loading more sessions', async () => {
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [{
+          id: `${params.projectID}-1`,
+          projectID: params.projectID,
+          effectiveProjectID: params.projectID,
+          title: 'First page',
+          time: { created: 1, updated: 1 },
+          category: 'user',
+        }] as any;
+      }
+      return [{
+        id: `${params.projectID}-2`,
+        projectID: params.projectID,
+        effectiveProjectID: params.projectID,
+        title: 'Second page',
+        time: { created: 2, updated: 2 },
+        category: 'user',
+      }] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+    }));
+    await act(async () => {});
+
+    await act(async () => {
+      await result.current.loadMore('prj_labs');
+    });
+
+    expect(sessionApi.list).toHaveBeenLastCalledWith(expect.objectContaining({
+      projectID: 'prj_labs',
+      offset: 1,
+    }));
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('loads more sessions for different projects concurrently', async () => {
+    const defaultPage = deferred<any[]>();
+    const labsPage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset === 0) {
+        return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+      }
+      return params.projectID === 'default' ? defaultPage.promise : labsPage.promise;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadDefault!: Promise<void>;
+    let loadLabs!: Promise<void>;
+    act(() => {
+      loadDefault = result.current.loadMore('default');
+      loadLabs = result.current.loadMore('prj_labs');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default', 'prj_labs']));
+
+    await act(async () => {
+      defaultPage.resolve([sessionListItem('default-2', 'default', 2)] as any);
+      await loadDefault;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['prj_labs']));
+
+    await act(async () => {
+      labsPage.resolve([sessionListItem('prj_labs-2', 'prj_labs', 2)] as any);
+      await loadLabs;
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+    expect(result.current.sessions.map((item) => item.id)).toEqual([
+      'default-1',
+      'prj_labs-1',
+      'default-2',
+      'prj_labs-2',
+    ]);
+  });
+
+  it('clears project pagination state when a background refresh supersedes it', async () => {
+    const stalePage = deferred<any[]>();
+    vi.mocked(sessionApi.list).mockImplementation(async (params: any) => {
+      if (params.offset > 0) return stalePage.promise;
+      return [sessionListItem(`${params.projectID}-1`, params.projectID)] as any;
+    });
+
+    const { result } = renderHook(() => useSessions('', {
+      projectIds: ['default', 'prj_labs'],
+      pageSize: 1,
+    }));
+    await act(async () => {});
+
+    let loadMore!: Promise<void>;
+    act(() => {
+      loadMore = result.current.loadMore('default');
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set(['default']));
+
+    await act(async () => {
+      await result.current.refetch();
+    });
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
+
+    await act(async () => {
+      stalePage.resolve([sessionListItem('default-stale', 'default', 2)] as any);
+      await loadMore;
+    });
+    expect(result.current.sessions.map((item) => item.id)).not.toContain('default-stale');
+    expect(result.current.loadingMoreProjectIds).toEqual(new Set());
   });
 });

@@ -20,7 +20,6 @@ from .utils import load_env_file
 
 
 AGENT_WORKSPACE = Path(os.environ.get("BH_AGENT_WORKSPACE", DEFAULT_AGENT_WORKSPACE)).expanduser()
-NAME = os.environ.get("BU_NAME", "default")
 INTERNAL = INTERNAL_URL_PREFIXES
 # Legacy compatibility for external imports; cookie export no longer uses site-root guessing.
 _COMMON_SECOND_LEVEL_SUFFIXES = {"ac", "co", "com", "edu", "gov", "mil", "net", "org"}
@@ -48,20 +47,14 @@ def _load_env() -> None:
             continue
         load_env_file(path)
 
+
 _load_env()
+
+NAME = ipc.runtime_paths().name
 
 
 def _send(req: dict) -> dict:
-    sock = ipc.connect(NAME, timeout=5.0)
-    sock.sendall((json.dumps(req) + "\n").encode())
-    data = b""
-    while not data.endswith(b"\n"):
-        chunk = sock.recv(1 << 20)
-        if not chunk:
-            break
-        data += chunk
-    sock.close()
-    response = json.loads(data)
+    response = ipc.request(NAME, req, timeout=5.0)
     if "error" in response:
         raise RuntimeError(response["error"])
     return response
@@ -509,7 +502,7 @@ def click_at_xy(x: int | float, y: int | float, button: str = "left", clicks: in
             from PIL import Image, ImageDraw
 
             dpr = js("window.devicePixelRatio") or 1
-            path = capture_screenshot(str(ipc._TMP / f"debug_click_{_debug_click_counter}.png"))
+            path = capture_screenshot(str(ipc.debug_screenshot_path(_debug_click_counter, NAME)))
             image = Image.open(path)
             draw = ImageDraw.Draw(image)
             px, py = int(x * dpr), int(y * dpr)
@@ -572,7 +565,8 @@ def scroll(x: int | float, y: int | float, dy: int | float = -300, dx: int | flo
 
 def capture_screenshot(path: str | None = None, full: bool = False, max_dim: int | None = None) -> str:
     """Save a PNG of the current viewport."""
-    path = path or str(ipc._TMP / "shot.png")
+    path = path or str(ipc.screenshot_path(NAME))
+    Path(path).parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     response = cdp("Page.captureScreenshot", format="png", captureBeyondViewport=full)
     Path(path).write_bytes(base64.b64decode(response["data"]))
     if max_dim:

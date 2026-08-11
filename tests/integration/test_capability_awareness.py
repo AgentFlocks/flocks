@@ -226,7 +226,7 @@ class TestWorkflowInjectionPipeline:
 
         builder_code = textwrap.dedent("""
         from flocks.agent.prompt_utils import build_workflows_section
-        def inject(agent_info, available_agents, tools, skills, categories, workflows=None):
+        def inject(agent_info, available_agents, tools, skills, workflows=None):
             section = build_workflows_section(workflows or [])
             agent_info.prompt = f"## Capability Context\\n{section}"
         """)
@@ -250,7 +250,7 @@ class TestWorkflowInjectionPipeline:
                     source="project",
                 )
             ]
-            inject_dynamic_prompts({"wf_test_agent": agent}, [], [], [], [], workflows)
+            inject_dynamic_prompts({"wf_test_agent": agent}, [], [], [], workflows)
             assert "my_wf" in agent.prompt
             assert "My integration workflow" in agent.prompt
         finally:
@@ -307,7 +307,7 @@ class TestRexPromptAwareness:
         assert 'skill_load(name="im-send")' not in prompt
         assert "### IM Send Protocol" not in prompt
         assert "Execute this exact sequence" not in prompt
-        assert "IM Session Resolution for schedule_task_create" not in prompt
+        assert "IM Session Resolution for schedule_task" not in prompt
 
     @pytest.mark.asyncio
     async def test_rex_prompt_contains_workflow_section(self):

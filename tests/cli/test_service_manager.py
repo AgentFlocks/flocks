@@ -1,4 +1,5 @@
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -15,8 +16,9 @@ from flocks.cli import service_process
 from tests.helpers.service_supervisor import (
     SleeperProcessAdapter,
     make_short_runtime_root,
-    wait_for_process_exit,
 )
+
+_REAL_ENSURE_WEBUI_DIST = service_manager._ensure_webui_dist
 
 
 class DummyConsole:
@@ -30,7 +32,6 @@ class DummyConsole:
 @pytest.fixture(autouse=True)
 def _skip_backend_webui_dist_check(monkeypatch) -> None:
     monkeypatch.setattr(service_manager, "_ensure_webui_dist", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", lambda *_args, **_kwargs: {"action": "noop", "error": None})
 
 
 def _make_runtime_paths(tmp_path: Path) -> service_manager.RuntimePaths:
@@ -512,6 +513,97 @@ def test_parse_windows_netstat_output_extracts_unique_pids() -> None:
     assert service_manager._parse_windows_netstat_output(output) == [1234, 5678]
 
 
+def test_run_windows_netstat_handles_missing_stdout(monkeypatch) -> None:
+    monkeypatch.setattr(
+        service_manager.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(returncode=0, stdout=None),
+    )
+
+    assert service_manager._run_windows_netstat(5173) == ""
+
+
+def test_run_windows_netstat_decodes_with_replacement(monkeypatch) -> None:
+    """netstat output is decoded as utf-8/replace so GBK console output on
+    Chinese Windows never raises UnicodeDecodeError in the reader thread."""
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="  TCP 127.0.0.1:5173 0.0.0.0:0 LISTENING 42\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert "42" in service_manager._run_windows_netstat(5173)
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_windows_tasklist_process_name_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout='"python.exe","9436"\n')
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._windows_tasklist_process_name(9436) == "python.exe"
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_process_list_pids_windows_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="9436\n36056\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager._process_list_pids() == [9436, 36056]
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_get_node_major_version_decodes_with_replacement(monkeypatch) -> None:
+    monkeypatch.setattr(service_manager, "resolve_node_executable", lambda: "node")
+    seen: dict[str, object] = {}
+
+    def fake_run(*_args, **kwargs):
+        seen.update(kwargs)
+        return SimpleNamespace(returncode=0, stdout="v20.11.1\n")
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    assert service_manager.get_node_major_version() == 20
+    assert seen.get("encoding") == "utf-8"
+    assert seen.get("errors") == "replace"
+
+
+def test_windows_process_probes_survive_gbk_bytes(monkeypatch) -> None:
+    """End-to-end: real GBK-encoded bytes flowing through the decode path
+    must not raise UnicodeDecodeError (the restart-time reader-thread crash)."""
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    # 0xbb is the byte that crashed utf-8 decode in the original bug report.
+    gbk_stdout = "映像名称: python.exe 拒绝访问".encode("gbk").decode("utf-8", errors="replace")
+
+    def fake_run(*_args, **kwargs):
+        assert kwargs.get("encoding") == "utf-8"
+        assert kwargs.get("errors") == "replace"
+        return SimpleNamespace(returncode=0, stdout=gbk_stdout)
+
+    monkeypatch.setattr(service_manager.subprocess, "run", fake_run)
+
+    # None of these should raise, even with mojibake stdout.
+    service_manager._windows_tasklist_process_name(123)
+    service_manager._run_windows_netstat(5173)
+    service_manager._process_list_pids()
+
+
 def test_port_owner_pids_warns_when_no_tool_found(monkeypatch) -> None:
     monkeypatch.setattr(service_manager.sys, "platform", "linux")
     monkeypatch.setattr(service_manager, "which", lambda _name: None)
@@ -527,6 +619,18 @@ def test_port_is_in_use_falls_back_to_bind_when_pid_lookup_unavailable(monkeypat
 
     with pytest.warns(RuntimeWarning, match="退回到 bind 检查"):
         assert service_manager.port_is_in_use(5173) is True
+
+
+@pytest.mark.parametrize(("port_available", "expected"), [(True, False), (False, True)])
+def test_windows_port_is_in_use_confirms_empty_pid_lookup_with_bind(
+    monkeypatch,
+    port_available: bool,
+    expected: bool,
+) -> None:
+    monkeypatch.setattr(service_manager.sys, "platform", "win32")
+    monkeypatch.setattr(service_manager, "_bind_port_available", lambda _port: port_available)
+
+    assert service_manager.port_is_in_use(5173, listeners=[]) is expected
 
 
 def test_bind_port_available_checks_all_ipv4_interfaces(monkeypatch) -> None:
@@ -951,27 +1055,22 @@ def test_start_all_starts_supervisor_when_control_api_is_down(monkeypatch) -> No
     assert call_order == ["ensure_runtime_dirs", "_start_all_without_stop"]
 
 
-def test_start_all_resolves_upgrade_runtime_before_supervisor_status(monkeypatch) -> None:
+def test_start_all_checks_supervisor_before_starting(monkeypatch) -> None:
     events: list[str] = []
     console = DummyConsole()
     paths = _make_runtime_paths(Path("/tmp/flocks-test"))
-
-    def resolve_upgrade_runtime(_console, *, frontend_port: int, attempt_recover: bool) -> dict[str, object]:
-        events.append(f"upgrade:{frontend_port}:{attempt_recover}")
-        return {"action": "cleaned", "error": None}
 
     def supervisor_running(_paths) -> bool:
         events.append("supervisor")
         return False
 
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
-    monkeypatch.setattr(service_manager, "_resolve_upgrade_runtime", resolve_upgrade_runtime)
     monkeypatch.setattr(service_manager, "supervisor_is_running", supervisor_running)
     monkeypatch.setattr(service_manager, "_start_all_without_stop", lambda _config, _console: events.append("start"))
 
     service_manager.start_all(service_manager.ServiceConfig(frontend_port=5173), console)
 
-    assert events == ["upgrade:5173:False", "supervisor", "start"]
+    assert events == ["supervisor", "start"]
 
 
 def test_start_all_does_not_duplicate_running_supervisor(monkeypatch) -> None:
@@ -1095,6 +1194,40 @@ def test_restart_all_stops_then_starts_daemon(monkeypatch) -> None:
     service_manager.restart_all(service_manager.ServiceConfig(), console=None)
 
     assert call_order == ["stop", "start"]
+
+
+def test_restart_server_requests_backend_restart(monkeypatch) -> None:
+    calls: list[str] = []
+    console = DummyConsole()
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+    status = _supervisor_status(_supervisor_status_payload())
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: True)
+    monkeypatch.setattr(
+        service_manager,
+        "request_restart_backend",
+        lambda **_kwargs: calls.append("backend") or status,
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_print_status_payload",
+        lambda *_args, **_kwargs: calls.append("status"),
+    )
+
+    service_manager.restart_server(console)
+
+    assert calls == ["backend", "status"]
+
+
+def test_restart_server_requires_running_supervisor(monkeypatch) -> None:
+    paths = _make_runtime_paths(Path("/tmp/flocks-test"))
+
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    monkeypatch.setattr(service_manager, "supervisor_is_running", lambda _paths: False)
+
+    with pytest.raises(service_manager.ServiceError, match="请执行 `flocks restart` 进行全量重启"):
+        service_manager.restart_server(DummyConsole())
 
 
 def test_start_all_without_stop_starts_supervisor_daemon(monkeypatch, tmp_path: Path) -> None:
@@ -1465,6 +1598,10 @@ def test_build_frontend_env_sets_portal_defaults_when_env_missing(monkeypatch) -
         env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"]
         == service_manager.DEFAULT_VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS
     )
+    allowed_hosts = env["__VITE_ADDITIONAL_SERVER_ALLOWED_HOSTS"].split(",")
+    assert "127.0.0.1" in allowed_hosts
+    assert "localhost" in allowed_hosts
+    assert "portalflocks.threatbook.cn" in allowed_hosts
 
 
 def test_build_frontend_env_allows_overriding_portal_defaults(monkeypatch) -> None:
@@ -1499,7 +1636,10 @@ def _fake_process(pid: int, args: list[str] | None = None, returncode: int | Non
     return SimpleNamespace(pid=pid, args=args or [str(pid)], returncode=returncode, poll=lambda: returncode)
 
 
-def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path: Path) -> None:
+def test_supervisor_restarts_backend_after_tenth_consecutive_port_failure(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
@@ -1516,76 +1656,121 @@ def test_supervisor_recovers_backend_when_port_disappears(monkeypatch, tmp_path:
         lambda *_args, **_kwargs: calls.append("start:backend") or _fake_process(333, ["backend-new"]),
     )
 
-    daemon.tick()
+    assert daemon.interval == 30.0
+    assert daemon.failure_threshold == 10
 
+    for expected_failure_count in range(1, 10):
+        daemon.tick()
+        assert calls == []
+        assert daemon.backend.state == "degraded"
+        assert daemon.backend.health_failure_count == expected_failure_count
+
+    daemon.tick()
     assert calls == ["stop:后端", "start:backend"]
     assert daemon.backend.pid == 333
 
 
-def test_supervisor_waits_for_second_backend_health_failure(monkeypatch, tmp_path: Path) -> None:
+def test_supervisor_resets_backend_port_failures_after_recovery(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    port_states = iter([False] * 9 + [True] + [False] * 9)
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"])
+
+    monkeypatch.setattr(
+        service_process,
+        "tcp_port_accepts_connections",
+        lambda *_args: next(port_states),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda *_args, **_kwargs: calls.append("stop"),
+    )
+
+    for _ in range(9):
+        daemon.tick()
+
+    assert calls == []
+    assert daemon.backend.health_failure_count == 9
+
+    daemon.tick()
+
+    assert daemon.backend.state == "healthy"
+    assert daemon.backend.health_failure_count == 0
+
+    for _ in range(9):
+        daemon.tick()
+
+    assert calls == []
+    assert daemon.backend.state == "degraded"
+    assert daemon.backend.health_failure_count == 9
+
+
+def test_supervisor_restarts_backend_on_first_probe_after_process_exits(
+    monkeypatch,
+    tmp_path: Path,
+) -> None:
+    paths = _make_runtime_paths(tmp_path)
+    calls: list[str] = []
+    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
+    daemon = service_supervisor.SupervisorDaemon(service_manager.ServiceConfig(backend_port=9995))
+    daemon.paths = paths
+    daemon.backend.process = _fake_process(111, ["backend"], returncode=7)
+
+    monkeypatch.setattr(
+        service_manager,
+        "_terminate_process",
+        lambda *_args, **_kwargs: calls.append("stop"),
+    )
+    monkeypatch.setattr(
+        service_manager,
+        "_start_backend_process",
+        lambda *_args, **_kwargs: calls.append("start") or _fake_process(333, ["backend-new"]),
+    )
+
+    daemon.tick()
+
+    assert calls == ["stop", "start"]
+    assert daemon.backend.pid == 333
+
+
+def test_supervisor_liveness_probe_keeps_backend_healthy(monkeypatch, tmp_path: Path) -> None:
+    """Liveness-only probe: process alive + TCP port open = healthy, no HTTP check needed."""
     paths = _make_runtime_paths(tmp_path)
     calls: list[str] = []
     monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
     daemon = service_supervisor.SupervisorDaemon(
         service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
-        failure_threshold=2,
     )
     daemon.paths = paths
     daemon.backend.process = _fake_process(111, ["backend"])
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            return None
-
-        def get(self, _url, **_kwargs):
-            return httpx.Response(503, json={"status": "unhealthy"})
-
-    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
     monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
     monkeypatch.setattr(service_manager, "_terminate_process", lambda _process, name, _console: calls.append(f"stop:{name}"))
-    monkeypatch.setattr(
-        service_manager,
-        "_start_backend_process",
-        lambda *_args, **_kwargs: calls.append("start:backend") or _fake_process(333, ["backend-new"]),
-    )
 
     daemon.tick()
     assert calls == []
-    assert daemon.backend.state == "degraded"
+    assert daemon.backend.state == "healthy"
 
     daemon.tick()
-    assert calls == ["stop:后端", "start:backend"]
+    assert calls == []
+    assert daemon.backend.state == "healthy"
 
 
-def test_backend_probe_rejects_api_root_when_static_webui_missing(monkeypatch) -> None:
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args) -> None:
-            return None
-
-        def get(self, url, **_kwargs):
-            if str(url).endswith("/api/health"):
-                return httpx.Response(200, json={"status": "healthy"})
-            return httpx.Response(200, json={"status": "running"})
-
+def test_backend_probe_liveness_only_accepts_alive_process(monkeypatch) -> None:
+    """Liveness-only probe: process alive + TCP port open = healthy regardless of HTTP response."""
     monkeypatch.setattr(service_process, "tcp_port_accepts_connections", lambda *_args: True)
-    monkeypatch.setattr(service_process.httpx, "Client", FakeClient)
 
     result = service_process.BackendProcessAdapter().probe(_fake_process(111, ["backend"]), "127.0.0.1", 5173)
 
-    assert result.healthy is False
-    assert result.reason == "health status=200, root status=200"
+    assert result.healthy is True
+    assert result.reason == "liveness check passed"
 
 
 def test_supervisor_reports_webui_as_static_endpoint(monkeypatch, tmp_path: Path) -> None:
@@ -1622,47 +1807,6 @@ def test_supervisor_rejects_static_webui_stop_control_api(monkeypatch, tmp_path:
         shutil.rmtree(short_root, ignore_errors=True)
 
     assert exc_info.value.response.status_code == 409
-
-
-@pytest.mark.skipif(sys.platform == "win32", reason="uses the Unix domain socket control API")
-def test_supervisor_upgrade_prepare_control_api_pauses_real_child_restart(monkeypatch, tmp_path: Path) -> None:
-    del tmp_path
-    short_root = make_short_runtime_root("flocks-supervisor-")
-    paths = _make_runtime_paths(short_root)
-    paths.run_dir.mkdir(parents=True)
-    paths.log_dir.mkdir(parents=True)
-    monkeypatch.setattr(service_manager, "ensure_runtime_dirs", lambda: paths)
-    backend_adapter = SleeperProcessAdapter()
-    daemon = service_supervisor.SupervisorDaemon(
-        service_manager.ServiceConfig(backend_port=9995, frontend_port=9996),
-        backend_adapter=backend_adapter,
-    )
-    daemon._start_control_server()
-
-    try:
-        daemon.restart_all(reason="test startup")
-        backend_process = daemon.backend.process
-        assert backend_process is not None
-        assert daemon.webui.process is None
-        assert daemon.webui.state == "static"
-
-        status = service_control.request_prepare_upgrade(paths=paths)
-
-        wait_for_process_exit(backend_process)
-        assert status.backend.paused is True
-        assert status.webui.paused is True
-        assert daemon.backend.process is None
-        assert backend_process.pid in backend_adapter.stopped
-
-        daemon.tick()
-
-        assert len(backend_adapter.started) == 1
-        assert daemon.backend.process is None
-        assert daemon.status_payload()["backend"]["paused"] is True
-    finally:
-        daemon.shutdown_children()
-        daemon._stop_control_server()
-        shutil.rmtree(short_root, ignore_errors=True)
 
 
 def test_build_webui_dist_tolerates_windows_node_assertion_after_build(monkeypatch, tmp_path: Path) -> None:
@@ -1708,6 +1852,108 @@ def test_build_webui_dist_prefers_bundled_npm_over_path_lookup(monkeypatch, tmp_
     service_manager._build_webui_dist(tmp_path, service_manager.ServiceConfig(), console)
 
     assert build_calls[0][0] == r"C:\Users\flocks\AppData\Local\Programs\Flocks\tools\node\npm.cmd"
+
+
+def test_webui_needs_build_when_source_is_newer_than_dist(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is True
+
+
+def test_webui_needs_build_ignores_generated_directories(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    generated_path = webui_dir / "node_modules" / "package" / "index.js"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    generated_path.parent.mkdir(parents=True)
+    source_path.write_text("source", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    generated_path.write_text("generated", encoding="utf-8")
+    built_at = max(path.stat().st_mtime_ns for path in (webui_dir, source_path.parent, source_path))
+    os.utime(index_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    os.utime(generated_path, ns=(built_at + 2_000_000_000, built_at + 2_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is False
+
+
+def test_webui_needs_build_when_source_is_deleted(tmp_path: Path) -> None:
+    webui_dir = tmp_path / "webui"
+    source_dir = webui_dir / "src"
+    source_path = source_dir / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_dir.mkdir(parents=True)
+    index_path.parent.mkdir()
+    source_path.write_text("source", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = max(path.stat().st_mtime_ns for path in (webui_dir, source_dir, source_path))
+    os.utime(index_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    source_path.unlink()
+    os.utime(source_dir, ns=(built_at + 2_000_000_000, built_at + 2_000_000_000))
+
+    assert service_manager._webui_needs_build(webui_dir) is True
+
+
+def test_ensure_webui_dist_rebuilds_when_source_is_newer(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server import static_webui
+
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    builds: list[Path] = []
+    monkeypatch.setattr(static_webui, "ensure_webui_dist_dir", lambda: index_path.parent.resolve())
+    monkeypatch.setattr(
+        service_manager,
+        "_build_webui_dist",
+        lambda root, _config, _console: builds.append(root),
+    )
+
+    _REAL_ENSURE_WEBUI_DIST(tmp_path, service_manager.ServiceConfig(), DummyConsole())
+
+    assert builds == [tmp_path]
+
+
+def test_ensure_webui_dist_skips_stale_source_when_requested(monkeypatch, tmp_path: Path) -> None:
+    from flocks.server import static_webui
+
+    webui_dir = tmp_path / "webui"
+    source_path = webui_dir / "src" / "main.tsx"
+    index_path = webui_dir / "dist" / "index.html"
+    source_path.parent.mkdir(parents=True)
+    index_path.parent.mkdir()
+    (webui_dir / "package.json").write_text("{}", encoding="utf-8")
+    source_path.write_text("before", encoding="utf-8")
+    index_path.write_text("<html></html>", encoding="utf-8")
+    built_at = index_path.stat().st_mtime_ns
+    os.utime(source_path, ns=(built_at + 1_000_000_000, built_at + 1_000_000_000))
+    builds: list[Path] = []
+    monkeypatch.setattr(static_webui, "ensure_webui_dist_dir", lambda: index_path.parent.resolve())
+    monkeypatch.setattr(
+        service_manager,
+        "_build_webui_dist",
+        lambda root, _config, _console: builds.append(root),
+    )
+
+    config = service_manager.ServiceConfig(skip_frontend_build=True)
+    _REAL_ENSURE_WEBUI_DIST(tmp_path, config, DummyConsole())
+
+    assert builds == []
 
 
 def test_start_backend_raises_when_port_has_listener(monkeypatch, tmp_path: Path) -> None:

@@ -13,7 +13,6 @@ if TYPE_CHECKING:
         AvailableAgent,
         AvailableTool,
         AvailableSkill,
-        AvailableCategory,
         AvailableWorkflow,
     )
 
@@ -23,7 +22,6 @@ def inject(
     available_agents: List["AvailableAgent"],
     tools: List["AvailableTool"],
     skills: List["AvailableSkill"],
-    categories: List["AvailableCategory"],
     workflows: Optional[List["AvailableWorkflow"]] = None,
 ) -> None:
     """Build and inject Rex's dynamic system prompt."""
@@ -31,7 +29,6 @@ def inject(
         available_agents=available_agents,
         available_tools=tools,
         available_skills=skills,
-        available_categories=categories,
         available_workflows=workflows or [],
         use_task_system=False,
     )
@@ -41,7 +38,6 @@ def build_dynamic_rex_prompt(
     available_agents: List["AvailableAgent"],
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
-    available_categories: List["AvailableCategory"],
     available_workflows: Optional[List["AvailableWorkflow"]] = None,
     use_task_system: bool = False,
 ) -> str:
@@ -52,7 +48,7 @@ def build_dynamic_rex_prompt(
         build_anti_patterns_section,
     )
 
-    _ = available_tools, available_categories
+    _ = available_tools
 
     key_triggers = build_key_triggers_section(available_agents, available_skills)
     agent_selection = build_agent_selection_table(available_agents)
@@ -130,7 +126,7 @@ Use this order every time:
 1. **Direct tools first**: if there is a short tool path, execute directly.
 2. **Security exception**: for one IOC that only needs basic TI facts, prefer direct lookup.
 3. **Delegate when needed**: use specialists for deep investigation, attribution, correlation, batching, external docs, or structured expert output.
-4. **Do not guess**: if unsure whether something is a tool, skill, category, or subagent, use `tool_search` first.
+4. **Do not guess**: if unsure whether something is a tool, skill, or subagent, use `tool_search` first.
 
 ## 3. Delegation
 
@@ -256,6 +252,11 @@ def _build_command_guidance_section() -> str:
 
 Use `flocks --help` to inspect Flocks CLI commands and usage.
 run_slash_command tool with help command to get the latest slash command guidance.
+
+### Safe Flocks Restart
+
+When you need to restart the running Flocks service yourself, use `flocks restart --server-only`.
+永远不要直接执行 `flocks restart`，这将会导致你杀死自己并且无法自启动。
 </Command_Guidance>"""
 
 
@@ -432,5 +433,5 @@ Security sub-agents still have dedicated toolsets and should be preferred for no
 def _build_im_send_pointer_section() -> str:
     return """### IM Messaging
 
-When the user wants to send a message to an IM platform, call `im_send_message`.
-When creating a scheduled task that sends to an IM platform later, resolve the target `session_id` with `im_send_message(resolve_only=true)` before calling `schedule_task_create`."""
+When the user wants to send a message to a connected messaging channel (including IM platforms and email), call `im_send_message`.
+When creating a scheduled task that sends to a connected messaging channel later, resolve the target `session_id` with `im_send_message(resolve_only=true)` before calling `schedule_task(action="create", resource_type="scheduler", ...)`."""

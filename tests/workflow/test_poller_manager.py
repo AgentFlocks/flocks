@@ -4,12 +4,74 @@ import asyncio
 import threading
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
+from flocks.tool import ToolContext
 from flocks.workflow import poller_manager
 from flocks.workflow import execution_store
 from flocks.workflow.runner import RunWorkflowResult
+
+
+@pytest.fixture(autouse=True)
+def trigger_tool_context(monkeypatch: pytest.MonkeyPatch) -> SimpleNamespace:
+    context = ToolContext(
+        session_id="schedule-parent",
+        message_id="schedule-message",
+        agent="rex",
+    )
+    builder = AsyncMock(return_value=context)
+    cleanup = AsyncMock()
+    monkeypatch.setattr(poller_manager, "build_workflow_tool_context", builder)
+    monkeypatch.setattr(poller_manager, "cleanup_workflow_tool_context", cleanup)
+    return SimpleNamespace(context=context, builder=builder, cleanup=cleanup)
+
+
+@pytest.mark.asyncio
+async def test_start_all_skips_stale_workflow_config_as_info(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workflow_id = "removed-workflow"
+    config = {"enabled": True, "intervalSeconds": "not-a-number"}
+    info_events: list[tuple[str, dict]] = []
+    warning_events: list[str] = []
+
+    async def _list_configs(*, kind: str):  # noqa: ANN202
+        assert kind == "workflow_poller_config"
+        return [(workflow_id, config)]
+
+    async def _get_config(_workflow_id: str, *, kind: str) -> dict[str, Any]:
+        assert kind == "workflow_poller_config"
+        return config
+
+    monkeypatch.setattr(poller_manager.WorkflowStore, "list_configs", _list_configs)
+    monkeypatch.setattr(poller_manager.WorkflowStore, "get_config", _get_config)
+    monkeypatch.setattr(poller_manager, "read_workflow_from_fs", lambda _workflow_id: None)
+    monkeypatch.setattr(
+        poller_manager.log,
+        "info",
+        lambda event, data=None: info_events.append((event, data)),
+    )
+    monkeypatch.setattr(
+        poller_manager.log,
+        "warning",
+        lambda event, _data=None: warning_events.append(event),
+    )
+
+    manager = poller_manager.WorkflowPollerManager()
+    await manager.start_all()
+
+    status = manager.get_status(workflow_id)
+    assert status["state"] == "stopped"
+    assert status["error"] == "workflow_not_found"
+    assert info_events == [
+        (
+            "poller.workflow_not_found_on_start",
+            {"workflow_id": workflow_id, "action": "stale_config_skipped"},
+        )
+    ]
+    assert warning_events == []
 
 
 @pytest.mark.asyncio
@@ -42,7 +104,10 @@ async def test_restart_missing_workflow_reports_failed(monkeypatch: pytest.Monke
 
 
 @pytest.mark.asyncio
-async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+async def test_run_once_injects_dynamic_inputs_and_summary(
+    monkeypatch: pytest.MonkeyPatch,
+    trigger_tool_context: SimpleNamespace,
+) -> None:
     manager = poller_manager.WorkflowPollerManager()
     captured_inputs: dict[str, Any] = {}
 
@@ -63,6 +128,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         captured_inputs.update(inputs)
         assert workflow["start"] == "n1"
@@ -71,6 +137,7 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
         assert trace is False
         assert run_id == "exec-wf-run-once"
         assert execution_profile == "high_frequency"
+        assert tool_context is trigger_tool_context.context
         assert cancel() is False
         return RunWorkflowResult(
             status="success",
@@ -130,6 +197,11 @@ async def test_run_once_injects_dynamic_inputs_and_summary(monkeypatch: pytest.M
     assert captured_inputs["input_date"]
     assert captured_inputs["_trigger"] == "poller"
     assert captured_inputs["_poller_run_id"].startswith("poller-")
+    trigger_tool_context.builder.assert_awaited_once_with(
+        workflow_id="wf-run-once",
+        action_name="trigger:schedule",
+    )
+    trigger_tool_context.cleanup.assert_awaited_once_with(trigger_tool_context.context)
 
 
 @pytest.mark.asyncio
@@ -193,6 +265,7 @@ async def test_run_once_records_execution_and_normalizes_business_failure(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         assert workflow["start"] == "n1"
         assert workflow["nodes"][0]["id"] == "n1"
@@ -284,6 +357,7 @@ async def test_no_overlap_skips_when_previous_run_is_still_active(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         _ = workflow, inputs, timeout_s, trace, cancel, run_id
         _ = on_step_complete
@@ -380,6 +454,7 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
         on_step_complete,
         run_id: str,
         execution_profile: str,
+        tool_context: ToolContext,
     ):
         _ = workflow, inputs, timeout_s, trace, cancel, run_id
         _ = on_step_complete
@@ -411,22 +486,42 @@ async def test_stop_workflow_keeps_unfinished_run_tracked_until_thread_exits(
 async def test_start_all_only_restarts_enabled_configs(monkeypatch: pytest.MonkeyPatch) -> None:
     manager = poller_manager.WorkflowPollerManager()
     restarted: list[str] = []
+    warning_events: list[tuple[str, dict[str, str]]] = []
 
     async def _fake_list_configs(*, kind: str) -> list[tuple[str, dict[str, Any]]]:
         return [
+            ("wf-broken", {"enabled": True}),
             ("wf-enabled", {"enabled": True}),
             ("wf-disabled", {"enabled": False}),
         ]
 
-    async def _fake_restart(workflow_id: str) -> dict[str, Any]:
+    async def _fake_restart(
+        workflow_id: str,
+        *,
+        startup: bool = False,
+    ) -> dict[str, Any]:
+        assert startup is True
         restarted.append(workflow_id)
+        if workflow_id == "wf-broken":
+            raise ValueError("invalid config")
         return {"workflowId": workflow_id, "state": "running"}
 
     monkeypatch.setattr(poller_manager.WorkflowStore, "list_configs", _fake_list_configs)
     monkeypatch.setattr(manager, "restart_workflow", _fake_restart)
+    monkeypatch.setattr(
+        poller_manager.log,
+        "warning",
+        lambda event, data: warning_events.append((event, data)),
+    )
 
     await manager.start_all()
-    assert restarted == ["wf-enabled"]
+    assert restarted == ["wf-broken", "wf-enabled"]
+    assert warning_events == [
+        (
+            "poller.start_failed",
+            {"workflow_id": "wf-broken", "error": "invalid config"},
+        )
+    ]
 
 
 @pytest.mark.asyncio

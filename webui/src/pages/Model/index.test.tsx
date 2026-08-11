@@ -1,5 +1,5 @@
 import React from 'react';
-import { screen, waitFor } from '@testing-library/react';
+import { screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { vi } from 'vitest';
 
@@ -17,15 +17,27 @@ const mocks = vi.hoisted(() => ({
   refetch: vi.fn(),
   getSummary: vi.fn(),
   getResolved: vi.fn(),
+  getFallbacks: vi.fn(),
+  setFallbacks: vi.fn(),
   listDefinitions: vi.fn(),
+  createDefinition: vi.fn(),
+  getModelSettings: vi.fn(),
+  updateModelSettings: vi.fn(),
   catalogList: vi.fn(),
   createProvider: vi.fn(),
+  getCredentials: vi.fn(),
+  revealCredentials: vi.fn(),
+  setCredentials: vi.fn(),
+  testCredentials: vi.fn(),
 }));
 
 vi.mock('react-i18next', () => ({
   useTranslation: () => ({
     t: (key: string, params?: Record<string, unknown>) => {
       if (key === 'status.models') return `${params?.count ?? 0} models`;
+      if (key === 'modelSelection.info') {
+        return 'modelSelection.info';
+      }
       const translations: Record<string, string> = {
         pageTitle: 'Models',
         pageDescription: 'Manage providers',
@@ -42,6 +54,7 @@ vi.mock('react-i18next', () => ({
         'form.baseUrlRequired': 'Please enter Base URL',
         'form.apiKeyOptional': '(optional, leave empty for no-auth gateways)',
         'form.apiKeyOptionalHint': 'Leave empty for no-auth gateway',
+        'form.apiKeyKeepExisting': 'Leave blank to keep the existing API key',
         'form.searchProvider': 'Search providers...',
         'form.noResults': 'No results',
         'form.alreadyAdded': 'Already added',
@@ -108,13 +121,14 @@ vi.mock('@/components/common/EntitySheet', () => ({
 
 vi.mock('@/api/provider', () => ({
   providerAPI: {
-    getCredentials: vi.fn(),
-    setCredentials: vi.fn(),
-    testCredentials: vi.fn(),
+    getCredentials: mocks.getCredentials,
+    revealCredentials: mocks.revealCredentials,
+    setCredentials: mocks.setCredentials,
+    testCredentials: mocks.testCredentials,
   },
   modelV2API: {
     listDefinitions: mocks.listDefinitions,
-    createDefinition: vi.fn(),
+    createDefinition: mocks.createDefinition,
     deleteDefinition: vi.fn(),
   },
   usageAPI: {
@@ -124,14 +138,16 @@ vi.mock('@/api/provider', () => ({
     createProvider: mocks.createProvider,
   },
   modelSettingsAPI: {
-    get: vi.fn(),
-    update: vi.fn(),
+    get: mocks.getModelSettings,
+    update: mocks.updateModelSettings,
   },
   catalogAPI: {
     list: mocks.catalogList,
   },
   defaultModelAPI: {
     getResolved: mocks.getResolved,
+    getFallbacks: mocks.getFallbacks,
+    setFallbacks: mocks.setFallbacks,
     delete: vi.fn(),
     set: vi.fn(),
   },
@@ -150,6 +166,8 @@ describe('ModelPage add provider dialog', () => {
     });
     mocks.getSummary.mockResolvedValue({ data: null });
     mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
     mocks.listDefinitions.mockResolvedValue({ data: { models: [] } });
     mocks.catalogList.mockResolvedValue({
       data: {
@@ -215,6 +233,599 @@ describe('ModelPage add provider dialog', () => {
         api_key: 'not-needed',
         description: 'Compatible endpoint',
       });
+    });
+  });
+});
+
+describe('ModelPage configure provider dialog', () => {
+  const provider = {
+    id: 'openai',
+    name: 'OpenAI',
+    source: 'config',
+    env: [],
+    key: null,
+    options: {},
+    models: {},
+    configured: true,
+    modelCount: 1,
+    category: 'connected',
+  };
+  const model = {
+    id: 'gpt-4o',
+    name: 'GPT-4o',
+    provider_id: 'openai',
+    model_type: 'chat',
+    status: 'active',
+    capabilities: {
+      features: [],
+      supports_streaming: true,
+      supports_tools: true,
+    },
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers: [provider],
+      connectedIds: ['openai'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({ data: null });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models: [model], total: 1 } });
+    mocks.catalogList.mockResolvedValue({
+      data: {
+        providers: [{ id: 'openai', models: [] }],
+      },
+    });
+    mocks.getCredentials.mockResolvedValue({
+      data: {
+        secret_id: 'openai_llm_key',
+        api_key: null,
+        api_key_masked: 'sk-***1234',
+        base_url: 'https://old.example.com/v1',
+        has_credential: true,
+      },
+    });
+    mocks.revealCredentials.mockResolvedValue({
+      data: {
+        secret_id: 'openai_llm_key',
+        api_key: 'sk-existing-secret-1234',
+        api_key_masked: 'sk-***1234',
+        base_url: 'https://old.example.com/v1',
+        has_credential: true,
+      },
+    });
+    mocks.setCredentials.mockResolvedValue({ data: { success: true } });
+    mocks.testCredentials.mockResolvedValue({
+      data: {
+        success: true,
+        message: 'ok',
+        model_id: 'gpt-4o',
+        question: 'ping',
+        answer: 'pong',
+        latency_ms: 10,
+      },
+    });
+  });
+
+  async function openConfigureDialog(user: ReturnType<typeof userEvent.setup>) {
+    renderWithRouter(<ModelPage />);
+    await user.click(await screen.findByTitle('Configure'));
+    expect(await screen.findByTestId('entity-sheet')).toBeInTheDocument();
+    expect(mocks.revealCredentials).toHaveBeenCalledWith('openai');
+  }
+
+  it('does not test provider credentials when the page loads', async () => {
+    renderWithRouter(<ModelPage />);
+
+    await waitFor(() => {
+      expect(mocks.getCredentials).toHaveBeenCalledWith('openai');
+    });
+    expect(mocks.testCredentials).not.toHaveBeenCalled();
+  });
+
+  it('displays and preserves the existing API key when saving a new base URL', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+
+    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
+    expect(apiKeyInput).toHaveAttribute('type', 'password');
+    expect(apiKeyInput).not.toHaveValue('sk-***1234');
+    await user.click(screen.getByTitle('form.show'));
+    expect(apiKeyInput).toHaveAttribute('type', 'text');
+
+    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
+    await user.clear(baseUrlInput);
+    await user.type(baseUrlInput, 'https://new.example.com/v1');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.testCredentials).not.toHaveBeenCalled();
+    const payload = mocks.setCredentials.mock.calls.at(-1)?.[1];
+    expect(payload).toEqual(expect.objectContaining({
+      base_url: 'https://new.example.com/v1',
+    }));
+    expect(payload).not.toHaveProperty('api_key');
+  });
+
+  it('persists the displayed API key and a base URL change before testing the connection', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+    mocks.setCredentials.mockClear();
+    mocks.testCredentials.mockClear();
+
+    const baseUrlInput = screen.getByPlaceholderText('https://api.example.com/v1');
+    await user.clear(baseUrlInput);
+    await user.type(baseUrlInput, 'https://test.example.com/v1');
+    await user.click(screen.getByRole('button', { name: 'form.testConnection2' }));
+
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    const payload = mocks.setCredentials.mock.calls[0]?.[1];
+    expect(payload).toEqual(expect.objectContaining({
+      base_url: 'https://test.example.com/v1',
+    }));
+    expect(payload).not.toHaveProperty('api_key');
+    await waitFor(() => {
+      expect(mocks.testCredentials).toHaveBeenCalledWith('openai', 'gpt-4o');
+    });
+  });
+
+  it('submits a replacement API key when the displayed value changes', async () => {
+    const user = userEvent.setup();
+    await openConfigureDialog(user);
+
+    const apiKeyInput = screen.getByDisplayValue('sk-existing-secret-1234');
+    await user.clear(apiKeyInput);
+    await user.type(apiKeyInput, 'sk-replacement-secret');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => expect(mocks.setCredentials).toHaveBeenCalled());
+    expect(mocks.setCredentials.mock.calls.at(-1)?.[1]).toEqual(expect.objectContaining({
+      api_key: 'sk-replacement-secret',
+    }));
+  });
+});
+
+describe('ModelPage default model selector', () => {
+  const providers = [
+    {
+      id: 'openai',
+      name: 'OpenAI Gateway',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+    {
+      id: 'minimax',
+      name: 'MiniMax Cloud',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+    {
+      id: 'disconnected',
+      name: 'Disconnected Provider',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: false,
+      modelCount: 1,
+      category: 'available',
+    },
+  ];
+  const models = [
+    {
+      id: 'gpt-4o',
+      name: 'GPT-4o',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'minimax-m3',
+      name: 'MiniMax Vision M3',
+      provider_id: 'minimax',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: {
+        features: [],
+        supports_streaming: true,
+        supports_tools: true,
+        supports_vision: false,
+        modalities: { input: ['text', 'image'], output: ['text'] },
+      },
+      limits: { context_window: 200000, max_output_tokens: 8192 },
+      pricing: { input: 1.25, output: 5, cache_read: 0.25, unit: 1000000, currency: 'USD' },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({ data: { provider_id: 'openai', model_id: 'gpt-4o' } });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
+    mocks.createDefinition.mockResolvedValue({ data: {} });
+    mocks.getModelSettings.mockResolvedValue({
+      data: { enabled: true, default_parameters: {} },
+    });
+    mocks.updateModelSettings.mockResolvedValue({ data: {} });
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockResolvedValue({ data: { success: true, latency_ms: 10 } });
+  });
+
+  it('shows provider groups, model identity, vision, and details', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByTitle('dashboard.setDefaultModel'));
+    const heading = await screen.findByRole('heading', { name: 'dashboard.setDefaultModel' });
+    const selector = within(heading.parentElement?.parentElement as HTMLElement);
+
+    expect(selector.getByText('MiniMax Cloud')).toBeInTheDocument();
+    expect(selector.getByText('MiniMax Vision M3')).toBeInTheDocument();
+    expect(selector.getByText('minimax-m3')).toBeInTheDocument();
+    expect(selector.getByText('form.vision')).toBeInTheDocument();
+    expect(selector.getByRole('button', {
+      name: 'modelSelection.info GPT-4o',
+    })).toBeInTheDocument();
+
+    await user.click(selector.getByRole('button', {
+      name: 'modelSelection.info MiniMax Vision M3',
+    }));
+
+    const tooltip = await screen.findByRole('tooltip');
+    expect(within(tooltip).getByText('form.modelId')).toBeInTheDocument();
+    expect(within(tooltip).getByText('form.contextWindow')).toBeInTheDocument();
+    expect(within(tooltip).getByText('form.pricing')).toBeInTheDocument();
+    expect(tooltip).toHaveTextContent('minimax-m3');
+    expect(tooltip).toHaveTextContent(/200(?:K|,?000)/);
+    expect(tooltip).toHaveTextContent(/1\.25/);
+    expect(tooltip).toHaveTextContent(/\b5(?:\.0+)?\b/);
+    expect(tooltip).toHaveTextContent('$1.25/$5/$0.25/M');
+    expect(tooltip).toHaveTextContent(/USD|\$/);
+  });
+
+  it('shows and saves cache-read pricing in model details', async () => {
+    const user = userEvent.setup();
+    mocks.listDefinitions.mockResolvedValue({
+      data: {
+        models: [
+          models[0],
+          {
+            ...models[1],
+            pricing: {
+              input: 1,
+              output: 2,
+              cache_read: 0.2,
+              unit: 1000000,
+              currency: 'CNY',
+            },
+          },
+        ],
+        total: models.length,
+      },
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('MiniMax Vision M3'));
+    const cacheReadLabel = await screen.findByText('form.cacheRead');
+    const cacheReadInput = cacheReadLabel.parentElement?.querySelector('input');
+    const inputPrice = screen.getByText('form.input').parentElement?.querySelector('input');
+    const outputPrice = screen.getByText('form.output').parentElement?.querySelector('input');
+    const currencySelect = screen.getByText('form.currency').parentElement?.querySelector('select');
+    expect(cacheReadInput).toHaveValue(0.2);
+
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'USD');
+
+    expect(inputPrice).toHaveValue(0.142857);
+    expect(outputPrice).toHaveValue(0.285714);
+    expect(cacheReadInput).toHaveValue(0.028571);
+
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'CNY');
+    expect(inputPrice).toHaveValue(1);
+    expect(outputPrice).toHaveValue(2);
+    expect(cacheReadInput).toHaveValue(0.2);
+
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'USD');
+
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mocks.createDefinition).toHaveBeenCalledWith(
+        'minimax',
+        expect.objectContaining({
+          input_price: 0.142857,
+          output_price: 0.285714,
+          cache_read_price: 0.028571,
+          currency: 'USD',
+        }),
+      );
+    });
+  });
+
+  it('keeps prices unchanged when the source currency is unsupported', async () => {
+    const user = userEvent.setup();
+    mocks.listDefinitions.mockResolvedValue({
+      data: {
+        models: [
+          models[0],
+          {
+            ...models[1],
+            pricing: {
+              input: 1,
+              output: 2,
+              cache_read: 0.2,
+              unit: 1000000,
+              currency: 'EUR',
+            },
+          },
+        ],
+        total: models.length,
+      },
+    });
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('MiniMax Vision M3'));
+    const inputPrice = screen.getByText('form.input').parentElement?.querySelector('input');
+    const outputPrice = screen.getByText('form.output').parentElement?.querySelector('input');
+    const cacheReadPrice = screen.getByText('form.cacheRead').parentElement?.querySelector('input');
+    const currencySelect = screen.getByText('form.currency').parentElement?.querySelector('select');
+
+    expect(currencySelect).toHaveValue('EUR');
+    await user.selectOptions(currencySelect as HTMLSelectElement, 'CNY');
+
+    expect(currencySelect).toHaveValue('EUR');
+    expect(inputPrice).toHaveValue(1);
+    expect(outputPrice).toHaveValue(2);
+    expect(cacheReadPrice).toHaveValue(0.2);
+  });
+
+  it('sends null when the cache-read price is cleared', async () => {
+    const user = userEvent.setup();
+    renderWithRouter(<ModelPage />);
+
+    await user.click(await screen.findByText('MiniMax Vision M3'));
+    const cacheReadPrice = screen.getByText('form.cacheRead').parentElement?.querySelector('input');
+    await user.clear(cacheReadPrice as HTMLInputElement);
+    await user.click(screen.getByRole('button', { name: 'Save' }));
+
+    await waitFor(() => {
+      expect(mocks.createDefinition).toHaveBeenCalledWith(
+        'minimax',
+        expect.objectContaining({ cache_read_price: null }),
+      );
+    });
+  });
+});
+
+describe('ModelPage auxiliary model editor', () => {
+  const providers = [
+    {
+      id: 'openai',
+      name: 'OpenAI Gateway',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 2,
+      category: 'connected',
+    },
+    {
+      id: 'minimax',
+      name: 'MiniMax Cloud',
+      source: 'config',
+      env: [],
+      key: null,
+      options: {},
+      models: {},
+      configured: true,
+      modelCount: 1,
+      category: 'connected',
+    },
+  ];
+  const models = [
+    {
+      id: 'gpt-4o',
+      name: 'GPT-4o',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'unconfigured-model',
+      name: 'Unconfigured Model',
+      provider_id: 'disconnected',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'gpt-4o-mini',
+      name: 'GPT-4o Mini',
+      provider_id: 'openai',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+    {
+      id: 'minimax-m3',
+      name: 'MiniMax M3',
+      provider_id: 'minimax',
+      model_type: 'llm',
+      status: 'active',
+      capabilities: { features: [], supports_streaming: true, supports_tools: true },
+    },
+  ];
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    localStorage.clear();
+    sessionStorage.clear();
+    mocks.useProviders.mockReturnValue({
+      providers,
+      connectedIds: ['openai', 'minimax'],
+      loading: false,
+      error: null,
+      refetch: mocks.refetch,
+    });
+    mocks.getSummary.mockResolvedValue({ data: null });
+    mocks.getResolved.mockResolvedValue({
+      data: { provider_id: 'openai', model_id: 'gpt-4o' },
+    });
+    mocks.getFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.setFallbacks.mockResolvedValue({ data: { fallback_providers: [] } });
+    mocks.listDefinitions.mockResolvedValue({ data: { models, total: models.length } });
+    mocks.getCredentials.mockResolvedValue({ data: null });
+    mocks.testCredentials.mockResolvedValue({ data: { success: true, latency_ms: 10 } });
+  });
+
+  async function openEditor(user: ReturnType<typeof userEvent.setup>) {
+    renderWithRouter(<ModelPage />);
+    await user.click(await screen.findByTitle('dashboard.editFallbackModels'));
+    return screen.findByRole('dialog', { name: 'fallbacks.title' });
+  }
+
+  it('explains automatic routing when no auxiliary models are configured', async () => {
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+
+    expect(within(dialog).getByText('fallbacks.empty')).toBeInTheDocument();
+    expect(within(dialog).getByText('fallbacks.emptyHint')).toBeInTheDocument();
+    expect(within(dialog).getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+  });
+
+  it('adds and saves an auxiliary model without offering the primary model', async () => {
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    await user.click(editor.getByRole('button', { name: 'fallbacks.add' }));
+    expect(editor.queryByRole('button', { name: /GPT-4o gpt-4o$/ })).not.toBeInTheDocument();
+    expect(editor.queryByRole('button', { name: /Unconfigured Model/ })).not.toBeInTheDocument();
+    await user.click(editor.getByRole('button', { name: /MiniMax M3 minimax-m3/ }));
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
+  });
+
+  it('reorders configured auxiliary models before saving', async () => {
+    mocks.getFallbacks.mockResolvedValue({
+      data: {
+        fallback_providers: [
+          { provider_id: 'minimax', model_id: 'minimax-m3' },
+          { provider_id: 'openai', model_id: 'gpt-4o-mini' },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    await user.click(editor.getAllByRole('button', { name: 'fallbacks.moveDown' })[0]);
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.setFallbacks).toHaveBeenCalledWith([
+        { provider_id: 'openai', model_id: 'gpt-4o-mini' },
+        { provider_id: 'minimax', model_id: 'minimax-m3' },
+      ]);
+    });
+  });
+
+  it('keeps the editor open and reports save failures', async () => {
+    mocks.setFallbacks.mockRejectedValueOnce(new Error('configuration is read-only'));
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    await user.click(editor.getByRole('button', { name: 'fallbacks.add' }));
+    await user.click(editor.getByRole('button', { name: /MiniMax M3 minimax-m3/ }));
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => {
+      expect(mocks.toast.error).toHaveBeenCalledWith(
+        'operationFailed',
+        'configuration is read-only',
+      );
+    });
+    expect(screen.getByRole('dialog', { name: 'fallbacks.title' })).toBeInTheDocument();
+  });
+
+  it('blocks saving stale entries until they are removed, then clears the chain', async () => {
+    mocks.getFallbacks.mockResolvedValue({
+      data: {
+        fallback_providers: [
+          { provider_id: 'retired', model_id: 'retired-model' },
+        ],
+      },
+    });
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    expect(editor.getByText('fallbacks.unavailable')).toBeInTheDocument();
+    expect(editor.getByText('fallbacks.removeInvalidHint')).toBeInTheDocument();
+    expect(editor.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+
+    await user.click(editor.getByRole('button', { name: 'fallbacks.remove' }));
+    await user.click(editor.getByRole('button', { name: 'fallbacks.save' }));
+
+    await waitFor(() => expect(mocks.setFallbacks).toHaveBeenCalledWith([]));
+  });
+
+  it('blocks edits until a failed configuration load is retried', async () => {
+    mocks.getFallbacks
+      .mockRejectedValueOnce(new Error('auxiliary request failed'))
+      .mockResolvedValueOnce({ data: { fallback_providers: [] } });
+    const user = userEvent.setup();
+    const dialog = await openEditor(user);
+    const editor = within(dialog);
+
+    expect(await editor.findByText('fallbacks.loadFailed')).toBeInTheDocument();
+    expect(editor.getByRole('button', { name: 'fallbacks.save' })).toBeDisabled();
+    await user.click(editor.getByRole('button', { name: 'fallbacks.retry' }));
+
+    await waitFor(() => expect(mocks.getFallbacks).toHaveBeenCalledTimes(2));
+    await waitFor(() => {
+      expect(editor.queryByText('fallbacks.loadFailed')).not.toBeInTheDocument();
     });
   });
 });

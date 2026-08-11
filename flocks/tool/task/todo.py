@@ -237,9 +237,12 @@ async def todo_tool(
     old_todos = await Todo.get(ctx.session_id)
     normalized_todos = _normalize_todos(todos)
     if _all_terminal(normalized_todos):
-        await Todo.update(ctx.session_id, [])
+        await Todo.update_active(ctx.session_id, [])
     else:
-        await Todo.update(ctx.session_id, normalized_todos)
+        await Todo.update_active(
+            ctx.session_id,
+            normalized_todos,
+        )
 
     old_serialized = _serialize_todos(old_todos)
     new_serialized = _serialize_todos(normalized_todos)

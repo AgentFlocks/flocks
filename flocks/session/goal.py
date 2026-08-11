@@ -263,7 +263,6 @@ async def judge_goal_with_model(
         messages=messages,
         **provider_options,
         max_tokens=JUDGE_MAX_TOKENS,
-        temperature=0,
     )
 
     response_content = restore_text_with_replacements(response.content, replacements)

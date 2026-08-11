@@ -1,0 +1,20 @@
+{
+  "name": "flocks-whatsapp-bridge",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Local WhatsApp bridge for Flocks using Baileys",
+  "scripts": {
+    "start": "node bridge.js"
+  },
+  "dependencies": {
+    "@hapi/boom": "^10.0.1",
+    "@whiskeysockets/baileys": "7.0.0-rc13",
+    "express": "^4.21.2",
+    "pino": "^9.6.0"
+  },
+  "overrides": {
+    "protobufjs": "^7.5.5"
+  }
+}
+

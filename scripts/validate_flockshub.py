@@ -62,6 +62,8 @@ def main() -> int:
         manifest = load_json(manifest_path)
         if manifest.get("id") != plugin_id or manifest.get("type") != plugin_type:
             fail(f"Manifest id/type mismatch: {manifest_rel}")
+        if manifest.get("version") != entry.get("version"):
+            fail(f"Index/manifest version mismatch: {manifest_rel}")
         if manifest.get("category") not in categories:
             fail(f"Unknown category in {manifest_rel}: {manifest.get('category')}")
         unknown_tags = set(manifest.get("tags", [])) - tags
@@ -75,10 +77,39 @@ def main() -> int:
             fail(f"Unknown risk level in {manifest_rel}: {risk_level}")
 
         package_dir = manifest_path.parent
+        workspace_path = package_dir / "workspace.json"
+        if plugin_type == "webui" and workspace_path.is_file():
+            workspace = load_json(workspace_path)
+            if workspace.get("version") != manifest.get("version"):
+                fail(f"WebUI workspace/manifest version mismatch: {manifest_rel}")
         for entrypoint in manifest.get("entrypoints", []):
             ensure_relative(entrypoint)
             if not (package_dir / entrypoint).exists():
                 fail(f"Missing entrypoint {entrypoint} in {manifest_rel}")
+
+        python_files = {
+            package_dir / entrypoint
+            for entrypoint in manifest.get("entrypoints", [])
+            if Path(entrypoint).suffix == ".py"
+        }
+        if plugin_type in {"tool", "device"}:
+            python_files.update(
+                path
+                for path in package_dir.rglob("*.py")
+                if not any(
+                    part in {".git", "__pycache__"}
+                    for part in path.relative_to(package_dir).parts
+                )
+            )
+        for path in sorted(python_files):
+            if not path.is_file():
+                continue
+            try:
+                source = path.read_text(encoding="utf-8")
+                compile(source, str(path), "exec")
+            except (SyntaxError, UnicodeDecodeError) as exc:
+                relative_path = path.relative_to(package_dir).as_posix()
+                fail(f"Invalid Python source {relative_path} in {manifest_rel}: {exc}")
 
         for path in package_dir.rglob("*"):
             rel = path.relative_to(package_dir).as_posix()

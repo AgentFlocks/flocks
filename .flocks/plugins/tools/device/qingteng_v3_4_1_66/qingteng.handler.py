@@ -1599,21 +1599,6 @@ async def _dispatch_group(ctx: ToolContext, group: str, action: str, **params: A
     return _request_signed_json(spec.method, path, query=query, body=body, action=f"{group}.{action}")
 
 
-async def login(ctx: ToolContext, **kwargs: Any) -> ToolResult:
-    del ctx, kwargs
-    config = _load_runtime_config()
-    if not config:
-        return ToolResult(
-            success=False,
-            error="Missing configuration: qingteng base_url/qingteng_host, qingteng_username, qingteng_password",
-        )
-    conn_cls, host, port, base_path, username, password = config
-    ok, result, payload = _login_request(conn_cls, host, port, base_path, username, password)
-    if not ok:
-        return ToolResult(success=False, error=str(result), output=payload)
-    return ToolResult(success=True, output=result, metadata={"source": "Qingteng", "api": "login", "path": "/v1/api/auth"})
-
-
 async def system_audit(
     ctx: ToolContext,
     eventName: str | None = None,

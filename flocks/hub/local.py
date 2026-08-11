@@ -122,6 +122,26 @@ def has_install_payload(plugin_type: PluginType, path: Path) -> bool:
     return path.exists()
 
 
+def installed_payload_version(plugin_type: PluginType, path: Path) -> Optional[str]:
+    """Read a version embedded in an installed payload when one is available."""
+    if plugin_type != "webui" or not path.is_dir():
+        return None
+
+    import json
+
+    workspace_path = path / "workspace.json"
+    if not workspace_path.is_file():
+        return None
+    try:
+        raw = json.loads(workspace_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    version = raw.get("version") if isinstance(raw, dict) else None
+    if not isinstance(version, str) or not version.strip():
+        return None
+    return version.strip()
+
+
 def get_record(plugin_type: PluginType, plugin_id: str) -> Optional[InstalledPluginRecord]:
     return load_installed_records().get(f"{plugin_type}:{plugin_id}")
 

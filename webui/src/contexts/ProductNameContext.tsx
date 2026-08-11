@@ -3,10 +3,12 @@ import type { ReactNode } from 'react';
 import { uiConfigApi, type UIDisplayConfig } from '@/api/uiConfig';
 
 const DEFAULT_PRODUCT_NAME = (import.meta.env.VITE_APP_NAME || 'Flocks').trim() || 'Flocks';
+const DEFAULT_PRO_PRODUCT_NAME = 'Flocks Pro';
 const DEFAULT_FAVICON_URL = '/favicon.svg';
 
 interface ProductNameContextValue {
   productName: string;
+  proProductName: string;
   configuredDisplayName: string | null;
   faviconUrl: string;
   hasCustomFavicon: boolean;
@@ -19,6 +21,7 @@ interface ProductNameContextValue {
 
 const ProductNameContext = createContext<ProductNameContextValue>({
   productName: DEFAULT_PRODUCT_NAME,
+  proProductName: DEFAULT_PRO_PRODUCT_NAME,
   configuredDisplayName: null,
   faviconUrl: DEFAULT_FAVICON_URL,
   hasCustomFavicon: false,
@@ -112,6 +115,7 @@ export function ProductNameProvider({ children }: { children: ReactNode }) {
 
   const value = useMemo<ProductNameContextValue>(() => ({
     productName: displayConfig.displayName,
+    proProductName: displayConfig.configuredDisplayName || DEFAULT_PRO_PRODUCT_NAME,
     configuredDisplayName: displayConfig.configuredDisplayName ?? null,
     faviconUrl: displayConfig.faviconUrl || DEFAULT_FAVICON_URL,
     hasCustomFavicon: Boolean(displayConfig.faviconUrl),

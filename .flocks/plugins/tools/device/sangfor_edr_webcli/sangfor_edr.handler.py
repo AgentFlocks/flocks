@@ -1,36 +1,40 @@
-"""Sangfor EDR browser-state authentication helper.
-
-EDR has no stable Open API in this integration.  This handler follows the same
-browser workflow used by TDP / OneSEC / SkyEye / Qingteng skills:
-
-1. try to load the saved browser auth-state;
-2. if it is still valid, reuse it;
-3. if it is missing or expired, open the real EDR login page through CDP;
-4. fill username, password and captcha in the browser page;
-5. after login succeeds, save the full browser auth-state again.
-
-The handler only replaces the "wait for the user to log in manually" step with
-CDP-assisted form login.  It does not implement EDR business APIs.
-"""
+"""Sangfor EDR authentication and dashboard API helpers."""
 
 from __future__ import annotations
 
 import base64
+import hashlib
 import json
 import os
+import secrets
+import sys
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Optional
 from urllib.parse import urljoin, urlparse
 
+import requests
+import urllib3
+
 from flocks.browser import helpers
+from flocks.browser.admin import ensure_daemon
 from flocks.config.config_writer import ConfigWriter
 from flocks.tool.registry import ToolContext, ToolResult
+
+_PLUGIN_DIR = str(Path(__file__).resolve().parent)
+if _PLUGIN_DIR not in sys.path:
+    sys.path.insert(0, _PLUGIN_DIR)
+import sangfor_edr_dashboard_api as _dashboard_api_module  # noqa: E402
+import sangfor_edr_http_login as _http_login_module  # noqa: E402
+import sangfor_edr_threat_assets_api as _threat_assets_api_module  # noqa: E402
 
 SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
 USERNAME_SECRET_ID = "sangfor_edr_username"
 PASSWORD_SECRET_ID = "sangfor_edr_password"
+TOKEN_SECRET_ID = "sangfor_edr_token"
+TOKEN_BUNDLE_SECRET_ID = "sangfor_edr_token_bundle"
 DEFAULT_AUTH_STATE_PATH = "~/.flocks/browser/sangfor-edr/auth-state.json"
 DEFAULT_LOGIN_PATH = "/ui/login.php"
 DEFAULT_INDEX_PATH = "/ui/#/index"
@@ -239,12 +243,26 @@ def _saved_auto_login_status(params: dict[str, Any]) -> dict[str, Any]:
     has_base_url = bool(str(base_url or "").strip())
     has_username = bool(str(username or "").strip())
     has_password = bool(str(password or "").strip())
+    has_saved_token = bool(secrets.get(TOKEN_SECRET_ID))
+    pair_verified = False
+    auth_probe: dict[str, Any] | None = None
+    if has_base_url and auth_state_path.exists():
+        try:
+            cfg = _resolve_runtime_config({**params, "persist_credentials": False})
+            auth_probe = _probe_auth_pair(cfg)
+            pair_verified = bool(auth_probe.get("valid"))
+        except Exception as exc:
+            auth_probe = {"valid": False, "reason": "auth_probe_failed", "error": str(exc)}
+            pair_verified = False
     return {
         "auth_state_path": str(auth_state_path),
         "auth_state_exists": auth_state_path.exists(),
         "has_base_url": has_base_url,
         "has_saved_username": has_username,
         "has_saved_password": has_password,
+        "has_saved_token": has_saved_token,
+        "has_verified_auth_pair": pair_verified,
+        "auth_probe": auth_probe,
         "can_auto_refresh": has_base_url and has_username and has_password,
     }
 
@@ -310,6 +328,196 @@ def _now_ms() -> str:
     return str(int(time.time() * 1000))
 
 
+def _query_id() -> str:
+    return f"Query_{_now_ms()}"
+
+
+def _safe_error(exc: Exception, *sensitive_values: str) -> str:
+    message = str(exc)
+    for value in sensitive_values:
+        if value:
+            message = message.replace(value, "<redacted>")
+    return message
+
+
+def _http_headers(cfg: RuntimeConfig, *, image: bool = False) -> dict[str, str]:
+    headers = {
+        "Pragma": "no-cache",
+        "Cache-Control": "no-cache",
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+        ),
+        "Accept-Language": "zh-CN,zh;q=0.9",
+        "Referer": _login_url(cfg) if image else _url(cfg, "/ui/"),
+    }
+    if image:
+        headers["Accept"] = "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8"
+    else:
+        headers.update(
+            {
+                "Accept": "application/json, text/plain, */*",
+                "Content-Type": "application/json",
+                "Origin": cfg.base_url,
+            }
+        )
+    return headers
+
+
+def _read_auth_state(path: Path) -> dict[str, Any]:
+    state = json.loads(path.read_text(encoding="utf-8"))
+    if not isinstance(state, dict) or not isinstance(state.get("cookies"), list):
+        raise ValueError("EDR auth-state does not contain a cookie list.")
+    return state
+
+
+def _cookie_fingerprint(cookies: list[dict[str, Any]], base_url: str) -> str:
+    normalized = sorted(
+        (
+            str(cookie.get("name") or ""),
+            str(cookie.get("value") or ""),
+            str(cookie.get("domain") or ""),
+            str(cookie.get("path") or "/"),
+        )
+        for cookie in cookies
+        if isinstance(cookie, dict) and cookie.get("name")
+    )
+    payload = json.dumps(
+        {"base_url": _normalise_base_url(base_url), "cookies": normalized},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _save_auth_pair(cfg: RuntimeConfig, state: dict[str, Any], token: str) -> dict[str, Any]:
+    cookies = state.get("cookies")
+    if not isinstance(cookies, list) or not cookies or not token:
+        raise ValueError("EDR login did not return a complete cookie/token pair.")
+    cfg.auth_state_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = cfg.auth_state_path.with_name(f"{cfg.auth_state_path.name}.tmp")
+    temp_path.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+    temp_path.replace(cfg.auth_state_path)
+    fingerprint = _cookie_fingerprint(cookies, cfg.base_url)
+    secret_manager = _get_secret_manager()
+    secret_manager.set(TOKEN_SECRET_ID, token)
+    secret_manager.set(
+        TOKEN_BUNDLE_SECRET_ID,
+        json.dumps(
+            {
+                "token": token,
+                "base_url": cfg.base_url,
+                "cookie_fingerprint": fingerprint,
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ),
+    )
+    return {
+        "auth_state_path": str(cfg.auth_state_path),
+        "cookie_count": len(cookies),
+        "pair_verified": True,
+    }
+
+
+def _load_verified_auth_pair(cfg: RuntimeConfig) -> tuple[dict[str, Any], str]:
+    state = _read_auth_state(cfg.auth_state_path)
+    raw_bundle = _get_secret_manager().get(TOKEN_BUNDLE_SECRET_ID)
+    if not raw_bundle:
+        raise RuntimeError("EDR cookie/token pair metadata is missing; refresh authentication.")
+    try:
+        bundle = json.loads(raw_bundle)
+    except (TypeError, json.JSONDecodeError) as exc:
+        raise RuntimeError("EDR cookie/token pair metadata is invalid; refresh authentication.") from exc
+    token = str(bundle.get("token") or "")
+    base_url = str(bundle.get("base_url") or "")
+    fingerprint = str(bundle.get("cookie_fingerprint") or "")
+    actual = _cookie_fingerprint(state["cookies"], cfg.base_url)
+    if (
+        not token
+        or _normalise_base_url(base_url) != cfg.base_url
+        or not secrets.compare_digest(fingerprint, actual)
+    ):
+        raise RuntimeError("EDR cookies and login_token are not from the same login; refresh authentication.")
+    return state, token
+
+
+def _response_contains_agent_overview(payload: Any) -> bool:
+    """Return whether a successful threat-terminal response has data content."""
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return False
+    return any(
+        key in payload and payload.get(key) is not None
+        for key in ("data", "result", "agent_overview", "agent_total", "total", "count")
+    )
+
+
+def _unix_date_range(days: int = 7) -> dict[str, int]:
+    end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0)
+    start = (end - timedelta(days=max(1, days) - 1)).replace(hour=0, minute=0, second=0)
+    return {"start": int(start.timestamp()), "end": int(end.timestamp())}
+
+
+def _probe_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
+    try:
+        state, token = _load_verified_auth_pair(cfg)
+    except Exception as exc:
+        return {"valid": False, "reason": "auth_pair_missing_or_mismatched", "error": str(exc)}
+
+    session = _dashboard_session(cfg, state)
+    try:
+        response = session.post(
+            _url(cfg, f"/launch.php?s={token}&opr=get_agent_overview"),
+            headers=_http_headers(cfg),
+            json={
+                "app_args": {"name": "app.web.event_center.head", "options": {}},
+                "auto": 1,
+                "opr": "get_agent_overview",
+                "date_range": _unix_date_range(),
+                "query_id": _query_id(),
+            },
+            timeout=cfg.timeout,
+            allow_redirects=False,
+        )
+    except Exception as exc:
+        return {"valid": False, "reason": "auth_probe_request_failed", "error": _safe_error(exc, token)}
+
+    location = str(response.headers.get("Location") or "")
+    if response.status_code in {301, 302, 303, 307, 308}:
+        return {
+            "valid": False,
+            "reason": "auth_probe_redirected",
+            "http_status": response.status_code,
+            "location": location,
+        }
+    if response.status_code in {401, 403}:
+        return {
+            "valid": False,
+            "reason": "auth_probe_unauthorized",
+            "http_status": response.status_code,
+        }
+    if response.status_code != 200:
+        return {
+            "valid": False,
+            "reason": "auth_probe_http_error",
+            "http_status": response.status_code,
+        }
+    try:
+        payload = response.json()
+    except Exception as exc:
+        return {"valid": False, "reason": "auth_probe_invalid_json", "error": str(exc)}
+    if not isinstance(payload, dict) or not payload.get("success"):
+        return {"valid": False, "reason": "auth_probe_rejected"}
+    if not _response_contains_agent_overview(payload):
+        return {"valid": False, "reason": "auth_probe_expected_agent_data_missing"}
+    return {
+        "valid": True,
+        "reason": "auth_probe_succeeded",
+        "http_status": 200,
+        "agent_overview_verified": True,
+    }
+
+
 def _login_url(cfg: RuntimeConfig) -> str:
     return _url(cfg, cfg.login_path)
 
@@ -324,6 +532,122 @@ def _open_page(url: str) -> None:
     except Exception:
         helpers.goto_url(url)
     helpers.wait_for_load(timeout=15)
+
+
+def _ensure_browser_daemon() -> None:
+    """Start the browser daemon or replace a stale/incompatible instance."""
+    ensure_daemon(wait=15.0, _open_inspect=False)
+
+
+def _browser_daemon_result(exc: Exception, auth_state_path: Path) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_daemon_not_ready",
+        "reason": "browser_daemon_not_ready",
+        "error": str(exc),
+        "next_action": "run `flocks browser --setup`, then `flocks browser --doctor`, then retry",
+        "auth_state_path": str(auth_state_path),
+    }
+
+
+def _browser_page_open_result(exc: Exception, cfg: RuntimeConfig) -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "browser_login_page_open_failed",
+        "reason": "browser_login_page_open_failed",
+        "error": str(exc),
+        "next_action": "verify base_url and EDR connectivity, then retry",
+        "login_url": _login_url(cfg),
+        "auth_state_path": str(cfg.auth_state_path),
+    }
+
+
+def _manual_login_result(cfg: RuntimeConfig, reason: str, error: str = "") -> dict[str, Any]:
+    return {
+        "success": False,
+        "valid": False,
+        "status": "manual_login_required",
+        "reason": reason,
+        "error": error,
+        "login_url": _login_url(cfg),
+        "auth_state_path": str(cfg.auth_state_path),
+        "browser_left_open": True,
+        "next_action": "complete login in the opened browser, then call `complete_manual_login`",
+    }
+
+
+def _install_login_token_capture() -> bool:
+    script = r"""(() => {
+  const key = "__flocks_sangfor_edr_token";
+  sessionStorage.removeItem(key);
+  if (window.__flocksSangforEdrTokenHooked) return true;
+  window.__flocksSangforEdrTokenHooked = true;
+  const capture = (text) => {
+    try {
+      const token = JSON.parse(text)?.data?.token;
+      if (token !== undefined && token !== null && String(token)) sessionStorage.setItem(key, String(token));
+    } catch (_) {}
+  };
+  const originalFetch = window.fetch;
+  window.fetch = async function(...args) {
+    const response = await originalFetch.apply(this, args);
+    const url = String(args[0]?.url || args[0] || "");
+    if (url.includes("/launch_login.php")) {
+      try { capture(await response.clone().text()); } catch (_) {}
+    }
+    return response;
+  };
+  const originalOpen = XMLHttpRequest.prototype.open;
+  XMLHttpRequest.prototype.open = function(method, url, ...rest) {
+    this.__flocksEdrLogin = String(url || "").includes("/launch_login.php");
+    return originalOpen.call(this, method, url, ...rest);
+  };
+  const originalSend = XMLHttpRequest.prototype.send;
+  XMLHttpRequest.prototype.send = function(...args) {
+    if (this.__flocksEdrLogin) this.addEventListener("load", () => {
+      try { capture(this.responseType && this.responseType !== "text" ? JSON.stringify(this.response) : this.responseText); }
+      catch (_) {}
+    }, {once: true});
+    return originalSend.apply(this, args);
+  };
+  return true;
+})()"""
+    try:
+        return bool(helpers.js(script))
+    except Exception:
+        return False
+
+
+def _captured_login_token(timeout: float = 2.0) -> str:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            token = str(helpers.js("sessionStorage.getItem('__flocks_sangfor_edr_token') || ''") or "").strip()
+            if token:
+                return token
+        except Exception:
+            return ""
+        time.sleep(0.1)
+    return ""
+
+
+def _save_captured_login_token(timeout: float = 2.0) -> bool:
+    token = _captured_login_token(timeout)
+    if not token:
+        return False
+    _get_secret_manager().set(TOKEN_SECRET_ID, token)
+    return True
+
+
+def _save_browser_auth_pair(cfg: RuntimeConfig) -> dict[str, Any]:
+    token = _captured_login_token()
+    if not token:
+        raise RuntimeError("EDR login succeeded but login_token was not captured.")
+    saved = _save_auth_state(cfg)
+    pair = _save_auth_pair(cfg, _read_auth_state(cfg.auth_state_path), token)
+    return {"state": saved, "pair": pair}
 
 
 def _page_text() -> str:
@@ -393,6 +717,13 @@ def _validate_auth_state(cfg: RuntimeConfig) -> dict[str, Any]:
             "reason": "auth_state_not_found",
             "auth_state_path": str(cfg.auth_state_path),
         }
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        result = _browser_daemon_result(exc, cfg.auth_state_path)
+        result["reason"] = "auth_state_load_failed_browser_daemon_not_ready"
+        return result
+
     try:
         loaded = helpers.load_state(cfg.auth_state_path, url=_index_url(cfg))
         helpers.wait_for_load(timeout=15)
@@ -770,6 +1101,15 @@ def _wait_for_login_success(cfg: RuntimeConfig) -> bool:
     return False
 
 
+def _manual_login_reason() -> str:
+    text = _page_text().lower()
+    if any(marker in text for marker in ("动态口令", "短信验证码", "二次认证", "mfa", "otp")):
+        return "mfa_required"
+    if any(marker in text for marker in ("ukey", "usb key", "证书登录")):
+        return "certificate_login_required"
+    return "login_form_not_ready"
+
+
 def _missing_login_inputs(cfg: RuntimeConfig) -> list[str]:
     missing = []
     if not cfg.username:
@@ -781,34 +1121,36 @@ def _missing_login_inputs(cfg: RuntimeConfig) -> list[str]:
 
 def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "") -> dict[str, Any]:
     missing = _missing_login_inputs(cfg)
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        return _browser_daemon_result(exc, cfg.auth_state_path)
+    try:
+        _open_page(_login_url(cfg))
+    except Exception as exc:
+        return _browser_page_open_result(exc, cfg)
+    _install_login_token_capture()
     if missing:
-        return {
-            "success": False,
-            "status": "manual_login_required",
-            "reason": "missing_cdp_login_credentials",
-            "missing": missing,
-            "auth_state_path": str(cfg.auth_state_path),
-        }
-
-    _open_page(_login_url(cfg))
-    form_state = _wait_for_login_form_ready(cfg)
+        result = _manual_login_result(cfg, "missing_cdp_login_credentials")
+        result["missing"] = missing
+        return result
+    try:
+        form_state = _wait_for_login_form_ready(cfg)
+    except Exception as exc:
+        return _manual_login_result(cfg, _manual_login_reason(), str(exc))
     last_error = ""
     for attempt in range(1, cfg.max_captcha_retry + 1):
         try:
+            _install_login_token_capture()
             code = captcha_code.strip()
             if not code:
                 if not cfg.auto_ocr_code:
-                    return {
-                        "success": False,
-                        "status": "manual_login_required",
-                        "reason": "captcha_code_required",
-                        "auth_state_path": str(cfg.auth_state_path),
-                    }
+                    return _manual_login_result(cfg, "captcha_code_required")
                 code = _ocr_verify_code(_captcha_image_from_browser(cfg))
 
             filled = _set_login_form_values(cfg, code)
             if _wait_for_login_success(cfg):
-                saved = _save_auth_state(cfg)
+                saved = _save_browser_auth_pair(cfg)
                 return {
                     "success": True,
                     "status": "browser_cdp_login_refreshed_auth_state",
@@ -817,6 +1159,7 @@ def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "
                     "form": form_state,
                     "filled": {key: bool(value) for key, value in filled.items()},
                     "saved": saved,
+                    "token_saved": True,
                 }
             last_error = "login_success_check_timeout"
         except Exception as exc:
@@ -830,13 +1173,145 @@ def _refresh_auth_state_with_cdp_login(cfg: RuntimeConfig, captcha_code: str = "
         except Exception:
             pass
 
-    return {
-        "success": False,
-        "status": "manual_login_required",
-        "reason": "browser_cdp_login_failed",
-        "last_error": last_error,
-        "auth_state_path": str(cfg.auth_state_path),
+    return _manual_login_result(cfg, "browser_cdp_login_failed", last_error)
+
+
+def _complete_manual_login(cfg: RuntimeConfig) -> dict[str, Any]:
+    try:
+        _ensure_browser_daemon()
+    except Exception as exc:
+        return _browser_daemon_result(exc, cfg.auth_state_path)
+    try:
+        info = helpers.page_info()
+        if urlparse(str(info.get("url") or "")).netloc != urlparse(cfg.base_url).netloc:
+            _open_page(_index_url(cfg))
+        if not _is_logged_in(cfg):
+            return _manual_login_result(cfg, "manual_login_not_completed")
+        saved = _save_browser_auth_pair(cfg)
+        probe = _probe_auth_pair(cfg)
+        if not probe.get("valid"):
+            return {
+                "success": False,
+                "valid": False,
+                "status": "manual_login_capture_probe_failed",
+                "reason": str(probe.get("reason") or "auth_probe_failed"),
+                "error": "browser login state was saved but HTTP authentication probe failed",
+                "saved": saved,
+                "token_saved": True,
+                "probe": probe,
+            }
+        return {
+            "success": True,
+            "valid": True,
+            "status": "manual_login_captured_auth_state",
+            "auth_state_path": str(cfg.auth_state_path),
+            "saved": saved,
+            "token_saved": True,
+            "probe": probe,
+        }
+    except Exception as exc:
+        return {
+            "success": False,
+            "valid": False,
+            "status": "manual_login_capture_failed",
+            "reason": "manual_login_capture_failed",
+            "error": str(exc),
+            "auth_state_path": str(cfg.auth_state_path),
+            "next_action": "keep the browser open and retry `complete_manual_login`",
+        }
+
+
+def _dashboard_session(cfg: RuntimeConfig, state: dict[str, Any]) -> requests.Session:
+    session = requests.Session()
+    session.verify = False
+    host = urlparse(cfg.base_url).hostname or ""
+    for cookie in state["cookies"]:
+        if not isinstance(cookie, dict) or not cookie.get("name"):
+            continue
+        domain = str(cookie.get("domain") or host)
+        session.cookies.set(
+            str(cookie["name"]),
+            str(cookie.get("value") or ""),
+            domain=domain,
+            path=str(cookie.get("path") or "/"),
+        )
+    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+    return session
+
+
+def _dashboard_requests(
+    cfg: RuntimeConfig,
+    token: str,
+    *,
+    days: int,
+) -> dict[str, tuple[str, dict[str, Any]]]:
+    end = datetime.now().replace(hour=23, minute=59, second=59, microsecond=0)
+    start = (end - timedelta(days=days - 1)).replace(hour=0, minute=0, second=0)
+    unix_range = _unix_date_range(days)
+    text_range = {
+        "start": start.strftime("%Y-%m-%d %H:%M:%S"),
+        "end": end.strftime("%Y-%m-%d %H:%M:%S"),
     }
+
+    def launch(opr: str, app_name: str, extra: Optional[dict[str, Any]] = None):
+        payload = {
+            "app_args": {"name": app_name, "options": {}},
+            "auto": 1,
+            "opr": opr,
+            "query_id": _query_id(),
+        }
+        payload.update(extra or {})
+        return f"/launch.php?s={token}&opr={opr}", payload
+
+    return {
+        "agent_overview": launch(
+            "get_agent_overview",
+            "app.web.event_center.head",
+            {"date_range": unix_range},
+        ),
+        "influenced_agent_overview": launch(
+            "get_influenced_agent_overview",
+            "app.web.event_center.head",
+        ),
+        "vulnerability_overview": (
+            f"/api/edrgoweb/v1/vulner/list/homepageVulner?_method=post&s={token}&req_type=polling",
+            {
+                "recentCheckTime": unix_range,
+                "uuid": "sf-id-6",
+                "tid": "0",
+                "uid": cfg.username,
+                "token": token,
+            },
+        ),
+        "ransomware_defense": launch(
+            "ransom_virus_defense_interface",
+            "app.web.event_center.ransom_virus_protection",
+        ),
+        "realtime_virus": launch(
+            "real_time_virus",
+            "app.web.event_center.real_time_events",
+            {"date": text_range, "day_sum": days},
+        ),
+        "top_agents": launch(
+            "get_top5_agents",
+            "app.web.event_center.head",
+            {"day_sum": days, "date_range": unix_range},
+        ),
+        "resource_usage": launch(
+            "get_realtime_resource_usage",
+            "app.web.event_center.head",
+        ),
+    }
+
+
+def _collect_dashboard(
+    cfg: RuntimeConfig,
+    *,
+    sections: list[str],
+    days: int,
+) -> dict[str, Any]:
+    """Compatibility entry point; dashboard API implementation is standalone."""
+    return _dashboard_api_module.collect_dashboard(cfg, sections=sections, days=days)
 
 
 # ── Tool actions ─────────────────────────────────────────────────────────────
@@ -854,55 +1329,107 @@ async def handle(ctx: ToolContext) -> ToolResult:
     action = str(params.get("action") or "ensure_auth_state").strip()
 
     try:
-        if action == "status_auth_state":
-            status = _saved_auto_login_status(params)
-            validation: dict[str, Any] | None = None
-            if status.get("has_base_url"):
-                try:
-                    validation = _validate_auth_state(_resolve_runtime_config({**params, "persist_credentials": False}))
-                except Exception as exc:
-                    validation = {
-                        "valid": False,
-                        "reason": "auth_state_validate_failed",
-                        "error": str(exc),
-                        "auth_state_path": status["auth_state_path"],
-                    }
+        if action in {"status_auth_state", "ensure_auth_state", "refresh_auth_state", "http_login"}:
+            result = _http_login_module.run_auth_action(params)
             return ToolResult(
-                success=True,
-                output={
-                    "success": True,
-                    "status": "saved_auto_login_status",
-                    **status,
-                    "validation": validation,
-                },
+                success=bool(result.get("success")),
+                output=result,
+                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
             )
 
         cfg = _resolve_runtime_config(params)
 
         if action == "validate_auth_state":
             validation = _validate_auth_state(cfg)
-            return ToolResult(success=bool(validation.get("valid")), output=validation)
+            return ToolResult(
+                success=bool(validation.get("valid")),
+                output=validation,
+                error=None if validation.get("valid") else str(validation.get("reason") or "auth_state_invalid"),
+            )
+
+        if action == "complete_manual_login":
+            result = _complete_manual_login(cfg)
+            return ToolResult(
+                success=bool(result.get("success")),
+                output=result,
+                error=None if result.get("success") else result.get("reason"),
+            )
+
+        if action == "browser_login":
+            probe = _probe_auth_pair(cfg)
+            if probe.get("valid"):
+                result = {
+                    "success": True,
+                    "valid": True,
+                    "status": "browser_login_skipped_valid_auth_pair",
+                    "login_skipped": True,
+                    "probe": probe,
+                }
+            else:
+                result = _refresh_auth_state_with_cdp_login(
+                    cfg,
+                    captcha_code=str(params.get("captcha_code") or ""),
+                )
+                result["previous_probe"] = probe
+                if result.get("success"):
+                    confirmation = _probe_auth_pair(cfg)
+                    result["probe"] = confirmation
+                    if not confirmation.get("valid"):
+                        result.update(
+                            {
+                                "success": False,
+                                "valid": False,
+                                "status": "browser_login_probe_failed",
+                                "reason": str(confirmation.get("reason") or "auth_probe_failed"),
+                            }
+                        )
+            return ToolResult(
+                success=bool(result.get("success")),
+                output=result,
+                error=None if result.get("success") else str(result.get("error") or result.get("reason")),
+            )
 
         if action not in {"ensure_auth_state", "refresh_auth_state"}:
             return ToolResult(
                 success=False,
-                error="Unsupported Sangfor EDR auth action. Use status_auth_state, ensure_auth_state, validate_auth_state, or refresh_auth_state.",
+                error=(
+                    "Unsupported Sangfor EDR auth action. Use status_auth_state, "
+                    "ensure_auth_state, validate_auth_state, refresh_auth_state, "
+                    "http_login, browser_login, or complete_manual_login."
+                ),
             )
 
-        force_refresh = action == "refresh_auth_state" or _coerce_bool(params.get("force_refresh"), default=False)
-        if not force_refresh:
-            validation = _validate_auth_state(cfg)
-            if validation.get("valid"):
-                return ToolResult(success=True, output=_auth_state_loaded_output(validation))
-
-        result = _refresh_auth_state_with_cdp_login(
-            cfg,
-            captcha_code=str(params.get("captcha_code") or ""),
-        )
+        result = _http_login_module.run_auth_action(params)
         return ToolResult(
             success=bool(result.get("success")),
             output=result,
-            error=None if result.get("success") else result.get("reason"),
+            error=None if result.get("success") else str(result.get("error") or result.get("reason")),
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+
+async def handle_dashboard(ctx: ToolContext) -> ToolResult:
+    params = dict(ctx.params)
+    try:
+        result = _dashboard_api_module.run_dashboard(params)
+        return ToolResult(
+            success=bool(result.get("success")),
+            output=result,
+            error=None if result.get("success") else "dashboard_api_partial_failure",
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+
+async def handle_threat_assets(ctx: ToolContext) -> ToolResult:
+    params = dict(ctx.params)
+    try:
+        result = _threat_assets_api_module.run_threat_assets(params)
+        return ToolResult(
+            success=bool(result.get("success")),
+            output=result,
+            error=None if result.get("success") else "threat_assets_api_partial_failure",
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))

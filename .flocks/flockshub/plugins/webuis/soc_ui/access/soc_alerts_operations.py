@@ -78,16 +78,19 @@ DISPLAY_FIELDS = (
     "is_duplicate",
     "_syslog_meta",
 )
-DRIVER_FIELDS = frozenset(DISPLAY_FIELDS)
+DRIVER_FIELDS = frozenset((*DISPLAY_FIELDS, "triage_attack_verdict", "triage_attack_success"))
 FILTER_FIELDS = frozenset(
     {
         "_source_type",
         "net_type",
         "direction",
+        "threat_severity",
+        "threat_level",
         "threat_name",
         "threat_type",
         "threat_phase",
-        "threat_result",
+        "triage_attack_verdict",
+        "triage_attack_success",
         "rsp_status_code",
         "sip",
         "dport",
@@ -102,7 +105,7 @@ TABLE_COLUMNS = (
     {"key": "threat_name", "label": "Threat Name"},
     {"key": "threat_type", "label": "Threat Type"},
     {"key": "threat_phase", "label": "Attack Stage"},
-    {"key": "threat_result", "label": "Attack Result"},
+    {"key": "triage_attack_success", "label": "Attack Result"},
     {"key": "direction", "label": "Direction"},
     {"key": "sip", "label": "Source IP"},
     {"key": "sport", "label": "Source Port"},
@@ -157,6 +160,7 @@ class _BindingResolver:
                 "dateColumn": settings["date_column"],
                 "eventTimeColumn": settings["event_time_column"],
             },
+            predicate_value_resolver=_filter_value,
             capabilities=frozenset({"query"}),
         )
 
@@ -228,12 +232,14 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
     record = row.raw
     record_id = _record_id(record)
     observed_at = _observed_at(record)
-    threat_name = _first_text(record, "threat_name", "_threat_type", "report_title") or "SOC alert"
+    threat_name = _first_text(record, "threat_name", "report_title") or "SOC alert"
     threat_msg = _first_text(record, "threat_msg", "report_title", "threat_type")
     verdict = _verdict_bucket(record)
     table_cells = _table_cells(record)
     triage_report = _text(record.get("triage_report"))
     report_title = _first_text(record, "report_title") or _report_title_from_markdown(triage_report)
+    triage_attack_verdict = _triage_attack_verdict(record)
+    triage_attack_success = _triage_attack_success(record)
 
     return {
         "id": record_id,
@@ -241,6 +247,8 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
         "observedAt": observed_at,
         "rawAlerts": 1,
         "priority": "P1" if verdict == "success" else "P2",
+        "triageAttackVerdict": triage_attack_verdict,
+        "triageAttackSuccess": triage_attack_success,
         "reportTitle": report_title,
         "reason": threat_msg,
         "owner": "",
@@ -263,7 +271,7 @@ def _incident_from_row(row: InternalDataRow) -> dict[str, Any]:
             "business": _text(record.get("asset_group_name")),
         },
         "conclusion": {
-            "verdict": _verdict_label(verdict),
+            "verdict": triage_attack_verdict,
             "summary": threat_msg or threat_name,
             "recommendation": "",
         },
@@ -286,6 +294,8 @@ def _table_cells(record: dict[str, Any]) -> dict[str, dict[str, str]]:
             cells[key] = {"value": value}
     if "time" not in cells and (observed := _observed_at(record)):
         cells["time"] = {"value": observed}
+    cells["triage_attack_verdict"] = {"value": _triage_attack_verdict(record)}
+    cells["triage_attack_success"] = {"value": _triage_attack_success(record)}
     return cells
 
 
@@ -421,30 +431,51 @@ def _request_method(record: dict[str, Any]) -> str:
 
 
 def _verdict_bucket(record: dict[str, Any]) -> str:
-    if record.get("attack_success") is True:
-        return "success"
-    raw = " ".join(
-        _text(record.get(key)).lower()
-        for key in ("attack_verdict", "threat_result", "risk_level", "threat_level")
-    )
-    if any(marker in raw for marker in ("success", "attack_success", "succeeded")):
-        return "success"
-    if any(marker in raw for marker in ("failed", "blocked", "attack_failed")):
-        return "failed"
-    if any(marker in raw for marker in ("benign", "normal", "safe")):
+    verdict = _triage_attack_verdict(record)
+    if verdict == "non_attack":
         return "benign"
-    if "attack" in raw:
+    if verdict == "attack":
+        attack_success = _triage_attack_success(record)
+        if attack_success == "success":
+            return "success"
+        if attack_success == "failed":
+            return "failed"
         return "attack"
     return "unknown"
 
 
-def _verdict_label(bucket: str) -> str:
-    return {
-        "success": "success",
-        "failed": "failed",
-        "benign": "benign",
-        "attack": "attack",
-    }.get(bucket, "unknown")
+def _triage_attack_success(record: dict[str, Any]) -> str:
+    raw_verdict = _text(record.get("triage_attack_verdict")).strip().lower()
+    if _triage_attack_verdict(record) != "attack":
+        return "unknown"
+    value = _text(record.get("triage_attack_success")).strip().lower()
+    if value in {"success", "failed", "unknown"}:
+        return value
+    legacy_value = record.get("triage_attack_success")
+    if legacy_value is True:
+        return "success"
+    if legacy_value is False and raw_verdict == "attack_failed":
+        return "failed"
+    return "unknown"
+
+
+def _triage_attack_verdict(record: dict[str, Any]) -> str:
+    value = _text(record.get("triage_attack_verdict")).strip().lower()
+    if value in {"attack", "non_attack", "unknown"}:
+        return value
+    if value in {"attack_success", "attack_failed"}:
+        return "attack"
+    if value == "benign":
+        return "non_attack"
+    return "unknown"
+
+
+def _filter_value(record: dict[str, Any], field: str) -> Any:
+    if field == "triage_attack_verdict":
+        return _triage_attack_verdict(record)
+    if field == "triage_attack_success":
+        return _triage_attack_success(record)
+    return record.get(field)
 
 
 def _source_file_label(paths: tuple[Path, ...]) -> str:

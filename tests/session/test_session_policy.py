@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from flocks.auth.context import AuthUser
+from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.session.session import SessionInfo
 from flocks.session.policy import SessionPolicy
 
@@ -57,6 +57,22 @@ def test_can_delete_requires_owner_only():
     assert SessionPolicy.can_delete(session, stranger) is False
 
 
+def test_service_owned_session_cannot_be_claimed_by_matching_username():
+    session = _make_session(
+        owner_user_id=API_TOKEN_SERVICE_USER_ID,
+        owner_username=API_TOKEN_SERVICE_USER_ID,
+    )
+    colliding_member = AuthUser(
+        id="usr_real_member",
+        username=API_TOKEN_SERVICE_USER_ID,
+        role="member",
+    )
+
+    assert SessionPolicy.is_owner(session, colliding_member) is False
+    assert SessionPolicy.can_read(session, colliding_member) is False
+    assert SessionPolicy.can_write(session, colliding_member) is False
+
+
 def test_can_read_requires_owner_for_private_session():
     owner = _make_user()
     admin = _make_user(user_id="usr_admin", username="root", role="admin")
@@ -86,6 +102,23 @@ def test_ownerless_session_admin_can_manage_but_member_cannot():
     admin = _make_user(user_id="usr_admin", username="admin", role="admin")
     member = _make_user(user_id="usr_member", username="member", role="member")
     session = _make_session(owner_user_id=None, owner_username=None)
+
+    assert SessionPolicy.can_read(session, admin) is True
+    assert SessionPolicy.can_write(session, admin) is True
+    assert SessionPolicy.can_delete(session, admin) is True
+
+    assert SessionPolicy.can_read(session, member) is False
+    assert SessionPolicy.can_write(session, member) is False
+    assert SessionPolicy.can_delete(session, member) is False
+
+
+def test_system_owned_session_admin_can_manage_but_member_cannot():
+    admin = _make_user(user_id="usr_admin", username="admin", role="admin")
+    member = _make_user(user_id="usr_member", username="member", role="member")
+    session = _make_session(
+        owner_user_id=API_TOKEN_SERVICE_USER_ID,
+        owner_username=API_TOKEN_SERVICE_USER_ID,
+    )
 
     assert SessionPolicy.can_read(session, admin) is True
     assert SessionPolicy.can_write(session, admin) is True

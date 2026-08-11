@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useRef } from 'react';
-import { ChevronRight, ExternalLink, XCircle } from 'lucide-react';
+import { Bot, ChevronDown, ChevronRight, ExternalLink, XCircle } from 'lucide-react';
 import { useTranslation } from 'react-i18next';
 import type { MessagePart, ToolState } from '@/types';
 import DelegateDetailSheet from './DelegateDetailSheet';
@@ -211,9 +211,10 @@ const STATUS_STYLE: Record<string, {
 
 export interface DelegateTaskCardProps {
   part: MessagePart;
+  processStep?: boolean;
 }
 
-export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
+export default function DelegateTaskCard({ part, processStep = false }: DelegateTaskCardProps) {
   const { t } = useTranslation('common');
   let state: Partial<ToolState> = {};
   let info: DelegateInfo;
@@ -252,6 +253,123 @@ export default function DelegateTaskCard({ part }: DelegateTaskCardProps) {
     }
     setElapsed(info.durationMs);
   }, [info.status, state.time?.start, state.time?.end, info.durationMs]);
+
+  if (processStep) {
+    return (
+      <>
+        <details data-testid="chat-process-delegate-step" className="group/delegate min-w-0">
+          <summary className="flex min-h-7 cursor-pointer list-none items-center gap-2 text-sm font-medium text-[#747a78] transition-colors hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-200 [&::-webkit-details-marker]:hidden">
+            <span className="inline-grid h-[18px] w-[18px] flex-[0_0_18px] place-items-center text-violet-500 dark:text-violet-400">
+              <Bot className="h-4 w-4" />
+            </span>
+            <span className="min-w-0 flex-shrink-0 text-violet-700 dark:text-violet-300">
+              {t('delegate.delegatedTo', { agent: info.agentName })}
+            </span>
+            <span className="min-w-0 truncate font-normal text-[#9a9f9c] dark:text-zinc-500">
+              {info.description}
+            </span>
+            {info.isBackground && (
+              <span className="flex-shrink-0 rounded bg-violet-100 px-1 py-0.5 text-[9px] font-medium leading-none text-violet-600 dark:bg-violet-950/70 dark:text-violet-300">
+                {t('delegate.background')}
+              </span>
+            )}
+            <span className={`ml-auto flex flex-shrink-0 items-center gap-1 text-[11px] ${cfg.textColor}`}>
+              {cfg.pulse && (
+                <span className="h-1.5 w-1.5 rounded-full bg-sky-500 animate-pulse" />
+              )}
+              {t(`delegate.${info.status}`, { defaultValue: info.status })}
+            </span>
+            <ChevronDown className="ml-0.5 h-3 w-3 flex-shrink-0 text-[#9da29f] transition-transform group-open/delegate:rotate-180 dark:text-zinc-500" />
+          </summary>
+
+          <div className="mb-[9px] ml-2 mt-[3px] space-y-2 border-l border-[#e3e6e3] py-1.5 pl-[26px] pr-0 text-xs text-[#686e6c] dark:border-zinc-700 dark:text-zinc-400">
+            {elapsed !== null && elapsed > 0 && (
+              <div className="text-[11px] text-zinc-400 dark:text-zinc-500">
+                {info.status === 'running' ? t('delegate.elapsedRunning') : t('delegate.elapsedDone')}
+                {' '}
+                {formatDuration(elapsed)}
+                {info.stepCount > 0 && ` · ${info.stepCount} ${t('delegate.steps')}`}
+              </div>
+            )}
+
+            {info.status === 'running' && info.steps.length > 0 && (
+              <div className="space-y-1">
+                {info.steps.map((step, index) => (
+                  <div key={`${step.tool}-${index}`} className="flex min-w-0 items-center gap-1.5 text-[11px] leading-snug">
+                    <span className={
+                      step.status === 'completed'
+                        ? 'text-emerald-500'
+                        : step.status === 'error'
+                          ? 'text-red-500'
+                          : 'text-sky-400 animate-pulse'
+                    }>
+                      {step.status === 'completed' ? '✓' : step.status === 'error' ? '✗' : '◌'}
+                    </span>
+                    <span className="w-16 flex-shrink-0 truncate font-mono text-[10px] text-zinc-500">
+                      {step.tool}
+                    </span>
+                    <span className="truncate text-zinc-400">{step.title}</span>
+                  </div>
+                ))}
+                {info.currentText && (
+                  <div className="truncate pl-4 text-[10px] italic text-zinc-400">
+                    ⋯ {info.currentText.slice(-80)}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {info.status === 'error' && info.error && (
+              <div className="flex items-start gap-1.5 rounded-md bg-red-50 p-2 text-[11px] text-red-700 dark:bg-red-950/40 dark:text-red-300">
+                <XCircle className="mt-0.5 h-3.5 w-3.5 flex-shrink-0" />
+                <span className="break-words">{info.error}</span>
+              </div>
+            )}
+
+            {info.status === 'completed' && info.output && (
+              <details>
+                <summary className="cursor-pointer select-none text-[11px] font-medium text-zinc-500 hover:text-zinc-700 dark:text-zinc-400 dark:hover:text-zinc-200">
+                  {t('delegate.resultSummary')}
+                </summary>
+                <div className="mt-1 max-h-40 overflow-y-auto whitespace-pre-wrap break-words rounded-md border border-zinc-200 bg-white/70 p-2 text-[11px] leading-relaxed text-zinc-700 dark:border-zinc-700 dark:bg-zinc-900/70 dark:text-zinc-300">
+                  {truncateOutput(info.output)}
+                </div>
+              </details>
+            )}
+
+            <button
+              type="button"
+              onClick={() => {
+                if (!info.childSessionId) return;
+                setSheetOpen(true);
+              }}
+              disabled={!info.childSessionId}
+              className={`flex items-center gap-1 text-[11px] font-medium transition-colors group ${
+                info.childSessionId
+                  ? 'cursor-pointer text-violet-600 hover:text-violet-800 dark:text-violet-400 dark:hover:text-violet-300'
+                  : 'cursor-not-allowed text-zinc-400 dark:text-zinc-600'
+              }`}
+            >
+              <ExternalLink className="h-3 w-3" />
+              {t('delegate.viewExecution')}
+              <ChevronRight className="h-3 w-3 transition-transform group-hover:translate-x-0.5" />
+            </button>
+          </div>
+        </details>
+
+        {info.childSessionId && (
+          <DelegateDetailSheet
+            open={sheetOpen}
+            onClose={() => setSheetOpen(false)}
+            sessionId={info.childSessionId}
+            agentName={info.agentName}
+            description={info.description}
+            status={info.status}
+          />
+        )}
+      </>
+    );
+  }
 
   return (
     <>

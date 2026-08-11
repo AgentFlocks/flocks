@@ -1,6 +1,7 @@
-import type { Workflow } from '@/api/workflow';
+import type { Workflow, WorkflowSummary } from '@/api/workflow';
 
 type LocalizedNameSource = Record<string, unknown> | null | undefined;
+type WorkflowDisplaySource = Workflow | WorkflowSummary;
 
 function isChineseLocale(language?: string): boolean {
   if (!language) return false;
@@ -21,11 +22,11 @@ function localizedNamesFrom(value: LocalizedNameSource): Record<string, string> 
   return names;
 }
 
-function collectLocalizedNames(workflow: Workflow | null | undefined): Record<string, string> {
+function collectLocalizedNames(workflow: WorkflowDisplaySource | null | undefined): Record<string, string> {
   if (!workflow) return {};
-  const raw = workflow as Workflow & Record<string, unknown>;
-  const workflowJson = workflow.workflowJson as unknown as Record<string, unknown> | undefined;
-  const metadata = workflow.workflowJson?.metadata as Record<string, unknown> | undefined;
+  const raw = workflow as WorkflowDisplaySource & Record<string, unknown>;
+  const workflowJson = raw.workflowJson as Record<string, unknown> | undefined;
+  const metadata = workflowJson?.metadata as Record<string, unknown> | undefined;
   const names: Record<string, string> = {};
 
   [
@@ -70,7 +71,7 @@ function pickLocalizedName(names: Record<string, string>, language?: string): st
 }
 
 export function getWorkflowDisplayName(
-  workflow: Workflow | null | undefined,
+  workflow: WorkflowDisplaySource | null | undefined,
   language?: string,
 ): string {
   if (!workflow) return '';

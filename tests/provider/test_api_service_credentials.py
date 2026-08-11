@@ -2,6 +2,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from flocks.security.secrets import SecretManager
+
 
 class TestAPIServiceCredentials:
     @pytest.mark.asyncio
@@ -25,7 +27,9 @@ class TestAPIServiceCredentials:
             result = await get_service_credentials("skyeye_api")
 
         assert result.secret_id == "skyeye_api_key"
-        assert result.api_key == "skyeye-login-key"
+        assert result.api_key is None
+        assert result.api_key_masked
+        assert result.api_key_masked != "skyeye-login-key"
         assert result.base_url == "https://skyeye-domain/skyeye"
         assert result.username == "skyeye"
         assert result.has_credential is True
@@ -160,8 +164,10 @@ class TestAPIServiceCredentials:
             result = await get_service_credentials("tdp_api")
 
         assert result.secret_id == "tdp_api_key"
-        assert result.api_key == "tdp-api-key"
-        assert result.secret == "tdp-secret"
+        assert result.api_key is None
+        assert result.api_key_masked != "tdp-api-key"
+        assert result.secret is None
+        assert result.secret_masked != "tdp-secret"
         assert result.base_url == "https://tdp.example.com"
         assert result.has_credential is True
 
@@ -231,8 +237,10 @@ class TestAPIServiceCredentials:
             result = await get_service_credentials("onesec_api")
 
         assert result.secret_id == "onesec_credentials"
-        assert result.api_key == "onesec-api-key"
-        assert result.secret == "onesec-secret"
+        assert result.api_key is None
+        assert result.api_key_masked != "onesec-api-key"
+        assert result.secret is None
+        assert result.secret_masked != "onesec-secret"
         assert result.base_url == "https://console.onesec.net"
         assert result.has_credential is True
 
@@ -320,7 +328,7 @@ class TestAPIServiceCredentials:
         assert result.fields == {
             "base_url": "https://qt.example.com:8443/openapi",
             "username": "alice",
-            "password": "qt-secret",
+            "password": SecretManager.mask("qt-secret"),
         }
         assert result.secret_ids == {"password": "qingteng_password"}
         assert result.has_credential is True

@@ -41,6 +41,7 @@ from flocks.cli.service_manager import (
     ServiceError,
     resolve_flocks_cli_command,
     restart_all,
+    restart_server,
     runtime_paths,
     show_logs,
     show_status,
@@ -264,6 +265,11 @@ def stop():
 
 @app.command()
 def restart(
+    server_only: bool = typer.Option(
+        False,
+        "--server-only",
+        help="Restart only the backend server without stopping the supervisor daemon",
+    ),
     no_browser: bool = typer.Option(False, "--no-browser", help="Do not open WebUI in a browser"),
     skip_webui_build: bool = typer.Option(
         False,
@@ -278,9 +284,13 @@ def restart(
     webui_port: Optional[int] = typer.Option(None, "--webui-port", help="WebUI port"),
 ):
     """
-    Restart Flocks service.
+    Restart Flocks service. Agents must use `flocks restart --server-only`;
+    bare restart stops the supervisor and terminates the running agent.
     """
     try:
+        if server_only:
+            restart_server(console)
+            return
         restart_all(
             _restart_service_config(
                 no_browser=no_browser,

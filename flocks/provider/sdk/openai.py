@@ -18,12 +18,15 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
+    create_openai_http_client,
+    _normalize_stream_usage,
     build_reasoning_metadata,
     _coerce_bool,
     extract_reasoning_content_with_source,
     extract_reasoning_details,
     format_openai_content,
     format_openai_messages,
+    raise_if_response_body_unsafe,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -82,10 +85,11 @@ class OpenAIProvider(BaseProvider):
                 if isinstance(cfg_settings, dict) and "trust_env" in cfg_settings:
                     trust_env = _coerce_bool(cfg_settings.get("trust_env"), trust_env)
                 verify_ssl = resolve_verify_ssl(cfg_settings, default=True)
-                http_client = httpx.AsyncClient(
+                http_client = create_openai_http_client(
                     trust_env=trust_env,
                     verify=verify_ssl,
                     timeout=DEFAULT_HTTP_TIMEOUT,
+                    custom_settings=cfg_settings,
                 )
 
                 if base_url:
@@ -93,6 +97,7 @@ class OpenAIProvider(BaseProvider):
                         api_key=api_key,
                         base_url=base_url,
                         http_client=http_client,
+                        max_retries=0,
                     )
                     self.log.info(
                         "openai.client.created",
@@ -103,7 +108,11 @@ class OpenAIProvider(BaseProvider):
                         },
                     )
                 else:
-                    self._client = AsyncOpenAI(api_key=api_key, http_client=http_client)
+                    self._client = AsyncOpenAI(
+                        api_key=api_key,
+                        http_client=http_client,
+                        max_retries=0,
+                    )
                     self.log.info(
                         "openai.client.created",
                         {"trust_env": trust_env, "verify_ssl": verify_ssl},
@@ -157,7 +166,11 @@ class OpenAIProvider(BaseProvider):
         if kwargs.get("reasoningEffort"):
             request_params["reasoning_effort"] = kwargs["reasoningEffort"]
         
-        response = await client.chat.completions.create(**request_params)
+        try:
+            response = await client.chat.completions.create(**request_params)
+        except Exception as exc:
+            raise_if_response_body_unsafe(exc)
+            raise
         choice = response.choices[0]
         assistant_message = getattr(choice, "message", None)
         text_content = (
@@ -219,15 +232,12 @@ class OpenAIProvider(BaseProvider):
         
         # Track usage from final chunk (when stream_options.include_usage is set)
         stream_usage: Optional[Dict[str, int]] = None
+        usage_emitted = False
         
         async for chunk in stream:
             # Capture usage from the final chunk (OpenAI returns it in a chunk with no choices)
             if hasattr(chunk, 'usage') and chunk.usage:
-                stream_usage = {
-                    "prompt_tokens": getattr(chunk.usage, 'prompt_tokens', 0) or 0,
-                    "completion_tokens": getattr(chunk.usage, 'completion_tokens', 0) or 0,
-                    "total_tokens": getattr(chunk.usage, 'total_tokens', 0) or 0,
-                }
+                stream_usage = _normalize_stream_usage(chunk.usage)
             
             if not chunk.choices:
                 continue
@@ -251,6 +261,7 @@ class OpenAIProvider(BaseProvider):
                             finish_reason=choice.finish_reason,
                             usage=stream_usage,
                         )
+                    usage_emitted = stream_usage is not None
                 continue
 
             # Handle reasoning/thinking content (for o1/o3/gpt-5 models)
@@ -315,6 +326,13 @@ class OpenAIProvider(BaseProvider):
                         finish_reason=choice.finish_reason,
                         usage=stream_usage,
                     )
+                usage_emitted = stream_usage is not None
+
+        # OpenAI sends the usage-only chunk after the terminal finish chunk.
+        # Surface it separately when it was not available on the terminal chunk
+        # so the runner can persist usage and nested reasoning tokens.
+        if stream_usage and not usage_emitted:
+            yield StreamChunk(delta="", finish_reason=None, usage=stream_usage)
     
     # Embeddings support (added for memory system)
     async def embed(

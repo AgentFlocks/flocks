@@ -11,7 +11,7 @@ import asyncio
 import time as _time
 from datetime import datetime
 from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
@@ -91,6 +91,7 @@ class ToolCallState:
     status: str = "pending"  # "pending", "running", "completed", "error"
     output: Optional[str] = None
     error: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
 
 
 class StreamProcessor:
@@ -119,6 +120,10 @@ class StreamProcessor:
         workspace_dir: Optional[str] = None,
         langfuse_generation: Optional[Any] = None,
         step_index: Optional[int] = None,
+        execution_mode: str = "build",
+        plan_file_path: Optional[str] = None,
+        plan_relative_path: Optional[str] = None,
+        plan_permission_path: Optional[str] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -136,6 +141,10 @@ class StreamProcessor:
         self._workspace_dir = workspace_dir
         self._langfuse_generation = langfuse_generation
         self._step_index = step_index
+        self._execution_mode = execution_mode
+        self._plan_file_path = plan_file_path
+        self._plan_relative_path = plan_relative_path
+        self._plan_permission_path = plan_permission_path
         self._sandbox_runtime_cache = None
         self._sandbox_config_cache = None
         self._sandbox_context_cache = None
@@ -571,8 +580,10 @@ class StreamProcessor:
         # Hook pipeline: tool.execute.before
         # Apply any input rewrite before publishing the running state so UI
         # surfaces show the actual tool input that will be executed.
-        hook_skip = False
-        hook_skip_error = "Tool execution blocked by hook"
+        tool_start_time = int(datetime.now().timestamp() * 1000)
+        post_hook_fired = False
+        hook_blocked = False
+        hook_block_reason = ""
         try:
             from flocks.hooks.pipeline import HookPipeline
             hook_ctx = await HookPipeline.run_tool_before({
@@ -591,19 +602,30 @@ class StreamProcessor:
                     tool_input = updated
                     tool_state.input = tool_input
             hook_output = hook_ctx.output if hook_ctx and isinstance(hook_ctx.output, dict) else {}
-            hook_skip = hook_output.get("skip", False)
-            if isinstance(hook_output.get("error"), str) and hook_output["error"].strip():
-                hook_skip_error = hook_output["error"].strip()
+            decision = str(hook_output.get("decision") or "").strip().lower()
+            hook_blocked = decision == "block" or bool(hook_output.get("skip", False))
+            hook_block_reason = str(
+                hook_output.get("reason") or hook_output.get("error") or ""
+            ).strip()
+        except asyncio.CancelledError:
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                post_hook_fired=False,
+            )
+            raise
         except Exception as e:
             log.error("stream.tool_before_hook.error", {"error": str(e)})
-            hook_skip = True
-            hook_skip_error = "Tool execution blocked because tool-before hook failed"
+            hook_blocked = True
+            hook_block_reason = "Tool execution blocked because tool-before hook failed"
 
         tool_state.status = "running"
         
         # Update ToolPart to running state (like Flocks's Session.updatePart)
         # This matches Flocks's logic: update existing part from pending to running
-        tool_start_time = int(datetime.now().timestamp() * 1000)
         try:
             # Update the existing ToolPart with running state and actual input
             tool_part = ToolPart(
@@ -707,10 +729,11 @@ class StreamProcessor:
             except Exception as exc:
                 log.debug("stream.tool_span.init_failed", {"error": str(exc)})
         try:
-            if hook_skip:
+            if hook_blocked:
                 result = ToolResult(
                     success=False,
-                    error=hook_skip_error,
+                    error=hook_block_reason or "Tool execution blocked by hook",
+                    metadata={"blocked_by_hook": True},
                 )
             else:
                 sandbox_meta = await self._resolve_sandbox_meta(tool_name)
@@ -752,6 +775,7 @@ class StreamProcessor:
                             if _finished[0]:
                                 return
                             snapshot = copy.deepcopy(metadata)
+                            tool_state.metadata = snapshot
                             state_dict = {
                                 "status": "running",
                                 "input": _input,
@@ -826,6 +850,26 @@ class StreamProcessor:
                         _cb.mark_finished = _mark_finished
                         return _cb
 
+                    tool_extra = {
+                        **sandbox_meta["extra"],
+                        "execution_mode": self._execution_mode,
+                        "workspace_dir": self._workspace_dir,
+                        "model": {
+                            "providerID": getattr(
+                                self.assistant_message,
+                                "providerID",
+                                None,
+                            ),
+                            "modelID": getattr(
+                                self.assistant_message,
+                                "modelID",
+                                None,
+                            ),
+                        },
+                        "plan_file_path": self._plan_file_path,
+                        "plan_relative_path": self._plan_relative_path,
+                        "plan_permission_path": self._plan_permission_path,
+                    }
                     ctx = ToolContext(
                         session_id=self.session_id,
                         message_id=self.assistant_message.id,
@@ -833,7 +877,7 @@ class StreamProcessor:
                         call_id=tool_call_id,
                         abort_event=self.abort_event,
                         permission_callback=self.permission_callback,
-                        extra=sandbox_meta["extra"],
+                        extra=tool_extra,
                         metadata_callback=_make_metadata_cb(),
                         event_publish_callback=self.event_publish_callback,
                     )
@@ -851,26 +895,23 @@ class StreamProcessor:
                         if cb and hasattr(cb, 'mark_finished'):
                             cb.mark_finished()
 
-            # Hook pipeline: tool.execute.after
-            try:
-                from flocks.hooks.pipeline import HookPipeline
-                hook_ctx = await HookPipeline.run_tool_after({
-                    "sessionID": self.session_id,
-                    "workspace": self._workspace_dir,
-                    "agent": self.agent.name,
-                    "tool": {
-                        "name": tool_name,
-                        "input": tool_input,
-                        "callID": tool_call_id,
-                    },
-                    "result": result.model_dump(),
-                })
-                if hook_ctx and isinstance(hook_ctx.output, dict):
-                    override = hook_ctx.output.get("result")
-                    if isinstance(override, dict):
-                        result = ToolResult(**override)
-            except Exception as e:
-                log.error("stream.tool_after_hook.error", {"error": str(e)})
+            if result.success:
+                hook_status = "completed"
+            elif (result.metadata or {}).get("blocked_by_hook"):
+                hook_status = "blocked"
+            elif (result.metadata or {}).get("blocked_by_policy"):
+                hook_status = "blocked"
+            else:
+                hook_status = "error"
+            post_hook_fired = True
+            result = await self._run_tool_after_hook(
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+                result=result,
+                status=hook_status,
+                tool_start_time=tool_start_time,
+            )
             
             # Update tool state
             tool_state.status = "completed" if result.success else "error"
@@ -882,14 +923,10 @@ class StreamProcessor:
                 "tool_name": tool_name,
                 "success": result.success,
             })
-            output_preview = result.output if result.success else result.error
-            if isinstance(output_preview, str):
-                output_preview = output_preview[:600]
-
             try:
                 if tool_span_ctx is not None:
                     end_kwargs: Dict[str, Any] = {
-                        "output": output_preview,
+                        "output": result.output if result.success else result.error,
                         "metadata": {
                             "success": result.success,
                             "title": result.title,
@@ -976,65 +1013,15 @@ class StreamProcessor:
                     log.error("stream.tool_end_callback.error", {"error": str(e)})
             
         except asyncio.CancelledError:
-            interrupt_msg = "Tool execution was interrupted"
-            log.info("stream.tool_call.cancelled", {
-                "tool_call_id": tool_call_id,
-                "tool_name": tool_name,
-            })
-            try:
-                if tool_span_ctx is not None:
-                    tool_span_ctx.end(
-                        output=interrupt_msg,
-                        metadata={"success": False},
-                        level="ERROR",
-                        status_message="tool_cancelled",
-                    )
-            except Exception as _span_err:
-                log.debug("stream.tool_span.cancel_end_failed", {"error": str(_span_err)})
-
-            tool_state.status = "error"
-            tool_state.error = interrupt_msg
-
-            try:
-                tool_end_time = int(datetime.now().timestamp() * 1000)
-                error_state = ToolStateError(
-                    status="error",
-                    input=tool_input,
-                    error=interrupt_msg,
-                    time={"start": tool_start_time if 'tool_start_time' in locals() else tool_end_time, "end": tool_end_time},
-                )
-
-                error_part = ToolPart(
-                    id=tool_state.part_id,
-                    sessionID=self.session_id,
-                    messageID=self.assistant_message.id,
-                    type="tool",
-                    callID=tool_call_id,
-                    tool=tool_name,
-                    state=error_state,
-                )
-                await Message.store_part(self.session_id, self.assistant_message.id, error_part)
-
-                if self.event_publish_callback:
-                    await self.event_publish_callback("message.part.updated", {
-                        "part": {
-                            "id": tool_state.part_id,
-                            "messageID": self.assistant_message.id,
-                            "sessionID": self.session_id,
-                            "type": "tool",
-                            "callID": tool_call_id,
-                            "tool": tool_name,
-                            "state": {
-                                "status": "error",
-                                "input": tool_input,
-                                "error": interrupt_msg,
-                                "time": {"start": tool_start_time if 'tool_start_time' in locals() else tool_end_time, "end": tool_end_time},
-                            }
-                        }
-                    })
-            except Exception as store_e:
-                log.error("stream.tool_call.cancelled_update_failed", {"error": str(store_e)})
-
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                post_hook_fired=post_hook_fired,
+                tool_span_ctx=tool_span_ctx,
+            )
             raise
         except Exception as e:
             log.error("stream.tool_call.error", {
@@ -1042,6 +1029,21 @@ class StreamProcessor:
                 "tool_name": tool_name,
                 "error": str(e),
             })
+            if not post_hook_fired:
+                post_hook_fired = True
+                exception_result = ToolResult(
+                    success=False,
+                    error=str(e),
+                )
+                await self._run_tool_after_hook(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_call_id=tool_call_id,
+                    result=exception_result,
+                    status="error",
+                    tool_start_time=tool_start_time,
+                    allow_result_override=False,
+                )
             try:
                 if tool_span_ctx is not None:
                     tool_span_ctx.end(
@@ -1114,6 +1116,156 @@ class StreamProcessor:
                     await self.tool_end_callback(tool_name, error_result)
                 except Exception as e2:
                     log.error("stream.tool_end_callback.error", {"error": str(e2)})
+
+    async def _finalize_interrupted_tool_call(
+        self,
+        *,
+        tool_state: ToolCallState,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_call_id: str,
+        tool_start_time: int,
+        post_hook_fired: bool,
+        tool_span_ctx: Optional[Any] = None,
+    ) -> None:
+        """Emit and persist the terminal state for an interrupted tool call."""
+        interrupt_msg = "Tool execution was interrupted"
+        interrupted_metadata = {
+            **tool_state.metadata,
+            "status": "interrupted",
+            "interrupted": True,
+        }
+        tool_state.metadata = interrupted_metadata
+        log.info("stream.tool_call.cancelled", {
+            "tool_call_id": tool_call_id,
+            "tool_name": tool_name,
+        })
+        try:
+            if not post_hook_fired:
+                interrupted_result = ToolResult(
+                    success=False,
+                    error=interrupt_msg,
+                    metadata=interrupted_metadata,
+                )
+                await self._run_tool_after_hook(
+                    tool_name=tool_name,
+                    tool_input=tool_input,
+                    tool_call_id=tool_call_id,
+                    result=interrupted_result,
+                    status="interrupted",
+                    tool_start_time=tool_start_time,
+                    allow_result_override=False,
+                )
+        finally:
+            try:
+                if tool_span_ctx is not None:
+                    tool_span_ctx.end(
+                        output=interrupt_msg,
+                        metadata={"success": False},
+                        level="ERROR",
+                        status_message="tool_cancelled",
+                    )
+            except Exception as span_error:
+                log.debug(
+                    "stream.tool_span.cancel_end_failed",
+                    {"error": str(span_error)},
+                )
+
+            tool_state.status = "error"
+            tool_state.error = interrupt_msg
+            tool_end_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_input,
+                error=interrupt_msg,
+                metadata=interrupted_metadata,
+                time={"start": tool_start_time, "end": tool_end_time},
+            )
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=error_state,
+            )
+            try:
+                await Message.store_part(
+                    self.session_id,
+                    self.assistant_message.id,
+                    error_part,
+                )
+                if self.event_publish_callback:
+                    await self.event_publish_callback(
+                        "message.part.updated",
+                        {
+                            "part": {
+                                "id": tool_state.part_id,
+                                "messageID": self.assistant_message.id,
+                                "sessionID": self.session_id,
+                                "type": "tool",
+                                "callID": tool_call_id,
+                                "tool": tool_name,
+                                "state": {
+                                    "status": "error",
+                                    "input": tool_input,
+                                    "error": interrupt_msg,
+                                    "metadata": interrupted_metadata,
+                                    "time": {
+                                        "start": tool_start_time,
+                                        "end": tool_end_time,
+                                    },
+                                },
+                            }
+                        },
+                    )
+            except Exception as store_error:
+                log.error(
+                    "stream.tool_call.cancelled_update_failed",
+                    {"error": str(store_error)},
+                )
+
+    async def _run_tool_after_hook(
+        self,
+        *,
+        tool_name: str,
+        tool_input: Dict[str, Any],
+        tool_call_id: str,
+        result: ToolResult,
+        status: str,
+        tool_start_time: int,
+        allow_result_override: bool = True,
+    ) -> ToolResult:
+        """Run tool_after with a normalized result for every tool outcome."""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+
+            duration_ms = max(
+                0,
+                int(datetime.now().timestamp() * 1000) - tool_start_time,
+            )
+            hook_ctx = await HookPipeline.run_tool_after({
+                "sessionID": self.session_id,
+                "workspace": self._workspace_dir,
+                "agent": self.agent.name,
+                "tool": {
+                    "name": tool_name,
+                    "input": tool_input,
+                    "callID": tool_call_id,
+                },
+                "status": status,
+                "durationMs": duration_ms,
+                "result": result.model_dump(),
+                "error": result.error if not result.success else None,
+            })
+            if allow_result_override and isinstance(hook_ctx.output, dict):
+                override = hook_ctx.output.get("result")
+                if isinstance(override, dict):
+                    return ToolResult(**override)
+        except Exception as exc:
+            log.error("stream.tool_after_hook.error", {"error": str(exc)})
+        return result
 
     async def _load_config_data(self) -> Dict[str, Any]:
         """Load and cache config as plain dict."""
@@ -1330,15 +1482,20 @@ class StreamProcessor:
             # Intercept text-embedded tool calls produced by models that hallucinate
             # tool invocations as text rather than using the native API tool-calling
             # mechanism.  Two formats are supported:
-            #   1. XML:  <tool_use>{"name":"…","input":{…}}</tool_use>
-            #   2. JSON: [{"tool_name":"…","parameters":{…}}]
+            #   1. XML:  <tool_use>{"name":"...","input":{...}}</tool_use>
+            #   2. DSML: <｜DSML｜tool_calls>...</｜DSML｜tool_calls>
+            #   3. JSON: [{"tool_name":"...","parameters":{...}}]
             # Parse, execute, and strip them so the conversation loop continues
             # correctly and no raw markup/JSON appears in the UI.
             raw_text = self.current_text_part.text
             all_text_tool_calls: list[dict] = []
             cleaned = raw_text
 
-            if "<tool_use>" in cleaned or "<minimax:tool_call>" in cleaned:
+            if (
+                "<tool_use>" in cleaned
+                or "<minimax:tool_call>" in cleaned
+                or self._contains_dsml_tool_markup(cleaned)
+            ):
                 cleaned, xml_calls = self._parse_xml_text_tool_calls(cleaned)
                 all_text_tool_calls.extend(xml_calls)
 
@@ -1364,7 +1521,11 @@ class StreamProcessor:
                             input=tc["input"],
                         ))
                 self._text_tool_calls_executed = True
-            elif "<tool_use>" in raw_text or "<minimax:tool_call>" in raw_text:
+            elif (
+                "<tool_use>" in raw_text
+                or "<minimax:tool_call>" in raw_text
+                or self._contains_dsml_tool_markup(raw_text)
+            ):
                 log.warn("stream.text_tool_use_xml_stripped", {
                     "session_id": self.session_id,
                     "reason": "found XML tool-call markup but could not parse any valid tool calls",
@@ -1446,9 +1607,52 @@ class StreamProcessor:
             return current[len(previous):]
         return current
 
+    _DSML_NAMESPACE_RE = r"(?:\|\s*\|\s*DSML\s*\|\s*\||\|\s*DSML\s*\||｜\s*DSML\s*｜)"
+    _DSML_TAG_RE = re.compile(
+        r"<\s*(/?)\s*" + _DSML_NAMESPACE_RE + r"\s*([A-Za-z_][\w]*)\b([^>]*)>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_COMPLETE_BLOCK_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result)\b[^>]*>"
+        r".*?"
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result)\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_COMPLETE_INVOKE_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*invoke\b[^>]*>"
+        r".*?"
+        r"</\s*" + _DSML_NAMESPACE_RE + r"\s*invoke\s*>",
+        re.DOTALL | re.IGNORECASE,
+    )
+    _DSML_OPEN_BLOCK_RE = re.compile(
+        r"<\s*" + _DSML_NAMESPACE_RE + r"\s*(?:tool_use|tool_calls|tool_result|invoke)\b",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _contains_dsml_tool_markup(cls, text: str) -> bool:
+        return bool(cls._DSML_OPEN_BLOCK_RE.search(text))
+
+    @classmethod
+    def _normalize_dsml_tags(cls, text: str) -> str:
+        def replace(match: re.Match[str]) -> str:
+            closing = "/" if match.group(1) else ""
+            tag_name = match.group(2).lower()
+            attrs = "" if closing else match.group(3)
+            return f"<{closing}dsml:{tag_name}{attrs}>"
+
+        return cls._DSML_TAG_RE.sub(replace, text)
+
+    @classmethod
+    def _strip_dsml_blocks(cls, text: str) -> str:
+        text = cls._DSML_COMPLETE_BLOCK_RE.sub("", text)
+        return cls._DSML_COMPLETE_INVOKE_RE.sub("", text)
+
     @staticmethod
     def _sanitize_streaming_text_for_display(text: str) -> str:
         visible = text
+
+        visible = StreamProcessor._strip_dsml_blocks(visible)
 
         block_patterns = [
             re.compile(r"<tool_use>.*?</tool_use>", re.DOTALL),
@@ -1472,6 +1676,10 @@ class StreamProcessor:
                     truncate_at = start if truncate_at is None else min(truncate_at, start)
                     break
                 start = visible.find(start_tag, end + len(end_tag))
+
+        dsml_start = StreamProcessor._DSML_OPEN_BLOCK_RE.search(visible)
+        if dsml_start:
+            truncate_at = dsml_start.start() if truncate_at is None else min(truncate_at, dsml_start.start())
 
         if truncate_at is not None:
             visible = visible[:truncate_at]
@@ -1580,13 +1788,143 @@ class StreamProcessor:
                     "input": raw_input,
                 })
 
+        dsml_calls = self._parse_dsml_text_tool_calls(text)
+        tool_calls.extend(dsml_calls)
+
         # Strip <tool_use> and <tool_result> blocks from visible text
         cleaned = tool_use_re.sub("", text)
         cleaned = minimax_tool_call_re.sub("", cleaned)
         cleaned = tool_result_re.sub("", cleaned)
+        cleaned = self._strip_dsml_blocks(cleaned)
         cleaned = re.sub(r'\n{3,}', '\n\n', cleaned).strip()
 
         return cleaned, tool_calls
+
+    def _parse_dsml_text_tool_calls(self, text: str) -> list[dict]:
+        """Extract tool calls from DeepSeek-style DSML text blocks."""
+        normalized = self._normalize_dsml_tags(text)
+        tool_calls: list[dict] = []
+
+        for match in re.finditer(
+            r"<dsml:(?:tool_use|tool_calls)\b[^>]*>(.*?)</dsml:(?:tool_use|tool_calls)>",
+            normalized,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            body = match.group(1).strip()
+            if not body or not body[:1] in "{[":
+                continue
+
+            try:
+                data = json.loads(body)
+            except (json.JSONDecodeError, ValueError):
+                continue
+
+            if isinstance(data, dict):
+                candidates: list[Any] = [data]
+                if isinstance(data.get("tool_calls"), list):
+                    candidates = data["tool_calls"]
+            elif isinstance(data, list):
+                candidates = data
+            else:
+                candidates = []
+
+            for item in candidates:
+                parsed = self._coerce_text_tool_call_dict(item)
+                if parsed:
+                    tool_calls.append(parsed)
+
+        for match in re.finditer(
+            r"<dsml:invoke\b([^>]*)>(.*?)</dsml:invoke>",
+            normalized,
+            re.DOTALL | re.IGNORECASE,
+        ):
+            attrs = self._parse_xml_attrs(match.group(1))
+            name = str(attrs.get("name") or "").strip()
+            if not name:
+                continue
+
+            raw_input: dict[str, Any] = {}
+            invoke_body = match.group(2)
+            for param_match in re.finditer(
+                r"<dsml:parameter\b([^>]*)>(.*?)</dsml:parameter>",
+                invoke_body,
+                re.DOTALL | re.IGNORECASE,
+            ):
+                param_attrs = self._parse_xml_attrs(param_match.group(1))
+                param_name = str(param_attrs.get("name") or "").strip()
+                if not param_name:
+                    continue
+
+                param_value = param_match.group(2).strip()
+                parsed_value: Any = param_value
+                if str(param_attrs.get("string") or "").lower() != "true" and param_value:
+                    try:
+                        parsed_value = json.loads(param_value)
+                    except (json.JSONDecodeError, ValueError):
+                        parsed_value = param_value
+                raw_input[param_name] = parsed_value
+
+            tool_calls.append({
+                "id": Identifier.create("call"),
+                "name": name,
+                "input": raw_input,
+            })
+
+        return tool_calls
+
+    @staticmethod
+    def _parse_xml_attrs(raw_attrs: str) -> dict[str, str]:
+        attrs: dict[str, str] = {}
+        for match in re.finditer(r"([A-Za-z_][\w:-]*)\s*=\s*(\"([^\"]*)\"|'([^']*)')", raw_attrs):
+            attrs[match.group(1)] = match.group(3) if match.group(3) is not None else match.group(4)
+        return attrs
+
+    @staticmethod
+    def _coerce_text_tool_call_dict(data: Any) -> Optional[dict]:
+        if not isinstance(data, dict):
+            return None
+
+        function_data = data.get("function") if isinstance(data.get("function"), dict) else {}
+        name = next(
+            (
+                value for value in (
+                    data.get("name"),
+                    data.get("tool_name"),
+                    data.get("tool"),
+                    function_data.get("name"),
+                )
+                if value
+            ),
+            None,
+        )
+        if not isinstance(name, str) or not name.strip():
+            return None
+
+        raw_input = next(
+            (
+                value for value in (
+                    data.get("input"),
+                    data.get("parameters"),
+                    data.get("arguments"),
+                    function_data.get("arguments"),
+                )
+                if value is not None
+            ),
+            {},
+        )
+        if isinstance(raw_input, str):
+            try:
+                raw_input = json.loads(raw_input)
+            except (json.JSONDecodeError, ValueError):
+                raw_input = {}
+        if not isinstance(raw_input, dict):
+            raw_input = {}
+
+        return {
+            "id": Identifier.create("call"),
+            "name": name.strip(),
+            "input": raw_input,
+        }
 
     def _parse_json_text_tool_calls(self, text: str) -> tuple[str, list[dict]]:
         """

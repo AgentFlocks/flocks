@@ -21,6 +21,33 @@ def _build_session(session_id: str = "ses_stats_test") -> SessionInfo:
 
 
 @pytest.mark.asyncio
+async def test_current_project_stats_only_include_sessions_from_current_worktree(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    current_project = tmp_path / "current"
+    other_project = tmp_path / "other"
+    current_project.mkdir()
+    other_project.mkdir()
+    current = _build_session("ses-current")
+    current.directory = str(current_project)
+    current.project_id = "default"
+    other = _build_session("ses-other")
+    other.directory = str(other_project)
+    other.project_id = "default"
+
+    async def fake_get_all_sessions():
+        return [other, current]
+
+    monkeypatch.chdir(current_project)
+    monkeypatch.setattr(stats_cmd, "_get_all_sessions", fake_get_all_sessions)
+
+    sessions = await stats_cmd._resolve_project_sessions("")
+
+    assert [session.id for session in sessions] == [current.id]
+
+
+@pytest.mark.asyncio
 async def test_aggregate_stats_uses_usage_records(monkeypatch) -> None:
     session = _build_session()
     record = UsageRecord(

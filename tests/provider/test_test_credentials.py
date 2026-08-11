@@ -303,23 +303,23 @@ class TestTestCredentialsToolExecution:
 
     @pytest.mark.asyncio
     async def test_service_prefers_login_probe_over_action_dispatch_tool(self):
-        """When a parameter-free login tool exists (e.g. qingteng_login), it
-        should be tried before action-dispatch tools whose handler-side validation
-        requires extra fields beyond the JSON schema (e.g. qingteng_assets which
-        needs `resource` + `os_type` for `assets.refresh`).
+        """When a parameter-free login tool exists, it
+        should be tried before an action-dispatch tool whose handler-side validation
+        requires extra fields beyond the JSON schema (e.g. a grouped assets tool
+        that needs `resource` + `os_type` for `assets.refresh`).
         """
         from flocks.server.routes.provider import test_provider_credentials
 
         login_tool = ToolInfo(
-            name="qingteng_login",
-            description="Qingteng login probe",
+            name="example_login",
+            description="Example login probe",
             category=ToolCategory.CUSTOM,
             parameters=[],
             requires_confirmation=False,
         )
         assets_tool = ToolInfo(
-            name="qingteng_assets",
-            description="Qingteng assets dispatch",
+            name="example_assets",
+            description="Example assets dispatch",
             category=ToolCategory.CUSTOM,
             parameters=[
                 ToolParameter(
@@ -340,27 +340,28 @@ class TestTestCredentialsToolExecution:
             patch(_PATCH_SECRET_MGR, return_value=mock_secrets),
             patch(_PATCH_PROVIDER) as mock_provider_cls,
             patch(_PATCH_TOOL_REGISTRY) as mock_tr,
-            patch(_PATCH_TOOL_SOURCE, return_value=("api", "qingteng")),
+            patch(_PATCH_TOOL_SOURCE, return_value=("api", "example")),
         ):
             mock_provider_cls._ensure_initialized = MagicMock()
             mock_provider_cls.apply_config = AsyncMock()
             mock_provider_cls.get.return_value = None
 
             mock_tr.init = MagicMock()
+            mock_tr.init_async = AsyncMock()
             mock_tr.list_tools.return_value = [assets_tool, login_tool]
             mock_tr._dynamic_tools_by_module = {
-                "flocks.tool.generated.qingteng": ["qingteng_assets", "qingteng_login"],
+                "flocks.tool.generated.example": ["example_assets", "example_login"],
             }
             mock_tr.execute = AsyncMock(return_value=ToolResult(
                 success=True,
-                output={"jwt": "fake", "signKey": "fake", "comId": "1"},
+                output={"authenticated": True},
             ))
 
-            result = await test_provider_credentials("qingteng")
+            result = await test_provider_credentials("example")
 
             assert result["success"] is True, result
-            assert result["tool_tested"] == "qingteng_login"
-            mock_tr.execute.assert_awaited_once_with(tool_name="qingteng_login")
+            assert result["tool_tested"] == "example_login"
+            mock_tr.execute.assert_awaited_once_with(tool_name="example_login")
 
     @pytest.mark.asyncio
     async def test_declared_manifest_probe_is_used_before_heuristic_tool_selection(self):

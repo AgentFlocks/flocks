@@ -6,7 +6,7 @@ import NodeInfoPanel from './NodeInfoPanel';
 
 const { workflowAPI } = vi.hoisted(() => ({
   workflowAPI: {
-    list: vi.fn(),
+    listSummaries: vi.fn(),
     update: vi.fn(),
     runNode: vi.fn(),
   },
@@ -93,7 +93,7 @@ vi.mock('react-i18next', () => ({
 describe('NodeInfoPanel', () => {
   beforeEach(() => {
     vi.clearAllMocks();
-    workflowAPI.list.mockResolvedValue({ data: [] });
+    workflowAPI.listSummaries.mockResolvedValue({ data: [] });
     workflowAPI.update.mockResolvedValue({ data: {} });
     workflowAPI.runNode.mockResolvedValue({
       data: {

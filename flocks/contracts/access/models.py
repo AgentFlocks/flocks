@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -76,6 +77,7 @@ class Binding:
     driver_available_fields: frozenset[str]
     driver_allowlist_roots: tuple[Path, ...]
     driver_options: dict[str, Any] = field(default_factory=dict)
+    predicate_value_resolver: Callable[[dict[str, Any], str], Any] | None = None
     capabilities: frozenset[str] = frozenset({"query"})
 
 

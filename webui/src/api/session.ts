@@ -1,4 +1,6 @@
 import client from './client';
+import type { Session } from '@/types';
+import type { SessionExecutionMode } from '@/utils/sessionExecutionMode';
 
 export interface SessionMessagePartPayload {
   id: string;
@@ -6,6 +8,11 @@ export interface SessionMessagePartPayload {
   sessionID: string;
   type: string;
   text?: string;
+  time?: {
+    start: number;
+    end?: number;
+    compacted?: number;
+  };
   synthetic?: boolean;
   tool?: string;
   state?: Record<string, unknown>;
@@ -29,6 +36,7 @@ export interface QueuedPrompt {
   status: 'pending' | 'executing' | string;
   createdAt: number;
   updatedAt: number;
+  executionMode?: SessionExecutionMode;
 }
 
 export interface PromptQueueResponse {
@@ -77,10 +85,12 @@ export interface SessionListParams {
   limit?: number;
   offset?: number;
   directory?: string;
+  projectID?: string;
   roots?: boolean;
   start?: number;
   search?: string;
   category?: string;
+  status?: 'active' | 'archived' | 'all';
 }
 
 export interface SessionMessagePage {
@@ -101,8 +111,8 @@ export const sessionApi = {
   /**
    * 获取会话列表
    */
-  list: async (params?: SessionListParams) => {
-    const response = await client.get('/api/session', { params });
+  list: async (params?: SessionListParams): Promise<Session[]> => {
+    const response = await client.get<Session[]>('/api/session', { params });
     return response.data;
   },
 
@@ -125,24 +135,54 @@ export const sessionApi = {
   /**
    * 创建会话
    */
-  create: async (data?: { title?: string; parentID?: string }) => {
+  create: async (data?: { title?: string; parentID?: string; projectID?: string; model_auto?: boolean }) => {
     const response = await client.post('/api/session', data || {});
     return response.data;
   },
 
   /**
-   * 删除会话
+   * 永久删除会话（普通工作台应使用 archive）
    */
-  delete: async (sessionId: string) => {
-    const response = await client.delete(`/api/session/${sessionId}`);
+  delete: async (sessionId: string): Promise<boolean> => {
+    const response = await client.delete<boolean>(`/api/session/${sessionId}`);
+    return response.data;
+  },
+
+  /**
+   * 归档会话并保留全部持久化数据
+   */
+  archive: async (sessionId: string): Promise<SessionResponse> => {
+    const response = await client.post(`/api/session/${sessionId}/archive`);
+    return response.data;
+  },
+
+  /**
+   * 恢复已归档会话
+   */
+  restore: async (sessionId: string): Promise<SessionResponse> => {
+    const response = await client.post(`/api/session/${sessionId}/restore`);
     return response.data;
   },
 
   /**
    * 更新会话
    */
-  update: async (sessionId: string, data: { title?: string; provider?: string; model?: string; model_pinned?: boolean }) => {
+  update: async (sessionId: string, data: {
+    title?: string;
+    provider?: string;
+    model?: string;
+    model_pinned?: boolean;
+    model_auto?: boolean;
+  }) => {
     const response = await client.patch(`/api/session/${sessionId}`, data);
+    return response.data;
+  },
+
+  /**
+   * 将任务及其子任务移动到指定项目
+   */
+  moveToProject: async (sessionId: string, projectID: string): Promise<SessionResponse> => {
+    const response = await client.patch(`/api/session/${sessionId}/project`, { projectID });
     return response.data;
   },
 
@@ -214,6 +254,7 @@ export const sessionApi = {
     model?: Record<string, unknown>;
     variant?: string;
     displayText?: string;
+    executionMode?: SessionExecutionMode;
   }) => {
     const response = await client.post(`/api/session/${sessionId}/prompt_queue`, data);
     return response.data;

@@ -378,19 +378,22 @@ async def extract_and_save(
     memory_prompt = (
         "Below is the conversation history of a session:\n\n"
         f"---\n{full_text}\n---\n\n"
-        "From this conversation, extract the KEY MEMORIES worth "
-        "persisting for future sessions. Focus on:\n"
-        "- Important decisions made\n"
-        "- Technical facts (APIs, configs, file paths, commands, etc.)\n"
-        "- Action items / to-dos\n"
-        "- User preferences or corrections\n\n"
-        "Output a concise bullet list in Markdown. "
+        "Extract only high-signal evidence that may deserve later "
+        "consolidation into durable Memory. Include:\n"
+        "- Explicit user preferences and corrections\n"
+        "- Decisions and their rationale\n"
+        "- Non-derivable constraints and verified discoveries\n\n"
+        "Exclude secrets, credentials, guesses, plans, action items, task "
+        "status, PR or issue numbers, commit hashes, completed-work logs, "
+        "large outputs, and facts cheaply rediscoverable from code or "
+        "configuration.\n\n"
+        "Output concise declarative Markdown bullets. "
         "Use the same language as the conversation. "
-        "Omit trivial greetings or small-talk. "
         "If there is nothing worth remembering, reply with NOTHING."
     )
 
     memory_text: Optional[str] = None
+    extraction_completed = False
     try:
         mem_response = await provider.chat(
             model_id=model_id,
@@ -398,6 +401,7 @@ async def extract_and_save(
             max_tokens=1500,
         )
         if mem_response and mem_response.content:
+            extraction_completed = True
             content = mem_response.content.strip()
             if content.upper() != "NOTHING":
                 memory_text = content
@@ -407,8 +411,10 @@ async def extract_and_save(
             "error": str(e),
         })
 
-    if not memory_text:
+    if not extraction_completed:
         memory_text = summary
+    if not memory_text:
+        return
 
     daily = DailyMemory()
     header = f"\n## Session {session_id[:16]}… ({today} {now_ts})\n\n"

@@ -12,7 +12,7 @@ import asyncio
 import time
 from typing import Callable, Optional
 
-from flocks.channel.base import ChannelPlugin, ChannelStatus
+from flocks.channel.base import ChannelPlugin, ChannelStatus, NonRetryableChannelError
 from flocks.channel.inbound.dispatcher import InboundDispatcher
 from flocks.channel.registry import ChannelRegistry, default_registry
 from flocks.utils.log import Log
@@ -281,8 +281,11 @@ class GatewayManager:
                     await abort_event.wait()
                     break
 
-                # Long-running start() (WebSocket / polling mode)
-                await self._mark_connected(plugin, channel_id)
+                # Long-running start() (WebSocket / polling mode). Some active
+                # channels only know they are connected after a platform
+                # handshake; let those plugins publish their own status.
+                if not plugin.capabilities().self_managed_connection:
+                    await self._mark_connected(plugin, channel_id)
                 await start_task
 
                 if abort_event.is_set():
@@ -298,6 +301,14 @@ class GatewayManager:
                     break
 
             except asyncio.CancelledError:
+                break
+            except NonRetryableChannelError as e:
+                self._record_error(plugin, channel_id, e)
+                log.error("gateway.non_retryable", {
+                    "channel": channel_id,
+                    "error": str(e),
+                    "attempt": attempt + 1,
+                })
                 break
             except Exception as e:
                 self._record_error(plugin, channel_id, e)
@@ -361,14 +372,16 @@ class GatewayManager:
         channel_id: str,
         error: Exception,
     ) -> None:
-        plugin.mark_disconnected(error=str(error))
+        message = str(error)
+        if plugin.status.connected or plugin.status.last_error != message:
+            plugin.mark_disconnected(error=message)
         try:
             from flocks.channel.events import ChannelDisconnected
             from flocks.bus.bus import Bus
             asyncio.ensure_future(
                 Bus.publish(ChannelDisconnected, {
                     "channel_id": channel_id,
-                    "reason": str(error),
+                    "reason": message,
                 })
             )
         except Exception:

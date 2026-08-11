@@ -198,6 +198,14 @@ class TestOnboardingValidateRoutes:
 
 
 class TestOnboardingApplyRoutes:
+    def test_threatbook_region_presets_use_deepseek_v4_flash_0731(self):
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["cn"]["threatbook_default_model_id"] == (
+            "deepseek-v4-flash-0731"
+        )
+        assert onboarding_routes.ONBOARDING_REGION_PRESETS["global"]["threatbook_default_model_id"] == (
+            "deepseek-v4-flash-0731"
+        )
+
     def test_ensure_threatbook_mcp_config_uses_explicit_secret_reference(
         self, monkeypatch: pytest.MonkeyPatch
     ):
@@ -277,7 +285,7 @@ class TestOnboardingApplyRoutes:
             return True
 
         async def fake_set_default_model(model_type, body):
-            calls.append(("default_model", body.provider_id))
+            calls.append(("default_model", body.provider_id, body.model_id))
             return {"provider_id": body.provider_id, "model_id": body.model_id}
 
         monkeypatch.setattr(onboarding_routes, "_validate_onboarding_request", fake_validate)
@@ -302,13 +310,14 @@ class TestOnboardingApplyRoutes:
         data = resp.json()
         assert data["success"] is True
         assert data["default_model"]["provider_id"] == "threatbook-cn-llm"
+        assert data["default_model"]["model_id"] == "deepseek-v4-flash-0731"
         assert ("provider", "threatbook-cn-llm") in calls
         assert ("service", "threatbook-cn") in calls
         assert ("service_enabled", "threatbook-cn") in calls
         assert ("ensure_mcp", "cn") in calls
         assert ("mcp_credentials", "threatbook_mcp") in calls
         assert ("mcp_connect", "threatbook_mcp") in calls
-        assert ("default_model", "threatbook-cn-llm") in calls
+        assert ("default_model", "threatbook-cn-llm", "deepseek-v4-flash-0731") in calls
 
     @pytest.mark.asyncio
     async def test_apply_returns_400_when_validation_fails(

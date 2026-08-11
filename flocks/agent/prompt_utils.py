@@ -12,7 +12,7 @@ from __future__ import annotations
 
 from typing import Dict, List, Optional
 
-from flocks.agent.agent import AvailableAgent, AvailableCategory, AvailableSkill, AvailableTool, AvailableWorkflow
+from flocks.agent.agent import AvailableAgent, AvailableSkill, AvailableTool, AvailableWorkflow
 
 
 # ---------------------------------------------------------------------------
@@ -197,39 +197,24 @@ def build_delegation_table(agents: List[AvailableAgent]) -> str:
     return "\n".join(rows)
 
 
-def build_category_skills_delegation_guide(
-    categories: List[AvailableCategory],
-    skills: List[AvailableSkill],
-) -> str:
-    if not categories and not skills:
+def build_skills_delegation_guide(skills: List[AvailableSkill]) -> str:
+    if not skills:
         return ""
 
-    category_rows = [f"| `{c.name}` | {c.description or c.name} |" for c in categories]
     skill_rows = [
         f"| `{s.name}` | {s.description.split('.')[0] or s.description} |"
         for s in skills
     ]
 
     return (
-        "### Category + Skills Delegation System\n\n"
-        "**delegate_task() combines categories and skills for optimal task execution.**\n\n"
-        "#### Available Categories (Domain-Optimized Models)\n\n"
-        "Each category is configured with a model optimized for that domain. Read the description to understand when to use it.\n\n"
-        "| Category | Domain / Best For |\n"
-        "|----------|-------------------|\n"
-        + "\n".join(category_rows)
-        + "\n\n#### Available Skills (Domain Expertise Injection)\n\n"
+        "### Skills Delegation System\n\n"
+        "#### Available Skills (Domain Expertise Injection)\n\n"
         "Skills inject specialized instructions into the subagent. Read the description to understand when each skill applies.\n\n"
         "| Skill | Expertise Domain |\n"
         "|-------|------------------|\n"
         + "\n".join(skill_rows)
         + "\n\n---\n\n"
-        "### MANDATORY: Category + Skill Selection Protocol\n\n"
-        "**STEP 1: Select Category**\n"
-        "- Read each category's description\n"
-        "- Match task requirements to category domain\n"
-        "- Select the category whose domain BEST fits the task\n\n"
-        "**STEP 2: Evaluate ALL Skills**\n"
+        "### MANDATORY: Skill Selection Protocol\n\n"
         "For EVERY skill listed above, ask yourself:\n"
         '> "Does this skill\'s expertise domain overlap with my task?"\n\n'
         "- If YES → INCLUDE in `load_skills=[...]`\n"
@@ -252,14 +237,14 @@ def build_category_skills_delegation_guide(
         "### Delegation Pattern\n\n"
         "```typescript\n"
         "delegate_task(\n"
-        '  category="[selected-category]",\n'
+        '  subagent_type="[selected-agent]",\n'
         '  load_skills=["skill-1", "skill-2"],  // Include ALL relevant skills\n'
         '  prompt="..."\n'
         ")\n"
         "```\n\n"
         "**ANTI-PATTERN (will produce poor results):**\n"
         "```typescript\n"
-        'delegate_task(category="...", load_skills=[], prompt="...")  // Empty load_skills without justification\n'
+        'delegate_task(subagent_type="...", load_skills=[], prompt="...")  // Empty load_skills without justification\n'
         "```"
     )
 
@@ -319,48 +304,10 @@ def build_anti_patterns_section() -> str:
     )
 
 
-def build_ultrawork_section(
-    agents: List[AvailableAgent],
-    categories: List[AvailableCategory],
-    skills: List[AvailableSkill],
-) -> str:
-    lines: List[str] = []
-
-    if categories:
-        lines.append("**Categories** (for implementation tasks):")
-        for cat in categories:
-            short_desc = cat.description or cat.name
-            lines.append(f"- `{cat.name}`: {short_desc}")
-        lines.append("")
-
-    if skills:
-        lines.append("**Skills** (combine with categories - EVALUATE ALL for relevance):")
-        for skill in skills:
-            short_desc = skill.description.split(".")[0] or skill.description
-            lines.append(f"- `{skill.name}`: {short_desc}")
-        lines.append("")
-
-    if agents:
-        ultrawork_agent_priority = ["explore", "librarian", "plan", "oracle"]
-        sorted_agents = list(agents)
-        sorted_agents.sort(
-            key=lambda a: ultrawork_agent_priority.index(a.name)
-            if a.name in ultrawork_agent_priority
-            else 999
-        )
-        lines.append("**Agents** (for specialized consultation/exploration):")
-        for agent in sorted_agents:
-            short_desc = agent.description.split(".")[0] or agent.description
-            suffix = " (multiple)" if agent.name in ("explore", "librarian") else ""
-            lines.append(f"- `{agent.name}{suffix}`: {short_desc}")
-
-    return "\n".join(lines)
-
-
 def build_workflows_section(workflows: List[AvailableWorkflow]) -> str:
     """Render the available workflows section for injection into system prompts.
 
-    Mirrors the pattern used by build_category_skills_delegation_guide() for
+    Mirrors the pattern used by build_skills_delegation_guide() for
     skills, so agents know which workflows exist before calling run_workflow.
     """
     if not workflows:
