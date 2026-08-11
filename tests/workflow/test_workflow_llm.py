@@ -8,6 +8,7 @@ from flocks.workflow.errors import RunCancelledError
 from flocks.workflow.llm import LLMClient
 from flocks.workflow.engine import WorkflowEngine
 from flocks.workflow.models import Workflow
+from flocks.provider.sdk.openai_base import LLMResponseTooLargeError
 
 
 class _FakeResponse:
@@ -81,6 +82,8 @@ class _FakeProvider:
 
         if current == "error":
             raise RuntimeError("simulated failure")
+        if current == "too_large":
+            raise LLMResponseTooLargeError("response exceeded limit")
         if current == "timeout":
             await asyncio.sleep(0.05)
             return _FakeResponse("late")
@@ -241,6 +244,17 @@ def test_llm_retries_then_succeeds(monkeypatch):
     assert provider.calls == 3
 
 
+def test_llm_does_not_retry_an_oversized_response(monkeypatch):
+    provider = _FakeProvider("demo", "too_large", models=["m"])
+    _patch_provider(monkeypatch, {"demo": provider})
+
+    client = LLMClient(provider_id="demo", model="m")
+    with pytest.raises(ValueError, match="response exceeded limit"):
+        client.ask("hello", max_retries=2, retry_delay_s=0)
+
+    assert provider.calls == 1
+
+
 def test_llm_timeout_retries_then_raises(monkeypatch):
     provider = _FakeProvider("demo", "timeout", models=["m"])
     _patch_provider(monkeypatch, {"demo": provider})
@@ -310,4 +324,3 @@ def test_get_llm_client_does_not_stick_to_old_default(monkeypatch):
 
     assert out1 == "first:first-model"
     assert out2 == "second:second-model"
-

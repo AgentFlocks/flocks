@@ -40,13 +40,14 @@ class TestOpenAIProviderConfiguration:
         assert kwargs["verify"] is False
         timeout_arg = kwargs["timeout"]
         assert getattr(timeout_arg, "connect", None) == 30.0
-        assert getattr(timeout_arg, "read", None) == 600.0
-        assert getattr(timeout_arg, "write", None) == 600.0
+        assert getattr(timeout_arg, "read", None) == 180.0
+        assert getattr(timeout_arg, "write", None) == 1800.0
 
         mock_async_openai.assert_called_once_with(
             api_key="test-api-key",
             base_url="https://gateway.internal/v1",
             http_client=http_client,
+            max_retries=0,
         )
 
     def test_configure_invalidates_existing_client_when_credentials_change(self):
