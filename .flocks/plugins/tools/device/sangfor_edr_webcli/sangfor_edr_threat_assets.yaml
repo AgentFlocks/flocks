@@ -1,0 +1,73 @@
+name: sangfor_edr_threat_assets
+description: >
+  Collect Sangfor EDR threat-asset analysis data through authenticated HTTP APIs.
+  The collector uses the verified cookie/login_token pair from the HTTP login
+  module and supports risk summary, asset groups, and threat-agent event lists.
+description_cn: >
+  通过深信服 EDR HTTP API 采集威胁资产分析数据，包括风险汇总、资产分组和威胁终端事件列表。
+  采集前复用或刷新 HTTP 登录模块生成的成套 Cookie/token，不混用认证信息。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_edr
+inputSchema:
+  type: object
+  properties:
+    sections:
+      type: array
+      items:
+        type: string
+        enum: [risk_summary, zones, agent_events]
+      description: Optional sections. Omit to collect all threat-asset sections.
+    days:
+      type: integer
+      minimum: 1
+      maximum: 90
+      default: 7
+      description: Time range in days for threat-agent events.
+    info:
+      type: string
+      description: Search keyword for terminal name, IP address, or asset owner.
+    risk_level:
+      description: >
+        Risk level filter. Chinese values low/低风险, medium/中风险, high/高风险
+        map to 0/1/2; empty means all levels.
+    host_type:
+      description: >
+        Host type filter. PC终端 maps to 0 and 服务器终端 maps to 1; empty means all.
+    zone_name:
+      type: string
+      description: Asset-zone name. It is resolved to the device-specific zone_id through list_zones.
+    zone_id:
+      type: string
+      description: Optional device-specific asset-zone ID; zone_name is preferred for user-facing requests.
+    agent_state:
+      description: >
+        Agent state: -1 all, 0 online, 1 offline, 2 disabled, 3 unauthorized,
+        4 uninstalled, 6 downgraded. Chinese labels are accepted.
+    isolate_agent:
+      type: boolean
+      default: false
+      description: Collect isolated agents only when true.
+    page:
+      type: integer
+      minimum: 1
+      default: 1
+    limit:
+      type: integer
+      enum: [10, 20, 50, 100, 500]
+      default: 50
+    paginate:
+      type: boolean
+      default: true
+      description: Continue list_agent_event requests until total_items is collected.
+    base_url:
+      type: string
+      description: Optional EDR device URL.
+    auth_state_path:
+      type: string
+      description: Optional auth-state path.
+handler:
+  type: script
+  script_file: sangfor_edr.handler.py
+  function: handle_threat_assets
