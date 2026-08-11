@@ -350,16 +350,16 @@ async def lifespan(app: FastAPI):
 
     # Start Task Center (scheduler + queue executor)
     try:
-        from flocks.task.schedule_task_manager import ScheduleTaskManager
+        from flocks.task.manager import TaskManager
         await _run_startup_phase(
             log,
             "schedule_task_manager.start",
-            ScheduleTaskManager.start,
+            TaskManager.start,
         )
         log.info("schedule_task_manager.started")
     except Exception as e:
-        from flocks.task.schedule_task_manager import ScheduleTaskManager
-        ScheduleTaskManager.mark_start_failed(e)
+        from flocks.task.manager import TaskManager
+        TaskManager.mark_start_failed(e)
         log.warning("schedule_task_manager.start.failed", {"error": str(e)})
 
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)
@@ -538,9 +538,9 @@ async def lifespan(app: FastAPI):
 
     # Stop Task Center
     try:
-        from flocks.task.schedule_task_manager import ScheduleTaskManager
+        from flocks.task.manager import TaskManager
         from flocks.task.store import TaskStore
-        await ScheduleTaskManager.stop()
+        await TaskManager.stop()
         await TaskStore.close()
         log.info("schedule_task_manager.stopped")
     except Exception as e:

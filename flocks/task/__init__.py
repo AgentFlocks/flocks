@@ -20,7 +20,7 @@ from .models import (
     SchedulerStatus,
     build_schedule,
 )
-from .schedule_task_manager import ScheduleTaskManager
+from .manager import TaskManager
 from .store import TaskStore
 
 __all__ = [
@@ -30,7 +30,7 @@ __all__ = [
     "RetryConfig",
     "TaskExecution",
     "TaskExecutionQueueRef",
-    "ScheduleTaskManager",
+    "TaskManager",
     "TaskPriority",
     "TaskScheduler",
     "TaskTrigger",

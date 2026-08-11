@@ -6275,7 +6275,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
         </details>
       )}
 
-      {!isBashTool && status === 'error' && state.error && (
+      {status === 'error' && state.error && (
         <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
           {state.error}
         </div>

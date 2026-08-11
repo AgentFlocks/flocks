@@ -19,7 +19,7 @@ from flocks.provider.provider import Provider
 from flocks.server.routes.provider import list_providers
 from flocks.server.routes.workflow import _list_workflows_from_fs, _migrate_storage_to_filesystem
 from flocks.skill.skill import Skill
-from flocks.task.schedule_task_manager import ScheduleTaskManager
+from flocks.task.manager import TaskManager
 from flocks.tool.registry import ToolRegistry
 from flocks.utils.log import Log
 
@@ -70,7 +70,7 @@ def _should_count_agent(agent: Any) -> bool:
 
 
 async def _task_dashboard() -> dict[str, Any]:
-    return await ScheduleTaskManager.dashboard()
+    return await TaskManager.dashboard()
 
 
 async def _safe_dashboard(failures: list[str]) -> dict[str, Any]:

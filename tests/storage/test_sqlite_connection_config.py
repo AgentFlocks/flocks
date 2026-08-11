@@ -5,7 +5,7 @@ import pytest
 
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
-from flocks.task.schedule_task_manager import ScheduleTaskManager
+from flocks.task.manager import TaskManager
 
 
 @pytest.fixture(autouse=True)
@@ -73,10 +73,10 @@ def test_storage_connect_sync_applies_runtime_sqlite_pragmas() -> None:
 
 
 @pytest.mark.asyncio
-async def test_schedule_task_manager_sync_connection_uses_storage_sqlite_contract() -> None:
+async def test_task_manager_sync_connection_uses_storage_sqlite_contract() -> None:
     await Storage.init()
 
-    with ScheduleTaskManager._with_db_connection() as db:
+    with TaskManager._with_db_connection() as db:
         row = db.execute(
             "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'storage'"
         ).fetchone()

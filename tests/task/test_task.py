@@ -10,7 +10,7 @@ import pytest
 
 from flocks.cli.commands import task as task_cli_commands
 import flocks.task.background as background_module
-import flocks.task.schedule_task_manager as schedule_task_manager_module
+import flocks.task.manager as task_manager_module
 import flocks.task.plugin_sync as plugin_sync_module
 from flocks.server.routes import question as question_routes
 from flocks.config.config import Config
@@ -19,7 +19,7 @@ from flocks.storage.storage import Storage
 from flocks.task.background import BackgroundManager, BackgroundTask, LaunchInput
 from flocks.task.executor import TaskExecutor
 from flocks.task.formatting import format_task_datetime
-from flocks.task.schedule_task_manager import ScheduleTaskManager
+from flocks.task.manager import TaskManager
 from flocks.task.models import (
     DeliveryStatus,
     ExecutionMode,
@@ -49,8 +49,8 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     Config._cached_config = None
     Storage._db_path = None
     Storage._initialized = False
-    ScheduleTaskManager._instance = None
-    ScheduleTaskManager._startup_error = None
+    TaskManager._instance = None
+    TaskManager._startup_error = None
     TaskStore._initialized = False
     TaskStore._conn = None
 
@@ -59,21 +59,21 @@ async def isolated_task_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     yield
 
-    await ScheduleTaskManager.stop()
+    await TaskManager.stop()
     await TaskStore.close()
     Config._global_config = None
     Config._cached_config = None
     Storage._db_path = None
     Storage._initialized = False
-    ScheduleTaskManager._instance = None
-    ScheduleTaskManager._startup_error = None
+    TaskManager._instance = None
+    TaskManager._startup_error = None
     TaskStore._initialized = False
     TaskStore._conn = None
 
 
 @pytest.mark.asyncio
 async def test_immediate_scheduler_creates_single_queued_execution(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="立即执行",
         description="创建后立刻入队",
         mode=SchedulerMode.ONCE,
@@ -82,7 +82,7 @@ async def test_immediate_scheduler_creates_single_queued_execution(tmp_path: Pat
         workspace_directory=str(tmp_path / "workspace"),
     )
 
-    executions, total = await ScheduleTaskManager.list_scheduler_executions(scheduler.id)
+    executions, total = await TaskManager.list_scheduler_executions(scheduler.id)
 
     assert total == 1
     execution = executions[0]
@@ -99,7 +99,7 @@ async def test_list_executions_tolerates_legacy_non_utf8_description(
     tmp_path: Path,
 ):
     legacy_description = "扫描 Windows 主机 192.168.254.1"
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="legacy encoding",
         description="placeholder",
         mode=SchedulerMode.ONCE,
@@ -107,7 +107,7 @@ async def test_list_executions_tolerates_legacy_non_utf8_description(
         trigger=TaskTrigger(run_immediately=True),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    executions, _ = await ScheduleTaskManager.list_scheduler_executions(scheduler.id)
+    executions, _ = await TaskManager.list_scheduler_executions(scheduler.id)
     execution_id = executions[0].id
 
     db = await TaskStore.raw_db()
@@ -121,7 +121,7 @@ async def test_list_executions_tolerates_legacy_non_utf8_description(
     )
     await db.commit()
 
-    executions, total = await ScheduleTaskManager.list_executions(limit=20)
+    executions, total = await TaskManager.list_executions(limit=20)
 
     assert total == 1
     assert executions[0].description == legacy_description
@@ -129,7 +129,7 @@ async def test_list_executions_tolerates_legacy_non_utf8_description(
 
 @pytest.mark.asyncio
 async def test_once_scheduler_tick_creates_execution_and_disables_scheduler(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="单次定时",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(
@@ -142,8 +142,8 @@ async def test_once_scheduler_tick_creates_execution_and_disables_scheduler(tmp_
     loop = SchedulerLoop()
     await loop._tick()
 
-    updated = await ScheduleTaskManager.get_scheduler(scheduler.id)
-    executions, total = await ScheduleTaskManager.list_scheduler_executions(scheduler.id)
+    updated = await TaskManager.get_scheduler(scheduler.id)
+    executions, total = await TaskManager.list_scheduler_executions(scheduler.id)
 
     assert updated is not None
     assert updated.status == SchedulerStatus.DISABLED
@@ -154,7 +154,7 @@ async def test_once_scheduler_tick_creates_execution_and_disables_scheduler(tmp_
 
 @pytest.mark.asyncio
 async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="循环任务",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(
@@ -172,7 +172,7 @@ async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: P
     await loop._tick()
     await loop._tick()
 
-    executions, total = await ScheduleTaskManager.list_scheduler_executions(scheduler.id, limit=10)
+    executions, total = await TaskManager.list_scheduler_executions(scheduler.id, limit=10)
 
     assert total == 1
     assert executions[0].status == TaskStatus.QUEUED
@@ -182,7 +182,7 @@ async def test_cron_scheduler_does_not_spawn_second_active_execution(tmp_path: P
 @pytest.mark.asyncio
 async def test_create_scheduler_rejects_six_field_cron(tmp_path: Path):
     with pytest.raises(ValueError, match="only 5-field cron is supported"):
-        await ScheduleTaskManager.create_scheduler(
+        await TaskManager.create_scheduler(
             title="非法 cron",
             mode=SchedulerMode.CRON,
             trigger=TaskTrigger(
@@ -196,7 +196,7 @@ async def test_create_scheduler_rejects_six_field_cron(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_create_scheduler_rejects_out_of_range_five_field_cron(tmp_path: Path):
     with pytest.raises(ValueError, match="not a valid 5-field cron"):
-        await ScheduleTaskManager.create_scheduler(
+        await TaskManager.create_scheduler(
             title="越界 cron",
             mode=SchedulerMode.CRON,
             trigger=TaskTrigger(
@@ -214,7 +214,7 @@ async def test_create_scheduler_does_not_mutate_trigger_argument(tmp_path: Path)
         timezone="Asia/Shanghai",
     )
 
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="不修改调用方 trigger",
         mode=SchedulerMode.CRON,
         trigger=trigger,
@@ -276,7 +276,7 @@ async def test_plugin_sync_skips_new_scheduler_with_invalid_six_field_cron(
 async def test_plugin_sync_does_not_overwrite_existing_scheduler_with_invalid_six_field_cron(
     tmp_path: Path,
 ):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="原始内置任务",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(
@@ -299,7 +299,7 @@ async def test_plugin_sync_does_not_overwrite_existing_scheduler_with_invalid_si
         ]
     )
 
-    unchanged = await ScheduleTaskManager.get_scheduler(scheduler.id)
+    unchanged = await TaskManager.get_scheduler(scheduler.id)
 
     assert created == 0
     assert unchanged is not None
@@ -312,7 +312,7 @@ async def test_plugin_sync_does_not_overwrite_existing_scheduler_with_invalid_si
 async def test_update_scheduler_with_trigger_run_once_preserves_existing_cron_when_omitted(
     tmp_path: Path,
 ):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="切成单次任务时保留旧 cron",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(
@@ -322,7 +322,7 @@ async def test_update_scheduler_with_trigger_run_once_preserves_existing_cron_wh
         workspace_directory=str(tmp_path / "workspace"),
     )
 
-    updated = await ScheduleTaskManager.update_scheduler_with_trigger(
+    updated = await TaskManager.update_scheduler_with_trigger(
         scheduler.id,
         fields={},
         run_once=True,
@@ -338,8 +338,8 @@ async def test_update_scheduler_with_trigger_run_once_preserves_existing_cron_wh
 
 @pytest.mark.asyncio
 async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path):
-    manager = ScheduleTaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
         title="恢复阻塞循环任务",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(cron="*/5 * * * *", timezone="Asia/Shanghai"),
@@ -348,13 +348,13 @@ async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path
     scheduler.trigger.next_run = datetime.now(timezone.utc) - timedelta(seconds=1)
     await TaskStore.update_scheduler(scheduler)
 
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.SCHEDULED,
         enqueue=False,
     )
     started_at = datetime.now(timezone.utc) - timedelta(
-        seconds=schedule_task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 5
+        seconds=task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 5
     )
     execution.status = TaskStatus.RUNNING
     execution.started_at = started_at
@@ -366,7 +366,7 @@ async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path
     recovered = await manager._recover_stale_active_executions()
 
     assert recovered == 1
-    failed = await ScheduleTaskManager.get_execution(execution.id)
+    failed = await TaskManager.get_execution(execution.id)
     assert failed is not None
     assert failed.status == TaskStatus.FAILED
     assert "recovery threshold" in (failed.error or "")
@@ -374,7 +374,7 @@ async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path
 
     loop = SchedulerLoop()
     await loop._tick()
-    executions, total = await ScheduleTaskManager.list_scheduler_executions(scheduler.id, limit=10)
+    executions, total = await TaskManager.list_scheduler_executions(scheduler.id, limit=10)
 
     assert total == 2
     assert any(item.id == execution.id and item.status == TaskStatus.FAILED for item in executions)
@@ -383,29 +383,29 @@ async def test_recover_stale_running_execution_unblocks_scheduler(tmp_path: Path
 
 @pytest.mark.asyncio
 async def test_recover_orphaned_queued_execution_restores_queue_ref(tmp_path: Path):
-    await ScheduleTaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
     # Pause the execution loop so it cannot race the test by claiming the
     # execution before we manually simulate the orphan state (queued row
     # with no queue ref).
-    ScheduleTaskManager.pause_queue()
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    TaskManager.pause_queue()
+    scheduler = await TaskManager.create_scheduler(
         title="恢复孤儿排队任务",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=True,
     )
     await TaskStore.finish_queue_ref(execution.id)
 
-    manager = ScheduleTaskManager.get()
+    manager = TaskManager.get()
     assert manager is not None
 
     recovered = await manager._recover_orphaned_queued_executions()
-    refreshed = await ScheduleTaskManager.get_execution(execution.id)
+    refreshed = await TaskManager.get_execution(execution.id)
 
     assert recovered == 1
     assert refreshed is not None
@@ -420,54 +420,54 @@ async def test_recover_orphaned_queued_execution_restores_queue_ref(tmp_path: Pa
 
 @pytest.mark.asyncio
 async def test_queue_status_reports_stale_running_execution(tmp_path: Path):
-    await ScheduleTaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
         title="阻塞诊断",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
     )
     started_at = datetime.now(timezone.utc) - timedelta(
-        seconds=schedule_task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+        seconds=task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
     )
     execution.status = TaskStatus.RUNNING
     execution.started_at = started_at
     execution.queued_at = started_at
     await TaskStore.update_execution(execution)
 
-    status = await ScheduleTaskManager.queue_status()
+    status = await TaskManager.queue_status()
 
     assert status["stale_running"] == 1
     assert isinstance(status["oldest_running_seconds"], int)
-    assert status["oldest_running_seconds"] >= schedule_task_manager_module._RUNNING_RECOVERY_TIMEOUT_S
+    assert status["oldest_running_seconds"] >= task_manager_module._RUNNING_RECOVERY_TIMEOUT_S
 
 
 @pytest.mark.asyncio
 async def test_queue_status_uses_largest_elapsed_running_time(tmp_path: Path):
-    await ScheduleTaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    await TaskManager.start(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    scheduler = await TaskManager.create_scheduler(
         title="阻塞诊断-多任务",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    older_execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    older_execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
     )
-    newer_execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    newer_execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
     )
     older_started_at = datetime.now(timezone.utc) - timedelta(
-        seconds=schedule_task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+        seconds=task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
     )
     newer_started_at = datetime.now(timezone.utc) - timedelta(seconds=10)
     older_execution.status = TaskStatus.RUNNING
@@ -479,11 +479,11 @@ async def test_queue_status_uses_largest_elapsed_running_time(tmp_path: Path):
     await TaskStore.update_execution(older_execution)
     await TaskStore.update_execution(newer_execution)
 
-    status = await ScheduleTaskManager.queue_status()
+    status = await TaskManager.queue_status()
 
     assert status["stale_running"] == 1
     assert isinstance(status["oldest_running_seconds"], int)
-    assert status["oldest_running_seconds"] >= schedule_task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
+    assert status["oldest_running_seconds"] >= task_manager_module._RUNNING_RECOVERY_TIMEOUT_S + 15
 
 
 @pytest.mark.asyncio
@@ -624,12 +624,6 @@ async def test_background_task_completion_injects_parent_context(
     monkeypatch.setattr(background_module.Message, "update_part", update_part)
     monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
 
-    async def run_active_write(_session_id, operation, **_kwargs):
-        return await operation()
-
-    active_write = AsyncMock(side_effect=run_active_write)
-    monkeypatch.setattr(background_module.Session, "run_active_write", active_write)
-
     manager = BackgroundManager()
     task = BackgroundTask(
         id="bg_parent_inject",
@@ -648,8 +642,6 @@ async def test_background_task_completion_injects_parent_context(
 
     await manager._inject_parent_completion(task)
 
-    active_write.assert_awaited_once()
-    assert active_write.await_args.args[0] == "ses-parent"
     create_message.assert_awaited_once()
     kwargs = create_message.await_args.kwargs
     assert kwargs["session_id"] == "ses-parent"
@@ -670,11 +662,12 @@ async def test_background_task_completion_injects_parent_context(
 
 
 @pytest.mark.asyncio
-async def test_background_task_completion_always_attempts_parent_resume(
+async def test_background_task_completion_does_not_resume_running_parent(
     monkeypatch: pytest.MonkeyPatch,
 ):
     parent_loop_run = AsyncMock(return_value=SimpleNamespace(action="stop"))
     monkeypatch.setattr(background_module.SessionLoop, "run", parent_loop_run)
+    monkeypatch.setattr(background_module.SessionLoop, "is_running", lambda _session_id: True)
 
     manager = BackgroundManager()
     task = BackgroundTask(
@@ -692,8 +685,7 @@ async def test_background_task_completion_always_attempts_parent_resume(
     manager._schedule_parent_resume(task)
     await asyncio.sleep(0)
 
-    parent_loop_run.assert_awaited_once()
-    assert parent_loop_run.await_args.kwargs["session_id"] == "ses-parent"
+    parent_loop_run.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -747,15 +739,15 @@ async def test_trigger_workflow_resolves_workflow_id_from_filesystem(
 
 @pytest.mark.asyncio
 async def test_retry_queue_requeues_failed_execution(tmp_path: Path):
-    manager = ScheduleTaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
+    manager = TaskManager(max_concurrent=1, poll_interval=999, scheduler_interval=999)
 
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="失败重试",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -769,7 +761,7 @@ async def test_retry_queue_requeues_failed_execution(tmp_path: Path):
 
     await manager._process_retry_queue()
 
-    reloaded = await ScheduleTaskManager.get_execution(execution.id)
+    reloaded = await TaskManager.get_execution(execution.id)
     assert reloaded is not None
     assert reloaded.status == TaskStatus.QUEUED
     assert reloaded.retry.retry_after is None
@@ -781,18 +773,18 @@ async def test_retry_queue_requeues_failed_execution(tmp_path: Path):
 @pytest.mark.asyncio
 async def test_queue_dequeue_respects_claimed_slots_before_running_status(tmp_path: Path):
     queue = TaskQueue(max_concurrent=1)
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="并发控制",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    first = await ScheduleTaskManager.create_execution_from_scheduler(
+    first = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=True,
     )
-    second = await ScheduleTaskManager.create_execution_from_scheduler(
+    second = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=True,
@@ -814,14 +806,14 @@ async def test_queue_dequeue_respects_claimed_slots_before_running_status(tmp_pa
 
 @pytest.mark.asyncio
 async def test_immediate_scheduler_dedup_does_not_create_duplicate_execution(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="去重立即执行",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=True),
         workspace_directory=str(tmp_path / "workspace"),
         dedup_key="dup-immediate",
     )
-    duplicate = await ScheduleTaskManager.create_scheduler(
+    duplicate = await TaskManager.create_scheduler(
         title="去重立即执行",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=True),
@@ -829,7 +821,7 @@ async def test_immediate_scheduler_dedup_does_not_create_duplicate_execution(tmp
         dedup_key="dup-immediate",
     )
 
-    executions, total = await ScheduleTaskManager.list_scheduler_executions(scheduler.id, limit=10)
+    executions, total = await TaskManager.list_scheduler_executions(scheduler.id, limit=10)
 
     assert duplicate.id == scheduler.id
     assert total == 1
@@ -838,18 +830,18 @@ async def test_immediate_scheduler_dedup_does_not_create_duplicate_execution(tmp
 
 @pytest.mark.asyncio
 async def test_batch_cancel_counts_only_actual_cancellations(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="批量取消",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    cancellable = await ScheduleTaskManager.create_execution_from_scheduler(
+    cancellable = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=True,
     )
-    completed = await ScheduleTaskManager.create_execution_from_scheduler(
+    completed = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -858,7 +850,7 @@ async def test_batch_cancel_counts_only_actual_cancellations(tmp_path: Path):
     completed.completed_at = datetime.now(timezone.utc)
     await TaskStore.update_execution(completed)
 
-    cancelled = await ScheduleTaskManager.batch_cancel([cancellable.id, completed.id])
+    cancelled = await TaskManager.batch_cancel([cancellable.id, completed.id])
 
     assert cancelled == 1
 
@@ -874,28 +866,28 @@ async def test_delete_scheduler_cleans_active_executions_before_cascade(
         cancelled_runtime_ids.append(execution.id)
 
     monkeypatch.setattr(
-        ScheduleTaskManager,
+        TaskManager,
         "_cancel_execution_runtime",
         classmethod(fake_cancel_runtime),
     )
 
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="删除前清理普通计划",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    pending = await ScheduleTaskManager.create_execution_from_scheduler(
+    pending = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
     )
-    queued = await ScheduleTaskManager.create_execution_from_scheduler(
+    queued = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=True,
     )
-    running = await ScheduleTaskManager.create_execution_from_scheduler(
+    running = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -906,7 +898,7 @@ async def test_delete_scheduler_cleans_active_executions_before_cascade(
     running.session_id = "ses_delete_running"
     await TaskStore.update_execution(running)
     await TaskStore.enqueue_execution_ref(running.id)
-    completed = await ScheduleTaskManager.create_execution_from_scheduler(
+    completed = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -915,7 +907,7 @@ async def test_delete_scheduler_cleans_active_executions_before_cascade(
     completed.completed_at = datetime.now(timezone.utc)
     await TaskStore.update_execution(completed)
 
-    deleted = await ScheduleTaskManager.delete_scheduler(scheduler.id)
+    deleted = await TaskManager.delete_scheduler(scheduler.id)
 
     assert deleted is True
     assert set(cancelled_runtime_ids) == {
@@ -924,7 +916,7 @@ async def test_delete_scheduler_cleans_active_executions_before_cascade(
         running.id,
     }
     for execution_id in (pending.id, queued.id, running.id, completed.id):
-        assert await ScheduleTaskManager.get_execution(execution_id) is None
+        assert await TaskManager.get_execution(execution_id) is None
     assert await TaskStore.get_queue_ref(queued.id) is None
     assert await TaskStore.get_queue_ref(running.id) is None
 
@@ -946,13 +938,13 @@ async def test_delete_scheduler_cleans_active_executions_before_cascade(
 
 @pytest.mark.asyncio
 async def test_store_init_normalizes_legacy_paused_execution(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="兼容旧 paused 状态",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=True,
@@ -974,7 +966,7 @@ async def test_store_init_normalizes_legacy_paused_execution(tmp_path: Path):
     await TaskStore.close()
     await TaskStore.init()
 
-    normalized = await ScheduleTaskManager.get_execution(execution.id)
+    normalized = await TaskManager.get_execution(execution.id)
 
     assert normalized is not None
     assert normalized.status == TaskStatus.CANCELLED
@@ -985,12 +977,12 @@ async def test_store_init_normalizes_legacy_paused_execution(tmp_path: Path):
 
 @pytest.mark.asyncio
 async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.MonkeyPatch):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="CLI 兼容 paused 查询",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
     )
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -998,7 +990,7 @@ async def test_cli_list_tasks_accepts_legacy_paused_status(monkeypatch: pytest.M
     execution.status = TaskStatus.CANCELLED
     execution.completed_at = datetime.now(timezone.utc)
     await TaskStore.update_execution(execution)
-    await ScheduleTaskManager.disable_scheduler(scheduler.id)
+    await TaskManager.disable_scheduler(scheduler.id)
 
     printed: list[object] = []
     monkeypatch.setattr(task_cli_commands.console, "print", lambda *args, **kwargs: printed.append(args))
@@ -1057,24 +1049,24 @@ async def test_delete_builtin_scheduler_archives_and_cancels_active_executions(
         cancelled_runtime_ids.append(execution.id)
 
     monkeypatch.setattr(
-        ScheduleTaskManager,
+        TaskManager,
         "_cancel_execution_runtime",
         classmethod(fake_cancel_runtime),
     )
 
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="删除前清理内置计划",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(cron="*/5 * * * *", timezone="Asia/Shanghai"),
         workspace_directory=str(tmp_path / "workspace"),
         dedup_key="builtin:test-delete-cleanup",
     )
-    queued = await ScheduleTaskManager.create_execution_from_scheduler(
+    queued = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.SCHEDULED,
         enqueue=True,
     )
-    running = await ScheduleTaskManager.create_execution_from_scheduler(
+    running = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.SCHEDULED,
         enqueue=False,
@@ -1085,7 +1077,7 @@ async def test_delete_builtin_scheduler_archives_and_cancels_active_executions(
     running.session_id = "ses_builtin_running"
     await TaskStore.update_execution(running)
     await TaskStore.enqueue_execution_ref(running.id)
-    completed = await ScheduleTaskManager.create_execution_from_scheduler(
+    completed = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.SCHEDULED,
         enqueue=False,
@@ -1094,11 +1086,11 @@ async def test_delete_builtin_scheduler_archives_and_cancels_active_executions(
     completed.completed_at = datetime.now(timezone.utc)
     await TaskStore.update_execution(completed)
 
-    deleted = await ScheduleTaskManager.delete_scheduler(scheduler.id)
-    archived = await ScheduleTaskManager.get_scheduler(scheduler.id)
-    queued_execution = await ScheduleTaskManager.get_execution(queued.id)
-    running_execution = await ScheduleTaskManager.get_execution(running.id)
-    completed_execution = await ScheduleTaskManager.get_execution(completed.id)
+    deleted = await TaskManager.delete_scheduler(scheduler.id)
+    archived = await TaskManager.get_scheduler(scheduler.id)
+    queued_execution = await TaskManager.get_execution(queued.id)
+    running_execution = await TaskManager.get_execution(running.id)
+    completed_execution = await TaskManager.get_execution(completed.id)
 
     assert deleted is True
     assert archived is not None
@@ -1116,39 +1108,39 @@ async def test_delete_builtin_scheduler_archives_and_cancels_active_executions(
 
 @pytest.mark.asyncio
 async def test_dashboard_counts_exclude_immediate_once_schedulers(tmp_path: Path):
-    await ScheduleTaskManager.create_scheduler(
+    await TaskManager.create_scheduler(
         title="队列任务模板",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=True),
         workspace_directory=str(tmp_path / "workspace-1"),
     )
-    await ScheduleTaskManager.create_scheduler(
+    await TaskManager.create_scheduler(
         title="单次计划任务",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False, run_at=datetime.now(timezone.utc) + timedelta(hours=1)),
         workspace_directory=str(tmp_path / "workspace-2"),
     )
-    await ScheduleTaskManager.create_scheduler(
+    await TaskManager.create_scheduler(
         title="循环计划任务",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(cron="*/5 * * * *", timezone="Asia/Shanghai"),
         workspace_directory=str(tmp_path / "workspace-3"),
     )
 
-    counts = await ScheduleTaskManager.dashboard()
+    counts = await TaskManager.dashboard()
 
     assert counts["scheduled_active"] == 2
 
 
 @pytest.mark.asyncio
 async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: Path):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="未读结果",
         mode=SchedulerMode.ONCE,
         trigger=TaskTrigger(run_immediately=False),
         workspace_directory=str(tmp_path / "workspace"),
     )
-    unread = await ScheduleTaskManager.create_execution_from_scheduler(
+    unread = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -1158,7 +1150,7 @@ async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: 
     unread.delivery_status = DeliveryStatus.UNREAD
     await TaskStore.update_execution(unread)
 
-    notified = await ScheduleTaskManager.create_execution_from_scheduler(
+    notified = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -1168,7 +1160,7 @@ async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: 
     notified.delivery_status = DeliveryStatus.NOTIFIED
     await TaskStore.update_execution(notified)
 
-    viewed = await ScheduleTaskManager.create_execution_from_scheduler(
+    viewed = await TaskManager.create_execution_from_scheduler(
         scheduler,
         trigger_type=ExecutionTriggerType.RUN_ONCE,
         enqueue=False,
@@ -1178,7 +1170,7 @@ async def test_get_unviewed_results_includes_unread_and_notified_only(tmp_path: 
     viewed.delivery_status = DeliveryStatus.VIEWED
     await TaskStore.update_execution(viewed)
 
-    results = await ScheduleTaskManager.get_unviewed_results()
+    results = await TaskManager.get_unviewed_results()
     result_ids = {item.id for item in results}
 
     assert unread.id in result_ids
@@ -1191,11 +1183,11 @@ async def test_task_page_notice_drops_legacy_tables_after_third_display():
     db = await TaskStore.raw_db()
     await db.execute("CREATE TABLE tasks (id TEXT PRIMARY KEY)")
     await db.commit()
-    ScheduleTaskManager._write_migration_state({"failed": True, "notice_count": 0})
+    TaskManager._write_migration_state({"failed": True, "notice_count": 0})
 
-    first = await ScheduleTaskManager.get_task_page_notice()
-    second = await ScheduleTaskManager.get_task_page_notice()
-    third = await ScheduleTaskManager.get_task_page_notice()
+    first = await TaskManager.get_task_page_notice()
+    second = await TaskManager.get_task_page_notice()
+    third = await TaskManager.get_task_page_notice()
 
     assert first == {
         "message": "系统更新了任务表的存储，旧表自动迁移失败，请手动重建任务 scheduler",
@@ -1203,4 +1195,4 @@ async def test_task_page_notice_drops_legacy_tables_after_third_display():
     }
     assert second is not None and second["displayCount"] == 2
     assert third is not None and third["displayCount"] == 3
-    assert ScheduleTaskManager._legacy_tables_exist() is False
+    assert TaskManager._legacy_tables_exist() is False

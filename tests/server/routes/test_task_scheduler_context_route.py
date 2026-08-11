@@ -2,13 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from flocks.task.schedule_task_manager import ScheduleTaskManager
+from flocks.task.manager import TaskManager
 from flocks.task.models import ExecutionMode, ExecutionTriggerType, SchedulerMode, TaskTrigger
 
 
 @pytest.mark.asyncio
 async def test_update_scheduler_accepts_context_for_workflow_inputs(client):
-    scheduler = await ScheduleTaskManager.create_scheduler(
+    scheduler = await TaskManager.create_scheduler(
         title="工作流定时任务",
         mode=SchedulerMode.CRON,
         trigger=TaskTrigger(cron="0 9 * * *", timezone="Asia/Shanghai"),
@@ -28,11 +28,11 @@ async def test_update_scheduler_accepts_context_for_workflow_inputs(client):
     assert response.status_code == 200
     assert response.json()["context"] == {"keyword": "after", "limit": 5}
 
-    updated = await ScheduleTaskManager.get_scheduler(scheduler.id)
+    updated = await TaskManager.get_scheduler(scheduler.id)
     assert updated is not None
     assert updated.context == {"keyword": "after", "limit": 5}
 
-    execution = await ScheduleTaskManager.create_execution_from_scheduler(
+    execution = await TaskManager.create_execution_from_scheduler(
         updated,
         trigger_type=ExecutionTriggerType.SCHEDULED,
         enqueue=False,

@@ -7,7 +7,7 @@ import pytest
 import flocks.tool.task.schedule_task_center  # noqa: F401
 from flocks.config.config import Config
 from flocks.storage.storage import Storage
-from flocks.task.schedule_task_manager import ScheduleTaskManager
+from flocks.task.manager import TaskManager
 from flocks.task.models import SchedulerMode, TaskPriority, TaskScheduler, TaskTrigger
 from flocks.task.store import TaskStore
 from flocks.tool.registry import ToolContext, ToolRegistry
@@ -27,8 +27,8 @@ async def isolated_task_env(tmp_path: pytest.TempPathFactory, monkeypatch: pytes
     Config._cached_config = None
     Storage._db_path = None
     Storage._initialized = False
-    ScheduleTaskManager._instance = None
-    ScheduleTaskManager._startup_error = None
+    TaskManager._instance = None
+    TaskManager._startup_error = None
     TaskStore._initialized = False
     TaskStore._conn = None
 
@@ -37,14 +37,14 @@ async def isolated_task_env(tmp_path: pytest.TempPathFactory, monkeypatch: pytes
 
     yield
 
-    await ScheduleTaskManager.stop()
+    await TaskManager.stop()
     await TaskStore.close()
     Config._global_config = None
     Config._cached_config = None
     Storage._db_path = None
     Storage._initialized = False
-    ScheduleTaskManager._instance = None
-    ScheduleTaskManager._startup_error = None
+    TaskManager._instance = None
+    TaskManager._startup_error = None
     TaskStore._initialized = False
     TaskStore._conn = None
 
@@ -107,7 +107,7 @@ class TestTaskCenterCompatibility:
 
         assert result.success is True
 
-        schedulers, total = await ScheduleTaskManager.list_schedulers(limit=10)
+        schedulers, total = await TaskManager.list_schedulers(limit=10)
         assert total == 1
         scheduler = schedulers[0]
         assert scheduler.mode == SchedulerMode.CRON
@@ -130,7 +130,7 @@ class TestTaskCenterCompatibility:
 
         assert result.success is True
 
-        schedulers, total = await ScheduleTaskManager.list_schedulers(limit=10)
+        schedulers, total = await TaskManager.list_schedulers(limit=10)
         assert total == 1
         scheduler = schedulers[0]
         assert scheduler.mode == SchedulerMode.CRON
@@ -152,7 +152,7 @@ class TestTaskCenterCompatibility:
 
         assert result.success is True
 
-        schedulers, total = await ScheduleTaskManager.list_schedulers(limit=10)
+        schedulers, total = await TaskManager.list_schedulers(limit=10)
         assert total == 1
         scheduler = schedulers[0]
         assert scheduler.mode == SchedulerMode.CRON
@@ -161,7 +161,7 @@ class TestTaskCenterCompatibility:
 
     @pytest.mark.asyncio
     async def test_task_update_accepts_schedule_fields(self):
-        scheduler = await ScheduleTaskManager.create_scheduler(
+        scheduler = await TaskManager.create_scheduler(
             title="原始任务",
             description="原始描述",
             mode=SchedulerMode.ONCE,
@@ -187,7 +187,7 @@ class TestTaskCenterCompatibility:
 
         assert result.success is True
 
-        updated = await ScheduleTaskManager.get_scheduler(scheduler.id)
+        updated = await TaskManager.get_scheduler(scheduler.id)
         assert updated is not None
         assert updated.mode == SchedulerMode.CRON
         assert updated.description == "更新后的描述"
@@ -218,7 +218,7 @@ class TestTaskCenterCompatibility:
         assert result.error is not None
         assert "run_at" in result.error or "cron" in result.error
 
-        _, total = await ScheduleTaskManager.list_schedulers(limit=10)
+        _, total = await TaskManager.list_schedulers(limit=10)
         assert total == 0
 
     @pytest.mark.asyncio
@@ -238,7 +238,7 @@ class TestTaskCenterCompatibility:
 
         assert result.success is True
 
-        schedulers, total = await ScheduleTaskManager.list_schedulers(limit=10)
+        schedulers, total = await TaskManager.list_schedulers(limit=10)
         assert total == 1
         scheduler = schedulers[0]
         assert scheduler.mode == SchedulerMode.CRON
@@ -263,12 +263,12 @@ class TestTaskCenterCompatibility:
         assert "only 5-field cron is supported" in result.error
         assert "`0 6 * * *`" in result.error
 
-        _, total = await ScheduleTaskManager.list_schedulers(limit=10)
+        _, total = await TaskManager.list_schedulers(limit=10)
         assert total == 0
 
     @pytest.mark.asyncio
     async def test_task_update_rejects_six_field_cron_with_hint(self):
-        scheduler = await ScheduleTaskManager.create_scheduler(
+        scheduler = await TaskManager.create_scheduler(
             title="待更新的定时任务",
             mode=SchedulerMode.CRON,
             trigger=TaskTrigger(
@@ -292,7 +292,7 @@ class TestTaskCenterCompatibility:
         assert "only 5-field cron is supported" in result.error
         assert "`0 6 * * *`" in result.error
 
-        unchanged = await ScheduleTaskManager.get_scheduler(scheduler.id)
+        unchanged = await TaskManager.get_scheduler(scheduler.id)
         assert unchanged is not None
         assert unchanged.trigger.cron == "*/5 * * * *"
 
@@ -327,7 +327,7 @@ class TestTaskCenterCompatibility:
 
     @pytest.mark.asyncio
     async def test_task_update_can_disable_and_enable_scheduled_task(self):
-        scheduler = await ScheduleTaskManager.create_scheduler(
+        scheduler = await TaskManager.create_scheduler(
             title="可停止的定时任务",
             mode=SchedulerMode.CRON,
             trigger=TaskTrigger(
@@ -345,7 +345,7 @@ class TestTaskCenterCompatibility:
         )
 
         assert disable_result.success is True
-        disabled = await ScheduleTaskManager.get_scheduler(scheduler.id)
+        disabled = await TaskManager.get_scheduler(scheduler.id)
         assert disabled is not None
         assert disabled.status.value == "disabled"
 
@@ -359,6 +359,6 @@ class TestTaskCenterCompatibility:
         )
 
         assert enable_result.success is True
-        enabled = await ScheduleTaskManager.get_scheduler(scheduler.id)
+        enabled = await TaskManager.get_scheduler(scheduler.id)
         assert enabled is not None
         assert enabled.status.value == "active"

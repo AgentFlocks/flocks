@@ -1,4 +1,4 @@
-"""Schedule task manager for the scheduler/execution domain."""
+"""Task Manager for scheduler/execution domain."""
 
 import asyncio
 import json
@@ -32,7 +32,7 @@ from .queue import TaskQueue
 from .scheduler import TaskScheduler as SchedulerLoop
 from .store import TaskStore
 
-log = Log.create(service="task.schedule_manager")
+log = Log.create(service="task.manager")
 
 _TASK_EXPIRY_HOURS: int = 24
 _CLEANUP_INTERVAL_S: int = 3600
@@ -49,8 +49,8 @@ class _TaskEventProps(_BaseModel):
     title: str
 
 
-class ScheduleTaskManager:
-    _instance: Optional["ScheduleTaskManager"] = None
+class TaskManager:
+    _instance: Optional["TaskManager"] = None
     _startup_error: Optional[str] = None
 
     def __init__(
@@ -83,7 +83,7 @@ class ScheduleTaskManager:
         max_concurrent: int = 4,
         poll_interval: int = 5,
         scheduler_interval: int = 30,
-    ) -> "ScheduleTaskManager":
+    ) -> "TaskManager":
         if cls._instance and cls._instance._running:
             return cls._instance
         await TaskStore.init()
@@ -128,7 +128,7 @@ class ScheduleTaskManager:
         log.info("manager.stopped")
 
     @classmethod
-    def get(cls) -> Optional["ScheduleTaskManager"]:
+    def get(cls) -> Optional["TaskManager"]:
         return cls._instance
 
     @classmethod
