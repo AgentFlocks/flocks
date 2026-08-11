@@ -47,6 +47,15 @@ def coerce_security_mode(value: Any) -> str:
     return ""
 
 
+def coerce_auth_mode(value: Any) -> str:
+    mode = coerce_str(value).lower().strip()
+    if mode in {"", "password"}:
+        return "password"
+    if mode in {"oauth2", "xoauth2"}:
+        return "xoauth2"
+    return mode
+
+
 def default_security(port: int, protocol: str) -> str:
     if protocol == "imap":
         if port == 993:
@@ -97,6 +106,7 @@ def is_valid_email(raw: str) -> bool:
 
 def resolved_config(config: dict[str, Any]) -> dict[str, Any]:
     """Return normalized Email channel config with defaults applied."""
+    address = normalize_email_address(coerce_str(config.get("address")))
     imap_port = coerce_int(config.get("imapPort") or config.get("imap_port"), 993)
     smtp_port = coerce_int(config.get("smtpPort") or config.get("smtp_port"), 587)
     imap_security = coerce_security_mode(config.get("imapSecurity") or config.get("imap_security"))
@@ -108,8 +118,11 @@ def resolved_config(config: dict[str, Any]) -> dict[str, Any]:
 
     return {
         **config,
-        "address": normalize_email_address(coerce_str(config.get("address"))),
+        "address": address,
+        "username": coerce_str(config.get("username")) or address,
+        "authMode": coerce_auth_mode(config.get("authMode") or config.get("auth_mode")),
         "password": coerce_str(config.get("password")),
+        "accessToken": coerce_str(config.get("accessToken") or config.get("access_token")),
         "imapHost": coerce_str(config.get("imapHost") or config.get("imap_host")),
         "imapPort": imap_port,
         "imapSecurity": imap_security,
