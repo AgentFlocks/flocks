@@ -93,8 +93,8 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
     )
     monkeypatch.setitem(
         sys.modules,
-        "flocks.task.manager",
-        types.SimpleNamespace(TaskManager=types.SimpleNamespace(start=fake_async_noop, stop=fake_async_noop)),
+        "flocks.task.schedule_task_manager",
+        types.SimpleNamespace(ScheduleTaskManager=types.SimpleNamespace(start=fake_async_noop, stop=fake_async_noop)),
     )
     monkeypatch.setitem(
         sys.modules,
