@@ -577,11 +577,55 @@ class StreamProcessor:
             })
             return
 
+        # Hook pipeline: tool.execute.before
+        # Apply any input rewrite before publishing the running state so UI
+        # surfaces show the actual tool input that will be executed.
+        tool_start_time = int(datetime.now().timestamp() * 1000)
+        post_hook_fired = False
+        hook_blocked = False
+        hook_block_reason = ""
+        try:
+            from flocks.hooks.pipeline import HookPipeline
+            hook_ctx = await HookPipeline.run_tool_before({
+                "sessionID": self.session_id,
+                "workspace": self._workspace_dir,
+                "agent": self.agent.name,
+                "tool": {
+                    "name": tool_name,
+                    "input": tool_input,
+                    "callID": tool_call_id,
+                },
+            })
+            if hook_ctx and isinstance(hook_ctx.input, dict):
+                updated = hook_ctx.input.get("tool", {}).get("input")
+                if isinstance(updated, dict):
+                    tool_input = updated
+                    tool_state.input = tool_input
+            hook_output = hook_ctx.output if hook_ctx and isinstance(hook_ctx.output, dict) else {}
+            decision = str(hook_output.get("decision") or "").strip().lower()
+            hook_blocked = decision == "block" or bool(hook_output.get("skip", False))
+            hook_block_reason = str(
+                hook_output.get("reason") or hook_output.get("error") or ""
+            ).strip()
+        except asyncio.CancelledError:
+            await self._finalize_interrupted_tool_call(
+                tool_state=tool_state,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                tool_call_id=tool_call_id,
+                tool_start_time=tool_start_time,
+                post_hook_fired=False,
+            )
+            raise
+        except Exception as e:
+            log.error("stream.tool_before_hook.error", {"error": str(e)})
+            hook_blocked = True
+            hook_block_reason = "Tool execution blocked because tool-before hook failed"
+
         tool_state.status = "running"
         
         # Update ToolPart to running state (like Flocks's Session.updatePart)
         # This matches Flocks's logic: update existing part from pending to running
-        tool_start_time = int(datetime.now().timestamp() * 1000)
         try:
             # Update the existing ToolPart with running state and actual input
             tool_part = ToolPart(
@@ -665,49 +709,6 @@ class StreamProcessor:
                 await self.tool_start_callback(tool_name, tool_input)
             except Exception as e:
                 log.error("stream.tool_start_callback.error", {"error": str(e)})
-        
-        # Hook pipeline: tool_before
-        post_hook_fired = False
-        try:
-            from flocks.hooks.pipeline import HookPipeline
-
-            hook_ctx = await HookPipeline.run_tool_before({
-                "sessionID": self.session_id,
-                "workspace": self._workspace_dir,
-                "agent": self.agent.name,
-                "tool": {
-                    "name": tool_name,
-                    "input": tool_input,
-                    "callID": tool_call_id,
-                },
-            })
-            if hook_ctx and isinstance(hook_ctx.input, dict):
-                updated = hook_ctx.input.get("tool", {}).get("input")
-                if isinstance(updated, dict):
-                    tool_input = updated
-            decision = str(
-                (hook_ctx.output.get("decision") if hook_ctx else "") or ""
-            ).strip().lower()
-            hook_blocked = decision == "block"
-            hook_block_reason = str(
-                (hook_ctx.output.get("reason") if hook_ctx else "") or ""
-            ).strip()
-        except asyncio.CancelledError:
-            await self._finalize_interrupted_tool_call(
-                tool_state=tool_state,
-                tool_name=tool_name,
-                tool_input=tool_input,
-                tool_call_id=tool_call_id,
-                tool_start_time=tool_start_time,
-                post_hook_fired=False,
-            )
-            raise
-        except Exception as e:
-            log.error("stream.tool_before_hook.error", {"error": str(e)})
-            hook_blocked = False
-            hook_block_reason = ""
-        tool_state.input = tool_input
-
         # Execute tool synchronously
         tool_span_ctx = None
         if self._langfuse_generation is not None:

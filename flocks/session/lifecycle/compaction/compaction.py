@@ -1190,6 +1190,7 @@ class SessionCompaction:
                         focus_instruction=focus_instruction,
                         previous_summary=previous_summary,
                         chat_messages=chat_messages,
+                        session_id=session_id,
                     )
                 except RuntimeError as _e:
                     # No provider configured — long cooldown (hermes: 600s)

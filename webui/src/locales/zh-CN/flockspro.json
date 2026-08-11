@@ -154,6 +154,28 @@
     "invalidEmailError": "请输入有效的申请人邮箱",
     "invalidPhoneError": "请输入有效的申请人电话（支持国际号码）"
   },
+  "sensitiveDetection": {
+    "title": "Prompt 脱敏",
+    "description": "开启后，进入大模型前会替换用户、助手和工具消息中的敏感信息。",
+    "enabledLabel": "启用 Prompt 脱敏",
+    "placeholderFormat": "占位符格式",
+    "verbosePreview": "示例：[[V_EMAIL_1]]",
+    "compactPreview": "示例：[EMAIL_1]",
+    "promptHint": "模型值传递提示",
+    "promptHintDescription": "向模型补充如何把替换值传递给工具。建议开启，关闭后模型可能把替换值误判为模板变量。",
+    "loading": "正在读取 Prompt 脱敏设置...",
+    "saving": "正在保存 Prompt 脱敏设置...",
+    "placeholderFormats": {
+      "verbose": "稳定格式",
+      "compact": "简短格式"
+    },
+    "errors": {
+      "fetch": "读取 Prompt 脱敏设置失败",
+      "save": "保存 Prompt 脱敏设置失败",
+      "fetchSettings": "读取敏感信息识别设置失败",
+      "updateSettings": "保存敏感信息识别设置失败"
+    }
+  },
   "callback": {
     "processing": "正在完成云账号登录，请稍候...",
     "missingConsoleLoginId": "缺少 console_login_id，无法完成登录。",
