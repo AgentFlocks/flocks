@@ -178,12 +178,12 @@ def test_profile_dirs_only_returns_paths_for_requested_os() -> None:
         environ={"LOCALAPPDATA": str(local_app_data)},
     )
 
-    assert mac_profiles[:4] == flocks_debug_profiles
-    assert linux_profiles[:4] == flocks_debug_profiles
-    assert windows_profiles[:4] == flocks_debug_profiles
-    assert all("Library" in path.parts and "Application Support" in path.parts for path in mac_profiles[4:])
-    assert all(".config" in path.parts or ".var" in path.parts for path in linux_profiles[4:])
-    assert all(path.is_relative_to(local_app_data) for path in windows_profiles[4:])
+    assert mac_profiles[-4:] == flocks_debug_profiles
+    assert linux_profiles[-4:] == flocks_debug_profiles
+    assert windows_profiles[-4:] == flocks_debug_profiles
+    assert all("Library" in path.parts and "Application Support" in path.parts for path in mac_profiles[:-4])
+    assert all(".config" in path.parts or ".var" in path.parts for path in linux_profiles[:-4])
+    assert all(path.is_relative_to(local_app_data) for path in windows_profiles[:-4])
 
 
 def test_get_ws_url_skips_unreachable_profile_and_uses_next_candidate(tmp_path, monkeypatch) -> None:

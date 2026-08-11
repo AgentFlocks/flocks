@@ -63,7 +63,6 @@ def profile_dirs(
     if system == "Darwin":
         support = home / "Library/Application Support"
         return [
-            *flocks_debug_profiles,
             support / "Google/Chrome",
             support / "Google/Chrome Canary",
             support / "Comet",
@@ -74,11 +73,11 @@ def profile_dirs(
             support / "Microsoft Edge Canary",
             support / "BraveSoftware/Brave-Browser",
             support / "Chromium",
+            *flocks_debug_profiles,
         ]
     if system == "Windows":
         local = Path(environ.get("LOCALAPPDATA", str(home / "AppData/Local"))).expanduser()
         return [
-            *flocks_debug_profiles,
             local / "Google/Chrome/User Data",
             local / "Google/Chrome Beta/User Data",
             local / "Google/Chrome Dev/User Data",
@@ -91,9 +90,9 @@ def profile_dirs(
             local / "BraveSoftware/Brave-Browser/User Data",
             local / "BraveSoftware/Brave-Browser-Beta/User Data",
             local / "BraveSoftware/Brave-Browser-Nightly/User Data",
+            *flocks_debug_profiles,
         ]
     return [
-        *flocks_debug_profiles,
         home / ".config/google-chrome",
         home / ".config/google-chrome-beta",
         home / ".config/google-chrome-unstable",
@@ -107,6 +106,7 @@ def profile_dirs(
         home / ".var/app/com.google.Chrome/config/google-chrome",
         home / ".var/app/com.brave.Browser/config/BraveSoftware/Brave-Browser",
         home / ".var/app/com.microsoft.Edge/config/microsoft-edge",
+        *flocks_debug_profiles,
     ]
 
 
@@ -210,14 +210,15 @@ def get_ws_url() -> str:
     if profile_errors:
         details = "; ".join(dict.fromkeys(profile_errors))
         raise RuntimeError(
-            "Chromium-based browser remote debugging is not reachable for any detected profile: "
-            f"{details} — for manual setup, start the browser with --remote-debugging-port and a non-default "
-            "--user-data-dir, then verify http://127.0.0.1:9222/json/version"
+            "The browser's remote-debugging page is open, but DevTools is not live yet for any detected profile: "
+            f"{details} — if the browser opened a profile picker, choose your normal profile first, then tick the "
+            "checkbox and click Allow if shown"
         )
     raise RuntimeError(
         "DevToolsActivePort not found in "
-        f"{[str(path) for path in profiles]} — start a Chromium-based browser with --remote-debugging-port and a non-default "
-        "--user-data-dir, or set BU_CDP_WS for a remote browser"
+        f"{[str(path) for path in profiles]} — enable your browser's remote-debugging page "
+        "(for example chrome://inspect/#remote-debugging or edge://inspect/#remote-debugging), "
+        "or set BU_CDP_WS for a remote browser"
     )
 
 
@@ -291,9 +292,7 @@ class Daemon:
                     f"{hint}"
                 ) from error
             raise RuntimeError(
-                f"CDP WS handshake failed: {error} -- restart your Chromium-based browser with "
-                "--remote-debugging-port and a non-default --user-data-dir, then verify "
-                "http://127.0.0.1:9222/json/version"
+                f"CDP WS handshake failed: {error} -- click Allow in your browser if prompted, then retry"
             )
         await self.attach_first_page()
         orig = self.cdp._event_registry.handle_event

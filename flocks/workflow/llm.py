@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, Optional
 
 from flocks.config.config import Config
 from flocks.provider.provider import ChatMessage, Provider, ProviderConfig
+from flocks.provider.sdk.openai_base import LLMResponseSafetyError
 from flocks.workflow._async_runtime import (
     run_sync as _run_sync_on_shared_loop,
     run_sync_cancellable as _run_sync_cancellable_on_shared_loop,
@@ -432,6 +433,9 @@ class LLMClient:
                         f"LLM call timed out after {timeout_s}s "
                         f"(attempt {attempt + 1}/{total_attempts})"
                     )
+                except LLMResponseSafetyError as exc:
+                    last_exc = exc
+                    break
                 except Exception as exc:
                     last_exc = exc
 

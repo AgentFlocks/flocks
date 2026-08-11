@@ -5,10 +5,10 @@ version: "1.0.0"
 integration_type: device
 description: >
   Sangfor EDR integration with default HTTP login, explicitly selected
-  browser/CDP login, cookie/token validation, and dashboard API collection.
+  browser/CDP login, cookie/token validation, dashboard and threat-asset API collection.
 description_cn: >
   深信服 EDR 集成。默认通过 HTTP 登录，仅用户明确选择时使用 browser/CDP；
-  每次操作验证成套 Cookie/token，并通过 API 采集首页仪表盘。
+  每次操作验证成套 Cookie/token，并通过 API 采集首页仪表盘和威胁资产分析。
 credential_fields:
   - key: base_url
     label: Base URL
@@ -113,7 +113,7 @@ defaults:
   verify_ssl: false
 notes: |
   All login methods save cookies to auth-state.json and login_token to Secret
-  Manager. Pairing metadata prevents dashboard APIs from mixing credentials
+  Manager. Pairing metadata prevents dashboard and threat-asset APIs from mixing credentials
   produced by different logins. Device URLs are normalized to scheme, host,
   and port before use.
 

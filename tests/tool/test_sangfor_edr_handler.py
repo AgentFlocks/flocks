@@ -285,6 +285,65 @@ def test_dashboard_request_definitions_use_dynamic_base_inputs(tmp_path):
     assert vulner_payload["token"] == "token-value"
 
 
+def test_threat_asset_request_definitions_match_capture(tmp_path):
+    handler = _load_handler()
+    threat_assets = handler._threat_assets_api_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+
+    definitions = threat_assets._threat_requests(
+        cfg,
+        "token-value",
+        days=7,
+        info="李伟",
+        risk_level=2,
+        zone_id="zone-1",
+        isolate_agent=True,
+        page=2,
+        limit=10,
+    )
+
+    summary_path, summary_payload = definitions["risk_summary"]
+    assert summary_path.endswith("opr=list_risk_agent_total_count")
+    assert summary_payload["app_args"]["name"] == "app.web.event_center.pending_event"
+    zones_path, zones_payload = definitions["zones"]
+    assert zones_path.endswith("opr=list_zones")
+    assert zones_payload["data"] == {"local": True}
+    events_path, events_payload = definitions["agent_events"]
+    assert events_path.endswith("opr=list_agent_event")
+    assert events_payload["filter"] == {
+        "info": "李伟",
+        "host_type": "",
+        "zone_id": "zone-1",
+        "risk_level": 2,
+        "agent_state": -1,
+        "page": 2,
+        "limit": 10,
+        "isolate_agent": True,
+    }
+    assert "day_sum" in events_payload
+
+
+def test_threat_asset_zone_resolution_includes_nested_children(tmp_path):
+    handler = _load_handler()
+    threat_assets = handler._threat_assets_api_module
+    zones = {
+        "success": True,
+        "data": [
+            {"device": ""},
+            {
+                "zones": [
+                    {
+                        "zone_id": "parent",
+                        "zone_name": "Parent",
+                        "children": [{"zone_id": "child", "zone_name": "Child"}],
+                    }
+                ]
+            },
+        ],
+    }
+    assert threat_assets._resolve_zone_id("Child", zones) == "child"
+
+
 def test_auth_probe_requires_http_200_and_agent_overview_data(tmp_path, monkeypatch):
     handler = _load_handler()
     cfg = _cfg(handler, tmp_path / "auth-state.json")
