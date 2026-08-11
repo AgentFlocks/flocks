@@ -342,7 +342,6 @@ async def delete_scheduler(scheduler_id: str):
     return {"ok": True}
 
 
-
 @router.post("/task-schedulers/{scheduler_id}/enable")
 async def enable_scheduler(scheduler_id: str):
     from flocks.task.manager import TaskManager
@@ -493,3 +492,5 @@ async def delete_execution(execution_id: str):
     if not await TaskManager.delete_execution(execution_id):
         raise HTTPException(404, "Task execution not found")
     return {"ok": True}
+
+
