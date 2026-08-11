@@ -344,6 +344,87 @@ def test_threat_asset_zone_resolution_includes_nested_children(tmp_path):
     assert threat_assets._resolve_zone_id("Child", zones) == "child"
 
 
+def test_asset_inventory_request_definitions_match_capture():
+    handler = _load_handler()
+    inventory = handler._asset_inventory_api_module
+    assert inventory.DEFAULT_SECTIONS == ("inventory",)
+
+    definitions = inventory._inventory_requests(
+        "token-value",
+        scene_type="server_and_pc",
+    )
+
+    method, path, payload = definitions["inventory"]
+    assert method == "POST"
+    assert path.endswith("/api/edrgoweb/v1/asset/inventory/classify?s=token-value")
+    assert payload == {"sceneType": "server_and_pc"}
+
+
+def test_asset_inventory_classify_response_has_readable_labels():
+    handler = _load_handler()
+    inventory = handler._asset_inventory_api_module
+    readable = inventory._classify_readable_response(
+        {
+            "code": 0,
+            "data": [
+                {
+                    "assetGroupName": "ProcessPort",
+                    "groups": [{"assetName": "MonitorPort", "count": 21}],
+                },
+                {
+                    "assetGroupName": "ApplicationAsset",
+                    "groups": [{"assetName": "DataBase", "count": 3}],
+                },
+                {
+                    "assetGroupName": "SystemInfo",
+                    "groups": [{"assetName": "Replace", "count": 184}],
+                },
+            ],
+        }
+    )
+    assert readable == [
+        {
+            "asset_group": "ProcessPort",
+            "asset_group_zh": "进程端口",
+            "asset_group_en": "Process and Ports",
+            "items": [
+                {
+                    "asset_name": "MonitorPort",
+                    "asset_name_zh": "监听端口",
+                    "asset_name_en": "Monitoring Ports",
+                    "count": 21,
+                }
+            ],
+        },
+        {
+            "asset_group": "ApplicationAsset",
+            "asset_group_zh": "应用资产",
+            "asset_group_en": "Application Assets",
+            "items": [
+                {
+                    "asset_name": "DataBase",
+                    "asset_name_zh": "数据库",
+                    "asset_name_en": "Databases",
+                    "count": 3,
+                }
+            ],
+        },
+        {
+            "asset_group": "SystemInfo",
+            "asset_group_zh": "系统信息",
+            "asset_group_en": "System Information",
+            "items": [
+                {
+                    "asset_name": "Replace",
+                    "asset_name_zh": "真替真用",
+                    "asset_name_en": "Replace",
+                    "count": 184,
+                }
+            ],
+        },
+    ]
+
+
 def test_auth_probe_requires_http_200_and_agent_overview_data(tmp_path, monkeypatch):
     handler = _load_handler()
     cfg = _cfg(handler, tmp_path / "auth-state.json")

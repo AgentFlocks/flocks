@@ -28,6 +28,7 @@ if _PLUGIN_DIR not in sys.path:
 import sangfor_edr_dashboard_api as _dashboard_api_module  # noqa: E402
 import sangfor_edr_http_login as _http_login_module  # noqa: E402
 import sangfor_edr_threat_assets_api as _threat_assets_api_module  # noqa: E402
+import sangfor_edr_asset_inventory_api as _asset_inventory_api_module  # noqa: E402
 
 SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
@@ -1430,6 +1431,19 @@ async def handle_threat_assets(ctx: ToolContext) -> ToolResult:
             success=bool(result.get("success")),
             output=result,
             error=None if result.get("success") else "threat_assets_api_partial_failure",
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+
+async def handle_asset_inventory(ctx: ToolContext) -> ToolResult:
+    params = dict(ctx.params)
+    try:
+        result = _asset_inventory_api_module.run_asset_inventory(params)
+        return ToolResult(
+            success=bool(result.get("success")),
+            output=result,
+            error=None if result.get("success") else "asset_inventory_api_partial_failure",
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))
