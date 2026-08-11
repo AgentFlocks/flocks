@@ -3818,7 +3818,6 @@ describe('ChatToolPart bash rendering', () => {
     expect(screen.getByText('$').closest('pre')).toHaveClass('max-h-64');
     expect(screen.getByText('tests passed').closest('pre')).toHaveClass('max-h-64');
   });
-
 });
 
 describe('ChatToolPart question result rendering', () => {

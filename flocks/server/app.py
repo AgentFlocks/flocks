@@ -353,14 +353,14 @@ async def lifespan(app: FastAPI):
         from flocks.task.manager import TaskManager
         await _run_startup_phase(
             log,
-            "schedule_task_manager.start",
+            "task_manager.start",
             TaskManager.start,
         )
-        log.info("schedule_task_manager.started")
+        log.info("task_manager.started")
     except Exception as e:
         from flocks.task.manager import TaskManager
         TaskManager.mark_start_failed(e)
-        log.warning("schedule_task_manager.start.failed", {"error": str(e)})
+        log.warning("task_manager.start.failed", {"error": str(e)})
 
     # Seed built-in scheduled tasks from .flocks/plugins/tasks/*.json (idempotent)
     try:
@@ -542,9 +542,9 @@ async def lifespan(app: FastAPI):
         from flocks.task.store import TaskStore
         await TaskManager.stop()
         await TaskStore.close()
-        log.info("schedule_task_manager.stopped")
+        log.info("task_manager.stopped")
     except Exception as e:
-        log.warning("schedule_task_manager.stop.failed", {"error": str(e)})
+        log.warning("task_manager.stop.failed", {"error": str(e)})
     
     # Stop Skill file watcher
     try:

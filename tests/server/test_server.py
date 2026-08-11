@@ -9,7 +9,6 @@ from httpx import AsyncClient, ASGITransport
 from fastapi import status
 
 from flocks.server.app import app
-from flocks.task.manager import TaskManager
 from flocks.task.store import TaskStore
 from flocks.task.models import (
     DeliveryStatus,
