@@ -175,11 +175,13 @@ async def test_azure_chat_stream_still_emits_text_chunks():
         async for chunk in provider.chat_stream(
             model_id="gpt-5.4-mini",
             messages=[ChatMessage(role="user", content="hi")],
+            reasoningEffort="xhigh",
         )
     ]
 
     assert [chunk.delta for chunk in emitted] == ["hello", ""]
     assert emitted[-1].finish_reason == "stop"
+    assert client.completions.last_request["reasoning_effort"] == "xhigh"
 
 
 @pytest.mark.asyncio

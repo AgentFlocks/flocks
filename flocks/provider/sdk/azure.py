@@ -139,6 +139,8 @@ class AzureProvider(BaseProvider):
             request_params["max_completion_tokens"] = max_tokens
         if tools:
             request_params["tools"] = tools
+        if kwargs.get("reasoningEffort"):
+            request_params["reasoning_effort"] = kwargs["reasoningEffort"]
         
         try:
             response = await client.chat.completions.create(**request_params)
@@ -192,6 +194,8 @@ class AzureProvider(BaseProvider):
             request_params["max_completion_tokens"] = max_tokens
         if tools:
             request_params["tools"] = tools
+        if kwargs.get("reasoningEffort"):
+            request_params["reasoning_effort"] = kwargs["reasoningEffort"]
         
         try:
             stream = await client.chat.completions.create(**request_params)

@@ -9,7 +9,7 @@ Both ``SessionRunner`` (session/runner.py) and ``AgentExecutor``
 so that provider rules are maintained in exactly one place.
 """
 
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Mapping, Optional, Tuple
 
 from flocks.provider.interleaved import (
     REASONING_TRANSPORT_ANTHROPIC_MESSAGES,
@@ -30,8 +30,16 @@ log = Log.create(service="provider.options")
 DEFAULT_THINKING_BUDGET = 16000
 DEFAULT_OUTPUT_BUFFER = 8192
 DEFAULT_REASONING_EFFORT = "high"
-DEFAULT_KIMI_K3_REASONING_EFFORT = DEFAULT_REASONING_EFFORT
-KIMI_K3_REASONING_EFFORTS = frozenset({"low", "high", "max"})
+
+# ``enable_thinking`` controls off; this tuple orders provider-agnostic levels.
+_REASONING_EFFORT_LEVELS = (
+    "minimal",
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+)
 
 _GENERIC_CHAT_REASONING_EXTRA_BODY_KEYS = {
     "reasoning_content": "enable_thinking",
@@ -94,6 +102,130 @@ def _resolve_reasoning_effort(provider_id: str, model_id: str) -> Optional[str]:
             "error": str(exc),
         })
         return None
+
+
+def _get_reasoning_effort_map(
+    provider_id: str,
+    model_id: str,
+) -> Optional[Mapping[str, Optional[str]]]:
+    """Return the model-declared semantic-to-provider effort mapping."""
+    model = _lookup_raw_model_metadata(provider_id, model_id)
+    metadata_provider_id = getattr(model, "provider_id", None) if model else None
+    accepted_provider_ids = {provider_id.strip().lower()}
+    if "azure" in accepted_provider_ids:
+        accepted_provider_ids.add("azure-openai")
+    elif "azure-openai" in accepted_provider_ids:
+        accepted_provider_ids.add("azure")
+    if (
+        isinstance(metadata_provider_id, str)
+        and metadata_provider_id.strip().lower() not in accepted_provider_ids
+    ):
+        model = None
+    capabilities = getattr(model, "capabilities", None) if model else None
+    effort_map = (
+        getattr(capabilities, "thinking_level_map", None)
+        if capabilities
+        else None
+    )
+
+    if not effort_map:
+        try:
+            from flocks.provider.model_catalog import get_provider_model_definitions
+
+            catalog_provider_id = (
+                "azure-openai" if provider_id.strip().lower() == "azure" else provider_id
+            )
+            definitions = get_provider_model_definitions(catalog_provider_id) or []
+            catalog_model = next(
+                (model for model in definitions if model.id == model_id),
+                None,
+            )
+            catalog_capabilities = (
+                getattr(catalog_model, "capabilities", None)
+                if catalog_model
+                else None
+            )
+            effort_map = (
+                getattr(catalog_capabilities, "thinking_level_map", None)
+                if catalog_capabilities
+                else None
+            )
+        except Exception as exc:
+            log.debug("options.reasoning_effort.catalog_lookup_failed", {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "error": str(exc),
+            })
+
+    if not isinstance(effort_map, Mapping):
+        return None
+
+    normalized: Dict[str, Optional[str]] = {}
+    for semantic_level, provider_level in effort_map.items():
+        if not isinstance(semantic_level, str):
+            continue
+        if provider_level is not None and not isinstance(provider_level, str):
+            continue
+        normalized[semantic_level.strip().lower()] = provider_level
+    return normalized or None
+
+
+def _map_reasoning_effort(
+    provider_id: str,
+    model_id: str,
+    reasoning_effort: Optional[str],
+) -> Optional[str]:
+    """Clamp a semantic reasoning level and map it to the provider value."""
+    effort_map = _get_reasoning_effort_map(provider_id, model_id)
+    if not effort_map:
+        return None
+
+    requested = reasoning_effort or DEFAULT_REASONING_EFFORT
+    if effort_map.get(requested) is not None:
+        return effort_map[requested]
+
+    supported_levels = {
+        level: provider_level
+        for level, provider_level in effort_map.items()
+        if provider_level is not None
+    }
+    if not supported_levels:
+        return None
+
+    fallback = supported_levels.get(DEFAULT_REASONING_EFFORT) or next(
+        iter(supported_levels.values())
+    )
+    if requested not in _REASONING_EFFORT_LEVELS:
+        log.warning(
+            "options.reasoning_effort.invalid",
+            {
+                "provider_id": provider_id,
+                "model_id": model_id,
+                "reasoning_effort": requested,
+                "fallback": fallback,
+            },
+        )
+        return fallback
+
+    requested_index = _REASONING_EFFORT_LEVELS.index(requested)
+    higher_levels = _REASONING_EFFORT_LEVELS[requested_index + 1 :]
+    lower_levels = reversed(_REASONING_EFFORT_LEVELS[:requested_index])
+    for candidate in (*higher_levels, *lower_levels):
+        mapped_effort = effort_map.get(candidate)
+        if mapped_effort is not None:
+            log.warning(
+                "options.reasoning_effort.clamped",
+                {
+                    "provider_id": provider_id,
+                    "model_id": model_id,
+                    "reasoning_effort": requested,
+                    "resolved_reasoning_effort": candidate,
+                    "provider_reasoning_effort": mapped_effort,
+                },
+            )
+            return mapped_effort
+
+    return fallback
 
 
 def _resolve_default_extra_body(provider_id: str, model_id: str) -> Optional[Dict[str, Any]]:
@@ -234,27 +366,26 @@ def _build_generic_chat_extra_body(
     enabled = reasoning_enabled is not False
 
     if is_kimi_k3_model(model_id):
-        effort = reasoning_effort or DEFAULT_KIMI_K3_REASONING_EFFORT
-        if effort not in KIMI_K3_REASONING_EFFORTS:
-            log.warning(
-                "options.kimi_k3.invalid_reasoning_effort",
-                {
-                    "model_id": model_id,
-                    "reasoning_effort": effort,
-                    "fallback": DEFAULT_KIMI_K3_REASONING_EFFORT,
-                },
-            )
-            effort = DEFAULT_KIMI_K3_REASONING_EFFORT
-        return {"reasoning_effort": effort}
+        effort = _map_reasoning_effort(provider_id, model_id, reasoning_effort)
+        return {"reasoning_effort": effort} if effort else None
 
     if "deepseek" in model_lower or provider_lower == "deepseek":
-        return {
+        extra_body = {
             "thinking": (
                 {"type": "enabled"}
                 if enabled
                 else {"type": "disabled"}
             )
         }
+        if enabled and model_lower.startswith("deepseek-v4"):
+            effort = _map_reasoning_effort(
+                provider_id,
+                model_id,
+                reasoning_effort,
+            )
+            if effort:
+                extra_body["reasoning_effort"] = effort
+        return extra_body
 
     if "glm" in model_lower or provider_lower == "zhipu":
         return {
@@ -320,7 +451,8 @@ def build_provider_options(
     thinking_budget:
         Token budget for extended-thinking / reasoning where applicable.
     reasoning_effort:
-        Kimi K3 reasoning effort (``low``, ``high``, or ``max``).
+        Provider-agnostic reasoning effort. Unsupported levels are clamped to
+        the nearest model-supported level, preferring higher levels.
     resolve_max_tokens:
         If *True*, fall back to the model's configured ``max_tokens`` when
         no provider-specific logic has already set it.
@@ -367,11 +499,24 @@ def build_provider_options(
                 "budget_tokens": effective_budget,
             }
             options["max_tokens"] = api_limit if api_limit else (thinking_budget + DEFAULT_OUTPUT_BUFFER)
+            effort = _map_reasoning_effort(
+                provider_id,
+                model_id,
+                reasoning_effort,
+            )
+            if effort:
+                options["output_config"] = {"effort": effort}
 
     # -- OpenAI reasoning (o1 / o3 / gpt-5) --------------------------------
-    elif provider_id == "openai":
+    elif provider_id in {"openai", "azure", "azure-openai"}:
         if reasoning_enabled is not False and any(tag in model_lower for tag in ("o1", "o3", "gpt-5")):
-            options["reasoningEffort"] = reasoning_effort or DEFAULT_REASONING_EFFORT
+            effort = _map_reasoning_effort(
+                provider_id,
+                model_id,
+                reasoning_effort,
+            )
+            if effort:
+                options["reasoningEffort"] = effort
 
     # -- Google Gemini thinking ---------------------------------------------
     elif provider_id == "google":
@@ -413,22 +558,38 @@ def build_provider_options(
             reasoning_effort,
         )
         extra_body = dict(configured_extra_body or automatic_extra_body or {})
+        if configured_extra_body and (
+            "deepseek" in model_lower or provider_id.lower() == "deepseek"
+        ):
+            extra_body = dict(automatic_extra_body or {})
+            extra_body.update(configured_extra_body)
         if is_kimi_k3_model(model_id):
             # K3 is always a reasoning model and uses the top-level
             # reasoning_effort field instead of the K2.x thinking object.
             extra_body.pop("thinking", None)
             if reasoning_effort_explicit:
-                extra_body["reasoning_effort"] = (automatic_extra_body or {}).get(
-                    "reasoning_effort",
-                    DEFAULT_KIMI_K3_REASONING_EFFORT,
+                resolved_effort = (automatic_extra_body or {}).get(
+                    "reasoning_effort"
                 )
+                if resolved_effort:
+                    extra_body["reasoning_effort"] = resolved_effort
+                else:
+                    extra_body.pop("reasoning_effort", None)
             else:
                 configured_effort = extra_body.get("reasoning_effort")
-                if configured_effort not in KIMI_K3_REASONING_EFFORTS:
-                    extra_body["reasoning_effort"] = (automatic_extra_body or {}).get(
-                        "reasoning_effort",
-                        DEFAULT_KIMI_K3_REASONING_EFFORT,
+                supported_efforts = {
+                    value
+                    for value in (_get_reasoning_effort_map(provider_id, model_id) or {}).values()
+                    if value is not None
+                }
+                if supported_efforts and configured_effort not in supported_efforts:
+                    resolved_effort = (automatic_extra_body or {}).get(
+                        "reasoning_effort"
                     )
+                    if resolved_effort:
+                        extra_body["reasoning_effort"] = resolved_effort
+                    else:
+                        extra_body.pop("reasoning_effort", None)
         elif is_kimi_k27_code_model(model_id):
             # K2.7 rejects disabled thinking. Normalize configured values so
             # direct and gateway-backed endpoints always request reasoning.

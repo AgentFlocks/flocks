@@ -195,6 +195,7 @@ async def test_anthropic_stream_uses_beta_interleaved_and_yields_tools_on_block_
                 }
             ],
             thinking={"type": "enabled", "budget_tokens": 2048},
+            output_config={"effort": "max"},
         )
     ]
 
@@ -203,6 +204,7 @@ async def test_anthropic_stream_uses_beta_interleaved_and_yields_tools_on_block_
         "interleaved-thinking-2025-05-14",
         "fine-grained-tool-streaming-2025-05-14",
     ]
+    assert kwargs["output_config"] == {"effort": "max"}
 
     assert chunks[0].event_type == "reasoning-start"
     assert chunks[1].event_type == "reasoning"
