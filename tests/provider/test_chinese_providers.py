@@ -155,16 +155,41 @@ class TestCuratedCatalogModels:
         assert v4_pro.capabilities.interleaved["field"] == "reasoning_content"
 
     def test_alibaba_catalog(self):
+        meta = get_provider_meta("alibaba")
+        assert meta is not None
+        assert meta.name == "阿里云百炼 (Alibaba)"
+
         models = get_provider_model_definitions("alibaba")
         assert {m.id for m in models} == {
-            "qwen3-235b-a22b-2507",
-            "qwen3.5-flash-02-23",
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen3.7-max",
+            "qwen3.7-flash",
         }
 
-        flash = next(m for m in models if m.id == "qwen3.5-flash-02-23")
+        qwen38 = next(m for m in models if m.id == "qwen3.8-max")
+        assert qwen38.capabilities.supports_vision is True
+        assert qwen38.capabilities.supports_reasoning is True
+        assert qwen38.capabilities.interleaved["field"] == "reasoning_content"
+        assert qwen38.limits.context_window == 1000000
+        assert qwen38.limits.max_output_tokens == 65536
+        assert qwen38.pricing.currency == "CNY"
+
+        max_model = next(m for m in models if m.id == "qwen3.7-max")
+        assert max_model.capabilities.supports_reasoning is True
+        assert max_model.capabilities.interleaved["field"] == "reasoning_content"
+        assert max_model.limits.context_window == 1000000
+
+        plus = next(m for m in models if m.id == "qwen3.7-plus")
+        assert plus.capabilities.supports_vision is True
+        assert plus.capabilities.supports_reasoning is True
+
+        flash = next(m for m in models if m.id == "qwen3.7-flash")
+        assert flash.capabilities.supports_vision is True
         assert flash.capabilities.supports_reasoning is True
         assert flash.capabilities.interleaved["field"] == "reasoning_content"
         assert flash.limits.context_window == 1000000
+        assert flash.limits.max_output_tokens == 65536
         assert flash.pricing.currency == "CNY"
 
     def test_moonshot_catalog(self):
