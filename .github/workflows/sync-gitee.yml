@@ -266,6 +266,21 @@ jobs:
             exit 1
           fi
 
+          verification_status="$(
+            curl --silent --show-error --retry 3 \
+              --output "${release_response}" \
+              --write-out '%{http_code}' \
+              --get \
+              --data-urlencode "access_token=${GITEE_TOKEN}" \
+              "${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${encoded_tag}"
+          )"
+
+          if [[ "${verification_status}" != "200" ]]; then
+            message="$(jq -r '.message // "unknown Gitee API error"' "${release_response}" 2>/dev/null || true)"
+            echo "::error title=Gitee Release verification failed::HTTP ${verification_status}: ${message}"
+            exit 1
+          fi
+
           synced_tag="$(jq -er '.tag_name' "${release_response}")"
           synced_release_id="$(jq -er '.id' "${release_response}")"
           if [[ "${synced_tag}" != "${TAG_NAME}" ]]; then
