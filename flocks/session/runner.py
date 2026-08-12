@@ -70,7 +70,7 @@ from flocks.agent.agent import AgentInfo
 from flocks.agent.toolset import agent_declares_tool
 from flocks.provider.provider import Provider, ChatMessage
 from flocks.provider.reasoning_replay import prepare_reasoning_for_replay
-from flocks.hooks.pipeline import HookPipeline
+from flocks.hooks.pipeline import HookPipeline, HookStage
 from flocks.tool.catalog import (
     get_always_load_tool_names,
     get_tool_catalog_metadata,
