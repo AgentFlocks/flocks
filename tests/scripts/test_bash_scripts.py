@@ -41,3 +41,9 @@ def test_dev_script_sets_console_base_url_default() -> None:
 
     assert 'FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL:-https://portalflocks.threatbook.cn}"' in script
     assert 'FLOCKS_CONSOLE_BASE_URL="${FLOCKS_CONSOLE_BASE_URL}" \\' in script
+
+
+def test_dev_script_exposes_runtime_server_port() -> None:
+    script = (SCRIPT_DIR / "dev.sh").read_text(encoding="utf-8")
+
+    assert script.count('_FLOCKS_SERVER_PORT="${BACKEND_PORT}" \\') == 2
