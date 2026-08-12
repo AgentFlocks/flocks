@@ -355,6 +355,8 @@ class AnthropicProvider(BaseProvider):
                 request_params["max_tokens"] = kwargs["max_tokens"]
         else:
             request_params["temperature"] = kwargs.get("temperature", 0.7)
+        if kwargs.get("output_config"):
+            request_params["output_config"] = kwargs["output_config"]
         
         if system_message:
             request_params["system"] = system_message
@@ -456,6 +458,8 @@ class AnthropicProvider(BaseProvider):
         else:
             # Only set temperature when thinking is NOT enabled
             request_params["temperature"] = kwargs.get("temperature", 0.7)
+        if kwargs.get("output_config"):
+            request_params["output_config"] = kwargs["output_config"]
         
         if system_message:
             request_params["system"] = system_message

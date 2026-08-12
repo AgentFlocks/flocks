@@ -38,6 +38,11 @@ def _model_info_signature(model: "ModelInfo") -> tuple:
             getattr(cap, "supports_vision", None),
             getattr(cap, "supports_reasoning", None),
             getattr(cap, "interleaved", None),
+            json.dumps(
+                getattr(cap, "thinking_level_map", None),
+                default=str,
+                sort_keys=True,
+            ),
             getattr(cap, "max_tokens", None),
             getattr(cap, "context_window", None),
         )
@@ -123,6 +128,7 @@ class ModelCapabilities(BaseModel):
     supports_vision: bool = False
     supports_reasoning: bool = True
     interleaved: Optional[Dict[str, Any]] = None
+    thinking_level_map: Optional[Dict[str, Optional[str]]] = None
     max_tokens: Optional[int] = None
     context_window: Optional[int] = None
 
@@ -875,6 +881,7 @@ class Provider:
                                     supports_vision=model_dict.get("supports_vision", False),
                                     supports_reasoning=model_dict.get("supports_reasoning", True),
                                     interleaved=model_dict.get("interleaved"),
+                                    thinking_level_map=model_dict.get("thinking_level_map"),
                                     max_tokens=model_dict.get("max_output_tokens") or model_dict.get("max_tokens"),
                                     context_window=model_dict.get("context_window"),
                                 ),
@@ -1258,6 +1265,11 @@ class BaseProvider:
                 supports_vision=model.capabilities.supports_vision,
                 supports_reasoning=getattr(model.capabilities, "supports_reasoning", True),
                 interleaved=getattr(model.capabilities, "interleaved", None),
+                thinking_level_map=getattr(
+                    model.capabilities,
+                    "thinking_level_map",
+                    None,
+                ),
             ),
             limits=ModelLimits(
                 context_window=model.capabilities.context_window or 128000,
@@ -1323,6 +1335,12 @@ class BaseProvider:
         if "interleaved" in keys:
             overridden.capabilities.interleaved = getattr(
                 model.capabilities, "interleaved", None
+            )
+        if "thinking_level_map" in keys:
+            overridden.capabilities.thinking_level_map = getattr(
+                model.capabilities,
+                "thinking_level_map",
+                None,
             )
 
         # Limits — only override when explicitly stored

@@ -53,6 +53,28 @@ class TestCuratedCatalogProviders:
 class TestCuratedCatalogModels:
     """Verify key models, pricing, and limits."""
 
+    def test_mainstream_reasoning_models_declare_thinking_level_maps(self):
+        family_prefixes = (
+            "gpt",
+            "claude",
+            "deepseek",
+            "glm",
+            "qwen",
+            "kimi",
+            "minimax",
+        )
+        missing = []
+
+        for provider_id, provider in get_raw_catalog().items():
+            for model_id, model in provider.get("models", {}).items():
+                family = model.get("family", "").lower()
+                if not family.startswith(family_prefixes):
+                    continue
+                if not model.get("capabilities", {}).get("thinking_level_map"):
+                    missing.append(f"{provider_id}/{model_id}")
+
+        assert missing == []
+
     def test_openai_compatible_catalog(self):
         meta = get_provider_meta("openai-compatible")
         assert meta is not None
@@ -89,6 +111,8 @@ class TestCuratedCatalogModels:
 
         gpt54 = next(m for m in models if m.id == "gpt-5.4")
         assert gpt54.capabilities.supports_reasoning is True
+        assert gpt54.capabilities.thinking_level_map["xhigh"] == "xhigh"
+        assert gpt54.capabilities.thinking_level_map["minimal"] is None
         assert gpt54.limits.max_output_tokens == 1050000
         assert gpt54.pricing.input == 2.5
 
@@ -103,6 +127,8 @@ class TestCuratedCatalogModels:
 
         opus = next(m for m in models if m.id == "claude-opus-4-6")
         assert opus.capabilities.supports_vision is True
+        assert opus.capabilities.thinking_level_map["max"] == "max"
+        assert opus.capabilities.thinking_level_map["xhigh"] is None
         assert opus.pricing.output == 25.0
 
     def test_xai_catalog(self):
@@ -149,6 +175,7 @@ class TestCuratedCatalogModels:
         v4_flash = next(m for m in models if m.id == "deepseek-v4-flash")
         assert v4_flash.capabilities.supports_reasoning is True
         assert v4_flash.capabilities.interleaved["field"] == "reasoning_content"
+        assert v4_flash.capabilities.thinking_level_map["xhigh"] == "max"
 
         v4_pro = next(m for m in models if m.id == "deepseek-v4-pro")
         assert v4_pro.capabilities.supports_reasoning is True
@@ -163,6 +190,7 @@ class TestCuratedCatalogModels:
 
         flash = next(m for m in models if m.id == "qwen3.5-flash-02-23")
         assert flash.capabilities.supports_reasoning is True
+        assert flash.capabilities.thinking_level_map == {"high": "enabled"}
         assert flash.capabilities.interleaved["field"] == "reasoning_content"
         assert flash.limits.context_window == 1000000
         assert flash.pricing.currency == "CNY"
@@ -181,6 +209,8 @@ class TestCuratedCatalogModels:
         assert k3.capabilities.supports_vision is True
         assert k3.capabilities.supports_reasoning is True
         assert k3.capabilities.interleaved["field"] == "reasoning_content"
+        assert k3.capabilities.thinking_level_map["low"] == "low"
+        assert k3.capabilities.thinking_level_map["medium"] is None
         assert k3.pricing.input == 20.0
         assert k3.pricing.output == 100.0
         assert k3.pricing.cache_read == 2.0
@@ -235,6 +265,7 @@ class TestCuratedCatalogModels:
         glm47 = next(m for m in models if m.id == "glm-4.7")
         assert glm47.capabilities.supports_reasoning is True
         assert glm47.capabilities.interleaved["field"] == "reasoning_content"
+        assert glm47.capabilities.thinking_level_map == {"high": "enabled"}
 
     def test_minimax_catalog(self):
         models = get_provider_model_definitions("minimax")
@@ -246,6 +277,7 @@ class TestCuratedCatalogModels:
         m3 = next(m for m in models if m.id == "minimax-m3")
         assert m3.capabilities.supports_reasoning is True
         assert m3.capabilities.interleaved["field"] == "reasoning_details"
+        assert m3.capabilities.thinking_level_map == {"high": "adaptive"}
         assert m3.limits.context_window == 1000000
         assert m3.limits.max_output_tokens == 128000
         m27 = next(m for m in models if m.id == "minimax-m2.7")

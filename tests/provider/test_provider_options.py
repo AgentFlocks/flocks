@@ -4,7 +4,10 @@ from flocks.provider.interleaved import (
     REASONING_TRANSPORT_GENERIC_CHAT,
 )
 
-DEEPSEEK_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+DEEPSEEK_THINKING_EXTRA_BODY = {
+    "thinking": {"type": "enabled"},
+    "reasoning_effort": "high",
+}
 GLM_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled", "clear_thinking": False}}
 KIMI_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
 MIMO_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
@@ -121,7 +124,7 @@ class TestBuildProviderOptions:
 
     def test_kimi_k3_uses_reasoning_effort_instead_of_thinking(self):
         options = provider_options.build_provider_options(
-            "openai-compatible",
+            "moonshot",
             "kimi-k3",
             reasoning_enabled=False,
             resolve_max_tokens=False,
@@ -132,7 +135,7 @@ class TestBuildProviderOptions:
 
     def test_kimi_k3_respects_supported_reasoning_effort(self):
         options = provider_options.build_provider_options(
-            "openai-compatible",
+            "moonshot",
             "kimi-k3",
             reasoning_effort="low",
             resolve_max_tokens=False,
@@ -151,7 +154,7 @@ class TestBuildProviderOptions:
         )
 
         options = provider_options.build_provider_options(
-            "openai-compatible",
+            "moonshot",
             "kimi-k3",
             resolve_max_tokens=False,
         )
@@ -169,7 +172,7 @@ class TestBuildProviderOptions:
         )
 
         options = provider_options.build_provider_options(
-            "openai-compatible",
+            "moonshot",
             "kimi-k3",
             reasoning_effort="low",
             resolve_max_tokens=False,
@@ -254,6 +257,42 @@ class TestBuildProviderOptions:
         )
 
         assert options["extra_body"] == DEEPSEEK_THINKING_EXTRA_BODY
+
+    def test_deepseek_v4_maps_xhigh_reasoning_effort_to_max(self):
+        options = provider_options.build_provider_options(
+            "deepseek",
+            "deepseek-v4-flash",
+            reasoning_effort="xhigh",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+        }
+
+    def test_deepseek_effort_is_merged_with_configured_extra_body(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_default_extra_body",
+            lambda *_args: {"custom_option": True},
+        )
+
+        options = provider_options.build_provider_options(
+            "deepseek",
+            "deepseek-v4-pro",
+            reasoning_effort="xhigh",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {
+            "thinking": {"type": "enabled"},
+            "reasoning_effort": "max",
+            "custom_option": True,
+        }
 
     def test_deepseek_models_emit_disabled_thinking_when_reasoning_disabled(
         self,
@@ -467,3 +506,128 @@ class TestBuildProviderOptions:
         )
 
         assert options["reasoningEffort"] == "low"
+
+    def test_openai_clamps_unsupported_global_reasoning_effort_for_model(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_reasoning_effort",
+            lambda *_args: "max",
+        )
+
+        options = provider_options.build_provider_options(
+            "openai",
+            "gpt-5.4",
+            resolve_max_tokens=False,
+        )
+
+        assert options["reasoningEffort"] == "xhigh"
+
+    def test_openai_unknown_reasoning_model_omits_unverified_effort(self):
+        options = provider_options.build_provider_options(
+            "openai",
+            "o3",
+            reasoning_effort="max",
+            resolve_max_tokens=False,
+        )
+
+        assert "reasoningEffort" not in options
+
+    def test_openai_clamps_minimal_up_to_low_for_gpt_54(self):
+        options = provider_options.build_provider_options(
+            "openai",
+            "gpt-5.4",
+            reasoning_effort="minimal",
+            resolve_max_tokens=False,
+        )
+
+        assert options["reasoningEffort"] == "low"
+
+    def test_azure_openai_uses_catalog_effort_map(self):
+        options = provider_options.build_provider_options(
+            "azure-openai",
+            "gpt-5.4",
+            reasoning_effort="max",
+            resolve_max_tokens=False,
+        )
+
+        assert options["reasoningEffort"] == "xhigh"
+
+    def test_claude_clamps_xhigh_up_to_max(self):
+        options = provider_options.build_provider_options(
+            "anthropic",
+            "claude-sonnet-4-6",
+            reasoning_effort="xhigh",
+            resolve_max_tokens=False,
+        )
+
+        assert options["output_config"] == {"effort": "max"}
+
+    def test_invalid_global_effort_falls_back_to_model_high(self):
+        options = provider_options.build_provider_options(
+            "openai",
+            "gpt-5.4",
+            reasoning_effort="turbo",
+            resolve_max_tokens=False,
+        )
+
+        assert options["reasoningEffort"] == "high"
+
+    def test_unknown_kimi_k3_gateway_omits_unverified_effort(self):
+        options = provider_options.build_provider_options(
+            "openai-compatible",
+            "kimi-k3",
+            reasoning_effort="max",
+            resolve_max_tokens=False,
+        )
+
+        assert "extra_body" not in options
+
+    def test_toggle_only_models_accept_all_global_efforts(self):
+        cases = (
+            ("zhipu", "glm-5", GLM_THINKING_EXTRA_BODY),
+            ("alibaba", "qwen3.5-flash-02-23", {"enable_thinking": True}),
+            ("minimax", "minimax-m3", {"reasoning_split": True}),
+            ("moonshot", "kimi-k2.6", KIMI_THINKING_EXTRA_BODY),
+        )
+
+        for provider_id, model_id, expected_extra_body in cases:
+            for effort in ("minimal", "low", "medium", "high", "xhigh", "max"):
+                options = provider_options.build_provider_options(
+                    provider_id,
+                    model_id,
+                    reasoning_effort=effort,
+                    resolve_max_tokens=False,
+                )
+
+                assert options["extra_body"] == expected_extra_body
+
+    def test_kimi_k3_clamps_reasoning_effort_up_before_down(self):
+        options = provider_options.build_provider_options(
+            "moonshot",
+            "kimi-k3",
+            reasoning_effort="xhigh",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "max"}
+
+    def test_kimi_k3_clamps_unsupported_global_medium_to_high(
+        self,
+        monkeypatch,
+    ):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_reasoning_effort",
+            lambda *_args: "medium",
+        )
+
+        options = provider_options.build_provider_options(
+            "moonshot",
+            "kimi-k3",
+            resolve_max_tokens=False,
+        )
+
+        assert options["extra_body"] == {"reasoning_effort": "high"}
