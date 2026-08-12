@@ -75,7 +75,7 @@ jobs:
             > "${release_metadata}"
 
           resolved_tag="$(jq -er '.tag_name' "${release_metadata}")"
-          is_draft="$(jq -er '.draft' "${release_metadata}")"
+          is_draft="$(jq -r '.draft' "${release_metadata}")"
           published_at="$(jq -r '.published_at // empty' "${release_metadata}")"
 
           if [[ "${resolved_tag}" != "${TAG_NAME}" ]]; then
