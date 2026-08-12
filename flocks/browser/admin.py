@@ -20,7 +20,7 @@ from .utils import load_env_file
 VERSION_CACHE = Path(tempfile.gettempdir()) / "flocks-browser-version-cache.json"
 VERSION_CACHE_TTL = 24 * 3600
 DOCTOR_TEXT_LIMIT = 140
-# run_setup retries transient attach failures once, but exits after manual setup guidance.
+# run_setup retries once after the user enables remote debugging for the current profile.
 _SETUP_ATTACH_WAIT = 20.0
 _SETUP_RETRY_WAIT = 30.0
 
@@ -49,7 +49,7 @@ def _log_tail(name: str | None):
 
 
 def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
-    """Return True when a local browser needs remote-debugging setup guidance."""
+    """Return True when a local browser needs the inspect-page permission flow."""
     lower = (msg or "").lower()
     return (
         "devtoolsactiveport not found" in lower
@@ -63,12 +63,13 @@ def _needs_chrome_remote_debugging_prompt(msg: str | None) -> bool:
 
 
 def _local_debugging_setup_lines(system: str | None = None) -> list[str]:
-    """Return concise manual setup guidance for local Chromium-based debugging."""
+    """Return optional isolated-browser fallback guidance."""
     import platform
 
     system = system or platform.system()
     lines = [
-        "Do not look for webSocketDebuggerUrl in chrome://inspect; that page does not reliably show it.",
+        "Fallback only: use this if the current-profile inspect/Allow flow still cannot attach.",
+        "Do not look for webSocketDebuggerUrl in chrome://inspect; Flocks discovers the endpoint itself.",
         "Close the matching Chromium-based browser if it is already open, then run one command below.",
     ]
     if system == "Windows":
@@ -275,7 +276,7 @@ def _doctor_short_text(value, limit: int | None = None) -> str:
 
 
 def ensure_daemon(
-    wait: float = 60.0, name: str | None = None, env: dict | None = None, _show_debugging_guidance: bool = True
+    wait: float = 60.0, name: str | None = None, env: dict | None = None, _open_inspect: bool = True
 ) -> None:
     """Ensure a healthy daemon is running, restarting stale sessions when needed."""
     effective_name = ipc.runtime_paths(name or NAME).name
@@ -328,10 +329,17 @@ def ensure_daemon(
         msg = _log_tail(effective_name) or ""
         if local and attempt == 0 and _needs_chrome_remote_debugging_prompt(msg):
             restart_daemon(effective_name)
-            if _show_debugging_guidance:
-                print(f"{BROWSER_LABEL}: local Chromium-based browser remote debugging is not reachable.", file=sys.stderr)
-                _print_local_debugging_setup(sys.stderr)
-            raise RuntimeError(msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}")
+            if not _open_inspect:
+                raise RuntimeError(
+                    msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}"
+                )
+            _open_browser_inspect()
+            print(
+                f"{BROWSER_LABEL}: click Allow on your browser's inspect page "
+                "(for example chrome://inspect or edge://inspect), and tick the checkbox if shown",
+                file=sys.stderr,
+            )
+            continue
         raise RuntimeError(msg or f"daemon {effective_name} didn't come up -- check {ipc.log_path(effective_name)}")
 
 
@@ -437,6 +445,40 @@ def _chrome_running() -> bool:
         return False
 
 
+def _open_browser_inspect() -> None:
+    import platform
+    import subprocess
+    import webbrowser
+
+    inspect_targets = [
+        ("Google Chrome", "chrome://inspect/#remote-debugging"),
+        ("Microsoft Edge", "edge://inspect/#remote-debugging"),
+    ]
+    if platform.system() == "Darwin":
+        for app_name, url in inspect_targets:
+            try:
+                subprocess.run(
+                    [
+                        "osascript",
+                        "-e",
+                        f'tell application "{app_name}" to activate',
+                        "-e",
+                        f'tell application "{app_name}" to open location "{url}"',
+                    ],
+                    timeout=5,
+                    check=False,
+                )
+                return
+            except Exception:
+                continue
+    for _app_name, url in inspect_targets:
+        try:
+            if webbrowser.open(url, new=2):
+                return
+        except Exception:
+            continue
+
+
 def run_setup() -> int:
     """Interactively attach to the running browser."""
     import sys
@@ -458,33 +500,37 @@ def run_setup() -> int:
             restart_daemon()
     if not endpoint_name and not _chrome_running():
         print("no Chrome/Chromium/Edge/Brave process detected.")
-        print("start a Chromium-based browser with remote debugging, then rerun `flocks browser --setup`.")
-        _print_local_debugging_setup(sys.stdout)
+        print("start Chrome, Chromium, Edge, or Brave and rerun `flocks browser --setup`.")
         return 1
     try:
-        ensure_daemon(wait=_SETUP_ATTACH_WAIT, _show_debugging_guidance=False)
+        ensure_daemon(wait=_SETUP_ATTACH_WAIT, _open_inspect=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
         first_err = str(error)
 
-    needs_manual_debugging_setup = _is_local_chrome_mode() and _needs_chrome_remote_debugging_prompt(first_err)
-    if needs_manual_debugging_setup:
-        print("Chromium-based browser remote debugging is not reachable for the current profile.")
-        _print_local_debugging_setup(sys.stdout)
-        return 1
+    needs_inspect = _is_local_chrome_mode() and _needs_chrome_remote_debugging_prompt(first_err)
+    if needs_inspect:
+        print("browser remote debugging is not enabled on the current profile.")
+        print("opening your browser's inspect page -- in the tab that opens:")
+        print("  1. if the browser shows the profile picker, pick your normal profile;")
+        print("  2. tick 'Discover network targets' and click Allow if prompted.")
+        _open_browser_inspect()
     else:
         print(f"attach failed: {first_err}")
         print("retrying once (the browser may still be starting up)...")
 
     try:
-        ensure_daemon(wait=_SETUP_RETRY_WAIT, _show_debugging_guidance=False)
+        ensure_daemon(wait=_SETUP_RETRY_WAIT, _open_inspect=False)
         print("daemon is up.")
         return 0
     except RuntimeError as error:
         last = str(error)
 
     print(f"setup failed: {last}", file=sys.stderr)
+    if needs_inspect and _needs_chrome_remote_debugging_prompt(last):
+        print("current-profile attach still failed; optional isolated-browser fallback:", file=sys.stderr)
+        _print_local_debugging_setup(sys.stderr)
     print("run `flocks browser --doctor` for diagnostics.", file=sys.stderr)
     return 1
 
@@ -550,7 +596,7 @@ def run_doctor() -> int:
         daemon,
         ""
         if daemon
-        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is not reachable, follow its debug-browser instructions",
+        else "not running; run `flocks browser --setup` to attach; if setup reports remote debugging is disabled, follow its inspect-page prompt",
     )
     row("active browser connections", bool(connections), str(len(connections)))
     for conn in connections:

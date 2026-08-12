@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from flocks.plugin.loader import (
+    CriticalPluginEntrypointFailure,
     DEFAULT_PLUGIN_ROOT,
     ExtensionPoint,
     PluginLoader,
@@ -94,8 +95,10 @@ class TestPluginLoader:
     @pytest.fixture(autouse=True)
     def _reset(self):
         PluginLoader.clear_extension_points()
+        PluginLoader.clear_runtime_critical_entrypoint_failure()
         yield
         PluginLoader.clear_extension_points()
+        PluginLoader.clear_runtime_critical_entrypoint_failure()
 
     def test_register_and_load_agents(self, tmp_path: Path):
         """Simulates the AGENTS extension point with plain dicts."""
@@ -123,6 +126,112 @@ class TestPluginLoader:
 
         assert len(collected) == 1
         assert collected[0]["name"] == "test-agent"
+
+    def test_load_all_marks_a_critical_group_load_import_error(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """A group declaration, not a plugin name, makes a load error critical."""
+
+        class _CriticalEntryPoint:
+            name = "critical-test-plugin"
+
+            @staticmethod
+            def load():
+                raise ImportError("optional package dependency is unavailable")
+
+        class _EntryPoints:
+            @staticmethod
+            def select(*, group: str):
+                if group == "flocks.plugins.critical":
+                    return [_CriticalEntryPoint()]
+                assert group == "flocks.plugins"
+                return []
+
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: _EntryPoints(),
+        )
+        result = PluginLoader.load_all(project_dir=tmp_path)
+
+        assert result.has_critical_entrypoint_failure is True
+        assert result.critical_entrypoint_failures == ["critical-test-plugin"]
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
+
+    def test_load_all_marks_critical_group_failure_without_product_checks(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Critical group semantics do not depend on a product installation."""
+
+        class _CriticalEntryPoint:
+            name = "critical-test-plugin"
+
+            @staticmethod
+            def load():
+                raise ImportError("optional package dependency is unavailable")
+
+        class _EntryPoints:
+            @staticmethod
+            def select(*, group: str):
+                if group == "flocks.plugins.critical":
+                    return [_CriticalEntryPoint()]
+                assert group == "flocks.plugins"
+                return []
+
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: _EntryPoints(),
+        )
+        result = PluginLoader.load_all(project_dir=tmp_path)
+
+        assert result.has_critical_entrypoint_failure is True
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
+
+    def test_load_all_marks_critical_marker_from_regular_plugin(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """A plugin can explicitly declare its own critical startup failure."""
+
+        class _RegularEntryPoint:
+            name = "regular-test-plugin"
+
+            @staticmethod
+            def load():
+                raise CriticalPluginEntrypointFailure("plugin initialization failed")
+
+        class _EntryPoints:
+            @staticmethod
+            def select(*, group: str):
+                if group == "flocks.plugins":
+                    return [_RegularEntryPoint()]
+                assert group == "flocks.plugins.critical"
+                return []
+
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            lambda: _EntryPoints(),
+        )
+        result = PluginLoader.load_all(project_dir=tmp_path)
+
+        assert result.has_critical_entrypoint_failure is True
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
+
+    def test_load_all_marks_metadata_scan_failure_without_product_checks(
+        self, monkeypatch, tmp_path: Path
+    ):
+        """Entry-point metadata failures are critical independently of product."""
+
+        def _scan_error():
+            raise RuntimeError("entrypoint metadata unavailable")
+
+        monkeypatch.setattr(
+            "flocks.plugin.loader.importlib.metadata.entry_points",
+            _scan_error,
+        )
+
+        result = PluginLoader.load_all(project_dir=tmp_path)
+
+        assert result.has_critical_entrypoint_failure is True
+        assert PluginLoader.has_runtime_critical_entrypoint_failure() is True
 
     def test_register_and_load_tools(self, tmp_path: Path):
         """Simulates the TOOLS extension point."""

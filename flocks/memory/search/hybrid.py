@@ -24,7 +24,7 @@ class HybridSearch:
     def __init__(
         self,
         project_id: str,
-        provider_id: str,
+        provider_id: Optional[str],
         embedding_model: str,
         config: MemoryQueryConfig,
     ):
@@ -69,14 +69,41 @@ class HybridSearch:
         })
         
         try:
-            if not self.config.hybrid.enabled:
-                # Vector-only search
-                return await self._vector_search(
+            if self.provider_id is None:
+                results = await self._keyword_search(
                     query=query,
                     max_results=max_results,
-                    min_score=min_score,
                     sources=sources,
                 )
+                return [
+                    result
+                    for result in results
+                    if result.score >= min_score
+                ][:max_results]
+
+            if not self.config.hybrid.enabled:
+                try:
+                    return await self._vector_search(
+                        query=query,
+                        max_results=max_results,
+                        min_score=min_score,
+                        sources=sources,
+                    )
+                except Exception as exc:
+                    log.warn(
+                        "search.vector.failed_fts_fallback",
+                        {"error": str(exc)},
+                    )
+                    results = await self._keyword_search(
+                        query=query,
+                        max_results=max_results,
+                        sources=sources,
+                    )
+                    return [
+                        result
+                        for result in results
+                        if result.score >= min_score
+                    ][:max_results]
             
             # Hybrid search: parallel vector + keyword search
             candidate_limit = max_results * self.config.hybrid.candidate_multiplier
@@ -97,13 +124,31 @@ class HybridSearch:
             )
             
             # Handle exceptions
-            if isinstance(vector_results, Exception):
+            vector_failed = isinstance(vector_results, Exception)
+            keyword_failed = isinstance(keyword_results, Exception)
+            if vector_failed:
                 log.warn("search.vector.failed", {"error": str(vector_results)})
                 vector_results = []
             
-            if isinstance(keyword_results, Exception):
+            if keyword_failed:
                 log.warn("search.keyword.failed", {"error": str(keyword_results)})
                 keyword_results = []
+
+            if vector_failed and keyword_failed:
+                raise RuntimeError("Both vector and keyword search failed")
+
+            if keyword_results and not vector_results:
+                return [
+                    result
+                    for result in keyword_results
+                    if result.score >= min_score
+                ][:max_results]
+            if vector_results and not keyword_results:
+                return [
+                    result
+                    for result in vector_results
+                    if result.score >= min_score
+                ][:max_results]
             
             # Merge results
             merged = self._merge_results(
@@ -140,6 +185,9 @@ class HybridSearch:
     ) -> List[MemorySearchResult]:
         """Execute vector similarity search"""
         try:
+            if self.provider_id is None:
+                raise RuntimeError("Embedding provider is not configured")
+
             # Generate query embedding
             query_embedding = await Provider.embed(
                 text=query,
@@ -230,10 +278,7 @@ class HybridSearch:
             kw_range = kw_max - kw_min
             normalised_keyword: List[tuple[MemorySearchResult, float]] = []
             for r in keyword_results:
-                # When all scores are identical (including single-result case),
-                # use 0.5 as a neutral midpoint instead of 1.0 to avoid
-                # inflating keyword importance in the weighted combination.
-                norm = (r.score - kw_min) / kw_range if kw_range > 0 else 0.5
+                norm = (r.score - kw_min) / kw_range if kw_range > 0 else 1.0
                 normalised_keyword.append((r, norm))
         else:
             normalised_keyword = []
@@ -301,7 +346,7 @@ def decorate_citations(
     
     decorated = []
     for result in results:
-        citation = format_citation(result)
+        citation = result.citation or format_citation(result)
         decorated.append(result.model_copy(update={"citation": citation}))
     
     return decorated

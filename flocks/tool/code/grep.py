@@ -257,24 +257,16 @@ async def grep_tool(
         )
     
     try:
-        resolution = await resolve_tool_path(ctx, path or ".")
+        resolution = await resolve_tool_path(
+            ctx,
+            path or ".",
+            allow_host_memory=True,
+        )
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=pattern)
 
     search_path = resolution.resolved_path
 
-    # Request permission
-    await ctx.ask(
-        permission="grep",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={
-            "pattern": pattern,
-            "path": search_path,
-            "include": include
-        }
-    )
-    
     # Find ripgrep
     rg_path = find_ripgrep()
     

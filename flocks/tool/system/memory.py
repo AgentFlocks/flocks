@@ -1,8 +1,4 @@
-"""
-Memory tools for agents.
-
-Expose memory_search/memory_get/memory_write via ToolRegistry.
-"""
+"""Persistent Memory search for agents."""
 
 from typing import Dict, List, Optional
 
@@ -43,7 +39,12 @@ async def _get_session_memory(ctx: ToolContext) -> tuple[Optional[SessionMemory]
     memory = SessionMemory(
         session_id=session.id,
         project_id=session.project_id,
-        workspace_dir=Instance.get_directory() or session.directory,
+        workspace_dir=(
+            session.directory
+            or ctx.extra.get("workspace_dir")
+            or Instance.get_directory()
+            or "."
+        ),
         enabled=session.memory_enabled,
     )
 
@@ -65,7 +66,10 @@ def evict_session_memory(session_id: str) -> None:
 
 @ToolRegistry.register_function(
     name="memory_search",
-    description="Search project memory using a natural language query.",
+    description=(
+        "Search USER, Global, Daily, and current Project Memory, plus optional "
+        "readable Session History from the current project."
+    ),
     category=ToolCategory.SEARCH,
     parameters=[
         ToolParameter(
@@ -141,110 +145,3 @@ async def memory_search_tool(
     except Exception as e:
         log.error("memory_search.failed", {"error": str(e)})
         return ToolResult(success=False, error=f"Memory search failed: {str(e)}")
-
-
-@ToolRegistry.register_function(
-    name="memory_get",
-    description="Retrieve memory file content by path, optionally filtered by line range.",
-    category=ToolCategory.FILE,
-    parameters=[
-        ToolParameter(
-            name="path",
-            type=ParameterType.STRING,
-            description="Memory file path relative to memory root.",
-            required=True,
-        ),
-        ToolParameter(
-            name="from_line",
-            type=ParameterType.INTEGER,
-            description="Starting line number (1-based).",
-            required=False,
-        ),
-        ToolParameter(
-            name="lines",
-            type=ParameterType.INTEGER,
-            description="Number of lines to return.",
-            required=False,
-        ),
-    ],
-)
-async def memory_get_tool(
-    ctx: ToolContext,
-    path: str,
-    from_line: Optional[int] = None,
-    lines: Optional[int] = None,
-) -> ToolResult:
-    memory, err = await _get_session_memory(ctx)
-    if err:
-        return err
-
-    manager = memory.get_manager()
-    if not manager:
-        return ToolResult(success=False, error="Memory manager not available")
-
-    try:
-        output = await manager.read_file(
-            rel_path=path,
-            from_line=from_line,
-            lines=lines,
-        )
-        return ToolResult(success=True, output=output)
-    except FileNotFoundError:
-        return ToolResult(success=False, error=f"File not found: {path}")
-    except Exception as e:
-        log.error("memory_get.failed", {"path": path, "error": str(e)})
-        return ToolResult(success=False, error=f"Memory get failed: {str(e)}")
-
-
-@ToolRegistry.register_function(
-    name="memory_write",
-    description="Write content to memory files for long-term recall.",
-    category=ToolCategory.FILE,
-    parameters=[
-        ToolParameter(
-            name="content",
-            type=ParameterType.STRING,
-            description="Content to write to memory.",
-            required=True,
-        ),
-        ToolParameter(
-            name="path",
-            type=ParameterType.STRING,
-            description="Target path relative to memory root (default: YYYY-MM-DD.md).",
-            required=False,
-        ),
-        ToolParameter(
-            name="append",
-            type=ParameterType.BOOLEAN,
-            description="Append to existing file (default: true).",
-            required=False,
-        ),
-    ],
-)
-async def memory_write_tool(
-    ctx: ToolContext,
-    content: str,
-    path: Optional[str] = None,
-    append: Optional[bool] = True,
-) -> ToolResult:
-    memory, err = await _get_session_memory(ctx)
-    if err:
-        return err
-
-    try:
-        written_path = await memory.write(
-            content=content,
-            path=path,
-            append=bool(append),
-        )
-        return ToolResult(
-            success=True,
-            output={
-                "path": written_path,
-                "length": len(content),
-                "append": bool(append),
-            },
-        )
-    except Exception as e:
-        log.error("memory_write.failed", {"error": str(e)})
-        return ToolResult(success=False, error=f"Memory write failed: {str(e)}")

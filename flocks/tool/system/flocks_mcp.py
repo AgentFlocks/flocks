@@ -46,6 +46,7 @@ log = Log.create(service="tool.flocks_mcp")
             type=ParameterType.STRING,
             description="Action to perform: list | add | remove | connect | disconnect",
             required=True,
+            enum=["list", "add", "remove", "connect", "disconnect"],
         ),
         ToolParameter(
             name="name",
@@ -68,6 +69,46 @@ log = Log.create(service="tool.flocks_mcp")
                 "Use {secret:key_name} for sensitive values in environment/headers."
             ),
             required=False,
+            json_schema={
+                "type": "object",
+                "properties": {
+                    "type": {
+                        "type": "string",
+                        "enum": ["local", "remote", "stdio", "sse"],
+                    },
+                    "url": {"type": "string"},
+                    "command": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "environment": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "env": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "headers": {
+                        "type": "object",
+                        "additionalProperties": {"type": "string"},
+                    },
+                    "auth": {"type": "object"},
+                    "cwd": {"type": "string"},
+                    "enabled": {"type": "boolean"},
+                    "timeout": {"type": "number"},
+                    "transport": {"type": "string"},
+                    "auto_refresh": {"type": "boolean"},
+                    "refresh_interval": {"type": "integer"},
+                    "metadata": {"type": "object"},
+                    "retry": {"type": "object"},
+                },
+                "additionalProperties": False,
+            },
         ),
     ],
 )

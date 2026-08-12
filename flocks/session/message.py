@@ -484,11 +484,12 @@ class Message:
 
         async with _session_locks.get(session_id):
             if persist and session_id in cls._parts_cache:
-                if cls._parts_storage_format.get(session_id) == "legacy":
-                    await cls._persist_parts(session_id)
-                else:
-                    for message_id in list(cls._parts_cache[session_id]):
-                        await cls._persist_parts(session_id, message_id=message_id)
+                for message_id in list(cls._parts_cache[session_id]):
+                    await cls._persist_indexed_state(
+                        session_id,
+                        message_id,
+                        include_parts=True,
+                    )
 
     @classmethod
     def _cache_token(cls, session_id: str) -> tuple[int, int]:
@@ -647,7 +648,10 @@ class Message:
             try:
                 await asyncio.sleep(cls._PARTS_PERSIST_DEBOUNCE_MS / 1000)
                 async with _session_locks.get(session_id):
-                    await cls._persist_parts(session_id, message_id=message_id)
+                    await cls._persist_parts(
+                        session_id,
+                        message_id=message_id,
+                    )
             except asyncio.CancelledError:
                 pass
             except Exception as exc:
@@ -1369,6 +1373,117 @@ class Message:
             await Storage.delete(cls._parts_item_key(session_id, stale_mid))
             serialized.pop(stale_mid, None)
             persisted_mids.discard(stale_mid)
+
+    @classmethod
+    async def _persist_indexed_state(
+        cls,
+        session_id: str,
+        message_id: str,
+        *,
+        include_messages: bool = False,
+        include_parts: bool = False,
+        delete_message: bool = False,
+    ) -> None:
+        """Persist canonical message data and its derived FTS row atomically."""
+        set_entries = []
+        delete_keys = []
+
+        if include_messages:
+            messages = cls._messages_cache.get(session_id, [])
+            serialized_messages = []
+            for index, message in enumerate(messages):
+                normalized = cls._normalize_assistant_message(message)
+                if normalized is not message:
+                    messages[index] = normalized
+                serialized_messages.append(normalized.model_dump())
+            set_entries.append(
+                (f"{cls._MESSAGE_PREFIX}:{session_id}", serialized_messages, "json")
+            )
+
+        storage_format = cls._parts_storage_format.setdefault(
+            session_id,
+            "per_message",
+        )
+        if include_parts:
+            all_parts = cls._parts_cache.get(session_id, {})
+            serialized = cls._parts_serialized_cache.setdefault(session_id, {})
+            if storage_format == "legacy":
+                serialized = {
+                    mid: cls._serialize_message_parts(message_parts)
+                    for mid, message_parts in all_parts.items()
+                }
+                cls._parts_serialized_cache[session_id] = serialized
+                set_entries.append(
+                    (
+                        cls._parts_blob_key(session_id),
+                        serialized,
+                        "message_parts",
+                    )
+                )
+            elif delete_message:
+                delete_keys.append(cls._parts_item_key(session_id, message_id))
+            else:
+                serialized_one = cls._serialize_message_parts(
+                    all_parts.get(message_id, [])
+                )
+                serialized[message_id] = serialized_one
+                set_entries.append(
+                    (
+                        cls._parts_item_key(session_id, message_id),
+                        serialized_one,
+                        "message_part",
+                    )
+                )
+
+        from flocks.session.session import Session
+        from flocks.storage.session_search import (
+            delete_message_document,
+            upsert_session_document,
+        )
+
+        session = await Session.get_by_id_unfiltered(session_id)
+        message = next(
+            (
+                item
+                for item in cls._messages_cache.get(session_id, [])
+                if item.id == message_id
+            ),
+            None,
+        )
+        parts = list(
+            cls._parts_cache.get(session_id, {}).get(message_id, [])
+        )
+
+        async def _sync_search_index(db) -> None:
+            if not Storage.session_search_available():
+                return
+            if delete_message or message is None:
+                await delete_message_document(db, message_id)
+                return
+            if session is None:
+                return
+            await upsert_session_document(
+                db,
+                project_id=session.project_id,
+                message=message,
+                parts=parts,
+            )
+
+        await Storage.mutate_many(
+            set_entries=set_entries,
+            delete_keys=delete_keys,
+            transaction_hook=_sync_search_index,
+        )
+
+        if include_parts:
+            persisted_mids = cls._parts_persisted_mids.setdefault(
+                session_id,
+                set(),
+            )
+            if delete_message:
+                persisted_mids.discard(message_id)
+            else:
+                persisted_mids.add(message_id)
     
     @classmethod
     async def create(
@@ -1476,8 +1591,12 @@ class Message:
             cls._parts_cache[session_id][message.id].append(part)
             
             # Persist to storage
-            await cls._persist_messages(session_id)
-            await cls._persist_parts(session_id)
+            await cls._persist_indexed_state(
+                session_id,
+                message.id,
+                include_messages=True,
+                include_parts=True,
+            )
             
             log.info("message.created", {
                 "id": message.id,
@@ -1661,7 +1780,11 @@ class Message:
                 cls._schedule_parts_flush(session_id, message_id=message_id)
             else:
                 cls._cancel_parts_flush_task(session_id)
-                await cls._persist_parts(session_id, message_id=message_id)
+                await cls._persist_indexed_state(
+                    session_id,
+                    message_id,
+                    include_parts=True,
+                )
             
             log.debug("message.part.stored" if not updated else "message.part.updated", {
                 "session_id": session_id,
@@ -1714,7 +1837,11 @@ class Message:
                 messages.append(message_info)
                 cls._rebuild_id_index(session_id)
 
-            await cls._persist_messages(session_id)
+            await cls._persist_indexed_state(
+                session_id,
+                message_info.id,
+                include_messages=True,
+            )
 
         log.debug("message.upserted", {
             "id": message_info.id,
@@ -1919,7 +2046,13 @@ class Message:
                 had_pending_parts_flush = session_id in cls._parts_flush_tasks
                 cls._cancel_parts_flush_task(session_id)
                 try:
-                    await cls._persist_messages(session_id)
+                    await cls._persist_indexed_state(
+                        session_id,
+                        message_id,
+                        include_messages=True,
+                        include_parts=True,
+                        delete_message=True,
+                    )
                 except BaseException:
                     # Message metadata is the deletion commit point. Restore
                     # every in-memory index/cache if it was not persisted so a
@@ -1945,23 +2078,6 @@ class Message:
                         )
                     raise
 
-                try:
-                    if cls._parts_storage_format.get(session_id) == "legacy":
-                        await cls._persist_parts(session_id)
-                    else:
-                        await Storage.delete(cls._parts_item_key(session_id, message_id))
-                        cls._parts_persisted_mids.setdefault(session_id, set()).discard(
-                            message_id
-                        )
-                except Exception as exc:
-                    # Metadata deletion has committed. Orphaned parts are not
-                    # user-visible and can be cleaned later; restoring the
-                    # message here would make cache and durable metadata diverge.
-                    log.warn("message.delete.parts_cleanup_failed", {
-                        "session_id": session_id,
-                        "message_id": message_id,
-                        "error": str(exc),
-                    })
                 log.info("message.deleted", {"id": message_id, "session_id": session_id})
                 return True
             return False
@@ -2022,9 +2138,21 @@ class Message:
             cls._parts_fully_loaded.add(session_id)
             cls._cancel_parts_flush_task(session_id)
 
-            await cls._persist_messages(session_id)
-            await Storage.clear(prefix=cls._parts_item_prefix(session_id))
-            await Storage.delete(cls._parts_blob_key(session_id))
+            from flocks.storage.session_search import delete_session_documents
+
+            async def _delete_search_index(db) -> None:
+                if not Storage.session_search_available():
+                    return
+                await delete_session_documents(db, [session_id])
+
+            await Storage.mutate_many(
+                set_entries=[
+                    (f"{cls._MESSAGE_PREFIX}:{session_id}", [], "json"),
+                ],
+                delete_keys=[cls._parts_blob_key(session_id)],
+                delete_prefixes=[cls._parts_item_prefix(session_id)],
+                transaction_hook=_delete_search_index,
+            )
 
             log.info("messages.cleared", {
                 "session_id": session_id,
@@ -2355,7 +2483,11 @@ class Message:
             updated = message.model_copy(update=patch)
             messages[msg_index] = updated
             
-            await cls._persist_messages(session_id)
+            await cls._persist_indexed_state(
+                session_id,
+                message_id,
+                include_messages=True,
+            )
             
             log.info("message.updated", {
                 "id": message_id,
@@ -2397,7 +2529,11 @@ class Message:
             cls._touch_parts_revision(session_id, message_id)
             
             cls._cancel_parts_flush_task(session_id)
-            await cls._persist_parts(session_id, message_id=message_id)
+            await cls._persist_indexed_state(
+                session_id,
+                message_id,
+                include_parts=True,
+            )
             
             log.info("message.part_added", {
                 "message_id": message_id,
@@ -2440,7 +2576,11 @@ class Message:
                     cls._touch_parts_revision(session_id, message_id)
                     
                     cls._cancel_parts_flush_task(session_id)
-                    await cls._persist_parts(session_id, message_id=message_id)
+                    await cls._persist_indexed_state(
+                        session_id,
+                        message_id,
+                        include_parts=True,
+                    )
                     
                     log.info("message.part_updated", {
                         "message_id": message_id,
@@ -2475,7 +2615,11 @@ class Message:
                     cls._touch_parts_revision(session_id, message_id)
                     
                     cls._cancel_parts_flush_task(session_id)
-                    await cls._persist_parts(session_id, message_id=message_id)
+                    await cls._persist_indexed_state(
+                        session_id,
+                        message_id,
+                        include_parts=True,
+                    )
                     
                     log.info("message.part_removed", {
                         "message_id": message_id,

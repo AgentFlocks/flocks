@@ -251,7 +251,10 @@ async def _resolve_target(
             type=ParameterType.BOOLEAN,
             required=False,
             default=False,
-            description="Resolve and return session_id/channel_type without sending. Use before schedule_task_create.",
+            description=(
+                "Resolve and return session_id/channel_type without sending. Use before "
+                "schedule_task(action='create', resource_type='scheduler')."
+            ),
         ),
     ],
 )

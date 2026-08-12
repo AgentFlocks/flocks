@@ -611,6 +611,7 @@ function SyslogTriggerFields({
             <option value="auto">auto</option>
             <option value="rfc3164">rfc3164</option>
             <option value="rfc5424">rfc5424</option>
+            <option value="se">se</option>
           </Select>
         </Field>
       </div>

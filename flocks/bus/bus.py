@@ -95,15 +95,6 @@ class Bus:
         # Create payload
         payload = EventPayload(definition.type, properties)
 
-        # Run hook pipeline (event stage)
-        try:
-            from flocks.hooks.pipeline import HookPipeline
-            ctx = await HookPipeline.run_event(payload.to_dict())
-            if ctx and isinstance(ctx.input, dict) and "type" in ctx.input and "properties" in ctx.input:
-                payload = EventPayload(ctx.input["type"], ctx.input["properties"])
-        except Exception as exc:
-            log.error("bus.hook.error", {"type": definition.type, "error": str(exc)})
-        
         log.info("bus.publishing", {"type": definition.type})
         
         # Collect callbacks for this event type and wildcard ("*")

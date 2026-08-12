@@ -9,6 +9,10 @@ from starlette.responses import StreamingResponse
 from starlette.routing import Route
 from starlette.types import ASGIApp, Message, Receive, Scope
 
+from flocks.hooks.execution import (
+    current_execution_context,
+    current_execution_lifecycle_scope,
+)
 from flocks.server import app as server_app
 
 
@@ -52,6 +56,41 @@ async def _run_auth_middleware(
         receive,
         send,
     )
+
+
+@pytest.mark.asyncio
+async def test_auth_guard_keeps_ingress_context_and_scope_for_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    observed: dict[str, object] = {}
+
+    async def apply_auth(request: Request):
+        request.state.extension_context = {"workflow_transfer": "opaque-pro-token"}
+        observed["scope_during_auth"] = current_execution_lifecycle_scope()
+        return None, object(), None
+
+    async def endpoint(_scope, _receive, _send) -> None:
+        observed["context"] = current_execution_context()
+        observed["scope_during_endpoint"] = current_execution_lifecycle_scope()
+
+    async def no_op_hook(_request: Request, _payload: dict) -> None:
+        return None
+
+    async def receive() -> Message:
+        return {"type": "http.disconnect"}
+
+    monkeypatch.setattr(server_app, "_run_http_middleware_hooks", no_op_hook)
+    monkeypatch.setattr(server_app, "apply_auth_for_request", apply_auth)
+    monkeypatch.setattr(server_app, "clear_auth_context", lambda _token: None)
+
+    await server_app._AuthGuardMiddleware(endpoint)(
+        _http_scope("/api/session", method="POST"),
+        receive,
+        lambda _message: None,
+    )
+
+    assert observed["context"] == {"workflow_transfer": "opaque-pro-token"}
+    assert observed["scope_during_auth"] is observed["scope_during_endpoint"]
 
 
 def test_production_http_middleware_is_pure_asgi_and_keeps_order() -> None:

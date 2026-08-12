@@ -7,7 +7,8 @@ from __future__ import annotations
 import hmac
 import os
 import re
-from typing import Optional
+from collections.abc import Awaitable, Callable, Mapping
+from typing import Any, Optional
 
 from fastapi import HTTPException, Request, Response, status
 from starlette.requests import HTTPConnection
@@ -23,6 +24,21 @@ from flocks.security import get_secret_manager
 
 SESSION_COOKIE_NAME = "flocks_session"
 API_TOKEN_SECRET_ID = "server_api_token"
+
+AuthContextAdapter = Callable[
+    [HTTPConnection, AuthUser | None],
+    Awaitable[Mapping[str, Any] | None],
+]
+_auth_context_adapters: dict[str, AuthContextAdapter] = {}
+
+
+def register_auth_context_adapter(name: str, adapter: AuthContextAdapter) -> None:
+    """Register an optional post-auth extension-context adapter."""
+    _auth_context_adapters[name] = adapter
+
+
+def unregister_auth_context_adapter(name: str) -> None:
+    _auth_context_adapters.pop(name, None)
 
 # Paths that never require auth. Everything else is protected by default.
 PUBLIC_PATHS = frozenset({
@@ -242,6 +258,27 @@ def _build_api_token_user() -> AuthUser:
 
 
 async def apply_auth_for_request(request: HTTPConnection):
+    """Resolve auth for the HTTP request."""
+    auth_token = None
+
+    try:
+        result = await _apply_auth_for_request(request)
+        _blocked, auth_token, user = result
+        extension_context: dict[str, Any] = {}
+        for adapter in _auth_context_adapters.values():
+            supplied = await adapter(request, user)
+            if isinstance(supplied, Mapping):
+                extension_context.update(supplied)
+        if extension_context:
+            request.state.extension_context = extension_context
+        return result
+    except BaseException:
+        if auth_token is not None:
+            clear_auth_context(auth_token)
+        raise
+
+
+async def _apply_auth_for_request(request: HTTPConnection):
     """
     Resolve user from cookie and bind context var.
     Returns (response_if_blocked, token, user).
@@ -270,13 +307,13 @@ async def apply_auth_for_request(request: HTTPConnection):
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
 
         auth_user = user.to_auth_user()
-        request.state.auth_user = auth_user
-        token = set_current_auth_user(auth_user)
         if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="当前账号必须先修改密码后才能继续使用",
             )
+        request.state.auth_user = auth_user
+        token = set_current_auth_user(auth_user)
         return None, token, auth_user
 
     # Non-browser clients must authenticate with an API token because
@@ -321,13 +358,13 @@ async def apply_auth_for_request(request: HTTPConnection):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="登录已过期，请重新登录")
 
     auth_user = user.to_auth_user()
-    request.state.auth_user = auth_user
-    token = set_current_auth_user(auth_user)
     if auth_user.must_reset_password and not password_reset_exempt(request.url.path):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="当前账号必须先修改密码后才能继续使用",
         )
+    request.state.auth_user = auth_user
+    token = set_current_auth_user(auth_user)
     return None, token, auth_user
 
 

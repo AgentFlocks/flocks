@@ -154,24 +154,17 @@ async def glob_tool(
         ToolResult with matching files
     """
     try:
-        resolution = await resolve_tool_path(ctx, path or ".")
+        resolution = await resolve_tool_path(
+            ctx,
+            path or ".",
+            allow_host_memory=True,
+        )
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=path or pattern)
 
     search_path = resolution.resolved_path
     title = resolution.display_path
 
-    # Request permission
-    await ctx.ask(
-        permission="glob",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={
-            "pattern": pattern,
-            "path": search_path,
-        }
-    )
-    
     # Find files
     rg_path = find_ripgrep()
     files: List[Dict[str, Any]] = []

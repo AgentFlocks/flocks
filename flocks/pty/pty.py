@@ -12,7 +12,6 @@ import asyncio
 import os
 import uuid
 import subprocess
-import sys
 
 from flocks.utils.log import Log
 from flocks.utils.id import Identifier
@@ -24,37 +23,7 @@ log = Log.create(service="pty")
 # Buffer configuration matching Flocks
 BUFFER_LIMIT = 1024 * 1024 * 2  # 2MB
 BUFFER_CHUNK = 64 * 1024  # 64KB
-_ALLOWED_SHELL_NAMES = {
-    "ash",
-    "bash",
-    "csh",
-    "cmd",
-    "cmd.exe",
-    "dash",
-    "fish",
-    "ksh",
-    "ksh93",
-    "mksh",
-    "powershell",
-    "powershell.exe",
-    "pwsh",
-    "pwsh.exe",
-    "sh",
-    "tcsh",
-    "zsh",
-}
-_ALLOWED_SHELL_ARGS = {"-i", "-l", "--login"}
-_LOGIN_FLAG_SHELL_NAMES = {"bash", "fish", "ksh", "ksh93", "mksh", "sh", "zsh"}
-_BLOCKED_PTY_ENV_NAMES = {
-    "BASH_ENV",
-    "ENV",
-    "LD_LIBRARY_PATH",
-    "LD_PRELOAD",
-    "PROMPT_COMMAND",
-    "PYTHONSTARTUP",
-    "ZDOTDIR",
-}
-_BLOCKED_PTY_ENV_PREFIXES = ("DYLD_",)
+_LOGIN_CAPABLE_SHELL_NAMES = {"bash", "fish", "ksh", "ksh93", "mksh", "sh", "zsh"}
 
 
 class PtyStatus(str, Enum):
@@ -132,41 +101,23 @@ class Pty:
         return "sh"
 
     @classmethod
-    def _validate_interactive_shell(cls, command: str, args: List[str]) -> None:
-        """Allow PTY creation only for interactive shell sessions."""
-        if not command or "\x00" in command:
+    def _validate_process_arguments(cls, command: str, args: List[str]) -> None:
+        """Reject values that cannot be passed safely to process creation."""
+        if not isinstance(command, str) or not command or "\x00" in command:
             raise ValueError("Invalid PTY command")
-
-        shell_name = os.path.basename(command).lower()
-        if shell_name not in _ALLOWED_SHELL_NAMES:
-            raise ValueError("PTY command must be an approved interactive shell")
-
         for arg in args:
-            if not isinstance(arg, str) or "\x00" in arg or arg not in _ALLOWED_SHELL_ARGS:
-                raise ValueError("PTY command arguments are restricted to interactive shell flags")
-
-    @classmethod
-    def _is_blocked_env_name(cls, name: str) -> bool:
-        normalized = name.upper()
-        return normalized in _BLOCKED_PTY_ENV_NAMES or any(
-            normalized.startswith(prefix) for prefix in _BLOCKED_PTY_ENV_PREFIXES
-        )
+            if not isinstance(arg, str) or "\x00" in arg:
+                raise ValueError("Invalid PTY command argument")
 
     @classmethod
     def _prepare_environment(cls, input_env: Optional[Dict[str, str]]) -> Dict[str, str]:
-        """Build a PTY environment without shell/linker startup injection hooks."""
-        env = {
-            key: value
-            for key, value in os.environ.items()
-            if not cls._is_blocked_env_name(key)
-        }
+        """Build an environment that the platform can pass to the process."""
+        env = dict(os.environ)
 
         if input_env:
             for key, value in input_env.items():
                 if not isinstance(key, str) or not key or "\x00" in key:
                     raise ValueError("Invalid PTY environment variable name")
-                if cls._is_blocked_env_name(key):
-                    raise ValueError(f"PTY environment variable is not allowed: {key}")
                 if not isinstance(value, str) or "\x00" in value:
                     raise ValueError(f"Invalid PTY environment variable value: {key}")
                 env[key] = value
@@ -186,25 +137,73 @@ class Pty:
         return session.info if session else None
     
     @classmethod
-    async def create(cls, input_data: CreateInput) -> PtyInfo:
-        """
-        Create a new PTY session - matches Flocks's Pty.create()
-        
-        Args:
-            input_data: Session creation parameters
-            
-        Returns:
-            Created session info
-        """
+    async def create(
+        cls,
+        input_data: CreateInput,
+        *,
+        use_action_lifecycle: bool = True,
+    ) -> PtyInfo:
+        """Create a PTY session, optionally applying execution policy hooks."""
+        if not use_action_lifecycle:
+            return await cls._create(input_data)
+
+        command = input_data.command or cls._get_shell()
+        args = list(input_data.args or [])
+        cls._validate_process_arguments(command, args)
+        normalized_input = {
+            **input_data.model_dump(),
+            "command": command,
+            "args": args,
+        }
+        from flocks.session.tool_execution import (
+            build_session_tool_execution_payload,
+            run_tool_execution_lifecycle,
+        )
+        payload = await build_session_tool_execution_payload(
+            session_id="pty",
+            message_id=Identifier.create("pty"),
+            agent="pty",
+            tool_name="pty.open",
+            tool_input=input_data.model_dump(),
+            validated_input=normalized_input,
+            tool_schema=CreateInput.model_json_schema(),
+            tool_context_extra={
+                "tool_source": "pty",
+                "tool_category": "command",
+                "workspace_dir": input_data.cwd or os.getcwd(),
+            },
+        )
+
+        async def _patched_effect(patch: Dict[str, Any]) -> PtyInfo:
+            patched = CreateInput.model_validate({**normalized_input, **patch})
+            cls._validate_process_arguments(
+                patched.command or cls._get_shell(),
+                list(patched.args or []),
+            )
+            return await cls._create(patched)
+
+        return await run_tool_execution_lifecycle(
+            payload,
+            lambda: cls._create(input_data),
+            patched_effect=_patched_effect,
+        )
+
+    @classmethod
+    async def _create(cls, input_data: CreateInput) -> PtyInfo:
+        """Create the process after the public lifecycle adapter allows it."""
         pty_id = Identifier.create("pty")
         command = input_data.command or cls._get_shell()
         args = list(input_data.args) if input_data.args else []
-        cls._validate_interactive_shell(command, args)
+        cls._validate_process_arguments(command, args)
         
-        # Add login flag only for shells known to accept it.  Some approved
-        # POSIX-compatible shells (e.g. dash/ash) reject ``-l``.
+        # Add the login flag only for shells known to accept it. Some
+        # POSIX-compatible shells (for example dash/ash) reject ``-l``.
         shell_name = os.path.basename(command).lower()
-        if shell_name in _LOGIN_FLAG_SHELL_NAMES and "-l" not in args and "--login" not in args:
+        if (
+            shell_name in _LOGIN_CAPABLE_SHELL_NAMES
+            and "-l" not in args
+            and "--login" not in args
+        ):
             args.append("-l")
         
         cwd = input_data.cwd or os.getcwd()
@@ -403,14 +402,63 @@ class Pty:
                 session.process.setwinsize(rows, cols)
     
     @classmethod
-    def write(cls, pty_id: str, data: str) -> None:
-        """
-        Write data to PTY - matches Flocks's Pty.write()
-        
-        Args:
-            pty_id: Session ID
-            data: Data to write
-        """
+    async def write(
+        cls,
+        pty_id: str,
+        data: str,
+        *,
+        use_action_lifecycle: bool = True,
+    ) -> None:
+        """Write terminal bytes, optionally applying execution policy hooks."""
+        if not use_action_lifecycle:
+            await cls._write_async(pty_id, data)
+            return
+
+        from flocks.session.tool_execution import (
+            build_session_tool_execution_payload,
+            run_tool_execution_lifecycle,
+        )
+        payload = await build_session_tool_execution_payload(
+            session_id="pty",
+            message_id=Identifier.create("pty"),
+            agent="pty",
+            tool_name="pty.input",
+            tool_input={"data": data, "pty_id": pty_id},
+            validated_input={"data": data, "pty_id": pty_id},
+            tool_schema={
+                "type": "object",
+                "properties": {
+                    "data": {"type": "string"},
+                    "pty_id": {"type": "string"},
+                },
+                "required": ["data", "pty_id"],
+            },
+            tool_context_extra={
+                "tool_source": "pty",
+                "tool_category": "command",
+            },
+        )
+
+        async def _patched_effect(patch: Dict[str, Any]) -> None:
+            patched_data = patch.get("data", data)
+            if not isinstance(patched_data, str):
+                raise ValueError("PTY hook patch must contain string data")
+            await cls._write_async(pty_id, patched_data)
+
+        await run_tool_execution_lifecycle(
+            payload,
+            lambda: cls._write_async(pty_id, data),
+            patched_effect=_patched_effect,
+        )
+
+    @classmethod
+    async def _write_async(cls, pty_id: str, data: str) -> None:
+        """Adapt the synchronous process write to the async lifecycle API."""
+        cls._write(pty_id, data)
+
+    @classmethod
+    def _write(cls, pty_id: str, data: str) -> None:
+        """Write raw data only after the public lifecycle adapter allows it."""
         session = cls._sessions.get(pty_id)
         if session and session.info.status == PtyStatus.RUNNING:
             try:
@@ -424,7 +472,13 @@ class Pty:
                 log.error("pty.write.error", {"id": pty_id, "error": str(e)})
     
     @classmethod
-    async def connect(cls, pty_id: str, ws: Any) -> Optional[Dict[str, Callable]]:
+    async def connect(
+        cls,
+        pty_id: str,
+        ws: Any,
+        *,
+        use_action_lifecycle: bool = True,
+    ) -> Optional[Dict[str, Callable]]:
         """
         Connect WebSocket to PTY session - matches Flocks's Pty.connect()
         
@@ -457,9 +511,13 @@ class Pty:
                 await ws.close()
                 return None
         
-        def on_message(message: str) -> None:
+        async def on_message(message: str) -> None:
             """Handle incoming message from WebSocket"""
-            cls.write(pty_id, message)
+            await cls.write(
+                pty_id,
+                message,
+                use_action_lifecycle=use_action_lifecycle,
+            )
         
         def on_close() -> None:
             """Handle WebSocket close"""

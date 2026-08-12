@@ -197,7 +197,11 @@ async def read_tool(
         ToolResult with file contents
     """
     try:
-        resolution = await resolve_tool_path(ctx, filePath)
+        resolution = await resolve_tool_path(
+            ctx,
+            filePath,
+            allow_host_memory=True,
+        )
     except ValueError as exc:
         return ToolResult(
             success=False,
@@ -207,14 +211,6 @@ async def read_tool(
 
     filepath = resolution.resolved_path
     title = resolution.display_path
-    
-    # Request permission
-    await ctx.ask(
-        permission="read",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={}
-    )
     
     # Check file exists
     if not os.path.exists(filepath):

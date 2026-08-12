@@ -25,6 +25,7 @@ from flocks.config.config import Config
 
 T = TypeVar("T", bound=BaseModel)
 DDLScript = str | Callable[[aiosqlite.Connection], Awaitable[None]]
+TransactionHook = Callable[[aiosqlite.Connection], Awaitable[None]]
 R = TypeVar("R")
 
 
@@ -72,6 +73,7 @@ class Storage:
     _log = Log.create(service="storage")
     _db_path: Optional[Path] = None
     _initialized = False
+    _session_search_available = True
     _db_identity: Optional[Tuple[int, int]] = None
     # PID of the process that called ``init()``.  Used by ``_ensure_init`` to
     # detect ``fork()`` (uvicorn ``--reload`` / multiprocessing workers) and
@@ -150,6 +152,11 @@ class Storage:
             return cls._db_path
         data_dir = Config.get_data_path()
         return data_dir / "flocks.db"
+
+    @classmethod
+    def session_search_available(cls) -> bool:
+        """Return whether Session FTS is supported by the active SQLite runtime."""
+        return cls._session_search_available
 
     @staticmethod
     def _file_identity(db_path: Path) -> Optional[Tuple[int, int]]:
@@ -1354,6 +1361,20 @@ class Storage:
         except Exception as e:
             cls._log.warn("storage.vector.init.failed", {"error": str(e)})
 
+        from flocks.storage.session_search import ensure_session_search_tables
+
+        cls._session_search_available = await ensure_session_search_tables(
+            cls._db_path
+        )
+        if not cls._session_search_available:
+            cls._log.warn(
+                "storage.session_search.disabled",
+                {
+                    "reason": "SQLite runtime does not support FTS5",
+                    "db_path": str(cls._db_path),
+                },
+            )
+
         # Create model management tables
         await cls._create_model_management_tables()
 
@@ -1555,12 +1576,22 @@ class Storage:
         set_entries: Sequence[Tuple[str, Any, str]] = (),
         delete_keys: Sequence[str] = (),
         delete_prefixes: Sequence[str] = (),
+        transaction_hook: Optional[TransactionHook] = None,
     ) -> int:
-        """Apply related set/delete operations in one SQLite transaction."""
+        """Apply related set/delete operations in one SQLite transaction.
+
+        ``transaction_hook`` is reserved for derived relational indexes that
+        must commit atomically with their canonical KV records.
+        """
         entries = list(set_entries)
         keys_to_delete = list(delete_keys)
         prefixes_to_delete = list(delete_prefixes)
-        if not entries and not keys_to_delete and not prefixes_to_delete:
+        if (
+            not entries
+            and not keys_to_delete
+            and not prefixes_to_delete
+            and transaction_hook is None
+        ):
             return 0
 
         routing_paths = {
@@ -1568,6 +1599,8 @@ class Storage:
             *(cls.route_db_path_for_key(key) for key in keys_to_delete),
             *(cls.route_db_path_for_prefix(prefix) for prefix in prefixes_to_delete),
         }
+        if not routing_paths:
+            routing_paths = {cls.get_db_path()}
         if len(routing_paths) != 1:
             raise ValueError("Storage.mutate_many operations must target the same database")
 
@@ -1614,6 +1647,8 @@ class Storage:
                             (cls._like_prefix_pattern(prefix),),
                         )
                         deleted += max(cursor.rowcount, 0)
+                    if transaction_hook is not None:
+                        await transaction_hook(db)
                     await db.commit()
                     return deleted
                 except BaseException:

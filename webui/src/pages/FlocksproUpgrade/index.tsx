@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowDownCircle, ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, X, XCircle } from 'lucide-react';
+import { ArrowDownCircle, ArrowUpCircle, CheckCircle, ChevronDown, Loader2, LogIn, ShieldCheck, X, XCircle } from 'lucide-react';
 import { useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import PageHeader from '@/components/common/PageHeader';
@@ -12,6 +12,12 @@ import {
   type UpgradeRequestStatus,
 } from '@/api/consoleUpgrade';
 import { useProductName } from '@/contexts/ProductNameContext';
+import {
+  sensitiveDetectionApi,
+  type PromptRedactionPlaceholderFormat,
+  type PromptRedactionSettings,
+  type PromptRedactionSettingsUpdate,
+} from '@/api/sensitiveDetection';
 import { type UpdateProgress } from '@/api/update';
 import { extractErrorMessage } from '@/utils/error';
 import { checkRestartReadiness } from '@/utils/restartPolling';
@@ -329,6 +335,10 @@ export default function FlocksproUpgradePage() {
   const [showLicenseDetails, setShowLicenseDetails] = useState(false);
   const [licenseStatus, setLicenseStatus] = useState<FlocksproLicenseStatus | null>(null);
   const [proPackageStatus, setProPackageStatus] = useState<ProPackageStatus | null>(null);
+  const [promptRedactionSettings, setPromptRedactionSettings] = useState<PromptRedactionSettings | null>(null);
+  const [promptRedactionLoading, setPromptRedactionLoading] = useState(false);
+  const [promptRedactionSaving, setPromptRedactionSaving] = useState(false);
+  const [promptRedactionError, setPromptRedactionError] = useState<string | null>(null);
   const [dismissedRejectedRequestIds, setDismissedRejectedRequestIds] = useState<Set<string>>(
     loadDismissedRejectedRequestIds,
   );
@@ -791,6 +801,47 @@ export default function FlocksproUpgradePage() {
       setRefreshingInstalled(false);
     }
   }, [activeRequest?.request_id, currentDisplayLicenseRequest?.request_id, currentIssuedRequest?.request_id, refreshRequests, t]);
+
+  const loadPromptRedactionSettings = useCallback(async () => {
+    if (!isProLoaded) {
+      setPromptRedactionSettings(null);
+      setPromptRedactionError(null);
+      return;
+    }
+    setPromptRedactionLoading(true);
+    setPromptRedactionError(null);
+    try {
+      const settings = await sensitiveDetectionApi.getPromptRedactionSettings();
+      setPromptRedactionSettings(settings);
+    } catch (err) {
+      setPromptRedactionError(extractErrorMessage(err, t('sensitiveDetection.errors.fetchSettings')));
+    } finally {
+      setPromptRedactionLoading(false);
+    }
+  }, [isProLoaded, t]);
+
+  const updatePromptRedactionSettings = useCallback(
+    async (payload: PromptRedactionSettingsUpdate) => {
+      if (!isProLoaded) {
+        return;
+      }
+      setPromptRedactionSaving(true);
+      setPromptRedactionError(null);
+      try {
+        const settings = await sensitiveDetectionApi.updatePromptRedactionSettings(payload);
+        setPromptRedactionSettings(settings);
+      } catch (err) {
+        setPromptRedactionError(extractErrorMessage(err, t('sensitiveDetection.errors.updateSettings')));
+      } finally {
+        setPromptRedactionSaving(false);
+      }
+    },
+    [isProLoaded, t],
+  );
+
+  useEffect(() => {
+    void loadPromptRedactionSettings();
+  }, [loadPromptRedactionSettings]);
 
   useEffect(() => {
     if (autoSyncTriggeredRef.current) {
@@ -1314,6 +1365,112 @@ export default function FlocksproUpgradePage() {
                     ))}
                   </div>
                 )}
+              </div>
+            )}
+          </div>
+        )}
+
+        {isProLoaded && (
+          <div className="rounded-xl border border-gray-200 bg-white p-6 shadow-sm">
+            <div className="flex flex-col gap-3 border-b border-gray-200 pb-4 md:flex-row md:items-start md:justify-between">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-emerald-50 text-emerald-700">
+                  <ShieldCheck className="h-5 w-5" />
+                </span>
+                <div className="min-w-0">
+                  <h2 className="text-lg font-semibold text-gray-900">{t('sensitiveDetection.title')}</h2>
+                  <p className="mt-1 text-sm text-gray-500">{t('sensitiveDetection.description')}</p>
+                </div>
+              </div>
+              <button
+                type="button"
+                role="switch"
+                aria-checked={promptRedactionSettings?.enabled === true}
+                aria-label={t('sensitiveDetection.enabledLabel')}
+                disabled={!promptRedactionSettings || promptRedactionLoading || promptRedactionSaving}
+                onClick={() => void updatePromptRedactionSettings({ enabled: !promptRedactionSettings?.enabled })}
+                className={`relative inline-flex h-7 w-12 shrink-0 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                  promptRedactionSettings?.enabled ? 'bg-emerald-600' : 'bg-gray-300'
+                }`}
+              >
+                <span
+                  className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                    promptRedactionSettings?.enabled ? 'translate-x-6' : 'translate-x-1'
+                  }`}
+                />
+              </button>
+            </div>
+
+            <div className="divide-y divide-gray-200">
+              <div className="grid gap-3 py-4 md:grid-cols-[minmax(0,1fr)_16rem] md:items-center">
+                <div>
+                  <div className="text-sm font-medium text-gray-900">{t('sensitiveDetection.placeholderFormat')}</div>
+                  <div className="mt-1 text-xs text-gray-500">
+                    {promptRedactionSettings?.placeholderFormat === 'compact'
+                      ? t('sensitiveDetection.compactPreview')
+                      : t('sensitiveDetection.verbosePreview')}
+                  </div>
+                </div>
+                <div className="grid grid-cols-2 rounded-lg border border-gray-200 bg-gray-50 p-1">
+                  {(['verbose', 'compact'] as PromptRedactionPlaceholderFormat[]).map((format) => {
+                    const active = promptRedactionSettings?.placeholderFormat === format;
+                    return (
+                      <button
+                        key={format}
+                        type="button"
+                        aria-pressed={active}
+                        disabled={!promptRedactionSettings || promptRedactionLoading || promptRedactionSaving}
+                        onClick={() => void updatePromptRedactionSettings({ placeholderFormat: format })}
+                        className={`h-8 rounded-md px-3 text-sm font-semibold transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                          active ? 'bg-white text-gray-950 shadow-sm' : 'text-gray-500 hover:text-gray-950'
+                        }`}
+                      >
+                        {t(`sensitiveDetection.placeholderFormats.${format}`)}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="grid gap-3 py-4 md:grid-cols-[minmax(0,1fr)_16rem] md:items-center">
+                <div>
+                  <div className="text-sm font-medium text-gray-900">{t('sensitiveDetection.promptHint')}</div>
+                  <div className="mt-1 text-xs text-gray-500">{t('sensitiveDetection.promptHintDescription')}</div>
+                </div>
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={promptRedactionSettings?.promptHintEnabled === true}
+                  aria-label={t('sensitiveDetection.promptHint')}
+                  disabled={!promptRedactionSettings || promptRedactionLoading || promptRedactionSaving}
+                  onClick={() =>
+                    void updatePromptRedactionSettings({
+                      promptHintEnabled: !promptRedactionSettings?.promptHintEnabled,
+                    })
+                  }
+                  className={`ml-auto relative inline-flex h-7 w-12 items-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-50 ${
+                    promptRedactionSettings?.promptHintEnabled ? 'bg-emerald-600' : 'bg-gray-300'
+                  }`}
+                >
+                  <span
+                    className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                      promptRedactionSettings?.promptHintEnabled ? 'translate-x-6' : 'translate-x-1'
+                    }`}
+                  />
+                </button>
+              </div>
+            </div>
+
+            {(promptRedactionLoading || promptRedactionSaving || promptRedactionError) && (
+              <div
+                className={`rounded-lg border px-4 py-3 text-sm ${
+                  promptRedactionError
+                    ? 'border-red-200 bg-red-50 text-red-700'
+                    : 'border-gray-200 bg-gray-50 text-gray-600'
+                }`}
+              >
+                {promptRedactionError ||
+                  (promptRedactionSaving ? t('sensitiveDetection.saving') : t('sensitiveDetection.loading'))}
               </div>
             )}
           </div>

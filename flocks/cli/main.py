@@ -5,6 +5,7 @@ Provides command-line interface for Flocks
 """
 
 import asyncio
+import os
 import secrets as secrets_lib
 import sys
 from pathlib import Path
@@ -363,6 +364,8 @@ def serve(
     """
     import uvicorn
 
+    os.environ["_FLOCKS_SERVER_PORT"] = str(port)
+
     console.print(Panel(logo(), border_style="cyan"))
     console.print(f"[cyan]Starting server on:[/cyan] http://{host}:{port}")
     console.print(f"[cyan]API docs:[/cyan] http://{host}:{port}/docs")
@@ -479,10 +482,11 @@ def tui(
         if _ensure_server_api_token():
             console.print("[dim]Initialized local API token for TUI access[/dim]")
 
-        # Set auto-approve environment variable for TUI mode
         if auto_approve:
             env["FLOCKS_AUTO_APPROVE"] = "true"
-            console.print("[dim]Auto-approve enabled: All permissions will be automatically granted[/dim]")
+            console.print(
+                "[dim]Auto-approve enabled: all permissions will be automatically granted[/dim]"
+            )
 
         server_process = subprocess.Popen(
             resolve_flocks_cli_command() + [

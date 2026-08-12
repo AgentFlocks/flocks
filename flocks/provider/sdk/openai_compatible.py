@@ -26,6 +26,7 @@ from flocks.provider.sdk.openai_base import (
     ThinkTagExtractor,
     apply_openai_token_limit,
     build_reasoning_metadata,
+    create_openai_http_client,
     create_chat_completion_with_fallbacks,
     _coerce_bool,
     _is_effective_thinking_enabled,
@@ -106,10 +107,11 @@ class OpenAICompatibleProvider(BaseProvider):
                 )
                 if isinstance(custom_settings, dict) and "trust_env" in custom_settings:
                     trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
-                http_client = httpx.AsyncClient(
+                http_client = create_openai_http_client(
                     trust_env=trust_env,
                     verify=verify_ssl,
                     timeout=DEFAULT_HTTP_TIMEOUT,
+                    custom_settings=custom_settings,
                 )
 
                 # Create client
@@ -117,6 +119,7 @@ class OpenAICompatibleProvider(BaseProvider):
                     api_key=api_key,
                     base_url=base_url,
                     http_client=http_client,
+                    max_retries=0,
                 )
                 self.log.info(
                     "openai_compatible.client.created",

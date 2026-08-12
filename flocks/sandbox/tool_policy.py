@@ -1,93 +1,48 @@
-"""
-沙箱工具策略
+"""Opaque sandbox tool-policy metadata transport.
 
-对齐 OpenClaw sandbox/tool-policy.ts：
-- 支持 allow/deny 列表
-- 支持通配符 (*) 模式匹配
-- deny 优先于 allow
+Flocks deliberately does not interpret ``sandbox.tools`` as an authorization
+decision.  The optional Pro policy gate receives the raw global and agent
+configuration and is the sole owner of validation, merging, and enforcement.
 """
 
-import fnmatch
-import re
-from typing import List, Optional
-
-from .types import SandboxToolPolicy
+from typing import Any, Dict, Mapping
 
 
-def is_tool_allowed(policy: SandboxToolPolicy, name: str) -> bool:
+def build_tool_policy_metadata(
+    config_data: Mapping[str, Any] | None,
+    agent_id: str | None,
+) -> Dict[str, Any]:
+    """Return raw sandbox tool-policy configuration for an extension hook.
+
+    This copies containers only.  It intentionally does not normalize patterns,
+    merge scopes, or decide whether any tool is allowed.
     """
-    检查工具是否被允许。
-
-    规则（对齐 OpenClaw isToolAllowed）：
-    1. 如果在 deny 列表中 → 拒绝
-    2. 如果 allow 列表为空 → 允许
-    3. 如果在 allow 列表中 → 允许
-    4. 否则 → 拒绝
-
-    Args:
-        policy: 工具策略
-        name: 工具名称
-
-    Returns:
-        是否允许
-    """
-    normalized = name.strip().lower()
-    deny = _expand_patterns(policy.deny)
-    if _matches_any(normalized, deny):
-        return False
-    allow = _expand_patterns(policy.allow)
-    if not allow:
-        return True
-    return _matches_any(normalized, allow)
-
-
-def resolve_tool_policy(
-    global_allow: Optional[List[str]] = None,
-    global_deny: Optional[List[str]] = None,
-    agent_allow: Optional[List[str]] = None,
-    agent_deny: Optional[List[str]] = None,
-) -> SandboxToolPolicy:
-    """
-    解析工具策略（agent 覆盖 global）。
-
-    对齐 OpenClaw resolveSandboxToolPolicyForAgent。
-    当未配置 allow/deny 时，默认全允许。
-    """
-    allow: List[str]
-    deny: List[str]
-
-    if isinstance(agent_deny, list):
-        deny = agent_deny
-    elif isinstance(global_deny, list):
-        deny = global_deny
-    else:
-        deny = []
-
-    if isinstance(agent_allow, list):
-        allow = agent_allow
-    elif isinstance(global_allow, list):
-        allow = global_allow
-    else:
-        allow = []
-
-    return SandboxToolPolicy(allow=allow, deny=deny)
-
-
-def _expand_patterns(patterns: Optional[List[str]]) -> List[str]:
-    """展开模式列表（去空去重）."""
-    if not patterns:
-        return []
-    return [p.strip().lower() for p in patterns if p and p.strip()]
-
-
-def _matches_any(name: str, patterns: List[str]) -> bool:
-    """检查名称是否匹配任意模式."""
-    for pattern in patterns:
-        if pattern == "*":
-            return True
-        if "*" in pattern:
-            if fnmatch.fnmatch(name, pattern):
-                return True
-        elif name == pattern:
-            return True
-    return False
+    config = config_data if isinstance(config_data, Mapping) else {}
+    global_sandbox = config.get("sandbox")
+    global_tools = (
+        global_sandbox.get("tools", {})
+        if isinstance(global_sandbox, Mapping)
+        else {}
+    )
+    agents = config.get("agent")
+    agent_config = (
+        agents.get(agent_id)
+        if isinstance(agents, Mapping) and agent_id
+        else None
+    )
+    agent_sandbox = (
+        agent_config.get("sandbox")
+        if isinstance(agent_config, Mapping)
+        and isinstance(agent_config.get("sandbox"), Mapping)
+        else {}
+    )
+    agent_tools = (
+        agent_sandbox.get("tools", {})
+        if isinstance(agent_sandbox, Mapping)
+        else {}
+    )
+    return {
+        "source": "sandbox.tool_policy",
+        "global": dict(global_tools) if isinstance(global_tools, Mapping) else global_tools,
+        "agent": dict(agent_tools) if isinstance(agent_tools, Mapping) else agent_tools,
+    }

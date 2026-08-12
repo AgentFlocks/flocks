@@ -141,6 +141,7 @@ def _parse_model_definitions(
             supports_vision=caps_raw.get("supports_vision", False),
             supports_reasoning=caps_raw.get("supports_reasoning", True),
             interleaved=caps_raw.get("interleaved"),
+            thinking_level_map=caps_raw.get("thinking_level_map"),
             supports_streaming=caps_raw.get("supports_streaming", True),
         )
 

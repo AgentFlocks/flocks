@@ -434,4 +434,4 @@ def _build_im_send_pointer_section() -> str:
     return """### IM Messaging
 
 When the user wants to send a message to a connected messaging channel (including IM platforms and email), call `im_send_message`.
-When creating a scheduled task that sends to a connected messaging channel later, resolve the target `session_id` with `im_send_message(resolve_only=true)` before calling `schedule_task_create`."""
+When creating a scheduled task that sends to a connected messaging channel later, resolve the target `session_id` with `im_send_message(resolve_only=true)` before calling `schedule_task(action="create", resource_type="scheduler", ...)`."""

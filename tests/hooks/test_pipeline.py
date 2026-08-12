@@ -142,7 +142,7 @@ async def test_pipeline_runs_canonical_lifecycle_handlers() -> None:
     seen: list[str] = []
 
     class _CanonicalHook(HookBase):
-        async def user_prompt_submit(self, ctx) -> None:
+        async def user_prompt_before(self, ctx) -> None:
             seen.append(ctx.stage)
 
         async def tool_before(self, ctx) -> None:
@@ -151,20 +151,20 @@ async def test_pipeline_runs_canonical_lifecycle_handlers() -> None:
         async def tool_after(self, ctx) -> None:
             seen.append(ctx.stage)
 
-        async def turn_finish(self, ctx) -> None:
+        async def turn_after(self, ctx) -> None:
             seen.append(ctx.stage)
 
     HookPipeline.register("canonical-hook", _CanonicalHook())
     HookPipeline._initialized = True
 
-    await HookPipeline.run_user_prompt_submit({"sessionID": "ses_test"})
+    await HookPipeline.run_user_prompt_before({"sessionID": "ses_test"})
     await HookPipeline.run_tool_before({"sessionID": "ses_test"})
     await HookPipeline.run_tool_after({"sessionID": "ses_test"})
-    await HookPipeline.run_turn_finish({"sessionID": "ses_test"})
+    await HookPipeline.run_turn_after({"sessionID": "ses_test"})
 
     assert seen == [
-        HookStage.USER_PROMPT_SUBMIT,
+        HookStage.USER_PROMPT_BEFORE,
         HookStage.TOOL_BEFORE,
         HookStage.TOOL_AFTER,
-        HookStage.TURN_FINISH,
+        HookStage.TURN_AFTER,
     ]

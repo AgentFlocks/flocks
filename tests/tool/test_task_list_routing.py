@@ -12,8 +12,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from flocks.tool.registry import ToolContext, ToolResult
-from flocks.tool.task.schedule_task_center import schedule_task_list
+from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
+from flocks.tool.task.schedule_task_center import schedule_task, schedule_task_list
 
 _TM_PATH = "flocks.task.manager.TaskManager"
 
@@ -60,6 +60,64 @@ def _fake_execution(id_: str = "exec_1", status: str = "completed") -> SimpleNam
 # ------------------------------------------------------------------
 
 _EXECUTION_ONLY_STATUSES = ["completed", "failed", "running", "pending", "queued", "cancelled"]
+
+
+def test_unified_schedule_task_replaces_legacy_tool_registrations():
+    assert ToolRegistry.get("schedule_task") is not None
+    for legacy_name in (
+        "schedule_task_create",
+        "schedule_task_list",
+        "schedule_task_status",
+        "schedule_task_update",
+        "schedule_task_delete",
+        "schedule_task_rerun",
+    ):
+        assert ToolRegistry.get(legacy_name) is None
+
+
+@pytest.mark.asyncio
+async def test_unified_scheduler_list_uses_explicit_resource_type():
+    mock_list = AsyncMock(return_value=([_fake_scheduler()], 1))
+    with patch(_TM_PATH) as tm:
+        tm.list_schedulers = mock_list
+        result = await schedule_task(
+            _ctx(),
+            action="list",
+            resource_type="scheduler",
+        )
+
+    assert result.success
+    assert "Task schedulers" in result.output
+    assert mock_list.call_args.kwargs["scheduled_only"] is False
+
+
+@pytest.mark.asyncio
+async def test_unified_execution_list_uses_explicit_resource_type():
+    mock_list = AsyncMock(return_value=([_fake_execution()], 1))
+    with patch(_TM_PATH) as tm:
+        tm.list_executions = mock_list
+        result = await schedule_task(
+            _ctx(),
+            action="list",
+            resource_type="execution",
+            status="completed",
+        )
+
+    assert result.success
+    assert "Task executions" in result.output
+
+
+@pytest.mark.asyncio
+async def test_unified_task_rejects_action_for_wrong_resource_type():
+    result = await schedule_task(
+        _ctx(),
+        action="cancel",
+        resource_type="scheduler",
+        task_id="sched_1",
+    )
+
+    assert not result.success
+    assert "not supported" in result.error
 
 
 @pytest.mark.asyncio

@@ -719,6 +719,38 @@ def _workflow_stats_sample_deltas(conn, workflow_name, start_time=0, end_time=0)
     return deltas
 
 
+def _workflow_stats_call_delta_from_samples(conn, workflow_name, start_ms, end_ms):
+    if not _table_exists(conn, WORKFLOW_SNAPSHOT_TABLE):
+        return None
+    previous = conn.execute(
+        f"SELECT call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at < ? "
+        "ORDER BY sampled_at DESC LIMIT 1",
+        (workflow_name, start_ms),
+    ).fetchone()
+    if previous is None:
+        return None
+    rows = conn.execute(
+        f"SELECT sampled_at, call_count FROM {WORKFLOW_SNAPSHOT_TABLE} "
+        "WHERE workflow_id = ? AND sampled_at >= ? AND sampled_at < ? "
+        "ORDER BY sampled_at",
+        (workflow_name, start_ms, end_ms),
+    ).fetchall()
+    if not rows:
+        return None
+    total = 0
+    previous_count = max(_safe_int(previous[0]), 0)
+    for _, call_count in rows:
+        current_count = max(_safe_int(call_count), 0)
+        total += (
+            current_count - previous_count
+            if current_count >= previous_count
+            else current_count
+        )
+        previous_count = current_count
+    return max(total, 0)
+
+
 def _workflow_metric_value(stats, key, fallback=0):
     value = stats.get(key)
     return max(_safe_int(fallback if value is None else value), 0)
@@ -1231,6 +1263,9 @@ def _task_center_empty():
     return {
         "generatedAt": datetime.now().astimezone().isoformat(timespec="seconds"),
         "sessionCount": 0,
+        "activeExecutionCount": 0,
+        "scheduledActiveCount": 0,
+        "workflowActiveCount": 0,
         "scheduledTasks": [],
         "workflows": [],
         "sourceStatus": {
@@ -1260,7 +1295,7 @@ def _today_bounds():
 
 def _task_center_task_rows(limit=12):
     if not TASK_DB.is_file():
-        return 0, [], 0, 0
+        return 0, [], 0, 0, 0
     try:
         with sqlite3.connect(f"file:{TASK_DB}?mode=ro", uri=True, timeout=1.0) as conn:
             conn.row_factory = sqlite3.Row
@@ -1269,7 +1304,7 @@ def _task_center_task_rows(limit=12):
                 _table_exists(conn, "task_schedulers")
                 and _table_exists(conn, "task_executions")
             ):
-                return 0, [], 0, 0
+                return 0, [], 0, 0, 0
             today_start, tomorrow_start = _today_bounds()
             today_start_iso = today_start.isoformat(timespec="seconds")
             tomorrow_start_iso = tomorrow_start.isoformat(timespec="seconds")
@@ -1291,8 +1326,8 @@ def _task_center_task_rows(limit=12):
                     "SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END) AS success_count, "
                     "SUM(CASE WHEN status IN ('pending', 'queued', 'running') THEN 1 ELSE 0 END) AS active_count, "
                     "SUM(CASE WHEN "
-                    "julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) >= julianday(?) "
-                    "AND julianday(COALESCE(completed_at, updated_at, started_at, queued_at, created_at)) < julianday(?) "
+                    "julianday(COALESCE(started_at, queued_at, created_at)) >= julianday(?) "
+                    "AND julianday(COALESCE(started_at, queued_at, created_at)) < julianday(?) "
                     "THEN 1 ELSE 0 END) AS today_execution_count "
                     "FROM task_executions WHERE scheduler_id = ?",
                     (today_start_iso, tomorrow_start_iso, scheduler["id"]),
@@ -1345,9 +1380,10 @@ def _task_center_task_rows(limit=12):
                 tasks[:limit],
                 sum(task["executionCount"] for task in tasks),
                 sum(task["todayExecutionCount"] for task in tasks),
+                sum(task["activeCount"] for task in tasks),
             )
     except Exception:
-        return 0, [], 0, 0
+        return 0, [], 0, 0, 0
 
 
 def _workflow_manifest_name_map():
@@ -1593,7 +1629,7 @@ def _workflow_link_context(latest):
 
 def _task_center_workflow_rows(limit=12, include_mock=False):
     if not WORKFLOW_DB.is_file():
-        return [], 0, 0
+        return [], 0, 0, 0
     try:
         with sqlite3.connect(f"file:{WORKFLOW_DB}?mode=ro", uri=True, timeout=1.0) as conn:
             conn.row_factory = sqlite3.Row
@@ -1602,7 +1638,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                 _table_exists(conn, "workflow_stats")
                 or _table_exists(conn, "workflow_executions")
             ):
-                return [], 0, 0
+                return [], 0, 0, 0
             today_start, tomorrow_start = _today_bounds()
             today_start_ms = int(today_start.timestamp() * 1000)
             tomorrow_start_ms = int(tomorrow_start.timestamp() * 1000)
@@ -1650,6 +1686,7 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
             finished_at_expr = "finished_at" if "finished_at" in execution_columns else "NULL"
             updated_at_expr = "updated_at" if "updated_at" in execution_columns else "NULL"
             execution_time_expr = f"COALESCE({finished_at_expr}, {updated_at_expr}, started_at, 0)"
+            execution_start_expr = "started_at"
             active_time_expr = f"COALESCE({updated_at_expr}, started_at, 0)"
             latest_select = ", ".join(
                 [
@@ -1668,11 +1705,13 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                 ]
             )
             workflows = []
+            total_execution_count = 0
+            total_today_execution_count = 0
+            total_active_count = 0
             now_ms = int(time.time() * 1000)
             for workflow_id in workflow_ids:
                 workflow_name = names.get(workflow_id, workflow_id)
-                if UUID_RE.match(str(workflow_id)) and workflow_name == workflow_id:
-                    continue
+                hidden_workflow = UUID_RE.match(str(workflow_id)) and workflow_name == workflow_id
                 trigger_state = _workflow_trigger_state(conn, workflow_id)
                 stats = None
                 if _table_exists(conn, "workflow_stats"):
@@ -1687,8 +1726,8 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                     exec_summary = conn.execute(
                         "SELECT COUNT(*) AS execution_count, "
                         "SUM(CASE WHEN status IN ('success', 'completed') THEN 1 ELSE 0 END) AS success_count, "
-                        f"SUM(CASE WHEN {execution_time_expr} >= ? "
-                        f"AND {execution_time_expr} < ? THEN 1 ELSE 0 END) "
+                        f"SUM(CASE WHEN {execution_start_expr} >= ? "
+                        f"AND {execution_start_expr} < ? THEN 1 ELSE 0 END) "
                         "AS today_execution_count "
                         "FROM workflow_executions WHERE workflow_id = ?",
                         (today_start_ms, tomorrow_start_ms, workflow_id),
@@ -1732,18 +1771,40 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
                         _safe_int(active_summary["active_count"] if active_summary else 0),
                         0,
                     )
-                execution_count = max(
-                    _safe_int(stats["call_count"] if stats else 0),
+                exec_execution_count = max(
                     _safe_int(exec_summary["execution_count"] if exec_summary else 0),
+                    0,
                 )
-                success_count = max(
-                    _safe_int(stats["success_count"] if stats else 0),
-                    _safe_int(exec_summary["success_count"] if exec_summary else 0),
-                )
-                today_execution_count = max(
+                exec_today_execution_count = max(
                     _safe_int(exec_summary["today_execution_count"] if exec_summary else 0),
                     0,
                 )
+                if stats is not None:
+                    execution_count = max(_safe_int(stats["call_count"]), 0)
+                    stats_today_count = _workflow_stats_call_delta_from_samples(
+                        conn,
+                        workflow_id,
+                        today_start_ms,
+                        tomorrow_start_ms,
+                    )
+                    today_execution_count = (
+                        max(_safe_int(stats_today_count), 0)
+                        if stats_today_count is not None
+                        else exec_today_execution_count
+                    )
+                    success_count = max(_safe_int(stats["success_count"]), 0)
+                else:
+                    execution_count = exec_execution_count
+                    today_execution_count = exec_today_execution_count
+                    success_count = max(
+                        _safe_int(exec_summary["success_count"] if exec_summary else 0),
+                        0,
+                    )
+                total_execution_count += execution_count
+                total_today_execution_count += today_execution_count
+                total_active_count += active_count
+                if hidden_workflow:
+                    continue
                 last_run_at = 0
                 if latest:
                     last_run_at = (
@@ -1812,21 +1873,36 @@ def _task_center_workflow_rows(limit=12, include_mock=False):
             )
             return (
                 workflows[:limit],
-                sum(workflow["executionCount"] for workflow in workflows),
-                sum(workflow["todayExecutionCount"] for workflow in workflows),
+                total_execution_count,
+                total_today_execution_count,
+                total_active_count,
             )
     except Exception:
-        return [], 0, 0
+        return [], 0, 0, 0
 
 
 def _get_task_center(include_mock=False):
-    session_count, tasks, scheduled_execution_count, scheduled_today_execution_count = _task_center_task_rows()
-    workflows, workflow_execution_count, workflow_today_execution_count = _task_center_workflow_rows(
+    (
+        session_count,
+        tasks,
+        scheduled_execution_count,
+        scheduled_today_execution_count,
+        scheduled_active_count,
+    ) = _task_center_task_rows()
+    (
+        workflows,
+        workflow_execution_count,
+        workflow_today_execution_count,
+        workflow_active_count,
+    ) = _task_center_workflow_rows(
         include_mock=include_mock,
     )
     return {
         **_task_center_empty(),
         "sessionCount": session_count,
+        "activeExecutionCount": scheduled_active_count + workflow_active_count,
+        "scheduledActiveCount": scheduled_active_count,
+        "workflowActiveCount": workflow_active_count,
         "scheduledTasks": tasks,
         "scheduledExecutionCount": scheduled_execution_count,
         "scheduledTodayExecutionCount": scheduled_today_execution_count,

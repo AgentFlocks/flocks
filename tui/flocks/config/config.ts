@@ -931,6 +931,17 @@ export namespace Config {
         .string()
         .describe("Small model to use for tasks like title generation in the format of provider/model")
         .optional(),
+      fallback_providers: z
+        .array(
+          z
+            .object({
+              provider_id: z.string(),
+              model_id: z.string(),
+            })
+            .strict(),
+        )
+        .optional()
+        .describe("Ordered fallback models used by WebUI Auto mode after the primary model fails"),
       default_agent: z
         .string()
         .optional()

@@ -29,8 +29,6 @@ if TYPE_CHECKING:
 
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
-MEMORY_GUIDANCE_TOOL_NAMES = frozenset({"memory_get", "memory_search", "memory_write"})
-
 SystemPromptCache = Dict[str, Any]
 AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
 StringPromptFactory = Callable[[], Optional[str]]
@@ -83,6 +81,10 @@ def get_prompt_minimax() -> str:
 
 def get_prompt_codex() -> str:
     return _load_prompt_file("codex_header.txt")
+
+
+def get_prompt_flocks_config_guard() -> str:
+    return _load_prompt_file("flocks_config_guard.txt")
 
 
 PROMPT_DEFAULT = """You are Flocks, an AI-Native SecOps Platform.
@@ -547,6 +549,50 @@ class SessionPrompt:
         return total
 
     @classmethod
+    async def estimate_tool_result_tokens(
+        cls,
+        session_id: str,
+        message_id: str,
+    ) -> int:
+        """Estimate tool-result tokens added after an assistant model call."""
+        from flocks.session.message import Message
+
+        try:
+            parts = await Message.parts(message_id, session_id)
+        except Exception as exc:
+            log.debug("prompt.tool_result_estimate.parts_failed", {
+                "message_id": message_id,
+                "error": str(exc),
+            })
+            return 0
+
+        total = 0
+        for part in parts:
+            if getattr(part, "type", None) != "tool":
+                continue
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            time_info = getattr(state, "time", None)
+            if isinstance(time_info, dict) and time_info.get("compacted"):
+                total += 10
+                continue
+
+            status = getattr(state, "status", None)
+            if status == "completed":
+                output = getattr(state, "output", None)
+                if output:
+                    total += cls.count_tokens(
+                        output if isinstance(output, str) else str(output)
+                    )
+            elif status == "error":
+                error = getattr(state, "error", "Unknown error")
+                total += cls.count_tokens(f"Error: {error}")
+            elif status == "running":
+                total += cls.count_tokens("Error: Tool execution was interrupted")
+        return total
+
+    @classmethod
     async def _tokens_for_message(cls, session_id: str, msg: Any) -> int:
         """Return the token contribution of a single message (E6).
 
@@ -918,10 +964,18 @@ class SessionPrompt:
         prompt_tool_names: Iterable[str],
         memory_bootstrap_data: Optional[Dict[str, Any]],
     ) -> Optional[str]:
-        """Build memory tool guidance separately from the frozen memory snapshot."""
+        """Build filesystem Memory guidance beside the frozen snapshot."""
         if not memory_bootstrap_data:
             return None
-        if not (set(prompt_tool_names) & MEMORY_GUIDANCE_TOOL_NAMES):
+        required_tools = {
+            "read",
+            "write",
+            "edit",
+            "glob",
+            "grep",
+            "memory_search",
+        }
+        if not required_tools.issubset(set(prompt_tool_names)):
             return None
         instructions = memory_bootstrap_data.get("instructions", "")
         return cls._normalize_prompt_text(instructions)
@@ -938,15 +992,33 @@ class SessionPrompt:
             return []
 
         prompts: List[str] = []
+        user_profile = memory_bootstrap_data.get("user_profile")
+        if user_profile and user_profile.get("inject"):
+            profile_content = user_profile.get("content", "")
+            if profile_content:
+                prompts.append(
+                    f"## {user_profile['path']}\n\n{profile_content}"
+                )
+
         main_memory = memory_bootstrap_data.get("main_memory")
         if main_memory and main_memory.get("inject"):
             memory_content = main_memory.get("content", "")
             if memory_content:
                 prompts.append(f"## {main_memory['path']}\n\n{memory_content}")
 
+        project_memory = memory_bootstrap_data.get("project_memory")
+        if project_memory and project_memory.get("inject"):
+            project_content = project_memory.get("content", "")
+            if project_content:
+                prompts.append(
+                    f"## {project_memory['path']}\n\n{project_content}"
+                )
+
         log.debug("prompt.memory_injected", {
             "session_id": session_id,
+            "has_user_profile": user_profile is not None,
             "has_main": main_memory is not None,
+            "has_project": project_memory is not None,
         })
         return prompts
 
@@ -1024,7 +1096,7 @@ class SessionPrompt:
         session_id: str,
         agent_name: str,
     ) -> bool:
-        """Return true for built-in system subagents running as child sessions."""
+        """Return true when a built-in child uses the minimal prompt profile."""
         try:
             from flocks.agent.registry import Agent
             from flocks.session.session import Session
@@ -1046,6 +1118,9 @@ class SessionPrompt:
                 return False
 
             session = await Session.get_by_id(session_id)
+            metadata = getattr(session, "metadata", {}) if session else {}
+            if metadata.get("evolution"):
+                return False
             return bool(session and session.parent_id)
         except Exception as exc:
             log.debug("prompt.subagent_minimal_check_failed", {
@@ -1064,6 +1139,7 @@ class SessionPrompt:
     ) -> List[str]:
         """Build minimal system prompts for built-in system subagents."""
         prompts = [
+            get_prompt_flocks_config_guard().strip(),
             cls._normalize_prompt_text(agent_prompt),
             cls._build_minimal_environment(session_directory),
         ]
@@ -1141,6 +1217,13 @@ class SessionPrompt:
                 cache_scope="global",
                 digest_inputs={"model_id": model_id},
                 builder=lambda: cls._join_prompt_parts(SystemPrompt.provider(model_id)),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="flocks_config_guard",
+                cache_scope="global",
+                digest_inputs={"prompt": get_prompt_flocks_config_guard()},
+                builder=lambda: get_prompt_flocks_config_guard().strip(),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

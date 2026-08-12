@@ -12,6 +12,8 @@ is bound to multiple channels.
 
 from __future__ import annotations
 
+import os
+
 from flocks.tool.registry import (
     ParameterType,
     ToolCategory,
@@ -31,6 +33,20 @@ _CHANNEL_ALIASES: dict[str, list[str]] = {
     "email": ["email", "mail", "邮件", "imap", "smtp"],
     "slack": ["slack", "sl"],
 }
+
+
+def _get_server_port() -> int:
+    """Return the port of the API server hosting the current process."""
+    try:
+        runtime_port = os.environ.get("_FLOCKS_SERVER_PORT")
+        if runtime_port:
+            return int(runtime_port)
+
+        from flocks.config import Config
+
+        return Config.get_global().server_port
+    except Exception:
+        return 8000
 
 
 def _normalize_channel_type(channel_type: str | None) -> str | None:
@@ -213,12 +229,7 @@ async def channel_message(ctx: ToolContext, **kwargs) -> ToolResult:
     channel_type: str | None = _normalize_channel_type(raw_channel_type)
 
     # Prefer the HTTP endpoint of the running flocks server to reuse its WS connection.
-    try:
-        from flocks.config import Config
-        cfg = await Config.get()
-        port = getattr(cfg, "port", None) or 8000
-    except Exception:
-        port = 8000
+    port = _get_server_port()
 
     result = await _http_session_send(
         port,

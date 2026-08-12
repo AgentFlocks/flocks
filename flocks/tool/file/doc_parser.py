@@ -702,13 +702,6 @@ async def doc_parser(
     if output_file.exists() and not overwrite:
         return ToolResult(success=False, error=f"Output file already exists: {output_file}")
 
-    await ctx.ask(
-        permission="read",
-        patterns=[str(input_file)],
-        always=["*"],
-        metadata={"filepath": str(input_file)},
-    )
-
     markdown, parser_name, errors = await asyncio.to_thread(_run_extractors, input_file)
     if not markdown:
         error_lines = "\n".join(errors) if errors else "No parser produced content."
@@ -718,14 +711,6 @@ async def doc_parser(
         )
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
-    diff = f"Generated markdown for {input_file.name}"
-    await ctx.ask(
-        permission="edit",
-        patterns=[str(output_file)],
-        always=["*"],
-        metadata={"filepath": str(output_file), "diff": diff},
-    )
-
     output_file.write_text(markdown + "\n", encoding="utf-8")
     return ToolResult(
         success=True,

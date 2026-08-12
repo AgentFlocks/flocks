@@ -26,11 +26,9 @@ async def test_tool_search_adds_matches_to_session_callable_tools_and_emits_even
         _tool("read", ToolCategory.FILE),
         _tool("plugin_only", ToolCategory.CUSTOM, native=False),
     ]
-    add_callable = AsyncMock(return_value={"websearch"})
     event_callback = AsyncMock()
 
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
-    monkeypatch.setattr("flocks.tool.system.tool_search.add_session_callable_tools", add_callable)
 
     ctx = SimpleNamespace(session_id="session-3", event_publish_callback=event_callback)
     result = await tool_search(ctx, query="web", limit=5)
@@ -39,7 +37,6 @@ async def test_tool_search_adds_matches_to_session_callable_tools_and_emits_even
     assert result.output["callableToolNames"] == ["websearch"]
     assert result.output["callableToolCount"] == 1
     assert result.output["matches"][0]["name"] == "websearch"
-    add_callable.assert_awaited_once_with("session-3", ["websearch"])
     event_callback.assert_awaited()
 
 
@@ -67,11 +64,6 @@ async def test_tool_search_supports_category_and_tag_matching(
     ]
 
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
-    monkeypatch.setattr(
-        "flocks.tool.system.tool_search.add_session_callable_tools",
-        AsyncMock(return_value={"websearch"}),
-    )
-
     ctx = SimpleNamespace(session_id="session-4", event_publish_callback=AsyncMock())
     result = await tool_search(ctx, query="research", category="browser", limit=5)
 
@@ -91,10 +83,7 @@ async def test_tool_search_supports_exact_batch_select_and_aliases(
         _tool("webfetch", ToolCategory.BROWSER),
         _tool("read", ToolCategory.FILE),
     ]
-    add_callable = AsyncMock(return_value={"websearch", "webfetch"})
-
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
-    monkeypatch.setattr("flocks.tool.system.tool_search.add_session_callable_tools", add_callable)
 
     ctx = SimpleNamespace(session_id="session-select", event_publish_callback=AsyncMock())
     result = await tool_search(ctx, query="select:WebSearchTool,webfetch", limit=5)
@@ -103,7 +92,6 @@ async def test_tool_search_supports_exact_batch_select_and_aliases(
     assert result.output["normalizedQuery"] == "websearch webfetch"
     assert result.output["callableToolNames"] == ["webfetch", "websearch"]
     assert [match["name"] for match in result.output["matches"]] == ["websearch", "webfetch"]
-    add_callable.assert_awaited_once_with("session-select", ["websearch", "webfetch"])
 
 
 @pytest.mark.asyncio
@@ -116,11 +104,6 @@ async def test_tool_search_returns_user_plugin_tools(
     ]
 
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
-    monkeypatch.setattr(
-        "flocks.tool.system.tool_search.add_session_callable_tools",
-        AsyncMock(return_value=set()),
-    )
-
     ctx = SimpleNamespace(session_id="session-plugin", event_publish_callback=AsyncMock())
     result = await tool_search(ctx, query="plugin_memory", limit=5)
 
@@ -138,10 +121,7 @@ async def test_tool_search_adds_matching_tools_to_callable_set(
         _tool("read", ToolCategory.FILE),
         _tool("glob", ToolCategory.SEARCH),
     ]
-    add_callable = AsyncMock(return_value={"glob", "read"})
-
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
-    monkeypatch.setattr("flocks.tool.system.tool_search.add_session_callable_tools", add_callable)
 
     ctx = SimpleNamespace(session_id="session-nondeferred", event_publish_callback=AsyncMock())
     result = await tool_search(ctx, query="read", limit=5)
@@ -150,7 +130,6 @@ async def test_tool_search_adds_matching_tools_to_callable_set(
     assert result.output["count"] == 1
     assert result.output["matches"][0]["name"] == "read"
     assert result.output["callableToolNames"] == ["read"]
-    add_callable.assert_awaited_once_with("session-nondeferred", ["read"])
 
 
 @pytest.mark.asyncio
@@ -165,13 +144,10 @@ async def test_tool_search_does_not_return_disabled_tools(
         native=True,
         enabled=False,
     )
-    add_callable = AsyncMock(return_value=set())
-
     monkeypatch.setattr(
         "flocks.tool.system.tool_search.ToolRegistry.list_tools",
         lambda: [enabled_tool, disabled_tool],
     )
-    monkeypatch.setattr("flocks.tool.system.tool_search.add_session_callable_tools", add_callable)
 
     ctx = SimpleNamespace(session_id="session-disabled", event_publish_callback=AsyncMock())
     result = await tool_search(ctx, query="disabled searchable", limit=5)
@@ -180,7 +156,6 @@ async def test_tool_search_does_not_return_disabled_tools(
     assert result.output["count"] == 0
     assert result.output["matches"] == []
     assert result.output["callableToolNames"] == []
-    add_callable.assert_awaited_once_with("session-disabled", [])
 
 
 @pytest.mark.asyncio
@@ -199,10 +174,7 @@ async def test_tool_search_adds_device_candidate_metadata_without_affecting_call
             vendor="threatbook",
         ),
     ]
-    add_callable = AsyncMock(return_value={"tdp_event_list"})
-
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
-    monkeypatch.setattr("flocks.tool.system.tool_search.add_session_callable_tools", add_callable)
     monkeypatch.setattr(
         "flocks.tool.device.store.list_groups",
         AsyncMock(return_value=[SimpleNamespace(id="g1", name="上海机房")]),
@@ -239,7 +211,6 @@ async def test_tool_search_adds_device_candidate_metadata_without_affecting_call
     assert match["ambiguity"] == "multiple"
     assert match["requiresDeviceId"] is True
     assert [device["device_id"] for device in match["candidateDevices"]] == ["dev-1", "dev-2"]
-    add_callable.assert_awaited_once_with("session-device", ["tdp_event_list"])
 
 
 def test_runtime_tool_events_are_recognized() -> None:

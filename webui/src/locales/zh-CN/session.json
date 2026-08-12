@@ -114,6 +114,24 @@
       }
     }
   },
+  "permissionMode": {
+    "title": "命令执行模式",
+    "menuHint": "Permission mode 决定 Bash 与文件工具的基础权限；Runtime mode 决定 Plugins 目录是否可写。",
+    "readonly": "只读模式",
+    "readonlyDesc": "禁止 Bash 命令执行和文件变更；允许策略范围内的文件读取",
+    "requireConfirm": "人工审批",
+    "requireConfirmDesc": "人工确认高风险命令执行和文件操作",
+    "autoAllowAll": "全部允许",
+    "autoAllowAllDesc": "自动放行命令执行和文件操作；黑名单 hard-deny 类不会放行",
+    "executionControlTitle": "命令执行模式：设置 Bash/文件权限和开发/执行模式",
+    "runtimeTitle": "平台开发模式",
+    "runtimeDev": "开发模式",
+    "runtimeDevDesc": "可以开发和修改 ~/.flocks/plugins 下的 Agent、Skills、Workflows、Tools 等",
+    "runtimeExe": "执行模式",
+    "runtimeExeDesc": "禁止修改 ~/.flocks/plugins 目录；Project 目录和 workspace Output 不受影响",
+    "networkTitle": "网络访问模式",
+    "viewDetails": "查询详情"
+  },
   "agentPicker": {
     "title": "选择对话 Agent",
     "hint": "Rex 为默认智能体；选择后以子智能体标签路由当前消息",
@@ -183,7 +201,6 @@
       "close": "关闭",
       "full": "{{percent}}% 已用",
       "tokens": "~{{used}} / {{total}} Tokens",
-      "excludedTokens": "已排除 {{tokens}}",
       "noAttributedSegments": "暂无可归因明细",
       "breakdown": {
         "systemPrompt": "系统提示词",

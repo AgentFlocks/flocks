@@ -31,6 +31,7 @@ from flocks.config.config_writer import ConfigWriter
 from flocks.provider.provider import Provider
 from flocks.utils.log import Log
 
+
 router = APIRouter()
 log = Log.create(service="routes.config")
 
@@ -645,14 +646,16 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         channel_allow_from_deletions = _channel_allow_from_deletion_ids(config_data)
         _normalize_slack_dm_policy(config_data)
 
+        channels_payload = config_data.get("channels")
         # Extract channel sensitive fields into .secret.json before persisting
-        if "channels" in config_data and isinstance(config_data.get("channels"), dict):
+        if isinstance(channels_payload, dict):
             from flocks.security.channel_secrets import extract_channel_secrets
+
             config_data = {**config_data, "channels": extract_channel_secrets(config_data["channels"])}
 
         # Parse and validate configuration
         config = ConfigInfoModel.model_validate(config_data)
-        
+
         # Update project config
         await Config.update(
             config,
@@ -661,9 +664,25 @@ async def update_config(config_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Clear cache to reload
         Config.clear_cache()
-        
+        # Refresh only OSS-owned channel routing and Agent visibility config.
+        from flocks.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            invalidate_channel_config_cache,
+        )
+
+        channels = config_data.get("channels")
+        if isinstance(channels, dict) and channels:
+            for channel_id in channels:
+                invalidate_channel_config_cache(str(channel_id))
+            for channel_id in channels:
+                await InboundDispatcher._get_channel_config(
+                    str(channel_id),
+                    force_refresh=True,
+                )
+        else:
+            invalidate_channel_config_cache()
+
         log.info("config.updated")
-        
         return await get_config()
     except Exception as e:
         log.error("config.update.error", {"error": str(e)})

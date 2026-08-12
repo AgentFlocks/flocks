@@ -1703,7 +1703,65 @@ function CommandConnections() {
   ]);
 }
 
-function CommandActivityLane({ kind, lane }) {
+function activitySourceBadge(event) {
+  if (!event || event.stage !== 'denoise') return null;
+  if (event.triggerSource === 'workflow_execution') {
+    return { label: '工作流执行', title: '来源：workflow.db.workflow_executions' };
+  }
+  if (event.triggerSource === 'workflow_stats') {
+    return { label: '工作流统计', title: '来源：workflow.db.workflow_stats 调用计数变化' };
+  }
+  return {
+    label: '告警记录',
+    title: event.alert?.sourceType
+      ? `来源：soc.db 告警记录 · ${String(event.alert.sourceType).toUpperCase()}`
+      : '来源：soc.db 告警记录',
+  };
+}
+
+function activityCorrelationKeys(event) {
+  if (!event) return [];
+  const keys = [];
+  const dedupKey = String(event.result?.dedupKey || event.alert?.dedupKey || '').trim();
+  const alertId = String(event.alert?.id || '').trim();
+  const endpointThreat = [
+    event.alert?.srcIp,
+    event.alert?.dstIp,
+    event.alert?.threatName,
+  ].map((item) => String(item || '').trim()).filter(Boolean).join('|');
+  if (dedupKey) keys.push(`dedup:${dedupKey}`);
+  if (alertId) keys.push(`id:${alertId}`);
+  if (endpointThreat) keys.push(`flow:${endpointThreat}`);
+  return keys.map((key) => key.toLowerCase());
+}
+
+function activityEventsCorrelate(left, right) {
+  const rightKeys = new Set(activityCorrelationKeys(right));
+  return activityCorrelationKeys(left).some((key) => rightKeys.has(key));
+}
+
+function laneLinkStatus(kind, event, peerLane) {
+  if (!event) return '';
+  const peerEvent = peerLane?.current || peerLane?.last;
+  if (kind === 'denoise') {
+    if (!peerEvent) return '等待研判接收';
+    if (!activityEventsCorrelate(event, peerEvent)) return '';
+    return peerLane.current ? '已流转至研判' : '研判结果已回写';
+  }
+  if (!peerEvent || !activityEventsCorrelate(event, peerEvent)) return '';
+  return peerLane.current ? '承接降噪结果' : '承接最近降噪';
+}
+
+function triageContextText(stats) {
+  const triage = stats?.triage || EMPTY_STATS.triage;
+  const total = Math.max(Number(triage.totalRecords || 0), 0);
+  const newTriaged = Math.max(Number(triage.newTriaged || 0), 0);
+  const reused = Math.max(Number(triage.cacheHit || 0), 0)
+    + Math.max(Number(triage.followersReused || 0), 0);
+  return `窗口研判 ${compactNumber(total)} 条 · AI新研判 ${compactNumber(newTriaged)} 条 · 复用 ${compactNumber(reused)} 条`;
+}
+
+function CommandActivityLane({ kind, lane, peerLane, stats }) {
   const event = lane.current || lane.last;
   const active = Boolean(lane.current);
   const steps = kind === 'denoise' ? ['接入', '特征', '聚类', '降噪'] : ['证据', '情报', '推理', '结论'];
@@ -1719,6 +1777,9 @@ function CommandActivityLane({ kind, lane }) {
     ? `${event.alert.threatName}${sampleCount > 1 ? ` × ${sampleCount}` : ''}`
     : '等待新告警进入';
   const resultText = event ? activityResultText(event) : '自动巡检 · 等待任务';
+  const sourceBadge = activitySourceBadge(event);
+  const linkStatus = laneLinkStatus(kind, event, peerLane);
+  const contextText = kind === 'triage' ? triageContextText(stats) : linkStatus;
   return h('div', {
     className: cx('command-activity-lane', `lane-${kind}`, active && 'active'),
     style: {
@@ -1728,7 +1789,10 @@ function CommandActivityLane({ kind, lane }) {
   }, [
     h('div', { className: 'command-lane-copy', key: 'copy' }, [
       h('div', { className: 'command-lane-head', key: 'head' }, [
-        h('span', { key: 'label' }, kind === 'denoise' ? '智能降噪' : '智能研判'),
+        h('span', { className: 'command-lane-name', key: 'label' }, [
+          kind === 'denoise' ? '智能降噪' : '智能研判',
+          sourceBadge ? h('em', { className: 'command-source-badge', title: sourceBadge.title, key: 'source' }, sourceBadge.label) : null,
+        ]),
         h('b', { key: 'status' }, status),
       ]),
       h('strong', { title: eventTitle, key: 'title' }, eventTitle),
@@ -1737,6 +1801,10 @@ function CommandActivityLane({ kind, lane }) {
         style: active ? { animationDelay: `${Math.round(duration * 0.65)}ms` } : undefined,
         key: 'result',
       }, resultText) : null,
+      contextText ? h('small', {
+        className: cx('command-lane-context', kind === 'denoise' && linkStatus && 'link-status'),
+        key: 'context',
+      }, contextText) : null,
     ]),
     h('div', { className: 'command-drum-shell', 'aria-label': steps.join('、'), key: 'drum' }, [
       h('div', { className: 'command-drum-caption', key: 'caption' }, [
@@ -1812,8 +1880,8 @@ function CommandGraph({ stats, activity }) {
       h(AnimatedNumber, { tag: 'b', value: item.value, key: 'value' }),
     ]))),
     h('div', { className: 'command-lanes', key: 'lanes' }, [
-      h(CommandActivityLane, { kind: 'denoise', lane: activity.denoise, key: 'denoise' }),
-      h(CommandActivityLane, { kind: 'triage', lane: activity.triage, key: 'triage' }),
+      h(CommandActivityLane, { kind: 'denoise', lane: activity.denoise, peerLane: activity.triage, stats, key: 'denoise' }),
+      h(CommandActivityLane, { kind: 'triage', lane: activity.triage, peerLane: activity.denoise, stats, key: 'triage' }),
     ]),
   ]);
 }
@@ -2135,17 +2203,21 @@ function TaskCenterSummary({ taskCenter }) {
   const activeCount = [
     ...scheduledTasks,
     ...workflows,
-  ].filter((item) => Number(item.activeCount || 0) > 0).length;
-  const summaryMetric = (key, label, value, sub, className = '') => h('div', { className, key }, [
+  ].reduce((sum, item) => sum + Math.max(Number(item.activeCount || 0), 0), 0);
+  const totalActiveCount = taskCenter.activeExecutionCount == null
+    ? activeCount
+    : Math.max(Number(taskCenter.activeExecutionCount || 0), 0);
+  const workflowCallTooltip = '优先来自 workflow_stats.call_count；今日为当天 call_count 增量，缺少快照时回退执行记录数';
+  const summaryMetric = (key, label, value, sub, className = '', title = '') => h('div', { className, key, title }, [
     h('span', { key: 'label' }, label),
     h(AnimatedNumber, { tag: 'b', value: value || 0, duration: 800, key: 'value' }),
     sub ? h('small', { key: 'sub' }, sub) : null,
   ]);
   return h('div', { className: 'task-center-summary' }, [
-    summaryMetric('sessions', '会话次数', taskCenter.sessionCount, ''),
-    summaryMetric('active', '执行中', activeCount, '', activeCount ? 'active' : ''),
-    summaryMetric('scheduledRuns', '定时执行', taskCenter.scheduledExecutionCount, `今日 ${taskCenter.scheduledTodayExecutionCount || 0}`),
-    summaryMetric('workflowRuns', '工作流执行', taskCenter.workflowExecutionCount, `今日 ${taskCenter.workflowTodayExecutionCount || 0}`),
+    summaryMetric('sessions', '关联会话', taskCenter.sessionCount, ''),
+    summaryMetric('active', '执行中', totalActiveCount, '', totalActiveCount ? 'active' : ''),
+    summaryMetric('scheduledRuns', '定时执行', taskCenter.scheduledExecutionCount, `今日启动 ${taskCenter.scheduledTodayExecutionCount || 0}`),
+    summaryMetric('workflowRuns', '工作流调用', taskCenter.workflowExecutionCount, `今日调用 ${taskCenter.workflowTodayExecutionCount || 0}`, '', workflowCallTooltip),
   ]);
 }
 
@@ -2154,28 +2226,35 @@ function TaskCenterItem({ item, kind }) {
   const progressValue = taskCenterProgressValue(item);
   const progressLabel = taskCenterProgressLabel(item);
   const active = Number(item.activeCount || 0) > 0;
-  const status = taskCenterStatusLabel(item.lastStatus);
-  const statusClass = String(item.lastStatus || '').toLowerCase();
+  const schedulerStatus = String(item.status || '').toLowerCase();
+  const statusValue = kind === 'scheduled' ? schedulerStatus || item.lastStatus : item.lastStatus;
+  const status = taskCenterStatusLabel(statusValue);
+  const statusClass = String(statusValue || '').toLowerCase();
   const latestTime = taskCenterTimeLabel(item.lastRunAt);
   const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
   const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
   const alertName = String(item.latestAlertName || '').trim();
   const hasConversation = kind === 'workflow' && Boolean(String(item.sessionId || item.sessionID || '').trim());
+  const scheduledClosed = kind === 'scheduled' && ['disabled', 'stopped'].includes(schedulerStatus);
   const sub = kind === 'scheduled'
-    ? item.nextRunAt
+    ? scheduledClosed
+      ? item.lastRunAt
+        ? `上次执行 ${latestTime}`
+        : '已关闭'
+      : item.nextRunAt
       ? `下次 ${taskCenterTimeLabel(item.nextRunAt)}`
       : item.cronDescription || item.cron || taskCenterTimeLabel(item.lastRunAt)
-    : `最近执行 ${latestTime}`;
+    : `最近调用 ${latestTime}`;
   const stats = kind === 'workflow'
     ? [
-        h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'total', title: '工作流被调用/运行的次数，不代表处理告警条数' }, ['调用 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'today', title: '当天工作流调用次数' }, ['今日调用 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'progress' }, ['进度 ', h('b', { key: 'value' }, progressLabel)]),
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ]
     : [
         h('span', { key: 'total' }, ['执行 ', h(AnimatedNumber, { tag: 'b', value: item.executionCount || 0, duration: 700, key: 'value' })]),
-        h('span', { key: 'today' }, ['今日 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
+        h('span', { key: 'today' }, ['今日启动 ', h(AnimatedNumber, { tag: 'b', value: item.todayExecutionCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'success' }, ['成功 ', h(AnimatedNumber, { tag: 'b', value: item.successCount || 0, duration: 700, key: 'value' })]),
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ];
@@ -2207,13 +2286,13 @@ function TaskCenterItem({ item, kind }) {
       title: alertName || '暂无告警名称',
       key: 'alert',
     }, [
-      h('span', { key: 'label' }, '研判告警'),
+      h('span', { key: 'label' }, '关联告警'),
       h('b', { key: 'value' }, alertName || '暂无告警名称'),
     ]) : null,
     kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
-      h('span', { key: 'label' }, '执行哈希'),
+      h('span', { key: 'label' }, '执行ID'),
       h('code', { key: 'value' }, latestExecutionHash),
-      h('span', { key: 'link-label' }, '更多信息'),
+      h('span', { key: 'link-label' }, '关联对话'),
       h('code', { className: cx('task-center-jump', hasConversation && 'enabled'), key: 'link' }, hasConversation ? '查看对话' : '暂无关联对话'),
     ]) : null,
     h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
@@ -2230,6 +2309,8 @@ function TaskCenterItem({ item, kind }) {
 function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onToggle, collapsed, onCollapseToggle }) {
   const hasOverflow = items.length > 3;
   const visibleItems = expanded || !hasOverflow ? items : items.slice(0, 3);
+  const countUnit = kind === 'workflow' ? '个工作流' : '个任务';
+  const countText = collapsed || expanded || !hasOverflow ? `${count} ${countUnit}` : `显示 3/${count} ${countUnit}`;
   return h('section', { className: 'task-center-section' }, [
     h('div', { className: 'task-center-section-title', key: 'title' }, [
       h('button', {
@@ -2242,7 +2323,7 @@ function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onT
         h('i', { key: 'chevron' }, collapsed ? '›' : '⌄'),
         h('strong', { key: 'label' }, title),
       ]),
-      h('span', { key: 'count' }, collapsed ? `${count} 项` : expanded || !hasOverflow ? `${count} 项` : `显示 3/${count}`),
+      h('span', { key: 'count' }, countText),
     ]),
     collapsed ? null : h('div', { className: 'task-center-section-list', key: 'list' }, visibleItems.length
       ? visibleItems.map((item) => h(TaskCenterItem, { item, kind, key: `${kind}-${item.id}` }))
@@ -2252,7 +2333,7 @@ function TaskCenterSection({ title, count, items, kind, emptyText, expanded, onT
       type: 'button',
       onClick: onToggle,
       key: 'expand',
-    }, expanded ? '收起' : `展开全部 ${count} 项`) : null,
+    }, expanded ? '收起' : `展开全部 ${count} ${countUnit}`) : null,
   ]);
 }
 
@@ -2283,11 +2364,11 @@ function CommandTaskCenterPanel({ taskCenter }) {
       key: 'scheduled',
     }),
     h(TaskCenterSection, {
-      title: '工作流执行',
+      title: '工作流调用',
       count: workflows.length,
       items: workflows,
       kind: 'workflow',
-      emptyText: '暂无工作流执行记录',
+      emptyText: '暂无工作流调用记录',
       expanded: workflowExpanded,
       onToggle: () => setWorkflowExpanded((current) => !current),
       collapsed: workflowCollapsed,
@@ -2581,6 +2662,10 @@ export default function Page() {
 
     const poll = async () => {
       if (stopped) return;
+      if (document.hidden) {
+        schedule(ACTIVITY_POLL_MS);
+        return;
+      }
       try {
         const params = mockDashboardEnabled ? { mockActivity: '1' } : {};
         const response = await getApi().page.get('/task-center', { params });
@@ -4715,8 +4800,25 @@ const CSS = `
   box-shadow: inset 0 0 24px rgba(32,213,155,.08), 0 0 12px rgba(32,213,155,.08);
 }
 .command-lane-copy { min-width: 0; }
-.command-lane-head { display: flex; align-items: center; justify-content: space-between; }
+.command-lane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-width: 0; }
 .command-lane-head span { color: var(--drum-accent); font-size: 12px; font-weight: 700; }
+.command-lane-name { display: flex; min-width: 0; align-items: center; gap: 6px; overflow: hidden; white-space: nowrap; }
+.command-source-badge {
+  flex: 0 0 auto;
+  max-width: 72px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--drum-accent) 34%, transparent);
+  border-radius: 3px;
+  padding: 1px 4px;
+  color: rgba(218,247,255,.78);
+  font-size: 10px;
+  font-style: normal;
+  font-weight: 650;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  background: color-mix(in srgb, var(--drum-accent) 9%, transparent);
+}
 .command-lane-head b { color: #7890a4; font-size: 11px; font-weight: 600; }
 .command-activity-lane.active .command-lane-head b { color: #50e3b5; }
 .command-lane-copy > strong {
@@ -4740,6 +4842,18 @@ const CSS = `
 }
 .command-lane-result.idle { color: rgba(170,222,255,.55); }
 .command-activity-lane.active .command-lane-result { opacity: 0; animation: laneResult .35s ease forwards; }
+.command-lane-context {
+  display: block;
+  max-width: 100%;
+  margin-top: 5px;
+  overflow: hidden;
+  color: rgba(170,222,255,.58);
+  font-size: 10px;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.command-lane-context.link-status { color: rgba(117,232,196,.68); }
 .command-drum-shell {
   position: relative;
   display: grid;

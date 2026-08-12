@@ -1,10 +1,4 @@
-"""
-Sandbox runtime integration tests.
-
-These tests validate that StreamProcessor can:
-1. Enforce sandbox tool policy before tool execution.
-2. Inject sandbox context into ToolContext.extra for bash tool execution.
-"""
+"""Sandbox runtime integration tests."""
 
 import time
 from types import SimpleNamespace
@@ -46,8 +40,8 @@ def _build_processor(config_data: dict) -> StreamProcessor:
 
 
 @pytest.mark.asyncio
-async def test_sandbox_tool_policy_blocks_tool() -> None:
-    """Tool should be blocked when not allowed by sandbox tool policy."""
+async def test_sandbox_tool_policy_is_opaque_metadata_not_an_oss_decision() -> None:
+    """OSS transports raw constraints and never allows or denies a tool."""
     processor = _build_processor(
         {
             "sandbox": {
@@ -56,15 +50,29 @@ async def test_sandbox_tool_policy_blocks_tool() -> None:
                     "allow": ["read"],
                     "deny": [],
                 },
-            }
+            },
+            "agent": {
+                "rex": {
+                    "sandbox": {
+                        "tools": {
+                            "allow": ["bash", "write"],
+                            "deny": ["write"],
+                        }
+                    }
+                }
+            },
         }
     )
 
     meta = await processor._resolve_sandbox_meta("bash")
 
-    assert meta["blocked"] is True
-    assert "blocked by sandbox tool policy" in (meta["error"] or "")
-    assert meta["extra"] == {}
+    assert meta["blocked"] is False
+    assert meta["error"] is None
+    assert meta["extra"]["sandbox_tool_policy"] == {
+        "source": "sandbox.tool_policy",
+        "global": {"allow": ["read"], "deny": []},
+        "agent": {"allow": ["bash", "write"], "deny": ["write"]},
+    }
 
 
 @pytest.mark.asyncio

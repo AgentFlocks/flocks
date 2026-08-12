@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
+import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { QRCodeSVG } from 'qrcode.react';
 import {
   Radio,
@@ -29,6 +29,10 @@ import EmptyState from '@/components/common/EmptyState';
 import ChannelIcon from '@/components/common/ChannelIcon';
 import { useToast } from '@/components/common/Toast';
 import client from '@/api/client';
+import { useAgents } from '@/hooks/useAgents';
+import { getAgentDisplayName, isAgentUsableInChat } from '@/utils/agentDisplay';
+import { flocksproPolicyApi, type PermissionMode } from '@/api/flocksproPolicy';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 
 // ============================================================================
 // Types
@@ -71,7 +75,17 @@ interface FeishuAccountConfig {
   verificationToken?: string;
 }
 
-interface FeishuChannelConfig {
+interface ChannelScopedSecurityConfig {
+  defaultAgent?: string;
+  visibleAgents?: string[];
+}
+
+interface AgentOption {
+  value: string;
+  label: string;
+}
+
+interface FeishuChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   appId?: string;
   appSecret?: string;
@@ -79,7 +93,6 @@ interface FeishuChannelConfig {
   domain?: 'feishu' | 'lark';
   encryptKey?: string;
   verificationToken?: string;
-  defaultAgent?: string;
   dmPolicy?: string;
   groupTrigger?: string;
   allowFrom?: string[];
@@ -93,12 +106,11 @@ interface FeishuChannelConfig {
   groups?: Record<string, any>;
 }
 
-interface WeComChannelConfig {
+interface WeComChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   botId?: string;
   secret?: string;
   websocketUrl?: string;
-  defaultAgent?: string;
   dmPolicy?: string;
   groupTrigger?: string;
   allowFrom?: string[];
@@ -107,21 +119,19 @@ interface WeComChannelConfig {
   rateBurst?: number;
 }
 
-interface DingTalkChannelConfig {
+interface DingTalkChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   clientId?: string;
   clientSecret?: string;
-  defaultAgent?: string;
   debug?: boolean;
   allowFrom?: string[];
 }
 
-interface TelegramChannelConfig {
+interface TelegramChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   botToken?: string;
   mode?: 'polling' | 'webhook';
   webhookSecret?: string;
-  defaultAgent?: string;
   groupTrigger?: string;
   allowFrom?: string[];
   mentionContextMessages?: number;
@@ -131,7 +141,7 @@ interface TelegramChannelConfig {
   streamingCoalesceMs?: number;
 }
 
-interface SlackChannelConfig {
+interface SlackChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   botToken?: string;
   appToken?: string;
@@ -145,10 +155,13 @@ interface SlackChannelConfig {
   allowBots?: 'none' | 'mentions' | 'all';
 }
 
-interface EmailChannelConfig {
+interface EmailChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   address?: string;
+  username?: string;
+  authMode?: EmailAuthMode;
   password?: string;
+  accessToken?: string;
   imapHost?: string;
   imapPort?: number;
   imapSecurity?: 'ssl' | 'starttls' | 'insecure';
@@ -166,6 +179,22 @@ interface EmailChannelConfig {
   defaultSubject?: string;
   defaultAgent?: string;
 }
+
+type EmailSecurityMode = 'ssl' | 'starttls' | 'insecure';
+type EmailProtocol = 'imap' | 'smtp';
+type EmailAuthMode = 'password' | 'xoauth2';
+
+const EMAIL_DEFAULT_PORTS: Record<EmailProtocol, Record<EmailSecurityMode, number>> = {
+  imap: { ssl: 993, starttls: 143, insecure: 143 },
+  smtp: { ssl: 465, starttls: 587, insecure: 25 },
+};
+
+const EMAIL_SECURITY_BY_PORT: Record<EmailProtocol, Record<number, EmailSecurityMode>> = {
+  imap: { 993: 'ssl', 143: 'starttls' },
+  smtp: { 465: 'ssl', 587: 'starttls', 25: 'insecure' },
+};
+
+const LAST_SELECTED_CHANNEL_STORAGE_KEY = 'flocks:last-selected-channel';
 
 const EMAIL_HOST_PRESETS = [
   {
@@ -189,6 +218,8 @@ const EMAIL_HOST_PRESETS = [
     domains: ['163.com'],
     imapHost: 'imap.163.com',
     smtpHost: 'smtp.163.com',
+    smtpPort: 465,
+    smtpSecurity: 'ssl' as EmailSecurityMode,
   },
   {
     id: 'netease-126',
@@ -196,6 +227,8 @@ const EMAIL_HOST_PRESETS = [
     domains: ['126.com'],
     imapHost: 'imap.126.com',
     smtpHost: 'smtp.126.com',
+    smtpPort: 465,
+    smtpSecurity: 'ssl' as EmailSecurityMode,
   },
   {
     id: 'tencent-exmail',
@@ -252,6 +285,31 @@ function getEmailHostPreset(address: string | undefined) {
   return EMAIL_HOST_PRESETS.find((entry) => entry.domains.includes(domain));
 }
 
+function isNeteaseEmailAddress(address: string | undefined): boolean {
+  const preset = getEmailHostPreset(address);
+  return preset?.id === 'netease-163' || preset?.id === 'netease-126';
+}
+
+function readLastSelectedChannelId(): string | null {
+  try {
+    return window.localStorage.getItem(LAST_SELECTED_CHANNEL_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeLastSelectedChannelId(channelId: string | null) {
+  try {
+    if (channelId) {
+      window.localStorage.setItem(LAST_SELECTED_CHANNEL_STORAGE_KEY, channelId);
+    } else {
+      window.localStorage.removeItem(LAST_SELECTED_CHANNEL_STORAGE_KEY);
+    }
+  } catch {
+    // Ignore storage failures so channel settings remain usable.
+  }
+}
+
 function isEmailHostMismatch(
   address: string | undefined,
   host: string | undefined,
@@ -264,13 +322,43 @@ function isEmailHostMismatch(
   return normalizedHost !== expectedHost;
 }
 
-interface WeixinChannelConfig {
+function applyEmailHostPreset(
+  config: EmailChannelConfig,
+  address: string | undefined
+): EmailChannelConfig {
+  const preset = getEmailHostPreset(address);
+  const previousPreset = getEmailHostPreset(config.address);
+  const next: EmailChannelConfig = { ...config, address };
+  if (!preset) return next;
+
+  const shouldReplaceImapHost =
+    !config.imapHost ||
+    (previousPreset && normalizeEmailHost(config.imapHost) === previousPreset.imapHost);
+  const shouldReplaceSmtpHost =
+    !config.smtpHost ||
+    (previousPreset && normalizeEmailHost(config.smtpHost) === previousPreset.smtpHost);
+  const shouldReplaceSmtpPort =
+    config.smtpPort == null ||
+    (previousPreset?.smtpPort != null && config.smtpPort === previousPreset.smtpPort) ||
+    (previousPreset?.smtpPort == null && config.smtpPort === 587);
+  const shouldReplaceSmtpSecurity =
+    config.smtpSecurity == null ||
+    (previousPreset?.smtpSecurity != null && config.smtpSecurity === previousPreset.smtpSecurity) ||
+    (previousPreset?.smtpSecurity == null && config.smtpSecurity === 'starttls');
+
+  if (shouldReplaceImapHost) next.imapHost = preset.imapHost;
+  if (shouldReplaceSmtpHost) next.smtpHost = preset.smtpHost;
+  if (preset.smtpPort != null && shouldReplaceSmtpPort) next.smtpPort = preset.smtpPort;
+  if (preset.smtpSecurity && shouldReplaceSmtpSecurity) next.smtpSecurity = preset.smtpSecurity;
+  return next;
+}
+
+interface WeixinChannelConfig extends ChannelScopedSecurityConfig {
   enabled: boolean;
   token?: string;
   accountId?: string;
   baseUrl?: string;
   cdnBaseUrl?: string;
-  defaultAgent?: string;
   dmPolicy?: string;
   allowFrom?: string[];
   groupPolicy?: string;
@@ -366,6 +454,7 @@ function defaultSlackConfig(): SlackChannelConfig {
 function defaultEmailConfig(): EmailChannelConfig {
   return {
     enabled: false,
+    authMode: 'password',
     imapPort: 993,
     imapSecurity: 'ssl',
     smtpPort: 587,
@@ -665,12 +754,23 @@ function NumberInput({
   onChange: (v: number) => void;
   min?: number;
 }) {
+  const handleChange = (raw: string) => {
+    const digits = raw.replace(/[^\d]/g, '');
+    if (!digits) {
+      onChange(min ?? 0);
+      return;
+    }
+    const next = Number(digits);
+    onChange(min == null ? next : Math.max(min, next));
+  };
+
   return (
     <input
-      type="number"
+      type="text"
+      inputMode="numeric"
+      pattern="[0-9]*"
       value={value}
-      min={min}
-      onChange={(e) => onChange(Number(e.target.value))}
+      onChange={(e) => handleChange(e.target.value)}
       className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500"
     />
   );
@@ -723,6 +823,165 @@ function TagsInput({
         className="flex-1 min-w-[100px] text-sm outline-none bg-transparent py-0.5"
       />
     </div>
+  );
+}
+
+function ChannelSecurityFields({
+  defaultAgent,
+  visibleAgents,
+  agentOptions,
+  onDefaultAgentChange,
+  onVisibleAgentsChange,
+}: {
+  defaultAgent?: string;
+  visibleAgents?: string[];
+  agentOptions: AgentOption[];
+  onDefaultAgentChange: (agent: string | undefined) => void;
+  onVisibleAgentsChange: (agents: string[] | undefined) => void;
+}) {
+  const { t } = useTranslation('channel');
+  const selectedVisibleAgents = visibleAgents ?? [];
+  const [visibleAgentOpen, setVisibleAgentOpen] = useState(false);
+  const visibleAgentRef = useRef<HTMLDivElement | null>(null);
+  const selectedVisibleSet = useMemo(
+    () => new Set(selectedVisibleAgents),
+    [selectedVisibleAgents],
+  );
+  const defaultAgentOptions = useMemo(() => {
+    if (selectedVisibleAgents.length === 0) return agentOptions;
+    const selectedSet = new Set(selectedVisibleAgents);
+    return agentOptions.filter((item) => selectedSet.has(item.value));
+  }, [agentOptions, selectedVisibleAgents]);
+  const visibleAgentSummary = useMemo(() => {
+    if (selectedVisibleAgents.length === 0) return t('security.visibleAgentsEmpty');
+    const labels = selectedVisibleAgents
+      .map((name) => agentOptions.find((item) => item.value === name)?.label ?? name);
+    if (labels.length <= 2) return labels.join(', ');
+    return t('security.visibleAgentsSelectedCount', { count: labels.length, first: labels[0], second: labels[1] });
+  }, [agentOptions, selectedVisibleAgents, t]);
+
+  useEffect(() => {
+    if (!visibleAgentOpen) return;
+    const onDocumentMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (visibleAgentRef.current?.contains(target)) return;
+      setVisibleAgentOpen(false);
+    };
+    document.addEventListener('mousedown', onDocumentMouseDown);
+    return () => document.removeEventListener('mousedown', onDocumentMouseDown);
+  }, [visibleAgentOpen]);
+
+  useEffect(() => {
+    if (!defaultAgent) return;
+    // Agent options load asynchronously. An empty list is not evidence that
+    // a persisted default is invalid, so preserve it until discovery completes.
+    if (agentOptions.length === 0) return;
+    if (defaultAgentOptions.some((item) => item.value === defaultAgent)) return;
+    if (defaultAgentOptions.length > 0) {
+      onDefaultAgentChange(defaultAgentOptions[0].value);
+      return;
+    }
+    onDefaultAgentChange(undefined);
+  }, [defaultAgent, defaultAgentOptions, onDefaultAgentChange]);
+
+  const toggleVisibleAgent = (agentName: string) => {
+    const next = selectedVisibleSet.has(agentName)
+      ? selectedVisibleAgents.filter((item) => item !== agentName)
+      : [...selectedVisibleAgents, agentName];
+    onVisibleAgentsChange(next.length > 0 ? next : undefined);
+  };
+
+  return (
+    <>
+      <FieldRow label={t('security.defaultAgent')} hint={t('security.defaultAgentHint')}>
+        <Select
+          value={defaultAgent ?? ''}
+          onChange={(v) => onDefaultAgentChange(v || undefined)}
+          options={[
+            { value: '', label: t('security.defaultAgentEmpty') },
+            ...defaultAgentOptions.map((item) => ({
+              value: item.value,
+              label: `${item.label} (${item.value})`,
+            })),
+          ]}
+        />
+      </FieldRow>
+      <FieldRow label={t('security.visibleAgents')} hint={t('security.visibleAgentsHint')}>
+        <div className="relative" ref={visibleAgentRef}>
+          <button
+            type="button"
+            onClick={() => setVisibleAgentOpen((value) => !value)}
+            className="w-full px-3 py-1.5 text-sm border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-red-500 bg-white text-left flex items-center justify-between gap-3"
+          >
+            <span className={`${selectedVisibleAgents.length === 0 ? 'text-gray-400' : 'text-gray-700'} truncate`}>
+              {visibleAgentSummary}
+            </span>
+            <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${visibleAgentOpen ? 'rotate-180' : ''}`} />
+          </button>
+          {visibleAgentOpen && (
+            <div className="absolute z-20 mt-1 w-full max-h-64 overflow-y-auto rounded-md border border-gray-200 bg-white shadow-lg">
+              {agentOptions.length === 0 ? (
+                <div className="px-3 py-2 text-sm text-gray-500">{t('security.visibleAgentsNoOptions')}</div>
+              ) : (
+                agentOptions.map((item) => (
+                  <label
+                    key={item.value}
+                    className="flex items-center gap-2 px-3 py-2 text-sm text-gray-700 hover:bg-gray-50 cursor-pointer"
+                  >
+                    <input
+                      type="checkbox"
+                      checked={selectedVisibleSet.has(item.value)}
+                      onChange={() => toggleVisibleAgent(item.value)}
+                      className="h-4 w-4 rounded border-gray-300 text-red-600 focus:ring-red-500"
+                    />
+                    <span className="truncate">{item.label} ({item.value})</span>
+                  </label>
+                ))
+              )}
+            </div>
+          )}
+        </div>
+      </FieldRow>
+    </>
+  );
+}
+
+function ProChannelPermissionModeField({ channelId }: { channelId: string }) {
+  const { t } = useTranslation('channel');
+  const [enabled, setEnabled] = useState(false);
+  const [mode, setMode] = useState<PermissionMode>('require-confirm');
+
+  useEffect(() => {
+    let active = true;
+    void flocksproUsersApi.hasCapability().then((available) => {
+      if (!active) return;
+      setEnabled(available);
+      if (available) {
+        void flocksproPolicyApi.getChannel(channelId)
+          .then((result) => active && setMode(result.permissionMode ?? 'require-confirm'))
+          .catch(() => active && setEnabled(false));
+      }
+    });
+    return () => { active = false; };
+  }, [channelId]);
+
+  if (!enabled) return null;
+  return (
+    <FieldRow label={t('security.permissionMode')} hint={t('security.permissionModeHint')}>
+      <Select
+        value={mode}
+        onChange={(value) => {
+          const next = value as PermissionMode;
+          setMode(next);
+          void flocksproPolicyApi.setChannel(channelId, next).catch(() => setMode(mode));
+        }}
+        options={[
+          { value: 'readonly', label: t('security.permissionModeReadonly') },
+          { value: 'require-confirm', label: t('security.permissionModeRequireConfirm') },
+          { value: 'auto-allow-all', label: t('security.permissionModeAutoConfirmAll') },
+        ]}
+      />
+    </FieldRow>
   );
 }
 
@@ -1044,10 +1303,11 @@ function ChannelCard({ meta, config, status, isSelected, onClick }: ChannelCardP
 
 interface FeishuPanelProps {
   config: FeishuChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: FeishuChannelConfig) => void;
 }
 
-function FeishuPanel({ config, onChange }: FeishuPanelProps) {
+function FeishuPanel({ config, agentOptions, onChange }: FeishuPanelProps) {
   const { t } = useTranslation('channel');
   const set = useCallback(
     <K extends keyof FeishuChannelConfig>(key: K, value: FeishuChannelConfig[K]) =>
@@ -1151,13 +1411,13 @@ function FeishuPanel({ config, onChange }: FeishuPanelProps) {
       </Section>
 
       <Section title={t('feishu.behavior')} description={t('feishu.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('feishu.defaultAgent')} hint={t('feishu.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('feishu.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(v) => set('defaultAgent', v)}
+          onVisibleAgentsChange={(v) => set('visibleAgents', v)}
+        />
         <FieldRow label={t('feishu.groupTrigger')} hint={t('feishu.groupTriggerHint')}>
           <Select
             value={config.groupTrigger ?? 'mention'}
@@ -1342,10 +1602,11 @@ function AccountCard({ id, config, onChange, onRename, onRemove }: AccountCardPr
 
 interface WeComPanelProps {
   config: WeComChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: WeComChannelConfig) => void;
 }
 
-function WeComPanel({ config, onChange }: WeComPanelProps) {
+function WeComPanel({ config, agentOptions, onChange }: WeComPanelProps) {
   const { t } = useTranslation('channel');
   const set = useCallback(
     <K extends keyof WeComChannelConfig>(key: K, value: WeComChannelConfig[K]) =>
@@ -1384,13 +1645,13 @@ function WeComPanel({ config, onChange }: WeComPanelProps) {
       </Section>
 
       <Section title={t('wecom.behavior')} description={t('wecom.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('wecom.defaultAgent')} hint={t('wecom.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('wecom.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(v) => set('defaultAgent', v)}
+          onVisibleAgentsChange={(v) => set('visibleAgents', v)}
+        />
         <FieldRow label={t('wecom.groupTrigger')} hint={t('wecom.groupTriggerHint')}>
           <span className="inline-block px-3 py-1.5 text-sm text-gray-500 border border-gray-200 rounded-md bg-gray-50">
             {t('wecom.triggerMention')}
@@ -1438,10 +1699,11 @@ function WeComPanel({ config, onChange }: WeComPanelProps) {
 
 interface DingTalkPanelProps {
   config: DingTalkChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: DingTalkChannelConfig) => void;
 }
 
-function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
+function DingTalkPanel({ config, agentOptions, onChange }: DingTalkPanelProps) {
   const { t } = useTranslation('channel');
   const set = useCallback(
     <K extends keyof DingTalkChannelConfig>(key: K, value: DingTalkChannelConfig[K]) =>
@@ -1473,13 +1735,13 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
       </Section>
 
       <Section title={t('dingtalk.behavior')} description={t('dingtalk.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('dingtalk.defaultAgent')} hint={t('dingtalk.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('dingtalk.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(v) => set('defaultAgent', v)}
+          onVisibleAgentsChange={(v) => set('visibleAgents', v)}
+        />
         <FieldRow label={t('dingtalk.allowFrom')} hint={t('dingtalk.allowFromHint')}>
           <TagsInput
             value={config.allowFrom ?? []}
@@ -1508,11 +1770,12 @@ function DingTalkPanel({ config, onChange }: DingTalkPanelProps) {
 
 interface TelegramPanelProps {
   config: TelegramChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: TelegramChannelConfig) => void;
   onRefresh?: () => void;
 }
 
-function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
+function TelegramPanel({ config, agentOptions, onChange, onRefresh }: TelegramPanelProps) {
   const { t } = useTranslation('channel');
   const toast = useToast();
   const set = useCallback(
@@ -1651,13 +1914,13 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 
       {/* ── Message Behavior ── */}
       <Section title={t('telegram.behavior')} description={t('telegram.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('telegram.defaultAgent')} hint={t('telegram.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('telegram.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(v) => set('defaultAgent', v)}
+          onVisibleAgentsChange={(v) => set('visibleAgents', v)}
+        />
         <FieldRow label={t('telegram.groupTrigger')} hint={t('telegram.groupTriggerHint')}>
           <Select
             value={config.groupTrigger ?? 'mention'}
@@ -1720,9 +1983,11 @@ function TelegramPanel({ config, onChange, onRefresh }: TelegramPanelProps) {
 
 function SlackPanel({
   config,
+  agentOptions,
   onChange,
 }: {
   config: SlackChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: SlackChannelConfig) => void;
 }) {
   const { t } = useTranslation('channel');
@@ -1853,13 +2118,13 @@ function SlackPanel({
       </Section>
 
       <Section title={t('slack.behavior')} description={t('slack.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('slack.defaultAgent')} hint={t('slack.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('slack.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(value) => set('defaultAgent', value)}
+          onVisibleAgentsChange={(value) => set('visibleAgents', value)}
+        />
         <FieldRow label={t('slack.groupTrigger')} hint={t('slack.groupTriggerHint')}>
           <Select
             value={config.groupTrigger ?? 'mention'}
@@ -1925,17 +2190,67 @@ function SlackPanel({
 
 interface EmailPanelProps {
   config: EmailChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: EmailChannelConfig) => void;
 }
 
-function EmailPanel({ config, onChange }: EmailPanelProps) {
+function EmailPanel({ config, agentOptions, onChange }: EmailPanelProps) {
   const { t } = useTranslation('channel');
   const set = useCallback(
     <K extends keyof EmailChannelConfig>(key: K, value: EmailChannelConfig[K]) =>
       onChange({ ...config, [key]: value }),
     [config, onChange]
   );
+  const setAddress = useCallback(
+    (value: string) => onChange(applyEmailHostPreset(config, value || undefined)),
+    [config, onChange]
+  );
+  const setAuthMode = useCallback(
+    (value: EmailAuthMode) => {
+      const next: EmailChannelConfig = { ...config, authMode: value };
+      if (value === 'xoauth2') {
+        delete next.password;
+      } else {
+        delete next.accessToken;
+      }
+      onChange(next);
+    },
+    [config, onChange]
+  );
+  const setSecurity = useCallback(
+    (
+      protocol: EmailProtocol,
+      security: EmailSecurityMode,
+    ) => {
+      const portKey = protocol === 'imap' ? 'imapPort' : 'smtpPort';
+      const securityKey = protocol === 'imap' ? 'imapSecurity' : 'smtpSecurity';
+      onChange({
+        ...config,
+        [securityKey]: security,
+        [portKey]: EMAIL_DEFAULT_PORTS[protocol][security],
+      });
+    },
+    [config, onChange]
+  );
+  const setPort = useCallback(
+    (
+      protocol: EmailProtocol,
+      port: number,
+    ) => {
+      const portKey = protocol === 'imap' ? 'imapPort' : 'smtpPort';
+      const securityKey = protocol === 'imap' ? 'imapSecurity' : 'smtpSecurity';
+      const security = EMAIL_SECURITY_BY_PORT[protocol][port];
+      onChange({
+        ...config,
+        [portKey]: port,
+        ...(security ? { [securityKey]: security } : {}),
+      });
+    },
+    [config, onChange]
+  );
   const emailHostPreset = getEmailHostPreset(config.address);
+  const authMode = config.authMode ?? 'password';
+  const showNeteaseSmtpSecurityHint = isNeteaseEmailAddress(config.address);
   const showImapHostWarning = isEmailHostMismatch(config.address, config.imapHost, 'imap');
   const showSmtpHostWarning = isEmailHostMismatch(config.address, config.smtpHost, 'smtp');
 
@@ -1945,17 +2260,44 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.address')} required hint={t('email.addressHint')}>
           <TextInput
             value={config.address ?? ''}
-            onChange={(v) => set('address', v || undefined)}
+            onChange={setAddress}
             placeholder="agent@example.com"
           />
         </FieldRow>
-        <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
-          <SecretInput
-            value={config.password ?? ''}
-            onChange={(v) => set('password', v || undefined)}
-            placeholder="app password"
+        <FieldRow label={t('email.username')} hint={t('email.usernameHint')}>
+          <TextInput
+            value={config.username ?? ''}
+            onChange={(v) => set('username', v || undefined)}
+            placeholder="username"
           />
         </FieldRow>
+        <FieldRow label={t('email.authMode')} required hint={t('email.authModeHint')}>
+          <Select
+            value={authMode}
+            onChange={(v) => setAuthMode(v as EmailAuthMode)}
+            options={[
+              { value: 'password', label: t('email.authModePassword') },
+              { value: 'xoauth2', label: t('email.authModeXoauth2') },
+            ]}
+          />
+        </FieldRow>
+        {authMode === 'xoauth2' ? (
+          <FieldRow label={t('email.accessToken')} required hint={t('email.accessTokenHint')}>
+            <SecretInput
+              value={config.accessToken ?? ''}
+              onChange={(v) => set('accessToken', v || undefined)}
+              placeholder="ya29..."
+            />
+          </FieldRow>
+        ) : (
+          <FieldRow label={t('email.password')} required hint={t('email.passwordHint')}>
+            <SecretInput
+              value={config.password ?? ''}
+              onChange={(v) => set('password', v || undefined)}
+              placeholder="app password"
+            />
+          </FieldRow>
+        )}
       </Section>
 
       <Section title={t('email.servers')} description={t('email.serversDesc')}>
@@ -1975,7 +2317,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.imapSecurity')} hint={t('email.securityHint')}>
           <Select
             value={config.imapSecurity ?? 'ssl'}
-            onChange={(v) => set('imapSecurity', v as EmailChannelConfig['imapSecurity'])}
+            onChange={(v) => setSecurity('imap', v as EmailSecurityMode)}
             options={[
               { value: 'ssl', label: t('email.securitySsl') },
               { value: 'starttls', label: t('email.securityStarttls') },
@@ -1986,7 +2328,7 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.imapPort')} hint={t('email.imapPortHint')}>
           <NumberInput
             value={config.imapPort ?? 993}
-            onChange={(v) => set('imapPort', v)}
+            onChange={(v) => setPort('imap', v)}
             min={1}
           />
         </FieldRow>
@@ -2006,18 +2348,23 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
         <FieldRow label={t('email.smtpSecurity')} hint={t('email.securityHint')}>
           <Select
             value={config.smtpSecurity ?? 'starttls'}
-            onChange={(v) => set('smtpSecurity', v as EmailChannelConfig['smtpSecurity'])}
+            onChange={(v) => setSecurity('smtp', v as EmailSecurityMode)}
             options={[
               { value: 'ssl', label: t('email.securitySsl') },
               { value: 'starttls', label: t('email.securityStarttls') },
               { value: 'insecure', label: t('email.securityInsecure') },
             ]}
           />
+          {showNeteaseSmtpSecurityHint && (
+            <p className="mt-1.5 text-xs font-medium leading-relaxed text-red-600">
+              {t('email.neteaseSmtpSecurityHint')}
+            </p>
+          )}
         </FieldRow>
         <FieldRow label={t('email.smtpPort')} hint={t('email.smtpPortHint')}>
           <NumberInput
             value={config.smtpPort ?? 587}
-            onChange={(v) => set('smtpPort', v)}
+            onChange={(v) => setPort('smtp', v)}
             min={1}
           />
         </FieldRow>
@@ -2070,13 +2417,13 @@ function EmailPanel({ config, onChange }: EmailPanelProps) {
       </Section>
 
       <Section title={t('email.behavior')} description={t('email.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('email.defaultAgent')} hint={t('email.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('email.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(value) => set('defaultAgent', value)}
+          onVisibleAgentsChange={(value) => set('visibleAgents', value)}
+        />
         <FieldRow label={t('email.defaultSubject')} hint={t('email.defaultSubjectHint')}>
           <TextInput
             value={config.defaultSubject ?? ''}
@@ -2468,6 +2815,7 @@ function WhatsAppPanel({ config, onChange, onPairSuccess }: WhatsAppPanelProps) 
 
 interface WeixinPanelProps {
   config: WeixinChannelConfig;
+  agentOptions: AgentOption[];
   onChange: (c: WeixinChannelConfig) => void;
   /** Persist QR-obtained credentials to flocks.json + restart the channel.
    *  Called automatically when the QR login flow completes. */
@@ -2483,7 +2831,7 @@ type QrPhase =
   | 'expired'        // QR expired, allow restart
   | 'error';         // network / API error
 
-function WeixinPanel({ config, onChange, onQrLoginSuccess }: WeixinPanelProps) {
+function WeixinPanel({ config, agentOptions, onChange, onQrLoginSuccess }: WeixinPanelProps) {
   const { t } = useTranslation('channel');
   const toast = useToast();
   const set = useCallback(
@@ -2743,13 +3091,13 @@ function WeixinPanel({ config, onChange, onQrLoginSuccess }: WeixinPanelProps) {
       </Section>
 
       <Section title={t('weixin.behavior')} description={t('weixin.behaviorDesc')} defaultOpen={false}>
-        <FieldRow label={t('weixin.defaultAgent')} hint={t('weixin.defaultAgentHint')}>
-          <TextInput
-            value={config.defaultAgent ?? ''}
-            onChange={(v) => set('defaultAgent', v || undefined)}
-            placeholder={t('weixin.optional')}
-          />
-        </FieldRow>
+        <ChannelSecurityFields
+          defaultAgent={config.defaultAgent}
+          visibleAgents={config.visibleAgents}
+          agentOptions={agentOptions}
+          onDefaultAgentChange={(v) => set('defaultAgent', v)}
+          onVisibleAgentsChange={(v) => set('visibleAgents', v)}
+        />
         <FieldRow label={t('weixin.dmPolicy')} hint={t('weixin.dmPolicyHint')}>
           <Select
             value={config.dmPolicy ?? 'open'}
@@ -2973,8 +3321,9 @@ function StatsStrip({
 // ============================================================================
 
 export default function ChannelPage() {
-  const { t } = useTranslation('channel');
+  const { t, i18n } = useTranslation('channel');
   const toast = useToast();
+  const { agents } = useAgents();
 
   const [channels, setChannels] = useState<ChannelMeta[]>([]);
   const [statuses, setStatuses] = useState<Record<string, ChannelStatus>>({});
@@ -2987,6 +3336,16 @@ export default function ChannelPage() {
   const [restarting, setRestarting] = useState(false);
   const [refreshingStatus, setRefreshingStatus] = useState(false);
   const [refreshDone, setRefreshDone] = useState(false);
+
+  const chatAgentOptions = useMemo<AgentOption[]>(() => {
+    return agents
+      .filter((agent) => isAgentUsableInChat(agent))
+      .map((agent) => ({
+        value: agent.name,
+        label: getAgentDisplayName(agent, i18n.language) || agent.name,
+      }))
+      .sort((a, b) => a.label.localeCompare(b.label));
+  }, [agents, i18n.language]);
 
   // Track unsaved changes per channel
   const originalConfigsRef = useRef<Record<string, ChannelConfig>>({});
@@ -3051,16 +3410,30 @@ export default function ChannelPage() {
       setChannelConfigs(configs);
       originalConfigsRef.current = JSON.parse(JSON.stringify(configs));
 
-      // Auto-select first channel
-      if (channelList.length > 0 && !selectedId) {
-        setSelectedId(channelList[0].id);
-      }
+      setSelectedId((current) => {
+        const channelIds = new Set(channelList.map((ch) => ch.id));
+        if (current && channelIds.has(current)) {
+          return current;
+        }
+
+        const stored = readLastSelectedChannelId();
+        const nextSelectedId = stored && channelIds.has(stored)
+          ? stored
+          : (channelList[0]?.id ?? null);
+        writeLastSelectedChannelId(nextSelectedId);
+        return nextSelectedId;
+      });
     } catch (err: any) {
       toast.error(t('loadFailed'), err.message);
     } finally {
       setLoading(false);
     }
-  }, [selectedId, toast, t]);
+  }, [toast, t]);
+
+  const handleSelectChannel = useCallback((channelId: string) => {
+    setSelectedId(channelId);
+    writeLastSelectedChannelId(channelId);
+  }, []);
 
   const fetchStatuses = useCallback(async (silent = false) => {
     try {
@@ -3345,7 +3718,7 @@ export default function ChannelPage() {
                 config={channelConfigs[ch.id] ?? { enabled: false }}
                 status={statuses[ch.id]}
                 isSelected={selectedId === ch.id}
-                onClick={() => setSelectedId(ch.id)}
+                onClick={() => handleSelectChannel(ch.id)}
               />
             ))}
           </div>
@@ -3376,24 +3749,28 @@ export default function ChannelPage() {
                   {selectedId === 'feishu' && (
                     <FeishuPanel
                       config={selectedConfig as FeishuChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('feishu', cfg)}
                     />
                   )}
                   {selectedId === 'wecom' && (
                     <WeComPanel
                       config={selectedConfig as WeComChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('wecom', cfg)}
                     />
                   )}
                   {selectedId === 'dingtalk' && (
                     <DingTalkPanel
                       config={selectedConfig as DingTalkChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('dingtalk', cfg)}
                     />
                   )}
                   {selectedId === 'telegram' && (
                     <TelegramPanel
                       config={selectedConfig as TelegramChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('telegram', cfg)}
                       onRefresh={fetchAll}
                     />
@@ -3401,12 +3778,14 @@ export default function ChannelPage() {
                   {selectedId === 'slack' && (
                     <SlackPanel
                       config={selectedConfig as SlackChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('slack', cfg)}
                     />
                   )}
                   {selectedId === 'email' && (
                     <EmailPanel
                       config={selectedConfig as EmailChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('email', cfg)}
                     />
                   )}
@@ -3420,10 +3799,12 @@ export default function ChannelPage() {
                   {selectedId === 'weixin' && (
                     <WeixinPanel
                       config={selectedConfig as WeixinChannelConfig}
+                      agentOptions={chatAgentOptions}
                       onChange={(cfg) => handleChannelConfigChange('weixin', cfg)}
                       onQrLoginSuccess={handleWeixinQrSuccess}
                     />
                   )}
+                  <ProChannelPermissionModeField channelId={selectedId!} />
                 </div>
               </>
             ) : (
@@ -3460,6 +3841,14 @@ function stripEmpty(obj: Record<string, any>): Record<string, any> {
 
 function stripChannelConfigForSave(channelId: string, cfg: Record<string, any>): Record<string, any> {
   const result = stripEmpty(cfg);
+
+  if (channelId === 'email') {
+    if (result.authMode === 'xoauth2') {
+      delete result.password;
+    } else {
+      delete result.accessToken;
+    }
+  }
 
   if (channelId === 'slack') {
     const allowFrom = Array.isArray(cfg.allowFrom) ? cfg.allowFrom : [];
