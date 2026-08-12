@@ -490,3 +490,56 @@ class TestEstimateFullContextTokens:
         )
 
         assert result == 0
+
+
+class TestEstimateToolResultTokens:
+    @pytest.mark.asyncio
+    async def test_counts_only_results_added_after_model_call(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        from flocks.session import message as message_mod
+
+        parts = [
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(
+                    status="completed",
+                    input={"query": "i" * 400},
+                    output="o" * 400,
+                    time={},
+                ),
+            ),
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(
+                    status="completed",
+                    input={},
+                    output="ignored after compaction",
+                    time={"compacted": 1},
+                ),
+            ),
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(status="error", error="boom", time={}),
+            ),
+            SimpleNamespace(
+                type="tool",
+                state=SimpleNamespace(status="running", time={}),
+            ),
+            SimpleNamespace(type="text", text="not a tool result"),
+        ]
+
+        async def _parts(message_id, session_id):  # noqa: ARG001
+            return parts
+
+        monkeypatch.setattr(message_mod.Message, "parts", staticmethod(_parts))
+
+        result = await SessionPrompt.estimate_tool_result_tokens("ses_x", "msg_x")
+
+        assert result == (
+            SessionPrompt.count_tokens("o" * 400)
+            + 10
+            + SessionPrompt.count_tokens("Error: boom")
+            + SessionPrompt.count_tokens("Error: Tool execution was interrupted")
+        )
