@@ -139,6 +139,17 @@ class ModelManager:
             model_id=model_id,
         )
 
+    def get_effective_default_parameters(
+        self,
+        provider_id: str,
+        model_id: str,
+    ) -> Dict[str, Any]:
+        """Get inherited default parameters for a provider model."""
+        return ConfigWriter.get_effective_model_default_parameters(
+            provider_id,
+            model_id,
+        )
+
     # ==================== Default Models ====================
 
     def get_default_model(

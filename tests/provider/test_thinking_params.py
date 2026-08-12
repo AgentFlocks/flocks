@@ -100,7 +100,7 @@ def _expected_generic_chat_extra_body(
     if "mimo" in model_lower:
         return MIMO_THINKING_EXTRA_BODY
     if is_kimi_k3_model(model_id):
-        return {"reasoning_effort": "max"}
+        return {"reasoning_effort": "high"}
     if is_kimi_k27_code_model(model_id):
         return KIMI_THINKING_EXTRA_BODY
     if "kimi" in model_lower:
@@ -444,7 +444,7 @@ class TestDispatchShape:
             ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
             ("kimi-k2.7-code", KIMI_THINKING_EXTRA_BODY),
             ("kimi-k2.7-code-highspeed", KIMI_THINKING_EXTRA_BODY),
-            ("kimi-k3", {"reasoning_effort": "max"}),
+            ("kimi-k3", {"reasoning_effort": "high"}),
             ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
             ("minimax-m4-uncatalogued", {"reasoning_split": True}),
             ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),

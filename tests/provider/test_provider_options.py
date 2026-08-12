@@ -86,7 +86,7 @@ class TestBuildProviderOptions:
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"] == {"reasoning_effort": "max"}
+        assert options["extra_body"] == {"reasoning_effort": "high"}
 
     def test_kimi_k27_forces_thinking_even_when_toggle_is_disabled(self):
         options = provider_options.build_provider_options(
@@ -127,7 +127,7 @@ class TestBuildProviderOptions:
             resolve_max_tokens=False,
         )
 
-        assert options["extra_body"] == {"reasoning_effort": "max"}
+        assert options["extra_body"] == {"reasoning_effort": "high"}
         assert "thinking" not in options["extra_body"]
 
     def test_kimi_k3_respects_supported_reasoning_effort(self):
@@ -443,3 +443,27 @@ class TestBuildProviderOptions:
         )
 
         assert "reasoningEffort" not in options
+
+    def test_openai_reasoning_defaults_to_high(self):
+        options = provider_options.build_provider_options(
+            "openai",
+            "gpt-5.4",
+            resolve_max_tokens=False,
+        )
+
+        assert options["reasoningEffort"] == "high"
+
+    def test_openai_uses_configured_reasoning_effort(self, monkeypatch):
+        monkeypatch.setattr(
+            provider_options,
+            "_resolve_reasoning_effort",
+            lambda *_args: "low",
+        )
+
+        options = provider_options.build_provider_options(
+            "openai",
+            "gpt-5.4",
+            resolve_max_tokens=False,
+        )
+
+        assert options["reasoningEffort"] == "low"

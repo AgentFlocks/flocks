@@ -1,5 +1,10 @@
 {
   "provider": {},
+  "default_models": {
+    "default_parameters": {
+      "reasoning_effort": "high"
+    }
+  },
   "mcp": {},
   "channels": {},
   "plugin": [],
