@@ -22,6 +22,7 @@ import pytest
 from flocks.agent.agent import AgentInfo
 from flocks.session.prompt import (
     PROMPT_DEFAULT,
+    get_prompt_flocks_config_guard,
     PromptTemplate,
     SessionPrompt,
     SystemPrompt,
@@ -271,12 +272,13 @@ class TestBuildSystemPrompts:
                 tool_catalog_prompt_factory=lambda: "SHOULD_NOT_APPEAR",
             )
 
-        assert len(prompts) == 2
-        assert prompts[0] == "You are Rex Junior."
-        assert "## Environment" in prompts[1]
-        assert "Current working directory: /tmp/project" in prompts[1]
-        assert "Platform:" in prompts[1]
-        assert "Today's date:" in prompts[1]
+        assert len(prompts) == 3
+        assert prompts[0] == get_prompt_flocks_config_guard().strip()
+        assert prompts[1] == "You are Rex Junior."
+        assert "## Environment" in prompts[2]
+        assert "Current working directory: /tmp/project" in prompts[2]
+        assert "Platform:" in prompts[2]
+        assert "Today's date:" in prompts[2]
         assert "SHOULD_NOT_APPEAR" not in "\n".join(prompts)
         assert PROMPT_DEFAULT.strip() not in "\n".join(prompts)
 
@@ -306,6 +308,25 @@ class TestBuildSystemPrompts:
 
         assert len(prompts) > 2
         assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+
+    @pytest.mark.asyncio
+    async def test_full_prompt_requires_question_approval_for_flocks_config_operations(self):
+        prompts = await SessionPrompt.build_system_prompts(
+            session_id="ses-config-guard",
+            session_directory="/tmp/project",
+            agent_name="rex",
+            agent_prompt="You are Rex.",
+            provider_id="anthropic",
+            model_id="claude-sonnet",
+        )
+
+        guard = get_prompt_flocks_config_guard().strip()
+        assert guard in prompts
+        assert "`flocks.json`" in guard
+        assert "`mcp_list.json`" in guard
+        assert "MUST call the `question` tool" in guard
+        assert "user's original request is not approval" in guard
+        assert "only inspect protected configuration with non-mutating operations" in guard
 
 
 # ---------------------------------------------------------------------------

@@ -33,7 +33,7 @@ from flocks.session.runner import (
     StepResult,
     ToolCall,
 )
-from flocks.session.prompt import SessionPrompt
+from flocks.session.prompt import SessionPrompt, get_prompt_flocks_config_guard
 from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
 from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
@@ -739,6 +739,7 @@ class TestBuildSystemPrompts:
 
         assert prompts == [
             "provider prompt",
+            get_prompt_flocks_config_guard().strip(),
             "tool protocol",
             "memory guidance",
             "agent prompt",

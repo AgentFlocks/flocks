@@ -11,6 +11,7 @@ import {
   PROMPT_ANTHROPIC_SPOOF,
   PROMPT_BEAST,
   PROMPT_CODEX,
+  PROMPT_FLOCKS_CONFIG_GUARD,
   PROMPT_GENERAL,
   PROMPT_GEMINI,
 } from "./prompt-source"
@@ -19,8 +20,10 @@ import { Flag } from "@/flag/flag"
 
 export namespace SystemPrompt {
   export function header(providerID: string) {
-    if (providerID.includes("anthropic")) return [PROMPT_ANTHROPIC_SPOOF.trim()]
-    return []
+    const prompts: string[] = []
+    if (providerID.includes("anthropic")) prompts.push(PROMPT_ANTHROPIC_SPOOF.trim())
+    prompts.push(PROMPT_FLOCKS_CONFIG_GUARD.trim())
+    return prompts
   }
 
   export function instructions() {

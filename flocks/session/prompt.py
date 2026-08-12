@@ -83,6 +83,10 @@ def get_prompt_codex() -> str:
     return _load_prompt_file("codex_header.txt")
 
 
+def get_prompt_flocks_config_guard() -> str:
+    return _load_prompt_file("flocks_config_guard.txt")
+
+
 PROMPT_DEFAULT = """You are Flocks, an AI-Native SecOps Platform.
 
 You specialize in cybersecurity operations including:
@@ -1091,6 +1095,7 @@ class SessionPrompt:
     ) -> List[str]:
         """Build minimal system prompts for built-in system subagents."""
         prompts = [
+            get_prompt_flocks_config_guard().strip(),
             cls._normalize_prompt_text(agent_prompt),
             cls._build_minimal_environment(session_directory),
         ]
@@ -1168,6 +1173,13 @@ class SessionPrompt:
                 cache_scope="global",
                 digest_inputs={"model_id": model_id},
                 builder=lambda: cls._join_prompt_parts(SystemPrompt.provider(model_id)),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="flocks_config_guard",
+                cache_scope="global",
+                digest_inputs={"prompt": get_prompt_flocks_config_guard()},
+                builder=lambda: get_prompt_flocks_config_guard().strip(),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,
