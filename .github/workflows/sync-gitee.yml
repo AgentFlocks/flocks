@@ -218,14 +218,18 @@ jobs:
           encoded_tag="$(jq -rn --arg value "${TAG_NAME}" '$value | @uri')"
           release_lookup="${RUNNER_TEMP}/gitee-release-lookup.json"
           release_response="${RUNNER_TEMP}/gitee-release-response.json"
-          lookup_status="$(
+          if ! lookup_status="$(
             curl --silent --show-error --retry 3 \
               --output "${release_lookup}" \
               --write-out '%{http_code}' \
               --get \
               --data-urlencode "access_token=${GITEE_TOKEN}" \
               "${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${encoded_tag}"
-          )"
+          )"; then
+            echo "::error title=Gitee Release lookup request failed::Could not query ${TAG_NAME} after retries."
+            exit 1
+          fi
+          echo "Gitee Release lookup returned HTTP ${lookup_status}."
 
           common_fields=(
             --data-urlencode "access_token=${GITEE_TOKEN}"
@@ -251,14 +255,18 @@ jobs:
             exit 1
           fi
 
-          sync_status="$(
+          if ! sync_status="$(
             curl --silent --show-error --retry 3 \
               --output "${release_response}" \
               --write-out '%{http_code}' \
               --request "${sync_method}" \
               "${common_fields[@]}" \
               "${sync_url}"
-          )"
+          )"; then
+            echo "::error title=Gitee Release sync request failed::Release ${sync_method} failed after retries."
+            exit 1
+          fi
+          echo "Gitee Release ${sync_method} returned HTTP ${sync_status}."
 
           if [[ ! "${sync_status}" =~ ^2[0-9][0-9]$ ]]; then
             message="$(jq -r '.message // "unknown Gitee API error"' "${release_response}" 2>/dev/null || true)"
@@ -266,14 +274,18 @@ jobs:
             exit 1
           fi
 
-          verification_status="$(
+          if ! verification_status="$(
             curl --silent --show-error --retry 3 \
               --output "${release_response}" \
               --write-out '%{http_code}' \
               --get \
               --data-urlencode "access_token=${GITEE_TOKEN}" \
               "${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/tags/${encoded_tag}"
-          )"
+          )"; then
+            echo "::error title=Gitee Release verification request failed::Could not verify ${TAG_NAME} after retries."
+            exit 1
+          fi
+          echo "Gitee Release verification returned HTTP ${verification_status}."
 
           if [[ "${verification_status}" != "200" ]]; then
             message="$(jq -r '.message // "unknown Gitee API error"' "${release_response}" 2>/dev/null || true)"
