@@ -696,9 +696,9 @@ class TestToolCallExecution:
         assert running_inputs == [{"ip": "10.1.2.3"}]
 
     @pytest.mark.asyncio
-    async def test_tool_before_failure_blocks_tool_execution(self):
+    async def test_tool_before_failure_allows_tool_execution(self):
         proc = _make_processor()
-        execute_mock = AsyncMock(return_value=ToolResult(success=True, output="should not run", title="ip query"))
+        execute_mock = AsyncMock(return_value=ToolResult(success=True, output="executed", title="ip query"))
 
         with (
             patch("flocks.session.streaming.stream_processor.Message.store_part", new=AsyncMock()),
@@ -721,10 +721,10 @@ class TestToolCallExecution:
                 )
             )
 
-        execute_mock.assert_not_awaited()
+        execute_mock.assert_awaited_once()
         state = proc.tool_calls["tc_hook_fail"]
-        assert state.status == "error"
-        assert state.error == "Tool execution blocked because tool-before hook failed"
+        assert state.status == "completed"
+        assert state.output == "executed"
 
     @pytest.mark.asyncio
     async def test_cancelled_tool_blocks_late_running_metadata_updates(self):
