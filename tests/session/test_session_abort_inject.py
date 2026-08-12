@@ -16,6 +16,7 @@ import pytest
 
 from flocks.session.message import ToolPart, ToolStateCompleted
 from flocks.session.goal import GoalDecision
+from flocks.session.prompt import SessionPrompt
 from flocks.session.session_loop import SessionLoop, LoopCallbacks, LoopContext, LoopResult
 from flocks.session.runner import SessionRunner, StepResult
 from flocks.session.session import SessionInfo
@@ -707,7 +708,7 @@ class TestTurnLifecycle:
             AsyncMock(return_value=1),
         ), patch(
             "flocks.session.session_loop.SessionPrompt.estimate_full_context_tokens",
-            AsyncMock(return_value=0),
+            AsyncMock(side_effect=[0, 50_000, 0, 0]),
         ), patch(
             "flocks.session.runner.SessionRunner._process_step",
             AsyncMock(return_value=StepResult(action="stop")),
@@ -726,6 +727,100 @@ class TestTurnLifecycle:
         cleanup_turn = event_callback.await_args_list[2].args[1]
         assert cleanup_turn["continue_reason"] == "pre_compact_cleanup"
         assert cleanup_turn["status"] == "continued"
+
+    @pytest.mark.asyncio
+    async def test_post_observation_tool_delta_combines_with_observed_prompt(self):
+        session = SimpleNamespace(
+            id="turn_stale_usage_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        messages = [
+            self._make_msg("stale_usage_user", "user"),
+            self._make_msg(
+                "stale_usage_assistant",
+                "assistant",
+                finish="tool-calls",
+                tokens={"input": 95_000, "output": 0, "cache": {"read": 0, "write": 0}},
+            ),
+        ]
+        messages[0].content = "h" * 260_000
+        ctx.session_ctx = SimpleNamespace(get_messages=AsyncMock(return_value=messages))
+        tool_parts = [
+            ToolPart(
+                sessionID=session.id,
+                messageID="stale_usage_assistant",
+                callID=f"call_delta_{index}",
+                tool="bash",
+                state=ToolStateCompleted(
+                    input={"command": f"produce output {index}"},
+                    output="x" * 80_000,
+                    title="bash",
+                    metadata={},
+                    time={"start": index, "end": index + 1},
+                ),
+            )
+            for index in range(2)
+        ]
+        run_compaction = AsyncMock(return_value="stop")
+        parts_by_message = {"stale_usage_assistant": []}
+        truncation_calls = 0
+
+        async def truncate_one_tool_result(*args, **kwargs):  # noqa: ARG001
+            nonlocal truncation_calls
+            truncation_calls += 1
+            if truncation_calls == 1:
+                tool_parts[0].state.time["compacted"] = 1
+                return 1
+            return 0
+
+        with patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(
+                side_effect=lambda message_id, _session_id: (
+                    list(parts_by_message.get(message_id, []))
+                ),
+            ),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.truncate_oversized_tool_outputs",
+            AsyncMock(side_effect=truncate_one_tool_result),
+        ), patch(
+            "flocks.session.session_loop.SessionCompaction.prune",
+            AsyncMock(),
+        ), patch(
+            "flocks.session.session_loop.run_compaction",
+            run_compaction,
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ):
+            estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
+                session.id,
+                messages,
+            )
+            parts_by_message["stale_usage_assistant"] = tool_parts
+            result = await SessionLoop._run_loop(ctx, LoopCallbacks())
+            current_message_tokens = await SessionPrompt.estimate_full_context_tokens(
+                session.id,
+                messages,
+            )
+
+        assert estimated_tokens < int(128_000 * 0.85)
+        assert current_message_tokens < int(128_000 * 0.85)
+        assert result.action == "stop"
+        run_compaction.assert_awaited_once()
+        assert truncation_calls == 2
+        assert ctx.last_observed_prompt_tokens == 95_000
 
     @pytest.mark.asyncio
     async def test_run_loop_skips_exit_condition_when_assistant_has_tool_parts(self):

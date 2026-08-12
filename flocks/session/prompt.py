@@ -549,6 +549,50 @@ class SessionPrompt:
         return total
 
     @classmethod
+    async def estimate_tool_result_tokens(
+        cls,
+        session_id: str,
+        message_id: str,
+    ) -> int:
+        """Estimate tool-result tokens added after an assistant model call."""
+        from flocks.session.message import Message
+
+        try:
+            parts = await Message.parts(message_id, session_id)
+        except Exception as exc:
+            log.debug("prompt.tool_result_estimate.parts_failed", {
+                "message_id": message_id,
+                "error": str(exc),
+            })
+            return 0
+
+        total = 0
+        for part in parts:
+            if getattr(part, "type", None) != "tool":
+                continue
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            time_info = getattr(state, "time", None)
+            if isinstance(time_info, dict) and time_info.get("compacted"):
+                total += 10
+                continue
+
+            status = getattr(state, "status", None)
+            if status == "completed":
+                output = getattr(state, "output", None)
+                if output:
+                    total += cls.count_tokens(
+                        output if isinstance(output, str) else str(output)
+                    )
+            elif status == "error":
+                error = getattr(state, "error", "Unknown error")
+                total += cls.count_tokens(f"Error: {error}")
+            elif status == "running":
+                total += cls.count_tokens("Error: Tool execution was interrupted")
+        return total
+
+    @classmethod
     async def _tokens_for_message(cls, session_id: str, msg: Any) -> int:
         """Return the token contribution of a single message (E6).
 

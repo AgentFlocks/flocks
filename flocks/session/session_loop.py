@@ -100,11 +100,10 @@ class LoopContext:
     # Cooldown window to prefer cheap cleanup over repeated full compaction.
     last_compaction_step: Optional[int] = None
     last_cleanup_step: Optional[int] = None
-    # ``input + cache.read + output`` reported by the provider on the most
-    # recent finished assistant turn.  When non-zero this beats the
-    # synthetic estimate from ``estimate_full_context_tokens`` because it
-    # is what the upstream will actually bill us for on the next turn
-    # (matches the "observed value wins" rule from docs/design/context-compaction-v2.md §B3).
+    # ``input + cache.read + output + reasoning`` reported by the provider on
+    # the most recent finished assistant turn.  Overflow decisions compare it
+    # with a current message estimate so tool output produced after that model
+    # call cannot be missed.
     last_observed_prompt_tokens: int = 0
     auto_failover: bool = False
     # Entrypoint authorization is separate from persisted model_auto. Only a
@@ -1743,40 +1742,79 @@ class SessionLoop:
                     _cache = tokens_dict.get("cache") or {}
                     cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
                     output_tokens = tokens_dict.get("output", 0)
-                    reported_total = input_tokens + cache_read + output_tokens
+                    reasoning_tokens = tokens_dict.get("reasoning", 0)
+                    observed_prompt_tokens = input_tokens + cache_read
+                    reported_total = observed_prompt_tokens + output_tokens + reasoning_tokens
 
-                    # B3 — Observed-value-first token decision.  Always prefer
-                    # the provider's actual usage figure (input + cache_read)
-                    # over our synthetic estimate, because that is what the
-                    # next turn's prompt will be billed against.  Cache it on
-                    # the LoopContext so subsequent turns can reuse it as a
-                    # baseline.  Estimation only kicks in when the provider
-                    # genuinely reports no usage (all zero) — we feed the
-                    # compaction policy into ``estimate_full_context_tokens``
-                    # so it includes system-prompt + tool-schema overhead
-                    # and applies the 1.2 safety margin.
+                    # Provider usage describes the prompt before the latest
+                    # assistant response and its tool results.  Always compare
+                    # it with a lightweight estimate of the current messages
+                    # so newly produced tool output cannot be missed.
                     if reported_total > 0:
-                        ctx.last_observed_prompt_tokens = input_tokens + cache_read + output_tokens
-                        log.info("loop.tokens_decision", {
-                            "session_id": ctx.session.id,
-                            "source": "observed",
-                            "effective_tokens": input_tokens + cache_read,
-                            "overflow_threshold": compaction_policy.overflow_threshold,
-                        })
-                    else:
-                        estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
-                            ctx.session.id,
-                            messages,
-                            policy=compaction_policy,
+                        ctx.last_observed_prompt_tokens = reported_total
+                    # The assistant is marked ``tool-calls`` before its tools
+                    # finish, so a concurrent UI estimate may have cached this
+                    # message without the completed tool output.
+                    SessionPrompt.invalidate_message_cache(last_finished.id)
+                    last_finished_index = next(
+                        (
+                            index
+                            for index, message in enumerate(messages)
+                            if message.id == last_finished.id
+                        ),
+                        len(messages) - 1,
+                    )
+
+                    async def _estimate_effective_tokens() -> tuple[int, int, str]:
+                        if observed_prompt_tokens > 0:
+                            tool_result_tokens = (
+                                await SessionPrompt.estimate_tool_result_tokens(
+                                    ctx.session.id,
+                                    last_finished.id,
+                                )
+                            )
+                            later_tokens = (
+                                await SessionPrompt.estimate_full_context_tokens(
+                                    ctx.session.id,
+                                    messages[last_finished_index + 1:],
+                                    policy=compaction_policy,
+                                )
+                            )
+                            delta_tokens = tool_result_tokens + later_tokens
+                            return (
+                                reported_total + delta_tokens,
+                                delta_tokens,
+                                "observed+estimated_delta",
+                            )
+
+                        estimated_tokens = (
+                            await SessionPrompt.estimate_full_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                policy=compaction_policy,
+                            )
                         )
-                        tokens_dict = {"input": estimated_tokens, "output": 0, "cache": {"read": 0, "write": 0}}
-                        log.info("loop.tokens_decision", {
-                            "session_id": ctx.session.id,
-                            "source": "estimated",
-                            "effective_tokens": estimated_tokens,
-                            "message_count": len(messages),
-                            "overflow_threshold": compaction_policy.overflow_threshold,
-                        })
+                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated"
+
+                    (
+                        effective_tokens,
+                        estimated_component_tokens,
+                        decision_source,
+                    ) = await _estimate_effective_tokens()
+                    tokens_dict = {
+                        "input": effective_tokens,
+                        "output": 0,
+                        "cache": {"read": 0, "write": 0},
+                    }
+                    log.info("loop.tokens_decision", {
+                        "session_id": ctx.session.id,
+                        "source": decision_source,
+                        "effective_tokens": effective_tokens,
+                        "observed_tokens": reported_total,
+                        "estimated_component_tokens": estimated_component_tokens,
+                        "message_count": len(messages),
+                        "overflow_threshold": compaction_policy.overflow_threshold,
+                    })
                     
                     try:
                         _tok_cache = tokens_dict.get("cache") or {}
@@ -1789,6 +1827,13 @@ class SessionLoop:
 
                         if near_overflow and ctx.last_cleanup_step != ctx.step:
                             try:
+                                message_tokens_before_cleanup = (
+                                    await SessionPrompt.estimate_full_context_tokens(
+                                        ctx.session.id,
+                                        messages,
+                                        policy=compaction_policy,
+                                    )
+                                )
                                 trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
                                     ctx.session.id,
                                     context_window_tokens=model_context,
@@ -1816,19 +1861,45 @@ class SessionLoop:
                                         "input_tokens": current_input_tokens,
                                         "cooldown_active": recent_compaction,
                                     })
-                                    turn_state = set_turn_state(
-                                        ctx.session.id,
-                                        step=ctx.step,
-                                        status="continued",
-                                        continue_reason="pre_compact_cleanup",
-                                        queued_message_detected=False,
+                                    message_tokens_after_cleanup = (
+                                        await SessionPrompt.estimate_full_context_tokens(
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
+                                        )
                                     )
-                                    await cls._publish_runtime_event(
-                                        callbacks,
-                                        "turn.continued",
-                                        turn_state.model_dump(by_alias=True),
+                                    baseline_offset_tokens = max(
+                                        0,
+                                        effective_tokens - message_tokens_before_cleanup,
                                     )
-                                    continue
+                                    effective_tokens = (
+                                        message_tokens_after_cleanup + baseline_offset_tokens
+                                    )
+                                    tokens_dict["input"] = effective_tokens
+                                    current_input_tokens = effective_tokens
+                                    log.info("loop.pre_compact_cleanup_rechecked", {
+                                        "session_id": ctx.session.id,
+                                        "effective_tokens": effective_tokens,
+                                        "message_tokens": message_tokens_after_cleanup,
+                                        "baseline_offset_tokens": baseline_offset_tokens,
+                                        "overflow_threshold": (
+                                            compaction_policy.overflow_threshold
+                                        ),
+                                    })
+                                    if effective_tokens <= compaction_policy.overflow_threshold:
+                                        turn_state = set_turn_state(
+                                            ctx.session.id,
+                                            step=ctx.step,
+                                            status="continued",
+                                            continue_reason="pre_compact_cleanup",
+                                            queued_message_detected=False,
+                                        )
+                                        await cls._publish_runtime_event(
+                                            callbacks,
+                                            "turn.continued",
+                                            turn_state.model_dump(by_alias=True),
+                                        )
+                                        continue
                             except Exception as trunc_err:
                                 log.warn("loop.pre_compact_cleanup_error", {
                                     "session_id": ctx.session.id,
@@ -1937,6 +2008,13 @@ class SessionLoop:
                             if not ctx.tool_result_truncation_attempted:
                                 ctx.tool_result_truncation_attempted = True
                                 try:
+                                    message_tokens_before_cleanup = (
+                                        await SessionPrompt.estimate_full_context_tokens(
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
+                                        )
+                                    )
                                     trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
                                         ctx.session.id,
                                         context_window_tokens=model_context,
@@ -1947,15 +2025,26 @@ class SessionLoop:
                                             "truncated": trunc_count,
                                         })
                                         # Re-check overflow after truncation
-                                        # (B3) Reuse the active v2 policy so the
-                                        # re-estimate includes the same overhead
-                                        # + safety margin as the first decision.
-                                        re_est = await SessionPrompt.estimate_full_context_tokens(
-                                            ctx.session.id,
-                                            messages,
-                                            policy=compaction_policy,
+                                        message_tokens_after_cleanup = (
+                                            await SessionPrompt.estimate_full_context_tokens(
+                                                ctx.session.id,
+                                                messages,
+                                                policy=compaction_policy,
+                                            )
                                         )
-                                        re_tokens = {"input": re_est, "output": 0, "cache": {"read": 0, "write": 0}}
+                                        baseline_offset_tokens = max(
+                                            0,
+                                            effective_tokens - message_tokens_before_cleanup,
+                                        )
+                                        re_est = (
+                                            message_tokens_after_cleanup
+                                            + baseline_offset_tokens
+                                        )
+                                        re_tokens = {
+                                            "input": re_est,
+                                            "output": 0,
+                                            "cache": {"read": 0, "write": 0},
+                                        }
                                         still_overflow = await SessionCompaction.is_overflow(
                                             tokens=re_tokens,
                                             model_context=model_context,
