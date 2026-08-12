@@ -239,20 +239,33 @@ jobs:
             --data-urlencode "prerelease=${prerelease}"
           )
 
+          release_missing="false"
           if [[ "${lookup_status}" == "200" ]]; then
-            release_id="$(jq -er '.id' "${release_lookup}")"
-            sync_method="PATCH"
-            sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${release_id}"
-            echo "Gitee Release ${TAG_NAME} already exists; updating its metadata only."
+            release_id="$(jq -r '.id // empty' "${release_lookup}")"
+            if [[ -n "${release_id}" ]]; then
+              sync_method="PATCH"
+              sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases/${release_id}"
+              echo "Gitee Release ${TAG_NAME} already exists; updating its metadata only."
+            elif jq -e 'type == "null"' "${release_lookup}" > /dev/null; then
+              release_missing="true"
+              echo "Gitee returned HTTP 200 with null for missing Release ${TAG_NAME}."
+            else
+              echo "::error title=Unexpected Gitee Release lookup response::HTTP 200 response does not contain a Release ID."
+              exit 1
+            fi
           elif [[ "${lookup_status}" == "404" ]]; then
-            sync_method="POST"
-            sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases"
-            common_fields+=(--data-urlencode "target_commitish=${VERIFIED_SHA}")
-            echo "Creating Gitee Release ${TAG_NAME} at verified commit ${VERIFIED_SHA}."
+            release_missing="true"
           else
             message="$(jq -r '.message // "unknown Gitee API error"' "${release_lookup}" 2>/dev/null || true)"
             echo "::error title=Gitee Release lookup failed::HTTP ${lookup_status}: ${message}"
             exit 1
+          fi
+
+          if [[ "${release_missing}" == "true" ]]; then
+            sync_method="POST"
+            sync_url="${GITEE_API_BASE_URL}/repos/${GITEE_OWNER}/${GITEE_REPO}/releases"
+            common_fields+=(--data-urlencode "target_commitish=${VERIFIED_SHA}")
+            echo "Creating Gitee Release ${TAG_NAME} at verified commit ${VERIFIED_SHA}."
           fi
 
           if ! sync_status="$(
