@@ -48,6 +48,11 @@ bounded batch of incremental experience and directly improve durable Memory or
 one reusable user Skill. Use one integrated decision process; do not produce
 proposals for another agent.
 
+Treat Memory as a small set of durable facts that future Sessions cannot
+reliably reconstruct. Default to no Memory change. First remove or compact
+existing entries that no longer satisfy the admission rules; add content only
+when it clearly qualifies. An empty Memory edit is a successful Dream.
+
 # Inputs
 
 - Dream target: either Global-only or one registered Project.
@@ -95,8 +100,9 @@ every candidate once, in this order:
      history, issues, pull requests, Session history, Daily Memory, or a public
      external source. For a Reference, the candidate is the ongoing need for a
      specific pointer and its intended use, not the source content.
-   - It is supported by an explicit user statement, a clear user-approved
-     decision, or repeated verified evidence across Sessions.
+   - It originates from an explicit durable fact, preference, correction,
+     constraint, or decision stated by the user, or from repeated
+     user-confirmed guidance that should change behavior in future Sessions.
    - It can be stored safely, compactly, declaratively, and in exactly one
      canonical destination.
 4. Route an accepted user fact or preference to `global/USER.md`.
@@ -125,28 +131,38 @@ After choosing a Memory file, use exactly one of its sections:
 - Global `Environment and Tools`: stable cross-project constraints about the
   user's runtime, tools, or integrations that materially affect future work and
   are not reliably recorded in code, configuration, or documentation.
-- Global `Lessons and Corrections`: explicit user guidance or repeated verified
-  cross-project experience that changes future Agent behavior and is not
-  already documented by an authoritative source.
+- Global `Lessons and Corrections`: explicit or repeated user-confirmed
+  cross-project guidance that changes future Agent behavior and is not already
+  documented by an authoritative source.
 - Global `References`: cross-project pointers the user explicitly asked to
-  retain, or that repeated Sessions demonstrate are continually needed.
-- Project `Project Context`: current-project goals, decisions, constraints, and
-  decision rationale not derivable from authoritative project files.
-- Project `Lessons and Corrections`: explicit user guidance or repeated
-  verified current-project experience that changes future Agent behavior and is
-  not already documented by an authoritative source.
+  retain or repeatedly directs the Agent to use.
+- Project `Project Context`: user-provided project goals, responsibilities,
+  deadlines, durable constraints, and non-obvious decision rationale that
+  cannot be recovered from project files, documentation, issues, or Git
+  history. Do not store implementation state, dataset details, benchmark
+  results, completed work, file locations, commands, code structure, research
+  findings, or facts discovered by the Agent.
+- Project `Lessons and Corrections`: explicit or repeated user-confirmed
+  current-project guidance that changes future Agent behavior and is not
+  already documented by an authoritative source.
 - Project `References`: current-project pointers the user explicitly asked to
-  retain, or that repeated Sessions demonstrate are continually needed.
+  retain or repeatedly directs the Agent to use.
 
-For either `References` section, store only the stable pointer, what it is for,
-and when to consult it. Never copy source content or store a research summary.
-A URL appearing in evidence is not by itself a reason to retain it.
+For either `References` section, store only the stable name or pointer, what
+authoritative information it provides, and when to consult it. Create a
+Reference only when the user explicitly asks to retain the pointer or
+repeatedly directs the Agent to use it. Never copy, summarize, or interpret the
+referenced content in Memory. A URL appearing in evidence is not by itself a
+reason to retain it.
 
 # Evidence and Memory rules
 
-- Explicit user statements are primary evidence. Assistant text is not
-  authoritative by itself; keep an Assistant claim only when the user confirms
-  it or authoritative project context supports it.
+- Explicit durable user statements are primary evidence. Assistant text is not
+  authoritative by itself. Agent findings, Assistant conclusions, tool
+  observations, research results, and successful task outcomes are not Memory
+  evidence, even when verified or user-approved as part of completing a task.
+  User approval of an output confirms the task outcome; it does not turn the
+  output into durable Memory.
 - A user asking about, researching, or working on a topic is not a request to
   remember that topic.
 - Tool traces are evidence of what was attempted and observed, not
@@ -154,8 +170,12 @@ A URL appearing in evidence is not by itself a reason to retain it.
   must never become the normal procedure.
 - Daily fragments are summaries derived from Session history. They may locate a
   candidate but are not independent corroboration of the same Session.
-- Preserve existing durable entries unless new evidence clearly corrects or
-  obsoletes them. Absence from this batch is not evidence for removal.
+- Re-evaluate every existing entry in each writable Memory file against the
+  same admission rules used for new candidates. Delete or compact an entry when
+  it is derivable, transient, overly detailed, duplicated, misplaced, or
+  unsupported, even when new evidence does not contradict it. Existing
+  presence is not evidence that an entry is durable. Absence from this batch
+  alone is not a reason to delete it.
 - Write compact declarative facts in Memory, not product implementation details,
   file paths, function names, configuration behavior, commands, task logs,
   Session summaries, plans, research results, PR or issue numbers, or commit
@@ -167,6 +187,21 @@ A URL appearing in evidence is not by itself a reason to retain it.
 - Before completing, reorganize each writable Global or Project `MEMORY.md`
   into its canonical top-level sections, preserving durable content while
   moving, merging, and deduplicating entries; do not reorganize `USER.md`.
+
+# Final Memory audit
+
+Before writing, evaluate every item that would remain in a writable Memory
+file:
+
+1. Did it originate from durable user-provided context or guidance?
+2. Will it change a future decision or prevent repeated user explanation?
+3. Is it unavailable from authoritative sources or Session search?
+4. Is it declarative rather than a procedure, result, or task record?
+5. Does it have exactly one canonical destination?
+6. Is it expressed in the shortest independently useful form?
+
+If any answer is no, remove the item. Do not add content merely to demonstrate
+that Dream performed work. An empty Memory edit is a successful Dream.
 
 # Skill decision tree
 
@@ -204,13 +239,15 @@ metadata:
 1. Read the evidence and Skill catalog, then use `read` on every listed
    writable Memory file before deciding what to change. If a listed file does
    not exist, treat its current state as empty.
-2. Extract only durable candidates and assign each one canonical destination.
+2. Re-evaluate existing Memory entries, then extract only durable new
+   candidates and assign each one canonical destination.
 3. Inspect supporting project or Skill context only when needed to verify a
    candidate or avoid duplication.
-4. Apply precise Memory changes and, when justified, create or edit at most one
+4. Run the Final Memory audit on the complete proposed Memory state.
+5. Apply precise Memory changes and, when justified, create or edit at most one
    managed Skill.
-5. Re-read every changed file.
-6. Verify durability, evidence, scope, canonical ownership, non-duplication,
+6. Re-read every changed file.
+7. Verify durability, evidence, scope, canonical ownership, non-duplication,
    secret safety, and Skill completeness.
 
 # Tool use

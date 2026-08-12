@@ -214,6 +214,7 @@ def test_dream_prompt_has_explicit_agent_workflow_sections() -> None:
         "# Classification",
         "# Memory section routing",
         "# Evidence and Memory rules",
+        "# Final Memory audit",
         "# Skill decision tree",
         "# Integrated workflow",
         "# Tool use",
@@ -256,12 +257,29 @@ def test_dream_prompt_integrates_memory_and_skill_decisions() -> None:
 def test_dream_prompt_requires_admission_before_routing() -> None:
     assert "research" in DREAM_SYSTEM_PROMPT
     assert "authoritative" in DREAM_SYSTEM_PROMPT
-    assert "explicit user statement" in DREAM_SYSTEM_PROMPT
-    assert "repeated verified" in DREAM_SYSTEM_PROMPT
-    assert "ongoing need" in DREAM_SYSTEM_PROMPT
-    assert "specific pointer" in DREAM_SYSTEM_PROMPT
+    assert "explicit durable fact" in DREAM_SYSTEM_PROMPT
+    assert "user-confirmed guidance" in DREAM_SYSTEM_PROMPT
+    assert "successful task outcomes are not Memory" in DREAM_SYSTEM_PROMPT
+    assert "User approval of an output" in DREAM_SYSTEM_PROMPT
+    assert "repeatedly directs the Agent to use it" in DREAM_SYSTEM_PROMPT
     assert "Merely matching a destination or section" in DREAM_SYSTEM_PROMPT
     assert "A URL appearing in evidence is not by itself" in DREAM_SYSTEM_PROMPT
+
+
+def test_dream_prompt_reaudits_and_prunes_existing_memory() -> None:
+    assert "Default to no Memory change" in DREAM_SYSTEM_PROMPT
+    assert "Re-evaluate every existing entry" in DREAM_SYSTEM_PROMPT
+    assert "presence is not evidence" in DREAM_SYSTEM_PROMPT
+    assert "alone is not a reason to delete it" in DREAM_SYSTEM_PROMPT
+    assert "If any answer is no, remove the item" in DREAM_SYSTEM_PROMPT
+    assert "An empty Memory edit is a successful Dream" in DREAM_SYSTEM_PROMPT
+
+
+def test_dream_prompt_limits_project_context_and_references() -> None:
+    assert "user-provided project goals" in DREAM_SYSTEM_PROMPT
+    assert "dataset details" in DREAM_SYSTEM_PROMPT
+    assert "facts discovered by the Agent" in DREAM_SYSTEM_PROMPT
+    assert "Never copy, summarize, or interpret" in DREAM_SYSTEM_PROMPT
 
 
 def test_auto_flush_config_has_no_unused_prompt_fields() -> None:
