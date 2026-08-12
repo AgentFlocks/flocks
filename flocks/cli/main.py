@@ -5,6 +5,7 @@ Provides command-line interface for Flocks
 """
 
 import asyncio
+import os
 import secrets as secrets_lib
 import sys
 from pathlib import Path
@@ -362,6 +363,8 @@ def serve(
     Start the Flocks API server
     """
     import uvicorn
+
+    os.environ["_FLOCKS_SERVER_PORT"] = str(port)
 
     console.print(Panel(logo(), border_style="cyan"))
     console.print(f"[cyan]Starting server on:[/cyan] http://{host}:{port}")
