@@ -4,7 +4,7 @@ import tempfile
 
 import pytest
 
-from flocks.permission.next import DeniedError, PermissionNext, PermissionRequestInfo
+from flocks.permission.next import PermissionNext, PermissionRequestInfo
 from flocks.storage.storage import Storage
 
 
@@ -13,15 +13,9 @@ async def permission_storage():
     with tempfile.TemporaryDirectory() as tmpdir:
         await Storage.init(Path(tmpdir) / "permission.db")
         PermissionNext._pending = {}
-        PermissionNext._session_permissions = {}
-        PermissionNext._permanent_rules = {}
-        PermissionNext._state_loaded = False
         PermissionNext.set_callbacks(None, None)
         yield
         PermissionNext._pending = {}
-        PermissionNext._session_permissions = {}
-        PermissionNext._permanent_rules = {}
-        PermissionNext._state_loaded = False
         PermissionNext.set_callbacks(None, None)
         await Storage.clear()
 
@@ -43,13 +37,11 @@ async def test_reply_restores_persisted_pending_request_without_memory(permissio
 
     await PermissionNext.reply(request.id, "always", session_id=request.session_id)
 
-    assert PermissionNext._permanent_rules["bash"] == "allow"
     assert await Storage.get(pending_key) is None
-    assert await Storage.get(f"{PermissionNext._PERMANENT_PREFIX}bash") == "allow"
 
 
 @pytest.mark.asyncio
-async def test_reply_persists_session_rule_without_in_memory_future(permission_storage) -> None:
+async def test_reply_persists_transport_reply_without_in_memory_future(permission_storage) -> None:
     request = PermissionRequestInfo(
         id="per_testsession0000000000001",
         sessionID="ses_testsession0000000001",
@@ -68,8 +60,9 @@ async def test_reply_persists_session_rule_without_in_memory_future(permission_s
 
     await PermissionNext.reply(request.id, "allow_session", session_id=request.session_id)
 
-    assert PermissionNext._session_permissions[request.session_id]["write"] == "allow"
-    assert await Storage.get(f"{PermissionNext._SESSION_PREFIX}{request.session_id}") == {"write": "allow"}
+    stored = await Storage.get(f"{PermissionNext._REPLY_PREFIX}{request.id}")
+    assert stored["reply"] == "allow_session"
+    assert stored["sessionID"] == request.session_id
 
 
 @pytest.mark.asyncio
@@ -122,7 +115,7 @@ async def test_reply_unblocks_waiting_request_via_persisted_reply_when_memory_fu
 
 
 @pytest.mark.asyncio
-async def test_reply_denies_waiting_request_via_persisted_reply_when_memory_future_missing(
+async def test_reply_is_returned_raw_when_memory_future_missing(
     permission_storage,
 ) -> None:
     request_id = "per_waiting_deny"
@@ -144,8 +137,7 @@ async def test_reply_denies_waiting_request_via_persisted_reply_when_memory_futu
 
     await PermissionNext.reply(request_id, "deny", session_id="ses_waiting_deny")
 
-    with pytest.raises(DeniedError):
-        await asyncio.wait_for(ask_task, timeout=2)
+    assert await asyncio.wait_for(ask_task, timeout=2) == "deny"
 
     assert await Storage.get(f"{PermissionNext._REPLY_PREFIX}{request_id}") is None
 
@@ -180,6 +172,7 @@ async def test_session_denial_applies_to_active_request_without_global_rule(perm
 async def test_state_load_retries_after_transient_storage_failure(permission_storage, monkeypatch: pytest.MonkeyPatch) -> None:
     await Storage.set(f"{PermissionNext._PERMANENT_PREFIX}bash", "allow", "permission_rule")
 
+
     original_list_entries = Storage.list_entries
     call_count = 0
 
@@ -199,3 +192,67 @@ async def test_state_load_retries_after_transient_storage_failure(permission_sto
     await PermissionNext._ensure_persisted_state_loaded()
     assert PermissionNext._state_loaded is True
     assert PermissionNext._permanent_rules["bash"] == "allow"
+
+
+@pytest.mark.asyncio
+async def test_ask_returns_allow_when_auto_approve_env_set(
+    permission_storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("FLOCKS_AUTO_APPROVE", "true")
+
+    reply = await PermissionNext.ask(
+        session_id="ses_auto_approve",
+        permission="bash",
+        patterns=["*"],
+        ruleset=[],
+        metadata={},
+        request_id="per_auto_approve",
+    )
+
+    assert reply == "allow"
+    assert "per_auto_approve" not in PermissionNext._pending
+
+
+@pytest.mark.asyncio
+async def test_ask_times_out_as_denyable_timeout_and_cleans_pending_request(
+    permission_storage,
+) -> None:
+    request_id = "per_confirm_timeout"
+
+    with pytest.raises(asyncio.TimeoutError, match="timed out after 0s"):
+        await PermissionNext.ask(
+            session_id="ses_confirm_timeout",
+            permission="ssh_host_cmd",
+            patterns=["ssh_host_cmd:canonical:hash"],
+            ruleset=[],
+            metadata={},
+            request_id=request_id,
+            timeout_seconds=0,
+        )
+
+    assert request_id not in PermissionNext._pending
+    assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request_id}") is None
+    assert await Storage.get(f"{PermissionNext._REPLY_PREFIX}{request_id}") is None
+
+
+@pytest.mark.asyncio
+async def test_request_is_persisted_before_callback_can_reply(permission_storage) -> None:
+    request_id = "per_persist_before_expose"
+
+    async def reply_immediately(request: PermissionRequestInfo) -> None:
+        stored = await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request.id}")
+        assert stored is not None
+        await PermissionNext.reply(request.id, "always", session_id=request.session_id)
+
+    PermissionNext.set_callbacks(reply_immediately, None)
+
+    assert await PermissionNext.ask(
+        session_id="ses_persist_before_expose",
+        permission="bash",
+        patterns=["*"],
+        ruleset=[],
+        metadata={},
+        request_id=request_id,
+    ) == "always"
+    assert await Storage.get(f"{PermissionNext._PENDING_PREFIX}{request_id}") is None

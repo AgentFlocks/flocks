@@ -221,5 +221,74 @@
       "forbidden": "仅管理员可查看审计日志",
       "unavailable": "当前版本不支持审计日志"
     }
+  },
+  "security": {
+    "title": "安全配置",
+    "description": "管理企业安全链路：身份入口 → 工具可见性 → 策略/命令执行。",
+    "loading": "正在加载安全配置...",
+    "actions": {
+      "viewAudit": "查看审计日志",
+      "saveRollout": "保存运行模式",
+      "viewDetails": "查看详情"
+    },
+    "sections": {
+      "rollout": "运行模式",
+      "rolloutDescription": "统一设置工具策略、命令执行、身份入口和工具可见性的管控状态。仅审计时记录决策但不阻断；启用管控时按策略执行确认、拒绝或隐藏。保存后立即生效。",
+      "permissionBaseline": "执行权限基线",
+      "permissionBaselineDescription": "不同入口创建会话时的默认权限模式，由系统固定，不可在此页修改。",
+      "baseline": "系统安全基线",
+      "baselineDescription": "系统硬拒绝规则与只读模式下的能力上限，仅可查看，管理员不可放宽。"
+    },
+    "labels": {
+      "policyRollout": "工具执行",
+      "commandRollout": "命令执行",
+      "ingressRollout": "身份入口",
+      "visibilityRollout": "工具可见性",
+      "channelDefaultMode": "通道创建会话",
+      "uiDefaultMode": "UI 创建会话",
+      "hardDeny": "系统始终拒绝执行的命令",
+      "readonlyCeiling": "readonly 模式下被隐藏的工具",
+      "pathRegion": "路径区域",
+      "operation": "操作",
+      "developmentMode": "开发模式（dev-mode）",
+      "executionMode": "执行模式（exe-mode）",
+      "filesystemRollout": "文件管控",
+      "filesystemHardDenies": "文件硬拒绝项",
+      "networkHardDeny": "hard-deny 基线（始终拒绝访问，不能修改）",
+      "filesystemManagedScope": "纳管",
+      "filesystemExcludedScope": "不纳管",
+      "networkPersonalAllowlist": "个人始终允许域名（可增删）",
+      "whitelistCategory": "白名单类",
+      "blacklistCategory": "黑名单类",
+      "networkPersonalTrustedTools": "个人信任工具网络访问清单（每行: tool_name 或 tool_name,tool_source）",
+      "networkRulesValidation": "规则格式校验",
+      "networkTrustedTools": "全局信任工具网络访问清单（每行: tool_name 或 tool_name,tool_source）"
+    },
+    "hints": {
+      "policyRollout": "决定通用策略（文件读写、工作流动作、高风险工具等）是否真正拦截。仅审计：照样计算并写审计，但不阻断；启用管控：deny/需确认会真正停下。",
+      "commandRollout": "专门控制 Shell/命令类操作（bash、shell、cmd、PowerShell、SSH 命令等）。可与策略执行分开开启，例如只先管控命令、其它仍仅审计。",
+      "ingressRollout": "控制 Channel、HTTP、工作流等入口是否要求有效身份。关闭：不做入口身份校验；仅审计：解析身份但不挡请求；启用管控：无有效身份时直接拒绝进入。",
+      "visibilityRollout": "按安全策略决定 AI 当前能使用哪些工具。例如 readonly 模式下，Agent 不可见被隐藏的工具。仅审计：仍全部展示，只记录本应隐藏的工具；启用管控：真正隐藏这些工具。",
+      "filesystemRollout": "控制文件工具策略以审计模式或强制模式运行",
+      "networkPersonalAllowlist": "该清单与全局白名单分开维护，可手动增删，也会自动记录网络确认弹窗中的“始终允许该域名”。",
+      "networkPersonalTrustedTools": "命中该清单后，该用户对对应工具的网络请求不再逐次确认；仍会拦截 hard-deny 与黑名单目标。",
+      "networkRulesValidation": "域名/IP 规则用于白名单与黑名单；tool_name[,tool_source] 用于信任工具清单。",
+      "networkTrustedTools": "该清单是全局策略，作用于所有用户；仍会拦截 hard-deny 与黑名单目标。"
+    },
+    "modes": {
+      "disabled": "关闭",
+      "shadow": "仅审计",
+      "enforce": "启用管控"
+    },
+    "messages": {
+      "rolloutSaved": "运行模式已保存并立即生效"
+    },
+    "errors": {
+      "loadFailed": "加载安全配置失败",
+      "rolloutSaveFailed": "保存运行模式失败"
+    },
+    "placeholders": {
+      "networkPersonalAllowlistEmpty": "暂无个人始终允许记录"
+    }
   }
 }

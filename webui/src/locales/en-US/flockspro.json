@@ -221,5 +221,74 @@
       "forbidden": "Only admins can view audit logs",
       "unavailable": "Audit logs are not available in this edition"
     }
+  },
+  "security": {
+    "title": "Security Config",
+    "description": "Manage the enterprise security path: identity ingress → tool visibility → policy/command enforcement.",
+    "loading": "Loading security configuration...",
+    "actions": {
+      "viewAudit": "View Audit Logs",
+      "saveRollout": "Save Rollout",
+      "viewDetails": "View details"
+    },
+    "sections": {
+      "rollout": "Rollout Modes",
+      "rolloutDescription": "Unified controls for tool policy, command execution, identity ingress, and tool visibility. Audit-only records decisions without blocking; enforcement confirms, denies, or hides by policy. Changes take effect immediately after saving.",
+      "permissionBaseline": "Permission Baseline",
+      "permissionBaselineDescription": "Default permission modes for sessions created from different entry points. Fixed by the system and not editable here.",
+      "baseline": "System Baseline",
+      "baselineDescription": "System hard-deny rules and the readonly capability ceiling. View-only; administrators cannot relax them."
+    },
+    "labels": {
+      "policyRollout": "Tool Enforcement",
+      "commandRollout": "Command Enforcement",
+      "ingressRollout": "Identity Ingress",
+      "visibilityRollout": "Tool Visibility",
+      "channelDefaultMode": "Channel-created sessions",
+      "uiDefaultMode": "UI-created sessions",
+      "hardDeny": "Commands always denied by the system",
+      "readonlyCeiling": "Tools hidden in readonly mode",
+      "pathRegion": "Path region",
+      "operation": "Operation",
+      "developmentMode": "Development mode (dev-mode)",
+      "executionMode": "Execution mode (exe-mode)",
+      "filesystemRollout": "Filesystem controls",
+      "filesystemHardDenies": "Filesystem hard-deny rules",
+      "networkHardDeny": "hard-deny baseline (always deny access, not editable)",
+      "filesystemManagedScope": "In scope",
+      "filesystemExcludedScope": "Out of scope",
+      "networkPersonalAllowlist": "Personal always-allow domains (editable)",
+      "whitelistCategory": "Whitelist category",
+      "blacklistCategory": "Blacklist category",
+      "networkPersonalTrustedTools": "Personal trusted tool network access list (one per line: tool_name or tool_name,tool_source)",
+      "networkRulesValidation": "Rule format validation",
+      "networkTrustedTools": "Global trusted tool network access list (one per line: tool_name or tool_name,tool_source)"
+    },
+    "hints": {
+      "policyRollout": "Controls whether general policy decisions (file I/O, workflow actions, high-risk tools, etc.) actually block requests. Audit only: evaluate and audit without blocking. Enforce: deny/confirm decisions stop execution.",
+      "commandRollout": "Controls shell/command tools only (bash, shell, cmd, PowerShell, SSH commands, etc.). Can be enabled separately from policy enforcement—for example, enforce commands first while leaving other tools in audit-only mode.",
+      "ingressRollout": "Controls whether Channel, HTTP, and workflow entry points require a valid identity. Off: skip ingress identity checks. Audit only: resolve identity but do not block. Enforce: reject entry when no valid identity is available.",
+      "visibilityRollout": "Controls which tools the AI can use under the current security policy. For example, in readonly mode, the agent cannot see hidden tools. Audit only: still show all tools, and only record which ones would be hidden. Enforce: actually hide those tools.",
+      "filesystemRollout": "Controls whether file tools run in audit-only or enforcement mode.",
+      "networkPersonalAllowlist": "This list is maintained separately from the global allowlist. You can add/remove entries manually, and it is also populated by choosing \"always allow this domain\" in network confirmations.",
+      "networkPersonalTrustedTools": "Matches skip per-request confirmation for that user and tool, but hard-deny and blocklist targets are still blocked.",
+      "networkRulesValidation": "Domain/IP rules apply to allowlist and blocklist; tool_name[,tool_source] applies to trusted tool lists.",
+      "networkTrustedTools": "This is a global policy affecting all users; hard-deny and blocklist targets are still blocked."
+    },
+    "modes": {
+      "disabled": "Off",
+      "shadow": "Audit only",
+      "enforce": "Enforce"
+    },
+    "messages": {
+      "rolloutSaved": "Rollout saved and applied immediately"
+    },
+    "errors": {
+      "loadFailed": "Failed to load security config",
+      "rolloutSaveFailed": "Failed to save rollout"
+    },
+    "placeholders": {
+      "networkPersonalAllowlistEmpty": "No personal always-allow records yet"
+    }
   }
 }

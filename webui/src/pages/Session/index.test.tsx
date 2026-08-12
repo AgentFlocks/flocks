@@ -564,6 +564,75 @@ describe('SessionPage session actions menu', () => {
     expect(localStorage.getItem('flocks:session-execution-mode:draft')).toBeNull();
   });
 
+  it('writes Pro execution settings before sending a new session’s first prompt', async () => {
+    const user = userEvent.setup();
+    const settings = deferred<{ data: {
+      permissionMode: 'require-confirm';
+      runtimeMode: 'dev-mode';
+      networkMode: 'require-confirm';
+      networkModeDefault: 'require-confirm';
+      networkModeOverridden: false;
+      entry: 'webui';
+      revision: 1;
+    } }>();
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/flockspro/license/status') {
+        return Promise.resolve({ data: { pro_enabled: true } });
+      }
+      return Promise.resolve({
+        data: [{
+          id: 'default',
+          worktree: '/tmp/project',
+          name: '默认',
+          isDefault: true,
+          pathStatus: 'available',
+          sessionCount: 0,
+        }],
+      });
+    });
+    client.patch.mockReturnValue(settings.promise);
+
+    renderSessionPage();
+    await waitFor(() => {
+      expect(client.get).toHaveBeenCalledWith('/api/flockspro/license/status');
+    });
+    await user.click(screen.getByRole('button', { name: 'mock-create-and-send' }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenCalledWith(
+        '/api/flockspro/policy/sessions/session-2/execution-settings',
+        {
+          permissionMode: 'require-confirm',
+          runtimeMode: 'dev-mode',
+          networkMode: 'require-confirm',
+        },
+      );
+    });
+    expect(client.post).not.toHaveBeenCalledWith(
+      '/api/session/session-2/prompt_async',
+      expect.anything(),
+    );
+
+    settings.resolve({
+      data: {
+        permissionMode: 'require-confirm',
+        runtimeMode: 'dev-mode',
+        networkMode: 'require-confirm',
+        networkModeDefault: 'require-confirm',
+        networkModeOverridden: false,
+        entry: 'webui',
+        revision: 1,
+      },
+    });
+
+    await waitFor(() => {
+      expect(client.post).toHaveBeenCalledWith(
+        '/api/session/session-2/prompt_async',
+        expect.anything(),
+      );
+    });
+  });
+
   it('keeps the first new-session message optimistic with the persisted message id', async () => {
     const user = userEvent.setup();
     renderSessionPage();
@@ -3056,5 +3125,89 @@ describe('SessionPage session actions menu', () => {
     await user.click(await screen.findByRole('button', { name: /diagnose/i }));
     expect(screen.getByTestId('mock-chat-input')).toHaveTextContent('skill:diagnose');
     expect(screen.getByText('chat.addMenu.selectSkill')).toBeInTheDocument();
+  });
+
+  it('updates permission and runtime independently with the current revision', async () => {
+    const user = userEvent.setup();
+    client.get.mockImplementation((url: string) => {
+      if (url === '/api/flockspro/license/status') {
+        return Promise.resolve({ data: { pro_enabled: true } });
+      }
+      if (url.endsWith('/execution-settings')) {
+        return Promise.resolve({
+          data: {
+            permissionMode: 'require-confirm',
+            runtimeMode: 'dev-mode',
+            networkMode: 'require-confirm',
+            networkModeDefault: 'require-confirm',
+            networkModeOverridden: false,
+            entry: 'webui',
+            revision: 7,
+          },
+        });
+      }
+      return Promise.resolve({
+        data: [{
+          id: 'default',
+          worktree: '/tmp/project',
+          name: '默认',
+          isDefault: true,
+          pathStatus: 'available',
+          sessionCount: 1,
+        }],
+      });
+    });
+    client.patch
+      .mockResolvedValueOnce({
+        data: {
+          permissionMode: 'readonly',
+          runtimeMode: 'dev-mode',
+          networkMode: 'require-confirm',
+          networkModeDefault: 'require-confirm',
+          networkModeOverridden: false,
+          entry: 'webui',
+          revision: 8,
+        },
+      })
+      .mockResolvedValueOnce({
+        data: {
+          permissionMode: 'readonly',
+          runtimeMode: 'exe-mode',
+          networkMode: 'require-confirm',
+          networkModeDefault: 'require-confirm',
+          networkModeOverridden: false,
+          entry: 'webui',
+          revision: 9,
+        },
+      });
+
+    renderSessionPage('/sessions?session=session-1');
+
+    const selector = await waitFor(() => {
+      const element = document.querySelector('[data-permission-mode-selector]');
+      expect(element).not.toBeNull();
+      return element as HTMLElement;
+    });
+    await user.click(within(selector).getByRole('button', { name: /permissionMode\.requireConfirm/ }));
+    await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenNthCalledWith(
+        1,
+        '/api/flockspro/policy/sessions/session-1/execution-settings',
+        { permissionMode: 'readonly', revision: 7 },
+      );
+    });
+
+    await user.click(within(selector).getByRole('button', { name: /permissionMode\.readonly/ }));
+    await user.click(within(selector).getByRole('button', { name: /permissionMode\.runtimeExe/ }));
+
+    await waitFor(() => {
+      expect(client.patch).toHaveBeenNthCalledWith(
+        2,
+        '/api/flockspro/policy/sessions/session-1/execution-settings',
+        { runtimeMode: 'exe-mode', revision: 8 },
+      );
+    });
   });
 });

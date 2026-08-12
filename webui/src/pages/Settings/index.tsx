@@ -15,6 +15,7 @@ import {
   Save,
   Settings as SettingsIcon,
   ShieldCheck,
+  Shield,
   Sun,
   TextCursorInput,
   Upload,
@@ -48,7 +49,9 @@ const FlocksproUpgradePage = lazySettingsPage(() => import('@/pages/FlocksproUpg
 const AuditLogsPage = lazySettingsPage(() => import('@/pages/AuditLogs'), ['flockspro']);
 const ArchivedDataPage = lazySettingsPage(() => import('./ArchivedDataPanel'), ['session']);
 
-type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'system-logs' | 'audit-logs' | 'flockspro';
+const SecurityConfigPage = lazySettingsPage(() => import('@/pages/SecurityConfig'), ['flockspro']);
+
+type SettingsSectionId = 'preferences' | 'archived-data' | 'account' | 'security-config' | 'system-logs' | 'audit-logs' | 'flockspro';
 
 interface ReturnLocation {
   pathname: string;
@@ -78,6 +81,7 @@ function isSettingsSectionId(value: string | undefined): value is SettingsSectio
     value === 'preferences' ||
     value === 'archived-data' ||
     value === 'account' ||
+    value === 'security-config' ||
     value === 'system-logs' ||
     value === 'audit-logs' ||
     value === 'flockspro'
@@ -481,6 +485,7 @@ function SettingsContent({ sectionId }: { sectionId: SettingsSectionId }) {
     <Suspense fallback={<RoutePageSkeleton delayMs={180} />}>
       {sectionId === 'account' && <ConfigPage />}
       {sectionId === 'archived-data' && <ArchivedDataPage />}
+      {sectionId === 'security-config' && <SecurityConfigPage />}
       {sectionId === 'system-logs' && <SystemLogPage />}
       {sectionId === 'audit-logs' && <AuditLogsPage />}
       {sectionId === 'flockspro' && <FlocksproUpgradePage />}
@@ -558,6 +563,7 @@ export default function SettingsPage() {
         name: t('settingsGroupSystem'),
         items: [
           { id: 'account', name: t('accountManagement'), icon: UserCog },
+          { id: 'security-config', name: t('securityConfig'), icon: Shield, adminOnly: true, requiresFlockspro: true },
           { id: 'system-logs', name: t('systemLog'), icon: ScrollText },
           { id: 'audit-logs', name: t('auditLogs'), icon: ShieldCheck, adminOnly: true, requiresFlockspro: true },
           { id: 'flockspro', name: proProductName, icon: ArrowUpCircle, adminOnly: true },
