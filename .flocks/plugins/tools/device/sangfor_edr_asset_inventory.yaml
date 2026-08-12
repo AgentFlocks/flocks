@@ -1,0 +1,27 @@
+name: sangfor_edr_asset_inventory
+description: >
+  Collect Sangfor EDR asset-inventory classification counts through authenticated HTTP APIs.
+description_cn: >
+  通过已验证的成套 Cookie/token 采集深信服 EDR 资产分类统计数据。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_edr
+inputSchema:
+  type: object
+  properties:
+    scene_type:
+      type: string
+      enum: [server_and_pc]
+      default: server_and_pc
+      description: Inventory scope used by the classify endpoint.
+    base_url:
+      type: string
+      description: Optional EDR device URL.
+    auth_state_path:
+      type: string
+      description: Optional auth-state path.
+handler:
+  type: script
+  script_file: sangfor_edr.handler.py
+  function: handle_asset_inventory
