@@ -7,7 +7,7 @@ from typing import Optional
 
 from flocks.agent.registry import Agent
 from flocks.session.message import Message, MessageRole
-from flocks.session.session import PermissionRule, Session
+from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop
 from flocks.utils.log import Log
 
@@ -24,7 +24,6 @@ async def run_evolution_agent(
     provider_id: Optional[str] = None,
     model_id: Optional[str] = None,
     parent_session_id: Optional[str] = None,
-    write_permission_patterns: Optional[list[str]] = None,
 ) -> None:
     """Run a hidden evolution Agent in a disposable full Session Loop."""
     agent = await Agent.get(agent_name)
@@ -40,37 +39,6 @@ async def run_evolution_agent(
     )
 
     previous_main_session_id = get_main_session_id()
-    permissions = [
-        PermissionRule(
-            permission="question",
-            action="deny",
-            pattern="*",
-        )
-    ]
-    if write_permission_patterns is not None:
-        permissions.extend(
-            [
-                PermissionRule(
-                    permission="edit",
-                    action="deny",
-                    pattern="*",
-                ),
-                *[
-                    PermissionRule(
-                        permission="edit",
-                        action="allow",
-                        pattern=pattern,
-                    )
-                    for pattern in write_permission_patterns
-                ],
-                PermissionRule(
-                    permission="bash",
-                    action="allow",
-                    pattern="*",
-                ),
-            ]
-        )
-
     session = await Session.create(
         project_id=project_id,
         directory=directory,
@@ -79,7 +47,6 @@ async def run_evolution_agent(
         agent=agent_name,
         category="task",
         memory_enabled=False,
-        permission=permissions,
         metadata={
             "ephemeral": True,
             "evolution": agent_name,
@@ -112,8 +79,28 @@ async def run_evolution_agent(
             agent_name=agent_name,
             working_directory=directory,
         )
-        if result.action == "error":
-            raise RuntimeError(result.error or f"{agent_name} evolution Agent failed")
+        if result.error:
+            raise RuntimeError(result.error)
+        if result.action != "stop":
+            raise RuntimeError(
+                f"{agent_name} evolution Agent ended with action: {result.action}"
+            )
+        if result.metadata.get("aborted"):
+            raise RuntimeError(f"{agent_name} evolution Agent was aborted")
+        last_message = result.last_message
+        if last_message is None or last_message.role != "assistant":
+            raise RuntimeError(
+                f"{agent_name} evolution Agent ended without a final assistant message"
+            )
+        if last_message.error:
+            raise RuntimeError(
+                f"{agent_name} evolution Agent failed: {last_message.error}"
+            )
+        if last_message.finish != "stop":
+            raise RuntimeError(
+                f"{agent_name} evolution Agent ended with finish reason: "
+                f"{last_message.finish or 'missing'}"
+            )
     finally:
         try:
             await asyncio.shield(Session.delete(project_id, session.id))

@@ -575,6 +575,28 @@ async def edit_tool(
     if oldString == "" and edits is None:
         if newString is None:
             return ToolResult(success=False, error="newString is required when oldString is empty", title=title)
+        if ctx.agent == "self-improve" and Path(filepath).name == "SKILL.md":
+            from flocks.memory.evolution.skill_guard import (
+                validate_evolution_skill_write,
+            )
+
+            skill_path = Path(filepath)
+            if skill_path.exists():
+                evolution_error = (
+                    "Read the existing managed Skill and use a precise edit"
+                )
+            else:
+                evolution_error = await validate_evolution_skill_write(
+                    skill_path,
+                    newString,
+                    exists=False,
+                )
+            if evolution_error:
+                return ToolResult(
+                    success=False,
+                    error=evolution_error,
+                    title=title,
+                )
         diff = trim_diff(generate_diff(filepath, "", newString))
         parent_dir = os.path.dirname(filepath)
         if parent_dir and not os.path.exists(parent_dir):

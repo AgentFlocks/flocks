@@ -61,7 +61,7 @@ async def validate_evolution_skill_write(
     *,
     exists: bool,
 ) -> Optional[str]:
-    """Enforce creation-only writes and prevent Skill name shadowing."""
+    """Enforce valid creation-only writes and prevent Skill name shadowing."""
     error = validate_skill_document(path, content)
     if error:
         return error
@@ -144,7 +144,9 @@ def validate_skill_changes(
                 if (
                     error is None
                     and old_content is not None
-                    and not is_evolution_managed(old_content.decode("utf-8", errors="replace"))
+                    and not is_evolution_managed(
+                        old_content.decode("utf-8", errors="replace")
+                    )
                 ):
                     error = "Self-improve modified a Skill that is not Evolution-managed"
     if error:

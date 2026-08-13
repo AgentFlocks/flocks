@@ -1080,6 +1080,12 @@ async def test_project_dream_updates_project_and_global_user_memory(
         )
         return True
 
+    instance_directories: list[str] = []
+
+    async def provide(*, directory: str, fn: object, **_: object) -> object:
+        instance_directories.append(directory)
+        return await fn()  # type: ignore[operator]
+
     with (
         patch(
             "flocks.memory.evolution.dream.Config.get",
@@ -1109,6 +1115,10 @@ async def test_project_dream_updates_project_and_global_user_memory(
             ),
         ),
         patch(
+            "flocks.memory.evolution.dream.Instance.provide",
+            side_effect=provide,
+        ),
+        patch(
             "flocks.memory.evolution.dream.run_evolution_agent",
             new=AsyncMock(side_effect=apply_dream_updates),
         ),
@@ -1120,6 +1130,7 @@ async def test_project_dream_updates_project_and_global_user_memory(
         result = await run_dream_bridge(DreamTarget.project("prj_test"))
 
     assert result.changed is True
+    assert instance_directories == ["/workspace"]
     assert "Project uses Ruff" in project_path.read_text(encoding="utf-8")
     assert "Project uses Ruff" not in (memory_root / "MEMORY.md").read_text(encoding="utf-8")
     assert "Prefers concise answers" in (memory_root / "USER.md").read_text(encoding="utf-8")
@@ -1302,7 +1313,7 @@ async def test_evolution_schema_removes_legacy_skill_tables(
 
 
 @pytest.mark.asyncio
-async def test_scheduler_runs_due_dream_and_persists_success(
+async def test_scheduler_honors_runtime_enable_and_persists_success(
     tmp_path: Path,
 ) -> None:
     await Storage.init(tmp_path / "scheduler.db")
@@ -1316,7 +1327,15 @@ async def test_scheduler_runs_due_dream_and_persists_success(
     with (
         patch(
             "flocks.memory.evolution.scheduler.Config.get",
-            new=AsyncMock(return_value=SimpleNamespace(memory=None)),
+            new=AsyncMock(
+                side_effect=[
+                    SimpleNamespace(
+                        memory=MemoryConfig(dream={"enabled": False}),
+                    ),
+                    SimpleNamespace(memory=MemoryConfig()),
+                    SimpleNamespace(memory=MemoryConfig()),
+                ]
+            ),
         ),
         patch(
             "flocks.memory.evolution.scheduler.run_dream_bridge",
@@ -1329,9 +1348,10 @@ async def test_scheduler_runs_due_dream_and_persists_success(
     ):
         await MemoryEvolutionScheduler._tick_once(now_ts=1_000)
         await MemoryEvolutionScheduler._tick_once(now_ts=1_001)
+        await MemoryEvolutionScheduler._tick_once(now_ts=1_002)
 
     run.assert_awaited_once_with(DreamTarget.global_only())
-    assert await Storage.get(_LAST_SUCCESS_KEY) == 1_000
+    assert await Storage.get(_LAST_SUCCESS_KEY) == 1_001
 
 
 def test_scheduler_defaults_to_daily_run_and_half_hour_checks() -> None:

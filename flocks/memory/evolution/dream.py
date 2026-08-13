@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import os
 from typing import Optional
 
 from flocks.config import Config
@@ -15,7 +14,7 @@ from flocks.memory.paths import (
     memory_file_path,
 )
 from flocks.memory.types import MemoryScope
-from flocks.tool.path_utils import safe_relpath
+from flocks.project.instance import Instance
 
 from .agent_runner import run_evolution_agent
 from .common import (
@@ -376,11 +375,7 @@ async def run_dream_bridge(
         root.mkdir(parents=True, exist_ok=True)
         skills_before = skill_contents(root)
         catalog_budget = min(max(variable_budget // 4, 1000), 12000)
-        catalog_text = serialize_skill_catalog(
-            await skill_catalog(),
-            catalog_budget,
-        )
-        source_budget = variable_budget - len(catalog_text)
+        source_budget = variable_budget - catalog_budget
         sources, backlog, sync_targets = await _collect_dream_sources(
             config,
             target,
@@ -399,56 +394,54 @@ async def run_dream_bridge(
             await EvolutionCheckpointStore.commit("dream", sources)
             return DreamBridgeResult(False, len(sources), backlog)
 
-        source_text = json.dumps(
-            str(_redact_sensitive("\n\n".join(source_sections))),
-            ensure_ascii=False,
-        )
-        target_description = (
-            f"registered project {target.scope_id}"
-            if target.scope == MemoryScope.PROJECT
-            else "default Sessions (Global-only)"
-        )
-        writable_files = "\n".join(f"- {_document_label(key)}: {file_targets[key]}" for key in file_targets)
-        user_prompt = DREAM_USER_PROMPT.format(
-            target_description=target_description,
-            writable_files=writable_files,
-            skill_root=root.resolve(),
-            skill_catalog=catalog_text,
-            source_text=source_text,
-        )
-        if len(user_prompt) > _DREAM_MAX_INPUT_CHARS:
-            raise ValueError("Dream input exceeded its budget after safe serialization")
-
         workspace = next(
             (directory for project_id, directory in sync_targets if project_id == target.project_id),
             ".",
         )
-        memory_permissions = {
-            safe_relpath(
-                str(path.resolve(strict=False)),
-                workspace,
+
+        async def run_in_project() -> None:
+            catalog_text = serialize_skill_catalog(
+                await skill_catalog(),
+                catalog_budget,
             )
-            for path in file_targets.values()
-        } | {
-            safe_relpath(
-                str(path.resolve(strict=False)),
-                str(memory_root.parent),
+            source_text = json.dumps(
+                str(_redact_sensitive("\n\n".join(source_sections))),
+                ensure_ascii=False,
             )
-            for path in file_targets.values()
-        }
-        skill_permissions = {
-            f"{os.path.relpath(root.resolve(), workspace)}/*/SKILL.md",
-            "skills/*/SKILL.md",
-        }
-        await run_evolution_agent(
-            agent_name=SELF_IMPROVE_AGENT,
-            prompt=user_prompt,
-            project_id=target.project_id,
+            target_description = (
+                f"registered project {target.scope_id}"
+                if target.scope == MemoryScope.PROJECT
+                else "default Sessions (Global-only)"
+            )
+            writable_files = "\n".join(
+                f"- {_document_label(key)}: {file_targets[key]}"
+                for key in file_targets
+            )
+            user_prompt = DREAM_USER_PROMPT.format(
+                target_description=target_description,
+                writable_files=writable_files,
+                skill_root=root.resolve(),
+                skill_catalog=catalog_text,
+                source_text=source_text,
+            )
+            if len(user_prompt) > _DREAM_MAX_INPUT_CHARS:
+                raise ValueError(
+                    "Dream input exceeded its budget after safe serialization"
+                )
+
+            await run_evolution_agent(
+                agent_name=SELF_IMPROVE_AGENT,
+                prompt=user_prompt,
+                project_id=target.project_id,
+                directory=workspace,
+                provider_id=provider_id,
+                model_id=model_id,
+                parent_session_id=parent_session_id,
+            )
+
+        await Instance.provide(
             directory=workspace,
-            provider_id=provider_id,
-            model_id=model_id,
-            parent_session_id=parent_session_id,
-            write_permission_patterns=sorted(memory_permissions | skill_permissions),
+            fn=run_in_project,
         )
 
         changed_memory_files = tuple(

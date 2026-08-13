@@ -20,7 +20,13 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
         return_value=SimpleNamespace(
             action="stop",
             error=None,
-            last_message=SimpleNamespace(id="msg_done"),
+            last_message=SimpleNamespace(
+                id="msg_done",
+                role="assistant",
+                error=None,
+                finish="stop",
+            ),
+            metadata={},
         )
     )
     set_main = []
@@ -55,15 +61,54 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
             side_effect=set_main.append,
         ),
     ):
-        result = await run_evolution_agent(
-            agent_name="self-improve",
-            prompt="evidence",
-            project_id="default",
-            directory="/workspace",
-            provider_id="provider",
-            model_id="model",
-            write_permission_patterns=["memory/MEMORY.md"],
-        )
+        async def run() -> None:
+            await run_evolution_agent(
+                agent_name="self-improve",
+                prompt="evidence",
+                project_id="default",
+                directory="/workspace",
+                provider_id="provider",
+                model_id="model",
+            )
+
+        result = await run()
+        valid_result = {
+            "action": "stop",
+            "error": None,
+            "last_message": SimpleNamespace(
+                role="assistant",
+                error=None,
+                finish="stop",
+            ),
+            "metadata": {},
+        }
+        for overrides, error in (
+            (
+                {"error": "provider failed", "last_message": None},
+                "provider failed",
+            ),
+            (
+                {"last_message": None},
+                "without a final assistant message",
+            ),
+            (
+                {"metadata": {"aborted": True}},
+                "was aborted",
+            ),
+            (
+                {
+                    "last_message": SimpleNamespace(
+                        role="assistant",
+                        error=None,
+                        finish="length",
+                    ),
+                },
+                "finish reason: length",
+            ),
+        ):
+            loop.return_value = SimpleNamespace(**(valid_result | overrides))
+            with pytest.raises(RuntimeError, match=error):
+                await run()
 
     assert result is None
     assert created.await_args.kwargs["category"] == "task"
@@ -73,24 +118,16 @@ async def test_evolution_agent_uses_full_session_loop_and_deletes_session() -> N
         "providerID": "provider",
         "modelID": "model",
     }
-    permission_rules = created.await_args.kwargs["permission"]
-    assert any(
-        rule.permission == "edit" and rule.action == "allow" and rule.pattern == "memory/MEMORY.md"
-        for rule in permission_rules
-    )
-    assert any(rule.permission == "edit" and rule.action == "deny" and rule.pattern == "*" for rule in permission_rules)
-    assert any(
-        rule.permission == "bash" and rule.action == "allow" and rule.pattern == "*" for rule in permission_rules
-    )
-    loop.assert_awaited_once_with(
+    assert "permission" not in created.await_args.kwargs
+    loop.assert_awaited_with(
         session_id="ses_evolution",
         provider_id="provider",
         model_id="model",
         agent_name="self-improve",
         working_directory="/workspace",
     )
-    deleted.assert_awaited_once_with("default", "ses_evolution")
-    assert set_main == ["ses_main", "ses_main"]
+    deleted.assert_awaited_with("default", "ses_evolution")
+    assert set_main[-1] == "ses_main"
 
 
 def test_evolution_agents_are_hidden_and_have_expected_tools() -> None:

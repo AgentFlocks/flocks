@@ -263,12 +263,9 @@ async def lifespan(app: FastAPI):
     )
     log.info("question_handler.initialized")
     
-    # Memory is always enabled; Dream scheduling remains configurable.
+    # Memory is always enabled. The scheduler checks Dream's current setting
+    # on every tick so runtime config changes take effect without a restart.
     try:
-        config = await Config.get()
-        from flocks.memory.config import resolve_memory_config
-
-        memory_cfg = resolve_memory_config(config)
         from flocks.hooks.builtin import register_builtin_hooks
 
         await _run_startup_phase(
@@ -277,16 +274,15 @@ async def lifespan(app: FastAPI):
             register_builtin_hooks,
         )
         log.info("hooks.registered")
-        if memory_cfg.dream.enabled:
-            from flocks.memory.evolution.scheduler import (
-                MemoryEvolutionScheduler,
-            )
+        from flocks.memory.evolution.scheduler import (
+            MemoryEvolutionScheduler,
+        )
 
-            await _run_startup_phase(
-                log,
-                "memory.evolution.start",
-                MemoryEvolutionScheduler.start,
-            )
+        await _run_startup_phase(
+            log,
+            "memory.evolution.start",
+            MemoryEvolutionScheduler.start,
+        )
     except Exception as e:
         # Hook registration failure should not stop server startup
         log.warn("hooks.register_failed", {"error": str(e)})

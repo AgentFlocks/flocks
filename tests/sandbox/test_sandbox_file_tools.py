@@ -122,6 +122,7 @@ async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
     skill_root = home_dir / ".flocks" / "plugins" / "skills"
     managed_path = skill_root / "managed-skill" / "SKILL.md"
     unmanaged_path = skill_root / "manual-skill" / "SKILL.md"
+    project_skill_path = sandbox_dir / "project-skill" / "SKILL.md"
     managed_content = (
         "---\n"
         "name: managed-skill\n"
@@ -184,6 +185,13 @@ async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
             oldString="Manual workflow.",
             newString="Changed workflow.",
         )
+        project_skill_result = await ToolRegistry.execute(
+            "edit",
+            ctx=ctx,
+            filePath=str(project_skill_path),
+            oldString="",
+            newString=managed_content.replace("managed-skill", "project-skill"),
+        )
 
     assert create_result.success
     assert read_result.success
@@ -195,6 +203,9 @@ async def test_sandbox_self_improve_can_manage_only_marked_host_skills(
     assert not unmanaged_result.success
     assert "existing managed Skills" in (unmanaged_result.error or "")
     assert unmanaged_path.read_text(encoding="utf-8") == unmanaged_content
+    assert not project_skill_result.success
+    assert "outside the self-improve user root" in (project_skill_result.error or "")
+    assert not project_skill_path.exists()
 
 
 @pytest.mark.asyncio

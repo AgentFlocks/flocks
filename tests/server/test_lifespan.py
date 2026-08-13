@@ -40,6 +40,14 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
     async def fake_async_noop(*_args, **_kwargs) -> None:
         return None
 
+    dream_scheduler_events: list[str] = []
+
+    async def start_dream_scheduler() -> None:
+        dream_scheduler_events.append("start")
+
+    async def stop_dream_scheduler() -> None:
+        dream_scheduler_events.append("stop")
+
     monkeypatch.setattr(app_module.Log, "_writer", object())
     monkeypatch.setattr(app_module.Log, "create", lambda service: _DummyLogger())
     monkeypatch.setattr(app_module, "init_observability", lambda: None)
@@ -65,6 +73,16 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
         sys.modules,
         "flocks.hooks.builtin",
         types.SimpleNamespace(register_builtin_hooks=lambda: None),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "flocks.memory.evolution.scheduler",
+        types.SimpleNamespace(
+            MemoryEvolutionScheduler=types.SimpleNamespace(
+                start=start_dream_scheduler,
+                stop=stop_dream_scheduler,
+            ),
+        ),
     )
     monkeypatch.setitem(
         sys.modules,
@@ -152,3 +170,4 @@ async def test_lifespan_cleans_replaced_files_without_upgrade_recovery(
         pass
 
     assert events == ["cleanup_replaced_files"]
+    assert dream_scheduler_events == ["start", "stop"]
