@@ -393,6 +393,7 @@
       "historySummary": "{{count}} records · Latest {{time}}",
       "historySummaryLoading": "Loading execution history",
       "noHistory": "No execution records",
+      "executionNotFound": "Specified execution record was not found",
       "noOutput": "No output data",
       "stepsCompleted": "steps completed",
       "stepInputs": "Inputs",
