@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { useTranslation } from 'react-i18next';
 import { X, GitBranch, FileText, Code2, FileJson, Bot } from 'lucide-react';
 import { workflowAPI, Workflow, WorkflowExecution, WorkflowNode } from '@/api/workflow';
@@ -52,7 +52,10 @@ export default function WorkflowDetail() {
   const { t } = useTranslation('workflow');
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
   const confirm = useConfirm();
+  const queryTab = searchParams.get('tab');
+  const focusedExecutionId = searchParams.get('execId')?.trim() || '';
 
   const CANVAS_TABS: { id: CanvasTab; label: string; icon: React.ReactNode }[] = [
     { id: 'flow', label: t('detail.canvasTabs.flow'), icon: <GitBranch className="w-3.5 h-3.5" /> },
@@ -151,6 +154,12 @@ export default function WorkflowDetail() {
     if (!id) return;
     void loadWorkflow();
   }, [id, loadWorkflow]);
+
+  useEffect(() => {
+    if (queryTab !== 'run' && !focusedExecutionId) return;
+    setPanelOpen(true);
+    setRightPanelTab('overview');
+  }, [focusedExecutionId, queryTab]);
 
   useEffect(() => {
     const next = workflow?.markdownContent ?? workflow?.editMarkdownContent ?? '';
@@ -802,6 +811,7 @@ export default function WorkflowDetail() {
           onFirstMessageSent={handleFirstMessageSent}
           onSessionChange={handleWorkflowChatSessionChange}
           onGuidePrompt={launchWorkflowGuidePrompt}
+          focusExecutionId={focusedExecutionId}
           selectedNode={drawerNode}
           onDeselectNode={() => setDrawerNode(null)}
           onDelete={handleDelete}

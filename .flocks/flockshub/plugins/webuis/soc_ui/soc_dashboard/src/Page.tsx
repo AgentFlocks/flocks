@@ -194,12 +194,17 @@ function createActivityState() {
 
 function createMockActivityEvent(overrides) {
   const now = new Date();
+  const workflowId = overrides.workflowId || (overrides.stage === 'triage' ? 'stream_alert_triage' : 'stream_alert_denoise');
+  const executionId = overrides.executionId || `${workflowId}-mock-execution`;
   return {
-    eventId: overrides.eventId || `mock-${overrides.stage}-${overrides.alert?.id || Math.random().toString(36).slice(2)}`,
+    eventId: overrides.eventId || `workflow-execution:${executionId}`,
     stage: overrides.stage,
     status: overrides.status || 'running',
     occurredAt: overrides.occurredAt || now.toISOString(),
-    triggerSource: overrides.triggerSource || 'mock',
+    triggerSource: overrides.triggerSource || 'workflow_execution',
+    workflowId,
+    sessionId: overrides.sessionId || '',
+    messageId: overrides.messageId || '',
     playbackMode: overrides.playbackMode || 'normal',
     playbackStartedAt: overrides.playbackStartedAt || Date.now() - 4200,
     sampleCount: overrides.sampleCount || 1,
@@ -234,7 +239,8 @@ function createMockActivityState() {
   const now = Date.now();
   const denoiseCurrent = createMockActivityEvent({
     stage: 'denoise',
-    eventId: 'mock-denoise-current',
+    workflowId: 'stream_alert_denoise',
+    executionId: 'mock-denoise-run-001',
     playbackMode: 'burst',
     playbackStartedAt: now - 3600,
     sampleCount: 6,
@@ -259,7 +265,8 @@ function createMockActivityState() {
   });
   const triageCurrent = createMockActivityEvent({
     stage: 'triage',
-    eventId: 'mock-triage-current',
+    workflowId: 'stream_alert_triage',
+    executionId: 'mock-triage-run-002',
     playbackStartedAt: now - 6200,
     alert: {
       id: 'mock-alert-rce',
@@ -280,7 +287,8 @@ function createMockActivityState() {
   const triageWaiting = createMockActivityEvent({
     stage: 'triage',
     status: 'queued',
-    eventId: 'mock-triage-waiting',
+    workflowId: 'stream_alert_triage',
+    executionId: 'mock-triage-run-003',
     occurredAt: new Date(now - 18000).toISOString(),
     playbackStartedAt: now - 18000,
     alert: {
@@ -300,7 +308,8 @@ function createMockActivityState() {
   const denoiseWaiting = createMockActivityEvent({
     stage: 'denoise',
     status: 'queued',
-    eventId: 'mock-denoise-waiting',
+    workflowId: 'stream_alert_denoise',
+    executionId: 'mock-denoise-run-004',
     occurredAt: new Date(now - 26000).toISOString(),
     playbackStartedAt: now - 26000,
     sampleCount: 4,
@@ -440,7 +449,7 @@ function createMockTaskCenterState() {
         latestAlertName: '异常登录爆发（Mock）',
         progressPercent: 0.58,
         progressLabel: '第 4/7 步',
-        currentPhase: '聚类降噪',
+        currentPhase: 'running',
         sessionId: '',
         messageId: '',
       },
@@ -458,7 +467,7 @@ function createMockTaskCenterState() {
         latestAlertName: '远程命令执行攻击（Mock）',
         progressPercent: 0.67,
         progressLabel: '第 2/3 步',
-        currentPhase: '证据汇总',
+        currentPhase: 'running',
         sessionId: '',
         messageId: '',
       },
@@ -2177,24 +2186,51 @@ function taskCenterProgressLabel(item) {
   return String(item?.progressLabel || '').trim() || '待执行';
 }
 
-function openTaskCenterConversation(item) {
-  const sessionId = String(item?.sessionId || item?.sessionID || '').trim();
-  if (!sessionId || typeof window === 'undefined') return false;
-  const messageId = String(item?.messageId || item?.messageID || '').trim();
-  const params = new URLSearchParams({ session: sessionId });
-  if (messageId) params.set('focusMessage', messageId);
-  window.location.href = `/sessions?${params.toString()}`;
+function workflowIdFromTaskCenterItem(item) {
+  return String(item?.id || item?.workflowId || item?.workflowID || '').trim();
+}
+
+function executionIdFromTaskCenterItem(item) {
+  return String(item?.latestExecutionHash || item?.executionId || item?.executionID || '').trim();
+}
+
+function executionIdFromWorkflowEvent(event) {
+  const directId = String(event?.executionId || event?.executionID || '').trim();
+  if (directId) return directId;
+  const eventId = String(event?.eventId || event?.id || '').trim();
+  const match = eventId.match(/^workflow-execution:(.+)$/);
+  return match ? match[1].trim() : '';
+}
+
+function workflowIdFromEvent(event) {
+  return String(event?.workflowId || event?.workflowID || '').trim();
+}
+
+function openWorkflowExecution(workflowId, executionId) {
+  if (!workflowId || !executionId || typeof window === 'undefined') return false;
+  const params = new URLSearchParams({ tab: 'run', execId: executionId });
+  try {
+    const currentParams = new URLSearchParams(window.location.search || '');
+    if (currentParams.has('mockDashboard') || currentParams.has('mockActivity') || currentParams.has('mockTaskCenter')) {
+      params.set('mockDashboard', '1');
+    } else if (isMockSwitchEnabled(window.localStorage?.getItem(SOC_MOCK_DASHBOARD_KEY))
+      || isMockSwitchEnabled(window.localStorage?.getItem(SOC_MOCK_ACTIVITY_KEY))
+      || isMockSwitchEnabled(window.localStorage?.getItem(SOC_MOCK_TASK_CENTER_KEY))) {
+      params.set('mockDashboard', '1');
+    }
+  } catch {
+    // Mock switch propagation is best-effort; navigation must still work without localStorage.
+  }
+  window.location.href = `/workflows/${encodeURIComponent(workflowId)}?${params.toString()}`;
   return true;
 }
 
-function openConversationFromEvent(event) {
-  const sessionId = String(event?.sessionId || event?.sessionID || '').trim();
-  if (!sessionId || typeof window === 'undefined') return false;
-  const messageId = String(event?.messageId || event?.messageID || '').trim();
-  const params = new URLSearchParams({ session: sessionId });
-  if (messageId) params.set('focusMessage', messageId);
-  window.location.href = `/sessions?${params.toString()}`;
-  return true;
+function openWorkflowExecutionFromTaskCenter(item) {
+  return openWorkflowExecution(workflowIdFromTaskCenterItem(item), executionIdFromTaskCenterItem(item));
+}
+
+function openWorkflowExecutionFromEvent(event) {
+  return openWorkflowExecution(workflowIdFromEvent(event), executionIdFromWorkflowEvent(event));
 }
 
 function TaskCenterSummary({ taskCenter }) {
@@ -2234,7 +2270,7 @@ function TaskCenterItem({ item, kind }) {
   const latestExecutionHash = taskCenterHashValue(item.latestExecutionHash);
   const itemName = kind === 'workflow' ? taskCenterWorkflowName(item) : item.name || item.id;
   const alertName = String(item.latestAlertName || '').trim();
-  const hasConversation = kind === 'workflow' && Boolean(String(item.sessionId || item.sessionID || '').trim());
+  const hasExecution = kind === 'workflow' && Boolean(workflowIdFromTaskCenterItem(item) && executionIdFromTaskCenterItem(item));
   const scheduledClosed = kind === 'scheduled' && ['disabled', 'stopped'].includes(schedulerStatus);
   const sub = kind === 'scheduled'
     ? scheduledClosed
@@ -2259,20 +2295,20 @@ function TaskCenterItem({ item, kind }) {
         h('span', { key: 'rate' }, ['成功率 ', h('b', { key: 'value' }, taskCenterPercent(successRate))]),
       ];
   const handleOpen = () => {
-    if (hasConversation) openTaskCenterConversation(item);
+    if (hasExecution) openWorkflowExecutionFromTaskCenter(item);
   };
   const handleKeyDown = (event) => {
-    if (!hasConversation) return;
+    if (!hasExecution) return;
     if (event.key === 'Enter' || event.key === ' ') {
       event.preventDefault();
-      openTaskCenterConversation(item);
+      openWorkflowExecutionFromTaskCenter(item);
     }
   };
   return h('article', {
-    className: cx('task-center-item', active && 'active', hasConversation && 'clickable'),
-    role: hasConversation ? 'button' : undefined,
-    tabIndex: hasConversation ? 0 : undefined,
-    title: hasConversation ? '打开对应对话' : undefined,
+    className: cx('task-center-item', active && 'active', hasExecution && 'clickable'),
+    role: hasExecution ? 'button' : undefined,
+    tabIndex: hasExecution ? 0 : undefined,
+    title: hasExecution ? '打开执行详情' : undefined,
     onClick: handleOpen,
     onKeyDown: handleKeyDown,
   }, [
@@ -2292,8 +2328,8 @@ function TaskCenterItem({ item, kind }) {
     kind === 'workflow' ? h('div', { className: 'task-center-hash', title: latestExecutionHash, key: 'hash' }, [
       h('span', { key: 'label' }, '执行ID'),
       h('code', { key: 'value' }, latestExecutionHash),
-      h('span', { key: 'link-label' }, '关联对话'),
-      h('code', { className: cx('task-center-jump', hasConversation && 'enabled'), key: 'link' }, hasConversation ? '查看对话' : '暂无关联对话'),
+      h('span', { key: 'link-label' }, '执行详情'),
+      h('code', { className: cx('task-center-jump', hasExecution && 'enabled'), key: 'link' }, hasExecution ? '查看执行' : '暂无执行记录'),
     ]) : null,
     h('div', { className: cx('task-center-stats', kind === 'workflow' && 'workflow-stats'), key: 'stats' }, stats),
     h('div', {
@@ -2414,23 +2450,23 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
         : task.state === 'processing'
           ? task.stage === 'triage' ? '证据关联与结论生成中' : '特征提取与相似聚类中'
           : '等待 AI 处理';
-      const hasConversation = Boolean(String(event?.sessionId || event?.sessionID || '').trim());
+      const hasExecution = Boolean(workflowIdFromEvent(event) && executionIdFromWorkflowEvent(event));
       const handleOpen = () => {
-        if (hasConversation) openConversationFromEvent(event);
+        if (hasExecution) openWorkflowExecutionFromEvent(event);
       };
       const handleKeyDown = (keyboardEvent) => {
-        if (!hasConversation) return;
+        if (!hasExecution) return;
         if (keyboardEvent.key === 'Enter' || keyboardEvent.key === ' ') {
           keyboardEvent.preventDefault();
-          openConversationFromEvent(event);
+          openWorkflowExecutionFromEvent(event);
         }
       };
       return h('article', {
-        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasConversation && 'clickable'),
+        className: cx('event-rail-item', `state-${task.state}`, `kind-${task.stage}`, `motion-${task.motion || 'stable'}`, hasExecution && 'clickable'),
         key: task.key,
-        role: hasConversation ? 'button' : undefined,
-        tabIndex: hasConversation ? 0 : undefined,
-        title: hasConversation ? '打开对应对话' : undefined,
+        role: hasExecution ? 'button' : undefined,
+        tabIndex: hasExecution ? 0 : undefined,
+        title: hasExecution ? '打开执行详情' : undefined,
         onClick: handleOpen,
         onKeyDown: handleKeyDown,
       }, [
@@ -2441,7 +2477,7 @@ function CommandAiTaskPanel({ activity, timeFilter }) {
         ]),
         h('strong', { title, key: 'title' }, title),
         h('span', { title: eventEndpoint(event), key: 'endpoint' }, eventEndpoint(event)),
-        h('small', { key: 'result' }, hasConversation ? `${detail} · 查看对话` : detail),
+        h('small', { key: 'result' }, hasExecution ? `${detail} · 查看执行` : detail),
         task.state === 'processing' ? h(EventQueueProgress, { event, key: 'progress' }) : null,
       ]);
     }) : h('div', { className: 'event-rail-empty' }, '等待新的降噪或研判任务')),
@@ -2752,8 +2788,8 @@ export default function Page() {
           const incomingEvents = rawIncomingEvents.filter((event) => event?.stage !== 'denoise');
           const workflowEvents = Array.isArray(payload.workflowEvents) ? payload.workflowEvents : [];
           for (const workflowEvent of workflowEvents) {
-            const hasConversation = Boolean(String(workflowEvent?.sessionId || workflowEvent?.sessionID || '').trim());
-            if (hasConversation) {
+            const hasExecution = Boolean(workflowIdFromEvent(workflowEvent) && executionIdFromWorkflowEvent(workflowEvent));
+            if (hasExecution) {
               incomingEvents.push(workflowEvent);
             }
           }

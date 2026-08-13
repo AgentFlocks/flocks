@@ -79,6 +79,7 @@ interface RightPanelProps {
   onFirstMessageSent?: () => void;
   onSessionChange?: (sessionId: string | null) => void;
   onGuidePrompt?: (prompt: string, displayLabel: string) => void;
+  focusExecutionId?: string;
   /** Currently selected node — passed to ChatTab to show reference chip in input */
   selectedNode?: WorkflowNode | null;
   onDeselectNode?: () => void;
@@ -97,6 +98,7 @@ export default function RightPanel({
   onFirstMessageSent,
   onSessionChange,
   onGuidePrompt,
+  focusExecutionId,
   selectedNode, onDeselectNode,
   onDelete,
 }: RightPanelProps) {
@@ -181,6 +183,7 @@ export default function RightPanel({
               latestExecution={latestExecution ?? null}
               onLatestExecutionChange={onLatestExecutionChange}
               onExecutionSettled={onExecutionSettled}
+              focusExecutionId={focusExecutionId}
             />
           </TabErrorBoundary>
         )}

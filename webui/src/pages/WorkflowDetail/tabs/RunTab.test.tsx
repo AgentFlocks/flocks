@@ -88,6 +88,7 @@ vi.mock('react-i18next', () => ({
         'detail.run.syslogHint': 'syslog hint',
         'detail.run.historySection': '执行历史',
         'detail.run.noHistory': '暂无执行记录',
+        'detail.run.executionNotFound': '未找到指定执行记录',
         'detail.run.noOutput': '无输出数据',
         'detail.run.stepsCompleted': '步已完成',
         'detail.run.stepInputs': '输入',
@@ -120,9 +121,11 @@ const baseWorkflow = {
 function ControlledRunTab({
   initialExecution = null,
   workflow = baseWorkflow,
+  focusExecutionId,
 }: {
   initialExecution?: WorkflowExecution | null;
   workflow?: typeof baseWorkflow;
+  focusExecutionId?: string;
 }) {
   const [latestExecution, setLatestExecution] = React.useState<WorkflowExecution | null>(initialExecution);
 
@@ -131,6 +134,7 @@ function ControlledRunTab({
       workflow={workflow}
       latestExecution={latestExecution}
       onLatestExecutionChange={setLatestExecution}
+      focusExecutionId={focusExecutionId}
     />
   );
 }
@@ -138,12 +142,24 @@ function ControlledRunTab({
 describe('RunTab', () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    window.localStorage.clear();
+    window.history.replaceState(null, '', '/workflows/wf-1');
     workflowAPI.getSampleInputs.mockResolvedValue({ data: { sampleInputs: {} } });
     workflowAPI.saveSampleInputs.mockResolvedValue({ data: { ok: true } });
     workflowAPI.getService.mockResolvedValue({ data: null });
     workflowAPI.getKafkaConfig.mockResolvedValue({ data: null });
     workflowAPI.getSyslogConfig.mockResolvedValue({ data: null });
     workflowAPI.getHistory.mockResolvedValue({ data: [] });
+    workflowAPI.getExecution.mockResolvedValue({
+      data: {
+        id: 'exec-1',
+        workflowId: 'wf-1',
+        inputParams: {},
+        status: 'success',
+        startedAt: Date.now(),
+        executionLog: [],
+      },
+    });
     workflowAPI.run.mockResolvedValue({
       data: {
         id: 'exec-1',
@@ -174,6 +190,13 @@ describe('RunTab', () => {
       executionLog: [],
     };
     workflowAPI.getHistory.mockResolvedValue({ data: [runningExecution] });
+    workflowAPI.getExecution.mockResolvedValue({
+      data: {
+        ...runningExecution,
+        currentPhase: 'cancelling',
+        errorMessage: 'Cancellation requested',
+      },
+    });
 
     render(
       <ControlledRunTab
@@ -271,6 +294,9 @@ describe('RunTab', () => {
       },
     ];
     workflowAPI.getHistory.mockResolvedValue({ data: executions });
+    workflowAPI.getExecution.mockImplementation((workflowId: string, executionId: string) => (
+      Promise.resolve({ data: executions.find((execution) => execution.id === executionId) })
+    ));
 
     render(
       <RunTab
@@ -289,6 +315,84 @@ describe('RunTab', () => {
 
     const firstDetail = screen.getByText(/"marker": "first"/);
     expect(firstDetail.compareDocumentPosition(secondHistoryButton!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
+  it('loads and expands a focused execution even when it is outside recent history', async () => {
+    const focusedExecution = {
+      id: 'exec-focused',
+      workflowId: 'wf-1',
+      inputParams: { alert_id: 'alert-focused' },
+      outputResults: { marker: 'focused' },
+      status: 'success' as const,
+      startedAt: new Date('2026-01-03T00:00:00Z').getTime(),
+      duration: 3,
+      executionLog: [],
+    };
+    workflowAPI.getHistory.mockResolvedValue({ data: [] });
+    workflowAPI.getExecution.mockResolvedValue({ data: focusedExecution });
+
+    render(
+      <RunTab
+        workflow={baseWorkflow}
+        latestExecution={null}
+        sections={['history']}
+        focusExecutionId="exec-focused"
+      />,
+    );
+
+    expect(await screen.findByText('3.0s')).toBeInTheDocument();
+    expect(screen.getByText(/"marker": "focused"/)).toBeInTheDocument();
+    expect(workflowAPI.getExecution).toHaveBeenCalledWith('wf-1', 'exec-focused');
+  });
+
+  it('opens embedded history tab when an execution is focused', async () => {
+    const focusedExecution = {
+      id: 'exec-focused',
+      workflowId: 'wf-1',
+      inputParams: {},
+      outputResults: { marker: 'embedded-focused' },
+      status: 'success' as const,
+      startedAt: Date.now(),
+      duration: 1,
+      executionLog: [],
+    };
+    workflowAPI.getHistory.mockResolvedValue({ data: [focusedExecution] });
+
+    render(
+      <RunTab
+        workflow={baseWorkflow}
+        latestExecution={null}
+        sections={['test', 'history']}
+        embeddedTabs
+        focusExecutionId="exec-focused"
+      />,
+    );
+
+    expect(await screen.findByText(/"marker": "embedded-focused"/)).toBeInTheDocument();
+    expect(screen.getAllByRole('button', { name: '执行历史' })[0]).toHaveClass('bg-white');
+  });
+
+  it('uses dashboard mock execution fallback with the same execution id as task-center data', async () => {
+    const user = userEvent.setup();
+    window.history.replaceState(null, '', '/workflows/stream_alert_triage?tab=run&execId=mock-triage-run-002&mockDashboard=1');
+    workflowAPI.getHistory.mockResolvedValue({ data: [] });
+    workflowAPI.getExecution.mockRejectedValue(new Error('not found'));
+
+    render(
+      <RunTab
+        workflow={{
+          ...baseWorkflow,
+          id: 'stream_alert_triage',
+        }}
+        latestExecution={null}
+        sections={['history']}
+        focusExecutionId="mock-triage-run-002"
+      />,
+    );
+
+    expect(await screen.findByText(/"verdict": "疑似攻击行为"/)).toBeInTheDocument();
+    await user.click(screen.getByRole('button', { name: '执行日志 (2)' }));
+    expect(screen.getByText('concurrent_triage')).toBeInTheDocument();
   });
 
 });

@@ -9,6 +9,7 @@ interface OverviewTabProps {
   latestExecution?: WorkflowExecution | null;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   onExecutionSettled?: () => void;
+  focusExecutionId?: string;
 }
 
 function MetaRow({ icon, label, value }: { icon: ReactNode; label: string; value: ReactNode }) {
@@ -99,6 +100,7 @@ export default function OverviewTab({
   latestExecution = null,
   onLatestExecutionChange,
   onExecutionSettled,
+  focusExecutionId,
 }: OverviewTabProps) {
   const { t, i18n } = useTranslation('workflow');
   const [configExpanded, setConfigExpanded] = useState(true);
@@ -222,6 +224,7 @@ export default function OverviewTab({
           latestExecution={latestExecution}
           onLatestExecutionChange={onLatestExecutionChange}
           onExecutionSettled={onExecutionSettled}
+          focusExecutionId={focusExecutionId}
           embedded
           embeddedTabs
           hideSectionHeaders

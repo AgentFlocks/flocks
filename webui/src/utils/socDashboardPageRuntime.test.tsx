@@ -30,6 +30,8 @@ describe('SOC dashboard contract page runtime', () => {
   beforeEach(() => {
     installContractSdk();
     setDocumentHidden(false);
+    window.localStorage.clear();
+    window.history.replaceState(null, '', '/');
     window.sessionStorage.clear();
     pageGetMock.mockImplementation((path: string) => {
       if (path === '/stats') {
@@ -112,12 +114,14 @@ describe('SOC dashboard contract page runtime', () => {
             recentEvents: [],
             workflowEvents: [
               {
-                eventId: 'workflow-denoise-1',
+                eventId: 'workflow-execution:exec-denoise-1',
                 stage: 'denoise',
                 status: 'running',
                 occurredAt,
                 triggerSource: 'workflow_execution',
-                sessionId: 'session-1',
+                workflowId: 'stream_alert_denoise',
+                sessionId: '',
+                messageId: '',
                 alert: {
                   id: 'alert-1',
                   sourceType: 'workflow.db',
@@ -131,12 +135,14 @@ describe('SOC dashboard contract page runtime', () => {
                 },
               },
               {
-                eventId: 'workflow-triage-1',
+                eventId: 'workflow-execution:exec-triage-1',
                 stage: 'triage',
                 status: 'running',
                 occurredAt,
                 triggerSource: 'workflow_execution',
-                sessionId: 'session-1',
+                workflowId: 'stream_alert_triage',
+                sessionId: '',
+                messageId: '',
                 alert: {
                   id: 'alert-1',
                   sourceType: 'workflow.db',
@@ -223,8 +229,8 @@ describe('SOC dashboard contract page runtime', () => {
                 lastRunAt: Date.now(),
                 latestExecutionHash: 'workflow-run-1',
                 latestAlertName: '远程命令执行',
-                sessionId: 'session-1',
-                messageId: 'message-1',
+                sessionId: '',
+                messageId: '',
                 progressPercent: 0.5,
                 progressLabel: '运行中',
               },
@@ -253,8 +259,8 @@ describe('SOC dashboard contract page runtime', () => {
     expect(screen.getByText('远程命令执行')).toBeInTheDocument();
     expect(screen.getByText('执行ID')).toBeInTheDocument();
     expect(screen.getByText('workflow-run-1')).toBeInTheDocument();
-    expect(screen.getByText('关联对话')).toBeInTheDocument();
-    expect(screen.getByText('查看对话')).toBeInTheDocument();
+    expect(screen.getByText('执行详情')).toBeInTheDocument();
+    expect(screen.getByText('查看执行')).toBeInTheDocument();
     expect(screen.getByText(/最近调用/)).toBeInTheDocument();
 
     const summary = container.querySelector('.task-center-summary') as HTMLElement;
@@ -272,6 +278,21 @@ describe('SOC dashboard contract page runtime', () => {
     const workflowStats = container.querySelector('.task-center-stats.workflow-stats') as HTMLElement;
     expect(within(workflowStats).getByText('调用')).toBeInTheDocument();
     expect(within(workflowStats).getByText('今日调用')).toBeInTheDocument();
+  });
+
+  it('uses dashboard mock rows with the same workflow execution field shape as real task-center data', async () => {
+    window.localStorage.setItem('soc-dashboard-mock-v1', '1');
+
+    render(<Page />);
+
+    const user = userEvent.setup();
+    await user.click(await screen.findByRole('tab', { name: '任务中心' }));
+
+    expect(await screen.findByText('告警研判工作流（Mock）')).toBeInTheDocument();
+    expect(screen.getByText('mock-triage-run-002')).toBeInTheDocument();
+    expect(screen.getAllByText('执行详情').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('查看执行').length).toBeGreaterThanOrEqual(1);
+    expect(screen.queryByText('查看对话')).not.toBeInTheDocument();
   });
 
   it('reacts to the shared SOC dashboard title change event', async () => {
