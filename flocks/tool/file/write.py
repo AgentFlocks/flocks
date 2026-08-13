@@ -286,6 +286,7 @@ async def write_tool(
             ctx,
             filePath,
             allow_host_memory=True,
+            allow_host_skills=True,
         )
         if resolution.sandbox_root is None:
             redirected_path = await _maybe_redirect_to_default_outputs(
@@ -301,6 +302,7 @@ async def write_tool(
                     base_dir=resolution.base_dir,
                     worktree=resolution.worktree,
                     allow_host_memory=True,
+                    allow_host_skills=True,
                 )
     except ValueError as exc:
         return ToolResult(
@@ -358,6 +360,26 @@ async def write_tool(
                 success=False,
                 error=f"Failed to read existing file: {str(e)}",
                 title=title
+            )
+
+    if (
+        ctx.agent == "self-improve"
+        and Path(filepath).name == "SKILL.md"
+    ):
+        from flocks.memory.evolution.skill_guard import (
+            validate_evolution_skill_write,
+        )
+
+        evolution_error = await validate_evolution_skill_write(
+            Path(filepath),
+            content,
+            exists=exists,
+        )
+        if evolution_error:
+            return ToolResult(
+                success=False,
+                error=evolution_error,
+                title=title,
             )
 
     # Generate diff

@@ -6,7 +6,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from flocks.agent.agent import AvailableAgent
 from flocks.agent.registry import Agent
@@ -29,6 +29,54 @@ class DirectCommandResult:
     prompt: Optional[str] = None
     clear_screen: bool = False
     clear_history: bool = False
+
+
+CommandStatusCallback = Callable[[str, Optional[str]], Awaitable[None]]
+
+
+async def _publish_command_status(
+    callback: Optional[CommandStatusCallback],
+    status: str,
+    message: Optional[str] = None,
+) -> None:
+    """Publish best-effort foreground status for a long-running command."""
+    if callback is None:
+        return
+    try:
+        await callback(status, message)
+    except Exception:
+        return
+
+
+def _format_dream_result(result: Any, target_label: str) -> str:
+    """Format the visible result of one manual Dream run."""
+    changed_memory_files = tuple(getattr(result, "changed_memory_files", ()) or ())
+    changed_skills = tuple(getattr(result, "changed_skills", ()) or ())
+    memory_result = (
+        f"Updated {', '.join(changed_memory_files)}"
+        if changed_memory_files
+        else "Updated"
+        if getattr(result, "memory_changed", False)
+        else "No changes"
+    )
+    skill_result = (
+        f"Updated {', '.join(changed_skills)}"
+        if changed_skills
+        else "Updated"
+        if getattr(result, "skill_changed", False)
+        else "No changes"
+    )
+    lines = [
+        "Dream completed",
+        "",
+        f"- Target: {target_label}",
+        f"- Evidence processed: {result.processed_sources}",
+        f"- Memory: {memory_result}",
+        f"- Skill: {skill_result}",
+    ]
+    if getattr(result, "backlog", False):
+        lines.append("- Backlog: More evidence remains for a later Dream")
+    return "\n".join(lines)
 
 
 def is_agent_safe_direct_command(command: CommandInfo) -> bool:
@@ -136,6 +184,7 @@ async def run_direct_command(
     args_json: Optional[Any] = None,
     surface: Optional[CommandSurface] = None,
     session_id: Optional[str] = None,
+    status_callback: Optional[CommandStatusCallback] = None,
 ) -> DirectCommandResult:
     """Execute a direct command and return its result."""
     resolved = Command.resolve(name)
@@ -172,6 +221,69 @@ async def run_direct_command(
             handled=True,
             prompt=GoalManager.goal_prompt(state.objective),
         )
+
+    if name == "dream":
+        if not session_id:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Usage: /dream requires an active session.",
+            )
+        from flocks.config import Config
+        from flocks.memory.config import resolve_memory_config
+        from flocks.memory.evolution.common import DreamTarget
+        from flocks.memory.evolution.dream import run_dream_bridge
+        from flocks.memory.paths import is_registered_project_id
+        from flocks.session.session import Session
+
+        session = await Session.get_by_id(session_id)
+        if session is None:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Session not found.",
+            )
+        memory_config = resolve_memory_config(await Config.get())
+        if not memory_config.dream.enabled:
+            return DirectCommandResult(
+                handled=True,
+                success=False,
+                text="Dream is disabled",
+            )
+        target = (
+            DreamTarget.project(session.project_id)
+            if is_registered_project_id(session.project_id)
+            else DreamTarget.global_only()
+        )
+        target_label = (
+            f"Project {target.scope_id}"
+            if is_registered_project_id(target.scope_id)
+            else "Global"
+        )
+        await _publish_command_status(
+            status_callback,
+            "dreaming",
+            f"Dream is reviewing {target_label} evidence for durable Memory and Skill updates…",
+        )
+        try:
+            result = await run_dream_bridge(
+                target,
+                parent_session_id=session.id,
+            )
+        except Exception as exc:
+            command_result = DirectCommandResult(
+                handled=True,
+                success=False,
+                text=f"Dream failed: {exc}",
+            )
+        else:
+            command_result = DirectCommandResult(
+                handled=True,
+                text=_format_dream_result(result, target_label),
+            )
+        finally:
+            await _publish_command_status(status_callback, "idle")
+        return command_result
 
     if name == "tools":
         if not args or args == "list":

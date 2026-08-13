@@ -91,6 +91,7 @@ class ContinuationPolicy:
             hook_context = await HookPipeline.run_user_prompt_submit(
                 {
                     "sessionID": context.session.id,
+                    "sessionCategory": context.session.category,
                     "workspace": context.session.directory,
                     "agent": getattr(last_user, "agent", None) or context.agent_name,
                     "model": {
@@ -268,6 +269,7 @@ class ContinuationPolicy:
             await HookPipeline.run_turn_after(
                 {
                     "sessionID": context.session.id,
+                    "sessionCategory": context.session.category,
                     "workspace": context.session.directory,
                     "agent": getattr(last_message, "agent", None) or context.agent_name,
                     "model": {

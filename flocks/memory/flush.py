@@ -1,11 +1,11 @@
 """
 Memory Flush - Pre-compaction memory save mechanism
 
-Inspired by OpenClaw's memory flush design, triggers automatic memory
-saves when the session approaches context limits.
+Inspired by OpenClaw's memory flush design, preserves Session evidence when
+the Session approaches context limits.
 
 Includes:
-  - MemoryFlush: flush threshold logic and trigger helpers
+  - MemoryFlush: flush threshold and statistics helpers
   - extract_and_save: LLM-based memory extraction from conversation history
 """
 
@@ -111,104 +111,6 @@ class MemoryFlush:
         })
         
         return True
-    
-    @staticmethod
-    def get_flush_prompts(
-        config: MemoryAutoFlushConfig,
-        today: Optional[str] = None,
-    ) -> Dict[str, str]:
-        """
-        Get memory flush prompts with date filled in
-        
-        Args:
-            config: Memory flush configuration
-            today: Today's date (YYYY-MM-DD format)
-            
-        Returns:
-            Dict with system_prompt and user_prompt
-        """
-        if today is None:
-            today = datetime.now().strftime("%Y-%m-%d")
-        
-        # Replace YYYY-MM-DD with actual date
-        system_prompt = config.system_prompt
-        user_prompt = config.user_prompt.replace("YYYY-MM-DD", today)
-        
-        return {
-            "system_prompt": system_prompt,
-            "user_prompt": user_prompt,
-            "date": today,
-        }
-    
-    @staticmethod
-    async def trigger_flush(
-        session_id: str,
-        config: MemoryAutoFlushConfig,
-        create_flush_message: callable,
-        execute_agent_turn: callable,
-    ) -> bool:
-        """
-        Trigger a memory flush turn
-        
-        This creates a special agent turn with flush prompts.
-        The agent should save important memories before compaction.
-        
-        Args:
-            session_id: Session ID
-            config: Memory flush configuration
-            create_flush_message: Callback to create flush user message
-            execute_agent_turn: Callback to execute agent turn
-            
-        Returns:
-            True if flush succeeded
-        """
-        log.info("flush.trigger", {
-            "session_id": session_id,
-        })
-        
-        try:
-            # Get prompts with today's date
-            prompts = MemoryFlush.get_flush_prompts(config)
-            
-            # Create flush user message
-            flush_message = await create_flush_message(
-                content=prompts["user_prompt"],
-                metadata={
-                    "memory_flush": True,
-                    "date": prompts["date"],
-                }
-            )
-            
-            if not flush_message:
-                log.error("flush.create_message_failed", {
-                    "session_id": session_id,
-                })
-                return False
-            
-            # Execute agent turn with flush system prompt
-            result = await execute_agent_turn(
-                system_prompt_append=prompts["system_prompt"],
-                is_memory_flush=True,
-            )
-            
-            if result and result.get("success"):
-                log.info("flush.success", {
-                    "session_id": session_id,
-                })
-                return True
-            else:
-                log.warn("flush.turn_failed", {
-                    "session_id": session_id,
-                    "result": result,
-                })
-                return False
-        
-        except Exception as e:
-            log.error("flush.error", {
-                "session_id": session_id,
-                "error": str(e),
-            })
-            return False
     
     @staticmethod
     def calculate_threshold(

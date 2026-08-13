@@ -4476,6 +4476,25 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
     async def _clear_history() -> None:
         await _clear_session_history(sessionID)
 
+    async def _publish_command_status(
+        _output_event,
+        status_type: str,
+        message: Optional[str] = None,
+    ) -> None:
+        from flocks.session.core.status import SessionStatus, SessionStatusDreaming
+
+        if status_type == "dreaming" and message:
+            status = SessionStatusDreaming(message=message)
+            SessionStatus.set(sessionID, status)
+            status_payload = status.model_dump()
+        else:
+            SessionStatus.clear(sessionID)
+            status_payload = {"type": "idle"}
+        await publish_event("session.status", {
+            "sessionID": sessionID,
+            "status": status_payload,
+        })
+
     async def _run_session_control(output_event, parsed) -> bool:
         if parsed.canonical_name != "compact":
             return False
@@ -4512,6 +4531,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         direct_response=_publish_direct_response,
         run_llm=_run_llm,
         session_control=_run_session_control,
+        command_status=_publish_command_status,
         clear_history=_clear_history,
     )
     await dispatch_user_input(event, sink)

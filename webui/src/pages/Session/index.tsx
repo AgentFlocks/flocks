@@ -287,7 +287,10 @@ function readSessionStatusType(status: unknown): string | undefined {
 
 function isRunningSessionStatus(status: unknown): boolean {
   const statusType = readSessionStatusType(status);
-  return statusType === 'busy' || statusType === 'compacting' || statusType === 'retry';
+  return statusType === 'busy'
+    || statusType === 'compacting'
+    || statusType === 'dreaming'
+    || statusType === 'retry';
 }
 
 function readRunningSessionIds(statuses: unknown): Set<string> {

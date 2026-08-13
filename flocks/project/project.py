@@ -625,6 +625,19 @@ class Project:
         return {entry.id for entry in cls._all_registry_entries() if entry.shared_local}
 
     @classmethod
+    def get_owner_user_id(cls, project_id: str) -> Optional[str]:
+        """Return the owner of a registered project, if it is available."""
+
+        return next(
+            (
+                entry.owner_user_id
+                for entry in cls._all_registry_entries()
+                if entry.id == project_id and entry.owner_user_id
+            ),
+            None,
+        )
+
+    @classmethod
     async def list_visible(
         cls,
         *,

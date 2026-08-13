@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 import base64
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from flocks.command.command import Command, CommandDef
+from flocks.command.direct import DirectCommandResult
 from flocks.input.dispatcher import dispatch_user_input, parse_slash_command
 from flocks.input.events import UserInputEvent
 from flocks.input.output import CallbackOutputSink
@@ -67,6 +68,45 @@ class TestDispatchUserInput:
         assert result.action == "direct"
         assert direct and "Available / commands:" in direct[0]
         assert not llm
+
+    @pytest.mark.asyncio
+    async def test_direct_command_forwards_foreground_status(self):
+        direct = []
+        statuses = []
+
+        async def run_command(*_args, status_callback=None, **_kwargs):
+            await status_callback("dreaming", "Dreaming...")
+            await status_callback("idle", None)
+            return DirectCommandResult(handled=True, text="Dream completed")
+
+        sink = CallbackOutputSink(
+            "webui",
+            direct_response=lambda _event, text: _append(direct, text),
+            run_llm=lambda _event, prompt, display: _append([], (prompt, display)),
+            command_status=lambda _event, status, message: _append(
+                statuses,
+                (status, message),
+            ),
+        )
+        event = UserInputEvent(
+            source_type="webui",
+            sessionID="ses_test",
+            text="/dream",
+            parts=[{"type": "text", "text": "/dream"}],
+        )
+
+        with patch(
+            "flocks.command.handler.run_direct_command",
+            new=AsyncMock(side_effect=run_command),
+        ):
+            result = await dispatch_user_input(event, sink)
+
+        assert result.action == "direct"
+        assert direct == ["Dream completed"]
+        assert statuses == [
+            ("dreaming", "Dreaming..."),
+            ("idle", None),
+        ]
 
     @pytest.mark.asyncio
     async def test_webui_direct_response_is_excluded_from_model_context(

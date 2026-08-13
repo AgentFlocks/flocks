@@ -17,6 +17,7 @@ from flocks.memory.flush import MemoryFlush, extract_and_save
 from flocks.memory.types import (
     MemoryScope,
     MemorySource,
+    MemoryTimeRange,
     MemorySearchResult,
     MemorySyncProgress,
     MemoryProviderStatus,
@@ -35,6 +36,7 @@ from flocks.memory.config import (
     MemoryCacheConfig,
     MemoryBatchConfig,
     MemoryAutoFlushConfig,
+    MemoryDreamConfig,
     resolve_memory_config,
 )
 
@@ -59,6 +61,7 @@ __all__ = [
     # Types
     "MemoryScope",
     "MemorySource",
+    "MemoryTimeRange",
     "MemorySearchResult",
     "MemorySyncProgress",
     "MemoryProviderStatus",
@@ -76,6 +79,7 @@ __all__ = [
     "MemoryCacheConfig",
     "MemoryBatchConfig",
     "MemoryAutoFlushConfig",
+    "MemoryDreamConfig",
     "resolve_memory_config",
     
     # Utils

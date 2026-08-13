@@ -83,6 +83,7 @@ async def test_list_projects_uses_json_registry_without_virtual_default(project_
     assert [project.id for project in projects] == [created.id]
     assert projects[0].worktree == str(labs.resolve())
     assert projects[0].is_default is False
+    assert Project.get_owner_user_id(created.id) == "user-1"
     assert await Project.get(DEFAULT_PROJECT_ID, owner_id="user-1") is None
     list_entries.assert_not_awaited()
 

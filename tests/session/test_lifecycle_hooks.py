@@ -100,6 +100,7 @@ async def test_user_prompt_submit_adds_ephemeral_turn_context() -> None:
     payload = run_hook.await_args.args[0]
     assert payload["messageID"] == user.id
     assert payload["prompt"] == "implement hooks"
+    assert payload["sessionCategory"] == "user"
     assert payload["model"] == {
         "providerID": "test-provider",
         "modelID": "test-model",
@@ -205,6 +206,7 @@ async def test_goal_waiting_cannot_be_overridden_by_turn_after_output() -> None:
     assert decision.should_continue is False
     create_message.assert_not_awaited()
     hook_payload = run_hook.await_args.args[0]
+    assert hook_payload["sessionCategory"] == "user"
     assert hook_payload["terminalOutcome"] == {
         "status": "success",
         "finish_reason": "stop",

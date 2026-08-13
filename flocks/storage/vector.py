@@ -5,7 +5,9 @@ Provides vector similarity search and FTS5 full-text search capabilities
 for the memory system.
 """
 
-from typing import List, Optional, Dict, Any, Tuple
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, List, Optional, Dict, Any, Tuple
 from pathlib import Path
 import json
 import math
@@ -13,6 +15,9 @@ from datetime import datetime
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
+
+if TYPE_CHECKING:
+    from flocks.memory.types import MemoryTimeRange
 
 log = Log.create(service="storage.vector")
 
@@ -197,6 +202,7 @@ async def vector_search(
     max_results: int = 10,
     min_score: float = 0.0,
     sources: Optional[List[str]] = None,
+    time_range: Optional[MemoryTimeRange] = None,
 ) -> List[Dict[str, Any]]:
     """
     Perform vector similarity search
@@ -211,6 +217,7 @@ async def vector_search(
         max_results: Maximum results to return
         min_score: Minimum similarity score
         sources: Optional list of sources to filter ('memory', 'session')
+        time_range: Optional Daily filename date filter
         
     Returns:
         List of search results
@@ -229,6 +236,15 @@ async def vector_search(
                     )
             """
             params: list[Any] = [project_id]
+
+            if time_range is not None:
+                query += " AND scope = 'global' AND path GLOB 'daily/????-??-??.md'"
+                if time_range.daily_start_date is not None:
+                    query += " AND path >= ?"
+                    params.append(f"daily/{time_range.daily_start_date}.md")
+                if time_range.daily_end_date is not None:
+                    query += " AND path < ?"
+                    params.append(f"daily/{time_range.daily_end_date}.md")
             
             if sources:
                 placeholders = ",".join("?" * len(sources))
@@ -315,6 +331,7 @@ async def fts_search(
     query: str,
     max_results: int = 10,
     sources: Optional[List[str]] = None,
+    time_range: Optional[MemoryTimeRange] = None,
 ) -> List[Dict[str, Any]]:
     """
     Perform FTS5 full-text search
@@ -325,6 +342,7 @@ async def fts_search(
         query: Search query (FTS5 format)
         max_results: Maximum results to return
         sources: Optional list of sources to filter
+        time_range: Optional Daily filename date filter
         
     Returns:
         List of search results with BM25 scores
@@ -335,11 +353,10 @@ async def fts_search(
         async with Storage.connect(db_path) as db:
             # Build FTS query
             fts_query = build_fts_query(query)
-            if not fts_query:
-                return []
-            
+
             # Build SQL query
-            sql = """
+            rank_expression = "rank" if fts_query else "0.0"
+            sql = f"""
                 SELECT 
                     f.chunk_id,
                     f.path,
@@ -347,22 +364,38 @@ async def fts_search(
                     f.start_line,
                     f.end_line,
                     f.text,
-                    rank
+                    {rank_expression}
                 FROM memory_fts f
-                WHERE f.text MATCH ?
-                    AND (
+                WHERE (
                         f.scope = 'global'
                         OR (f.scope = 'project' AND f.scope_id = ?)
                     )
             """
-            params = [fts_query, project_id]
+            params: list[Any] = [project_id]
+            if fts_query:
+                sql += " AND f.text MATCH ?"
+                params.append(fts_query)
+
+            if time_range is not None:
+                sql += " AND f.scope = 'global' AND f.path GLOB 'daily/????-??-??.md'"
+                if time_range.daily_start_date is not None:
+                    sql += " AND f.path >= ?"
+                    params.append(f"daily/{time_range.daily_start_date}.md")
+                if time_range.daily_end_date is not None:
+                    sql += " AND f.path < ?"
+                    params.append(f"daily/{time_range.daily_end_date}.md")
             
             if sources:
                 placeholders = ",".join("?" * len(sources))
                 sql += f" AND f.source IN ({placeholders})"
                 params.extend(sources)
             
-            sql += f" ORDER BY rank LIMIT {max_results}"
+            if fts_query:
+                sql += " ORDER BY rank"
+            else:
+                sql += " ORDER BY f.path DESC, CAST(f.start_line AS INTEGER)"
+            sql += " LIMIT ?"
+            params.append(max_results)
             
             # Execute query
             cursor = await db.execute(sql, params)
@@ -371,7 +404,7 @@ async def fts_search(
             # Convert ranks to scores
             for row in rows:
                 chunk_id, path, source, start_line, end_line, text, rank = row
-                score = bm25_rank_to_score(rank)
+                score = bm25_rank_to_score(rank) if fts_query else 1.0
                 
                 results.append({
                     "id": chunk_id,

@@ -202,7 +202,7 @@ class ConfigWriter:
 
     @classmethod
     def ensure_memory_config(cls) -> bool:
-        """Persist the editable Memory Search config when absent."""
+        """Persist editable Memory Search and Dream config when absent."""
         path = Config.get_config_file()
         try:
             text = path.read_text(encoding="utf-8") if path.exists() else ""
@@ -233,6 +233,10 @@ class ConfigWriter:
                     exclude_none=True,
                 ),
             },
+            "dream": default_config.dream.model_dump(
+                mode="json",
+                exclude_none=True,
+            ),
         }
         cls._write_raw(data, path=path)
         log.info("config_writer.memory_config_initialized", {"path": str(path)})
