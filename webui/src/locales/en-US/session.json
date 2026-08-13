@@ -233,6 +233,7 @@
     "regenerate": "Regenerate",
     "thinking": "Thinking...",
     "streaming": "Streaming...",
+    "dreaming": "Dream is reviewing durable Memory and Skill updates…",
     "process": {
       "title": "View {{count}} steps",
       "duration": "Processed in {{duration}}",

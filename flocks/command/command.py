@@ -214,6 +214,16 @@ class Command:
                 channel_safe=True,
             ),
             CommandDef(
+                name="dream",
+                description="Run self-improvement for Memory and Skills",
+                template="Run Dream self-improvement for Memory and Skills.",
+                execution_kind="direct",
+                allow_attachments=False,
+                visible_surfaces=ALL_SURFACES,
+                requires_existing_session=True,
+                channel_safe=True,
+            ),
+            CommandDef(
                 name="model",
                 description="Change or inspect the current model",
                 template="Switch to model: $1",

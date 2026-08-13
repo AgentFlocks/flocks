@@ -49,9 +49,17 @@ def test_ensure_config_files_creates_from_examples(tmp_path, monkeypatch):
     # Existing example content is preserved and Memory defaults are persisted.
     config_data = json.loads(config_file.read_text(encoding="utf-8"))
     assert config_data["test"] == "config"
-    assert set(config_data["memory"]) == {"search"}
-    assert config_data["memory"]["search"]["embedding"]["provider"] == "auto"
-    assert config_data["memory"]["search"]["embedding"]["enabled"] is False
+    assert set(config_data["memory"]) == {"dream", "search"}
+    embedding_config = config_data["memory"]["search"]["embedding"]
+    assert set(embedding_config) == {"enabled", "model", "provider"}
+    assert embedding_config["provider"] == "auto"
+    assert embedding_config["enabled"] is False
+    assert config_data["memory"]["dream"]["enabled"] is True
+    assert set(config_data["memory"]["dream"]) == {
+        "enabled",
+        "interval_hours",
+        "recent_daily_days",
+    }
     assert mcp_file.read_text(encoding="utf-8") == '{"test": "mcp"}'
     assert secret_file.read_text(encoding="utf-8") == '{"test": "secret"}'
 
@@ -90,8 +98,40 @@ def test_ensure_config_files_skips_if_exists(tmp_path, monkeypatch):
     # Existing fields are preserved while the missing Memory config is added.
     config_data = json.loads(config_file.read_text(encoding="utf-8"))
     assert config_data["test"] == "existing"
-    assert set(config_data["memory"]) == {"search"}
+    assert set(config_data["memory"]) == {"dream", "search"}
     assert mcp_file.read_text() == '{"test": "mcp-existing"}'
+
+
+def test_ensure_config_files_preserves_explicitly_disabled_dream(
+    tmp_path,
+    monkeypatch,
+):
+    """An existing Memory setting remains user-controlled."""
+    config_dir = tmp_path / "home" / ".flocks" / "config"
+    example_dir = tmp_path / "examples"
+    config_dir.mkdir(parents=True)
+    example_dir.mkdir(parents=True)
+    monkeypatch.setenv("FLOCKS_CONFIG_DIR", str(config_dir))
+
+    config_file = config_dir / "flocks.json"
+    config_file.write_text(
+        '{"test": "existing", "memory": {"dream": {"enabled": false}}}',
+        encoding="utf-8",
+    )
+
+    from flocks.config.config import Config
+    from flocks.config import config_writer
+
+    Config._global_config = None
+    Config._cached_config = None
+    monkeypatch.setattr(config_writer, "_get_example_config_dir", lambda: example_dir)
+    config_writer.ensure_config_files()
+
+    config_data = json.loads(config_file.read_text(encoding="utf-8"))
+    assert config_data == {
+        "test": "existing",
+        "memory": {"dream": {"enabled": False}},
+    }
 
 
 def test_ensure_memory_config_is_written_to_flocks_json(
@@ -114,7 +154,7 @@ def test_ensure_memory_config_is_written_to_flocks_json(
     Config._cached_config = None
     assert ConfigWriter.ensure_memory_config() is True
     memory_config = json.loads(flocks_json.read_text(encoding="utf-8"))["memory"]
-    assert set(memory_config) == {"search"}
+    assert set(memory_config) == {"dream", "search"}
     assert flocks_jsonc.read_text(encoding="utf-8") == '{"test": "jsonc"}'
 
 

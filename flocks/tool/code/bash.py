@@ -385,7 +385,11 @@ async def bash_tool(
     2. Sandbox execution - inside a Docker container (when sandbox config is present)
     """
     # Resolve working directory
-    base_dir = get_tool_base_dir()
+    base_dir = (
+        ctx.extra.get("workspace_dir")
+        if isinstance(ctx.extra, dict)
+        else None
+    ) or get_tool_base_dir()
     cwd = _resolve_workdir(base_dir, workdir)
 
     # Validate timeout

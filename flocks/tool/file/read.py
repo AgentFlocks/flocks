@@ -201,6 +201,7 @@ async def read_tool(
             ctx,
             filePath,
             allow_host_memory=True,
+            allow_host_skills=True,
         )
     except ValueError as exc:
         return ToolResult(

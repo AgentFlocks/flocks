@@ -156,6 +156,7 @@ class SkillMetadata(BaseModel):
     homepage: Optional[str] = None
     emoji: Optional[str] = None
     ui_hidden: Optional[bool] = None
+    managed_by: Optional[str] = None
 
 
 class SkillInfo(BaseModel):
@@ -294,17 +295,31 @@ class Skill:
             if not cls._is_valid_name(name) or not cls._is_valid_description(description):
                 return None
 
-            # Parse extended metadata — try metadata.flocks first, then metadata.openclaw
+            # Parse extended metadata. Dependency fields remain compatible
+            # with metadata.flocks and metadata.openclaw, while ownership is
+            # declared directly as metadata.managed_by.
             skill_metadata: Optional[SkillMetadata] = None
             install_specs: Optional[List[SkillInstallSpec]] = None
             requires: Optional[SkillRequires] = None
 
             raw_meta = data.get("metadata")
             if isinstance(raw_meta, dict):
-                raw_flocks = raw_meta.get("flocks") or raw_meta.get("openclaw")
-                if isinstance(raw_flocks, dict):
+                nested_meta = (
+                    raw_meta.get("flocks")
+                    or raw_meta.get("openclaw")
+                )
+                parsed_meta = (
+                    dict(nested_meta)
+                    if isinstance(nested_meta, dict)
+                    else {}
+                )
+                if "managed_by" in raw_meta:
+                    parsed_meta["managed_by"] = raw_meta["managed_by"]
+                if parsed_meta:
                     try:
-                        skill_metadata = SkillMetadata.model_validate(raw_flocks)
+                        skill_metadata = SkillMetadata.model_validate(
+                            parsed_meta
+                        )
                         install_specs = skill_metadata.install or None
                         requires = skill_metadata.requires or None
                         ui_hidden = ui_hidden or bool(skill_metadata.ui_hidden)

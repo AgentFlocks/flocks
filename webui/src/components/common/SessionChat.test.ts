@@ -64,6 +64,7 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.sending': '发送中...',
   'chat.thinking': '思考中...',
   'chat.streaming': '继续输出中...',
+  'chat.dreaming': 'Dream 正在整理长期记忆与 Skill…',
   'chat.process.title': '查看 {{count}} 个步骤',
   'chat.process.duration': '已处理 {{duration}}',
   'chat.process.deepThinking': '深度思考',
@@ -2992,6 +2993,56 @@ describe('SessionChat intermediate process collapse', () => {
     const compactionText = await screen.findByText('正在压缩上下文...');
     expect(compactionText.closest('.w-full.max-w-full')).not.toBeNull();
   });
+
+  it('shows the manual Dream status message while the hidden agent runs', async () => {
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-dream',
+          role: 'user',
+          finish: 'stop',
+          parts: [
+            {
+              id: 'user-dream-text',
+              messageID: 'user-dream',
+              sessionID: 'sess-1',
+              type: 'text',
+              text: '/dream',
+            } as any,
+          ],
+        }),
+      ],
+      loading: false,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      replaceMessageText: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      live: true,
+    }));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'session.status',
+        properties: {
+          sessionID: 'sess-1',
+          status: {
+            type: 'dreaming',
+            message: 'Dream is reviewing Project prj_test evidence…',
+          },
+        },
+      });
+    });
+
+    expect(
+      await screen.findByText('Dream is reviewing Project prj_test evidence…'),
+    ).toBeInTheDocument();
+  });
 });
 
 describe('SessionChat optimistic message identity', () => {
@@ -5093,9 +5144,10 @@ describe('streaming activity helpers', () => {
     ])).toBe(false);
   });
 
-  it('keeps busy, compacting, and retry session statuses active', () => {
+  it('keeps busy, compacting, dreaming, and retry session statuses active', () => {
     expect(isActiveSessionStatus({ type: 'busy' })).toBe(true);
     expect(isActiveSessionStatus({ type: 'compacting' })).toBe(true);
+    expect(isActiveSessionStatus({ type: 'dreaming' })).toBe(true);
     expect(isActiveSessionStatus({ type: 'retry' })).toBe(true);
     expect(isActiveSessionStatus({ type: 'idle' })).toBe(false);
     expect(isActiveSessionStatus(undefined)).toBe(false);

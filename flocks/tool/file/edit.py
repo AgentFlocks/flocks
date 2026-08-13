@@ -528,6 +528,7 @@ async def edit_tool(
             ctx,
             filePath,
             allow_host_memory=True,
+            allow_host_skills=True,
         )
     except ValueError as exc:
         return ToolResult(success=False, error=str(exc), title=filePath)
@@ -574,6 +575,28 @@ async def edit_tool(
     if oldString == "" and edits is None:
         if newString is None:
             return ToolResult(success=False, error="newString is required when oldString is empty", title=title)
+        if ctx.agent == "self-improve" and Path(filepath).name == "SKILL.md":
+            from flocks.memory.evolution.skill_guard import (
+                validate_evolution_skill_write,
+            )
+
+            skill_path = Path(filepath)
+            if skill_path.exists():
+                evolution_error = (
+                    "Read the existing managed Skill and use a precise edit"
+                )
+            else:
+                evolution_error = await validate_evolution_skill_write(
+                    skill_path,
+                    newString,
+                    exists=False,
+                )
+            if evolution_error:
+                return ToolResult(
+                    success=False,
+                    error=evolution_error,
+                    title=title,
+                )
         diff = trim_diff(generate_diff(filepath, "", newString))
         parent_dir = os.path.dirname(filepath)
         if parent_dir and not os.path.exists(parent_dir):
@@ -647,6 +670,25 @@ async def edit_tool(
     content_new = bom + restore_line_endings(normalized_content_new, original_line_ending)
     diff = trim_diff(generate_diff(filepath, base_content, normalized_content_new))
 
+    if (
+        ctx.agent == "self-improve"
+        and Path(filepath).name == "SKILL.md"
+    ):
+        from flocks.memory.evolution.skill_guard import (
+            validate_evolution_skill_edit,
+        )
+
+        evolution_error = validate_evolution_skill_edit(
+            Path(filepath),
+            raw_content_old,
+            content_new,
+        )
+        if evolution_error:
+            return ToolResult(
+                success=False,
+                error=evolution_error,
+                title=title,
+            )
     try:
         with open(filepath, "w", encoding="utf-8", newline="") as file_handle:
             file_handle.write(content_new)

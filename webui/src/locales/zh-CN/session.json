@@ -234,6 +234,7 @@
     "regenerate": "重新生成",
     "thinking": "思考中...",
     "streaming": "继续输出中...",
+    "dreaming": "Dream 正在整理长期记忆与 Skill…",
     "process": {
       "title": "查看 {{count}} 个步骤",
       "duration": "已处理 {{duration}}",
