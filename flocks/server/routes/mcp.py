@@ -43,6 +43,7 @@ from flocks.config.config import Config
 from flocks.config.config_writer import ConfigWriter
 from flocks.utils.log import Log
 
+
 router = APIRouter()
 log = Log.create(service="routes.mcp")
 

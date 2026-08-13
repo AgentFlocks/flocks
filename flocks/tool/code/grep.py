@@ -267,18 +267,6 @@ async def grep_tool(
 
     search_path = resolution.resolved_path
 
-    # Request permission
-    await ctx.ask(
-        permission="grep",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={
-            "pattern": pattern,
-            "path": search_path,
-            "include": include
-        }
-    )
-    
     # Find ripgrep
     rg_path = find_ripgrep()
     

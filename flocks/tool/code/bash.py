@@ -73,6 +73,7 @@ Usage notes:
 - The `command` argument is required.
 - You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
 - It is very helpful to write a clear, concise `description` in 5-10 words.
+- Never use shell redirection/copy/move to bypass file-policy denials from `write`/`edit`/`delete` tools.
 - If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
 - Prefer dedicated tools instead of shell equivalents: use `glob` instead of `find` or `ls`, `grep` instead of shell `grep`/`rg`, `read` instead of `cat`/`head`/`tail`, `edit` instead of `sed`/`awk`, and `write` instead of shell redirection or `echo`-based file creation.
 - If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
@@ -161,6 +162,7 @@ Usage notes:
 - The `command` argument is required.
 - You can specify an optional timeout in milliseconds. If not specified, commands time out after {DEFAULT_TIMEOUT_MS}ms.
 - It is very helpful to write a clear, concise `description` in 5-10 words.
+- Do not bypass file-policy denials by using shell redirection/copy/move instead of file tools.
 - If the output exceeds {MAX_OUTPUT_LINES} lines or {MAX_OUTPUT_BYTES} bytes, it will be truncated and the full output will be written to a file.
 - Avoid unnecessary `Start-Sleep`. If commands can run immediately, run them immediately. If you must wait, prefer a short polling check over sleeping first.
 - If commands are independent, make multiple bash tool calls in one message so they can run in parallel.
@@ -454,9 +456,6 @@ async def _execute_host(
     if not Instance.contains_path(cwd):
         await ctx.ask(permission="external_directory", patterns=[cwd], always=[os.path.dirname(cwd) + "*"], metadata={})
 
-    # Request bash permission
-    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={})
-
     # Initialize metadata
     ctx.metadata(
         {
@@ -540,9 +539,6 @@ async def _execute_sandboxed(
             "container": sandbox.container_name,
         },
     )
-
-    # Request bash permission (沙箱内也需要权限)
-    await ctx.ask(permission="bash", patterns=[command], always=["*"], metadata={"sandbox": True})
 
     # Initialize metadata
     ctx.metadata(

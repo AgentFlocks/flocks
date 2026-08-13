@@ -33,7 +33,12 @@ from flocks.session.runtime.step_engine import (
     ToolCall,
 )
 from flocks.session.runtime.session_turn import LoopCallbacks, LoopContext
-from flocks.session.prompt import SessionPrompt, SystemPromptBlock, TurnPromptContext
+from flocks.session.prompt import (
+    SessionPrompt,
+    SystemPromptBlock,
+    TurnPromptContext,
+    get_prompt_flocks_config_guard,
+)
 from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
 from flocks.session.session import Session, SessionInfo
 from flocks.tool.registry import ToolCategory, ToolInfo
@@ -737,6 +742,7 @@ class TestBuildSystemPrompts:
 
         assert prompts == [
             "provider prompt",
+            get_prompt_flocks_config_guard().strip(),
             "tool protocol",
             "memory guidance",
             "agent prompt",

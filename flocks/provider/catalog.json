@@ -57,6 +57,14 @@
         "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -84,6 +92,9 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -110,6 +121,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "adaptive"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -134,6 +148,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -157,6 +174,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -179,6 +199,9 @@
             "field": "reasoning_content",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },
@@ -204,6 +227,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -226,6 +252,9 @@
             "field": "reasoning_content",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },
@@ -252,6 +281,9 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -271,6 +303,14 @@
         "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -313,6 +353,14 @@
         "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -340,6 +388,9 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -365,6 +416,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "adaptive"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -389,6 +443,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -412,6 +469,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -434,6 +494,9 @@
             "field": "reasoning_content",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },
@@ -459,6 +522,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -482,6 +548,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -499,6 +568,14 @@
         "family": "deepseek-v4",
         "capabilities": {
           "supports_tools": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -653,6 +730,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -670,6 +755,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -687,6 +780,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -704,6 +805,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": null,
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -767,6 +876,14 @@
           "supports_tools": true,
           "supports_vision": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -785,6 +902,14 @@
           "supports_tools": true,
           "supports_vision": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1014,6 +1139,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1031,6 +1164,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1048,6 +1189,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": "xhigh",
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1065,6 +1214,14 @@
         "capabilities": {
           "supports_tools": true,
           "supports_reasoning": true,
+          "thinking_level_map": {
+            "minimal": "minimal",
+            "low": "low",
+            "medium": "medium",
+            "high": "high",
+            "xhigh": null,
+            "max": null
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1120,6 +1277,14 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1144,6 +1309,14 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "minimal": null,
+            "low": null,
+            "medium": null,
+            "high": "high",
+            "xhigh": "max",
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1159,8 +1332,8 @@
     }
   },
   "alibaba": {
-    "name": "阿里云通义 (Alibaba/Qwen)",
-    "description": "通义千问系列大模型 via DashScope",
+    "name": "阿里云百炼 (Alibaba)",
+    "description": "阿里云百炼大模型 via DashScope",
     "npm": "@ai-sdk/openai-compatible",
     "default_base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
     "credential_schemas": [
@@ -1189,34 +1362,39 @@
       "ALIBABA_API_KEY"
     ],
     "models": {
-      "qwen3-235b-a22b-2507": {
-        "name": "Qwen3 235B A22B Instruct 2507",
-        "family": "qwen3",
+      "qwen3.8-max": {
+        "name": "Qwen3.8-Max",
+        "family": "qwen3.8",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_content",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
-          "context_window": 262144,
-          "max_output_tokens": 262144
+          "context_window": 1000000,
+          "max_output_tokens": 65536
         },
         "pricing": {
-          "input": 2.0,
-          "output": 20.0,
+          "input": 12.0,
+          "output": 36.0,
           "currency": "CNY"
         }
       },
-      "qwen3.5-flash-02-23": {
-        "name": "Qwen3.5-Flash",
-        "family": "qwen3.5",
+      "qwen3.7-plus": {
+        "name": "Qwen3.7-Plus",
+        "family": "qwen3.7",
         "capabilities": {
           "supports_tools": true,
+          "supports_vision": true,
           "supports_reasoning": true,
           "interleaved": {
             "field": "reasoning_content",
@@ -1227,11 +1405,61 @@
         },
         "limits": {
           "context_window": 1000000,
-          "max_output_tokens": 1000000
+          "max_output_tokens": 65536
         },
         "pricing": {
-          "input": 0.8,
+          "input": 2.0,
           "output": 8.0,
+          "currency": "CNY"
+        }
+      },
+      "qwen3.7-max": {
+        "name": "Qwen3.7-Max",
+        "family": "qwen3.7",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 65536
+        },
+        "pricing": {
+          "input": 12.0,
+          "output": 36.0,
+          "currency": "CNY"
+        }
+      },
+      "qwen3.7-flash": {
+        "name": "Qwen3.7-Flash",
+        "family": "qwen3.7",
+        "capabilities": {
+          "supports_tools": true,
+          "supports_vision": true,
+          "supports_reasoning": true,
+          "interleaved": {
+            "field": "reasoning_content",
+            "echo": "tool_calls",
+            "cross_provider_policy": "promote"
+          },
+          "supports_streaming": true
+        },
+        "limits": {
+          "context_window": 1000000,
+          "max_output_tokens": 65536
+        },
+        "pricing": {
+          "input": 0.2,
+          "output": 0.8,
           "currency": "CNY"
         }
       }
@@ -1280,6 +1508,14 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "minimal": null,
+            "low": "low",
+            "medium": null,
+            "high": "high",
+            "xhigh": null,
+            "max": "max"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1305,6 +1541,9 @@
             "echo": "tool_calls",
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },
@@ -1332,6 +1571,9 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1357,6 +1599,9 @@
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1381,6 +1626,9 @@
             "echo": "tool_calls",
             "placeholder": " ",
             "cross_provider_policy": "placeholder"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },
@@ -1439,6 +1687,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1462,6 +1713,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1484,6 +1738,9 @@
             "field": "reasoning_content",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },
@@ -1540,6 +1797,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "adaptive"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1564,6 +1824,9 @@
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
           },
+          "thinking_level_map": {
+            "high": "enabled"
+          },
           "supports_streaming": true
         },
         "limits": {
@@ -1586,6 +1849,9 @@
             "field": "reasoning_details",
             "echo": "tool_calls",
             "cross_provider_policy": "promote"
+          },
+          "thinking_level_map": {
+            "high": "enabled"
           },
           "supports_streaming": true
         },

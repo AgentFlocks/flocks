@@ -21,7 +21,13 @@ log = Log.create(service="config.writer")
 
 
 _FALLBACK_CONFIG_TEMPLATES: Dict[str, Dict[str, Any]] = {
-    "flocks.json": {},
+    "flocks.json": {
+        "default_models": {
+            "default_parameters": {
+                "reasoning_effort": "high",
+            },
+        },
+    },
     ".secret.json": {},
     "mcp_list.json": {
         "version": "1.0.0",
@@ -180,6 +186,15 @@ class ConfigWriter:
         # Clear Config cache so next Config.get() reloads from disk
         try:
             Config.clear_cache()
+        except Exception:
+            pass
+        try:
+            from flocks.channel.inbound.dispatcher import invalidate_channel_config_cache
+
+            channels = data.get("channels")
+            if isinstance(channels, dict):
+                for channel_id in channels:
+                    invalidate_channel_config_cache(str(channel_id))
         except Exception:
             pass
 
@@ -454,6 +469,31 @@ class ConfigWriter:
         data = cls._read_raw()
         return data.get("model_settings", {})
 
+    @classmethod
+    def get_effective_model_default_parameters(
+        cls,
+        provider_id: str,
+        model_id: str,
+    ) -> Dict[str, Any]:
+        """Resolve global defaults with model-specific overrides."""
+        data = cls._read_raw()
+        result: Dict[str, Any] = {}
+        default_models = data.get("default_models")
+        global_parameters = (
+            default_models.get("default_parameters", {})
+            if isinstance(default_models, dict)
+            else {}
+        )
+        if isinstance(global_parameters, dict):
+            result.update(global_parameters)
+
+        settings = data.get("model_settings", {})
+        setting = settings.get(f"{provider_id}/{model_id}", {})
+        model_parameters = setting.get("default_parameters", {})
+        if isinstance(model_parameters, dict):
+            result.update(model_parameters)
+        return result
+
     # ------------------------------------------------------------------
     # Default models (default_models section)
     # ------------------------------------------------------------------
@@ -503,7 +543,14 @@ class ConfigWriter:
     def get_all_default_models(cls) -> Dict[str, Dict[str, Any]]:
         """Get all default model configs."""
         data = cls._read_raw()
-        return data.get("default_models", {})
+        defaults = data.get("default_models")
+        if not isinstance(defaults, dict):
+            return {}
+        return {
+            model_type: config
+            for model_type, config in defaults.items()
+            if model_type != "default_parameters" and isinstance(config, dict)
+        }
 
     # ------------------------------------------------------------------
     # Runtime model fallbacks (fallback_providers section)

@@ -1,8 +1,7 @@
 """
 Tool search / discovery helper.
 
-Lets the model search available tools and immediately add the returned matches
-to the current session's callable tool set.
+Lets the model discover candidate tools and emit auditable discovery events.
 """
 
 from __future__ import annotations
@@ -18,14 +17,10 @@ from flocks.tool.registry import (
     ToolRegistry,
     ToolResult,
 )
-from flocks.session.callable_state import add_session_callable_tools
-
-
 DESCRIPTION = """Search available tools by task intent, keyword, category, or exact names.
 
 Use this tool when you need to discover a tool that is not already exposed in
-the current turn. Search by user goal, capability, or keyword. Matching tools
-returned here are added to the current session callable tool set immediately.
+the current turn. Search by user goal, capability, or keyword.
 If you already know the needed tool names, prefer one exact batch query such as
 `select:websearch,webfetch,skill` instead of multiple separate searches.
 IMPORTANT: search query must be in English.
@@ -133,8 +128,7 @@ async def tool_search(
             enriched.update(hint)
         enriched_matches.append(enriched)
     normalized_query = normalize_tool_search_query(query or "")
-    callable_candidates = [match["name"] for match in enriched_matches]
-    callable_tools = await add_session_callable_tools(ctx.session_id, callable_candidates)
+    discovered_tool_names = sorted({str(match["name"]) for match in enriched_matches})
     if ctx.event_publish_callback:
         await ctx.event_publish_callback("runtime.tool_discovery", {
             "sessionID": ctx.session_id,
@@ -142,8 +136,11 @@ async def tool_search(
             "normalizedQuery": normalized_query,
             "category": category,
             "returnedToolCount": len(matches),
-            "callableToolCount": len(callable_tools),
-            "callableToolNames": sorted(callable_candidates),
+            "discoveredToolCount": len(discovered_tool_names),
+            "discoveredToolNames": discovered_tool_names,
+            # Legacy aliases retained for existing consumers.
+            "callableToolCount": len(discovered_tool_names),
+            "callableToolNames": discovered_tool_names,
             "matchedTags": matched_tags,
             "deviceAwareToolCount": len(device_hints),
         })
@@ -156,12 +153,12 @@ async def tool_search(
             "category": category,
             "count": len(matches),
             "matchedTags": matched_tags,
-            "callableToolNames": sorted(callable_candidates),
-            "callableToolCount": len(callable_tools),
+            "callableToolNames": discovered_tool_names,
+            "callableToolCount": len(discovered_tool_names),
             "deviceAwareToolCount": len(device_hints),
             # Legacy compatibility keys.
-            "discoveredToolNames": sorted(callable_candidates),
-            "discoveredToolCount": len(callable_tools),
+            "discoveredToolNames": discovered_tool_names,
+            "discoveredToolCount": len(discovered_tool_names),
             "matches": enriched_matches,
         },
     )

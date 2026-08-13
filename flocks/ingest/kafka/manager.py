@@ -28,6 +28,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional
 
+from flocks.hooks.execution import execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     DEFAULT_LARGE_LIST_KEYS,
@@ -852,10 +854,26 @@ class KafkaManager:
             return exec_data
 
         try:
-            await self._dispatcher.dispatch(
-                trigger=trigger,
-                event=event,
-                executor=_executor,
+            action_payload = {
+                "operation": "workflow.trigger.kafka",
+                "transport": "headless",
+                "workflow_id": workflow_id,
+                "trigger": trigger,
+                "event": event,
+                "metadata": {
+                    "legacy_compat": True,
+                    "trigger_type": "kafka",
+                },
+            }
+            await execute_with_hooks(
+                action_payload,
+                lambda: self._dispatcher.dispatch(
+                    trigger=trigger,
+                    event=event,
+                    executor=_executor,
+                ),
+                before=HookPipeline.run_ingress_before,
+                after=HookPipeline.run_ingress_after,
             )
         except TriggerDispatchError as exc:
             log.warning(

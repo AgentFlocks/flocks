@@ -155,6 +155,72 @@ def test_permission_owner_can_reply(monkeypatch: pytest.MonkeyPatch, owned_sessi
     reply_mock.assert_awaited_once_with(info.id, "allow", session_id=owned_session.id)
 
 
+@pytest.mark.parametrize("response", ["trust_network_target", "trust_tool_network"])
+def test_network_permission_trust_reply_is_forwarded_unchanged(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_session: SessionInfo,
+    response: str,
+):
+    from flocks.permission.next import PermissionRequestInfo
+    from flocks.server.routes import permission as permission_routes
+
+    info = PermissionRequestInfo(
+        id=f"perm-network-{response}",
+        sessionID=owned_session.id,
+        permission="network",
+        patterns=["https://example.test"],
+        metadata={"network_confirm_options": [response]},
+    )
+    monkeypatch.setattr(permission_routes.Session, "get_by_id", AsyncMock(return_value=owned_session))
+    monkeypatch.setattr(permission_routes.PermissionNext, "get_pending_info", AsyncMock(return_value=info))
+    reply_mock = AsyncMock()
+    monkeypatch.setattr(permission_routes.PermissionNext, "reply", reply_mock)
+    client = _client(permission_routes.router, prefix="/permission", user=_user("owner-id", "owner"))
+
+    result = client.post(
+        f"/permission/{info.id}/reply",
+        json={"allow": True, "response": response},
+    )
+
+    assert result.status_code == 200
+    reply_mock.assert_awaited_once_with(info.id, response, session_id=owned_session.id)
+
+
+def test_network_permission_rejects_unoffered_trust_and_remember(
+    monkeypatch: pytest.MonkeyPatch,
+    owned_session: SessionInfo,
+):
+    from flocks.permission.next import PermissionRequestInfo
+    from flocks.server.routes import permission as permission_routes
+
+    info = PermissionRequestInfo(
+        id="perm-network-no-global-trust",
+        sessionID=owned_session.id,
+        permission="network",
+        patterns=["https://example.test"],
+        metadata={"network_confirm_options": ["trust_network_target"]},
+    )
+    monkeypatch.setattr(permission_routes.Session, "get_by_id", AsyncMock(return_value=owned_session))
+    monkeypatch.setattr(permission_routes.PermissionNext, "get_pending_info", AsyncMock(return_value=info))
+    reply_mock = AsyncMock()
+    monkeypatch.setattr(permission_routes.PermissionNext, "reply", reply_mock)
+    client = _client(permission_routes.router, prefix="/permission", user=_user("owner-id", "owner"))
+
+    assert client.post(
+        f"/permission/{info.id}/reply",
+        json={"allow": True, "response": "trust_tool_network"},
+    ).status_code == 422
+    assert client.post(
+        f"/permission/{info.id}/reply",
+        json={"allow": True, "always": True},
+    ).status_code == 422
+    assert client.post(
+        f"/permission/{info.id}/reply",
+        json={"allow": True, "response": "always"},
+    ).status_code == 422
+    reply_mock.assert_not_awaited()
+
+
 @pytest.mark.parametrize(
     ("allow", "expected_reply"),
     [(True, "allow_session"), (False, "deny_session")],

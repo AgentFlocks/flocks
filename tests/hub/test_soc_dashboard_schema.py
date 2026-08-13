@@ -984,7 +984,7 @@ def test_soc_dashboard_task_center_summarizes_tasks_and_workflows(tmp_path: Path
     monkeypatch.setattr(
         handlers,
         "_workflow_node_count",
-        lambda workflow_id: 3 if workflow_id == "stream_alert_triage" else 1,
+        lambda workflow_id: 4 if workflow_id == "stream_alert_triage" else 1,
     )
 
     payload = handlers._get_task_center()

@@ -9,7 +9,7 @@ import json
 from pathlib import Path
 
 import pytest
-from fastapi import HTTPException, status
+from fastapi import APIRouter, HTTPException, status
 from httpx import AsyncClient
 from unittest.mock import AsyncMock
 
@@ -487,8 +487,29 @@ class TestProviderRoutes:
 # Config routes
 # ===========================================================================
 
-class TestConfigRoutes:
+def test_http_mutation_routers_do_not_wrap_action_lifecycle() -> None:
+    """HTTP mutation routes must not enter generic action approval hooks."""
+    from flocks.server.routes import agent as agent_routes
+    from flocks.server.routes import channel as channel_routes
+    from flocks.server.routes import config as config_routes
+    from flocks.server.routes import mcp as mcp_routes
+    from flocks.server.routes import skill as skill_routes
+    from flocks.server.routes import workflow as workflow_routes
 
+    routers = (
+        agent_routes.router,
+        channel_routes.router,
+        config_routes.router,
+        mcp_routes.router,
+        skill_routes.router,
+        workflow_routes.router,
+        workflow_routes.webhook_router,
+    )
+
+    assert all(type(router) is APIRouter for router in routers)
+
+
+class TestConfigRoutes:
     @pytest.mark.asyncio
     async def test_get_config_returns_object(self, client: AsyncClient):
         """GET /api/config returns a configuration object."""
@@ -496,6 +517,53 @@ class TestConfigRoutes:
         assert resp.status_code == status.HTTP_200_OK
         data = resp.json()
         assert isinstance(data, dict)
+
+    @pytest.mark.asyncio
+    async def test_update_config_invalidates_channel_config_cache(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ):
+        """PATCH /api/config must invalidate in-memory channel config cache."""
+        from flocks.server.routes import config as config_routes
+
+        invalidate_calls: list[str | None] = []
+
+        monkeypatch.setattr(
+            config_routes.Config,
+            "update",
+            AsyncMock(return_value=None),
+        )
+        monkeypatch.setattr(
+            config_routes.Config,
+            "clear_cache",
+            lambda: None,
+        )
+
+        def _invalidate(channel_id: str | None = None) -> None:
+            invalidate_calls.append(channel_id)
+
+        monkeypatch.setattr(
+            "flocks.channel.inbound.dispatcher.invalidate_channel_config_cache",
+            _invalidate,
+        )
+        monkeypatch.setattr(
+            config_routes,
+            "get_config",
+            AsyncMock(return_value={}),
+        )
+
+        resp = await client.patch(
+            "/api/config/",
+            json={
+                "channels": {
+                    "weixin": {"enabled": True},
+                    "feishu": {"enabled": False},
+                }
+            },
+        )
+        assert resp.status_code == status.HTTP_200_OK, resp.text
+        assert invalidate_calls == ["weixin", "feishu"]
 
     @pytest.mark.asyncio
     async def test_config_has_expected_top_level_keys(self, client: AsyncClient):

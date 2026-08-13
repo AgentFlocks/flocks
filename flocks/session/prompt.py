@@ -82,6 +82,10 @@ def get_prompt_codex() -> str:
     return _load_prompt_file("codex_header.txt")
 
 
+def get_prompt_flocks_config_guard() -> str:
+    return _load_prompt_file("flocks_config_guard.txt")
+
+
 PROMPT_DEFAULT = """You are Flocks, an AI-Native SecOps Platform.
 
 You specialize in cybersecurity operations including:
@@ -558,6 +562,50 @@ class SessionPrompt:
         total = 0
         for msg in messages:
             total += await cls._tokens_for_message(session_id, msg)
+        return total
+
+    @classmethod
+    async def estimate_tool_result_tokens(
+        cls,
+        session_id: str,
+        message_id: str,
+    ) -> int:
+        """Estimate tool-result tokens added after an assistant model call."""
+        from flocks.session.message import Message
+
+        try:
+            parts = await Message.parts(message_id, session_id)
+        except Exception as exc:
+            log.debug("prompt.tool_result_estimate.parts_failed", {
+                "message_id": message_id,
+                "error": str(exc),
+            })
+            return 0
+
+        total = 0
+        for part in parts:
+            if getattr(part, "type", None) != "tool":
+                continue
+            state = getattr(part, "state", None)
+            if state is None:
+                continue
+            time_info = getattr(state, "time", None)
+            if isinstance(time_info, dict) and time_info.get("compacted"):
+                total += 10
+                continue
+
+            status = getattr(state, "status", None)
+            if status == "completed":
+                output = getattr(state, "output", None)
+                if output:
+                    total += cls.count_tokens(
+                        output if isinstance(output, str) else str(output)
+                    )
+            elif status == "error":
+                error = getattr(state, "error", "Unknown error")
+                total += cls.count_tokens(f"Error: {error}")
+            elif status == "running":
+                total += cls.count_tokens("Error: Tool execution was interrupted")
         return total
 
     @classmethod
@@ -1078,6 +1126,16 @@ class SessionPrompt:
     ) -> List[SystemPromptBlock]:
         """Build minimal prompt blocks for built-in system subagents."""
         blocks: List[SystemPromptBlock] = []
+        guard_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="flocks_config_guard",
+            cache_scope="global",
+            digest_inputs={"prompt": get_prompt_flocks_config_guard()},
+            builder=lambda: get_prompt_flocks_config_guard().strip(),
+        )
+        if guard_block is not None:
+            blocks.append(guard_block)
+
         agent_block = cls._build_cached_prompt_block(
             static_cache=static_cache,
             name="agent_identity",
@@ -1192,6 +1250,13 @@ class SessionPrompt:
                 cache_scope="global",
                 digest_inputs={"model_id": model_id},
                 builder=lambda: cls._join_prompt_parts(SystemPrompt.provider(model_id)),
+            ),
+            cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name="flocks_config_guard",
+                cache_scope="global",
+                digest_inputs={"prompt": get_prompt_flocks_config_guard()},
+                builder=lambda: get_prompt_flocks_config_guard().strip(),
             ),
             cls._build_cached_prompt_block(
                 static_cache=static_cache,

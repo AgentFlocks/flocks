@@ -476,9 +476,9 @@ class WorkflowPollerManager:
                 timeout_s=config["timeoutSeconds"],
                 trace=False,
                 execution_profile="high_frequency",
+                tool_context=tool_context,
                 cancel=cancel_event.is_set,
                 on_step_complete=step_recorder.on_step_complete,
-                tool_context=tool_context,
             )
             if not isinstance(result, RunWorkflowResult):
                 result = RunWorkflowResult(status="failed", error="invalid_run_result")
