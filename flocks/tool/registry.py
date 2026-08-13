@@ -11,12 +11,13 @@ import json
 import os
 import sys
 import threading
+import time
 from concurrent.futures import TimeoutError as FuturesTimeoutError
 from dataclasses import dataclass
 from dataclasses import field as dataclass_field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
+from typing import Any, Awaitable, Callable, Dict, List, Mapping, Optional, Set
 
 from pydantic import BaseModel, Field
 
@@ -479,6 +480,8 @@ class Tool:
     async def execute(self, ctx: ToolContext, **kwargs) -> ToolResult:
         """Execute the tool with given parameters and context"""
         try:
+            raw_kwargs = dict(kwargs)
+
             # Log tool execution start
             log.info("tool.execute.start", {
                 "tool": self.info.name,
@@ -566,8 +569,184 @@ class Tool:
 
             coerced_kwargs = _coerce_params(effective_kwargs, self.info.parameters, self.info.name)
 
-            # Execute handler
-            result = await self.handler(ctx, **coerced_kwargs)
+            # Preserve extension-owned ingress context for work created by an
+            # enclosing lifecycle.  Flocks treats this as an opaque carrier;
+            # installed extensions remain responsible for validating its data.
+            from flocks.hooks.contracts import (
+                HookDecisionAction,
+                ToolDecision,
+                ToolExecutionOutcome,
+            )
+            from flocks.hooks.execution import (
+                current_execution_context,
+                execution_stop_error,
+            )
+            from flocks.hooks.pipeline import HookPipeline
+            from flocks.session.tool_execution import (
+                build_session_tool_execution_payload,
+            )
+
+            tool_context_extra = dict(ctx.extra)
+            inherited_context = current_execution_context()
+            if inherited_context and not isinstance(
+                tool_context_extra.get("execution_context"), dict
+            ):
+                tool_context_extra["execution_context"] = inherited_context
+            tool_context_extra["tool_call_id"] = getattr(ctx, "call_id", None)
+            tool_context_extra["tool_source"] = getattr(self.info, "source", None)
+            tool_context_extra["tool_category"] = getattr(self.info.category, "value", self.info.category)
+            payload = await build_session_tool_execution_payload(
+                session_id=ctx.session_id,
+                message_id=ctx.message_id,
+                agent=ctx.agent,
+                tool_name=self.info.name,
+                tool_input=raw_kwargs,
+                tool_schema=schema.to_json_schema(),
+                tool_context_extra=tool_context_extra,
+                validated_input=coerced_kwargs,
+            )
+            execution_context = current_execution_context()
+            path_binding = execution_context.get("filesystem_path_binding")
+            had_binding = "filesystem_path_binding" in ctx.extra
+            previous_binding = ctx.extra.get("filesystem_path_binding")
+            if isinstance(path_binding, Mapping):
+                ctx.extra["filesystem_path_binding"] = dict(path_binding)
+            started_at = time.perf_counter()
+            result: ToolResult | None = None
+            terminal_status = "error"
+            terminal_error: BaseException | None = None
+            try:
+                before_ctx = await HookPipeline.run_tool_before(payload)
+                raw_decision = before_ctx.output.get("decision")
+                normalized_decision = (
+                    {
+                        key: value
+                        for key, value in raw_decision.items()
+                        if key in {"action", "reason", "labels", "validated_input_patch"}
+                    }
+                    if isinstance(raw_decision, Mapping)
+                    else {}
+                )
+                decision = ToolDecision.model_validate(
+                    normalized_decision
+                )
+                legacy_stop = execution_stop_error(before_ctx)
+                if legacy_stop is not None:
+                    decision = ToolDecision(
+                        action=HookDecisionAction.DENY,
+                        reason=str(legacy_stop),
+                    )
+                if decision.validated_input_patch:
+                    patched_kwargs = {
+                        **coerced_kwargs,
+                        **dict(decision.validated_input_patch),
+                    }
+                    patched_kwargs, _ = _remap_schema_kwargs(
+                        patched_kwargs,
+                        declared_param_names,
+                        tool_name=self.info.name,
+                    )
+                    invalid_patch_keys = sorted(
+                        key for key in patched_kwargs if key not in schema_properties
+                    )
+                    if invalid_patch_keys:
+                        raise ValueError(
+                            "Hook requested invalid validated_input_patch keys: "
+                            + ", ".join(invalid_patch_keys)
+                        )
+                    for required_param in schema.required:
+                        if required_param not in patched_kwargs:
+                            raise ValueError(
+                                "Hook patch removed required parameter: "
+                                + required_param
+                            )
+                    coerced_kwargs = _coerce_params(
+                        patched_kwargs,
+                        self.info.parameters,
+                        self.info.name,
+                    )
+                    payload = await build_session_tool_execution_payload(
+                        session_id=ctx.session_id,
+                        message_id=ctx.message_id,
+                        agent=ctx.agent,
+                        tool_name=self.info.name,
+                        tool_input=raw_kwargs,
+                        tool_schema=schema.to_json_schema(),
+                        tool_context_extra=tool_context_extra,
+                        validated_input=coerced_kwargs,
+                    )
+
+                if decision.action is HookDecisionAction.DENY:
+                    terminal_status = "deny"
+                    result = ToolResult(
+                        success=False,
+                        error=decision.reason or "Tool execution denied by hook",
+                        metadata={
+                            "hook_decision": decision.model_dump(mode="json"),
+                            "blocked_by_hook": True,
+                        },
+                    )
+                elif decision.action is HookDecisionAction.CONFIRM:
+                    terminal_status = "confirm"
+                    result = ToolResult(
+                        success=False,
+                        error=decision.reason or "Tool execution requires confirmation",
+                        metadata={
+                            "hook_decision": decision.model_dump(mode="json"),
+                            "confirmation_required": True,
+                            "correlation_id": payload["tool_execution"]["execution"]["id"],
+                        },
+                    )
+                else:
+                    result = await self.handler(ctx, **coerced_kwargs)
+                    terminal_status = "success" if result.success else "error"
+            except asyncio.CancelledError as exc:
+                terminal_status = "cancelled"
+                terminal_error = exc
+                raise
+            except Exception as exc:
+                terminal_status = "error"
+                terminal_error = exc
+                result = ToolResult(success=False, error=str(exc))
+            finally:
+                if had_binding:
+                    ctx.extra["filesystem_path_binding"] = previous_binding
+                else:
+                    ctx.extra.pop("filesystem_path_binding", None)
+                duration_ms = max(0, int((time.perf_counter() - started_at) * 1000))
+                summary: Any = None
+                if result is not None and result.output is not None:
+                    summary = {
+                        "type": type(result.output).__name__,
+                        "truncated": bool(result.truncated),
+                    }
+                outcome = ToolExecutionOutcome(
+                    status=terminal_status,
+                    duration_ms=duration_ms,
+                    error_type=(
+                        type(terminal_error).__name__
+                        if terminal_error is not None
+                        else None
+                    ),
+                    error_message=(
+                        str(terminal_error)
+                        if terminal_error is not None
+                        else (result.error if result and not result.success else None)
+                    ),
+                    result_summary=summary,
+                )
+                try:
+                    await HookPipeline.run_tool_after({
+                        **payload,
+                        "outcome": outcome.model_dump(mode="json"),
+                    })
+                except Exception as after_exc:
+                    log.error("tool.execute.after_hook.error", {
+                        "tool": self.info.name,
+                        "error": str(after_exc),
+                    })
+            if result is None:
+                raise RuntimeError("Tool execution did not produce a result")
 
             # Auto-truncate output unless the tool already handled it
             if result.success and not result.truncated:
@@ -1646,7 +1825,21 @@ class ToolRegistry:
 
         _tool_groups = [
             # file/ — filesystem operations
-            ("flocks.tool.file", ["read", "write", "edit", "apply_patch", "glob", "doc_parser"]),
+            (
+                "flocks.tool.file",
+                [
+                    "read",
+                    "write",
+                    "edit",
+                    "apply_patch",
+                    "glob",
+                    "doc_parser",
+                    "delete",
+                    "move",
+                    "copy",
+                    "mkdir",
+                ],
+            ),
             # code/ — code analysis + terminal
             ("flocks.tool.code", ["bash", "grep", "lsp_tool"]),
             # web/ — internet access

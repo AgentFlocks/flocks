@@ -22,7 +22,31 @@ jobs:
           echo "owner_lc=${GITHUB_REPOSITORY_OWNER,,}" >> "$GITHUB_OUTPUT"
           echo "release_tag=${{ github.event.release.tag_name }}" >> "$GITHUB_OUTPUT"
 
-      - name: Set up QEMU
+      - name: Set up QEMU (attempt 1)
+        id: qemu_attempt_1
+        continue-on-error: true
+        uses: docker/setup-qemu-action@v3
+
+      - name: Wait before QEMU retry 2
+        if: steps.qemu_attempt_1.outcome == 'failure'
+        run: sleep 10
+
+      - name: Set up QEMU (attempt 2)
+        id: qemu_attempt_2
+        if: steps.qemu_attempt_1.outcome == 'failure'
+        continue-on-error: true
+        uses: docker/setup-qemu-action@v3
+
+      - name: Wait before QEMU retry 3
+        if: >-
+          steps.qemu_attempt_1.outcome == 'failure' &&
+          steps.qemu_attempt_2.outcome == 'failure'
+        run: sleep 30
+
+      - name: Set up QEMU (attempt 3)
+        if: >-
+          steps.qemu_attempt_1.outcome == 'failure' &&
+          steps.qemu_attempt_2.outcome == 'failure'
         uses: docker/setup-qemu-action@v3
 
       - name: Setup Docker Buildx

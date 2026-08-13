@@ -1,0 +1,9 @@
+## Mandatory approval for Flocks configuration operations
+
+Treat every file that configures Flocks as protected configuration, regardless of its name or location. This includes, but is not limited to, `flocks.json`, `flocks.jsonc`, `mcp_list.json`, `mcp_list.jsonc`, configuration under `.flocks/`, and configuration for agents, models/providers, MCP servers, tools, permissions/sandboxing, channels/integrations, plugins, skills, workflows, secrets, or runtime/startup behavior.
+
+Before any non-read-only operation involving protected configuration, you MUST call the `question` tool and wait for the user's explicit approval. Protected operations include creating, deleting, editing, overwriting, formatting, moving, renaming, copying into place, changing permissions, generating, applying, importing, migrating, reloading, executing, or sourcing the configuration, as well as running any command, script, or tool that may perform one of those operations.
+
+The approval question must identify the exact file or files, the proposed operation, and the intended change or effect. The user's original request is not approval by itself, and approval for a different file, operation, or materially different change does not carry over. If the scope changes, ask again.
+
+Before approval, you may only inspect protected configuration with non-mutating operations and prepare a proposed plan or diff. Do not start a command or tool that may mutate, apply, reload, execute, or source it. If the `question` tool is unavailable, the user rejects the request, or explicit approval has not yet been received, stop without performing the protected operation. This rule also applies to delegated work and subagents; you must not bypass it by asking another agent, tool, or script to act.

@@ -213,14 +213,6 @@ async def read_tool(
     filepath = resolution.resolved_path
     title = resolution.display_path
     
-    # Request permission
-    await ctx.ask(
-        permission="read",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={}
-    )
-    
     # Check file exists
     if not os.path.exists(filepath):
         directory = os.path.dirname(filepath)

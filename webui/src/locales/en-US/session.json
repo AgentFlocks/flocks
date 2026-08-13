@@ -114,6 +114,23 @@
       }
     }
   },
+  "permissionMode": {
+    "title": "Session execution controls",
+    "menuHint": "Permission mode controls Bash and file tools; Runtime mode limits Plugin writes",
+    "readonly": "readonly",
+    "readonlyDesc": "Blocks Bash execution and file changes while allowing policy-scoped file reads",
+    "requireConfirm": "require-confirm",
+    "requireConfirmDesc": "Manually confirm high-risk command execution and file operations",
+    "autoAllowAll": "auto-allow-all",
+    "autoAllowAllDesc": "Automatically allows command execution and file operations; hard-deny blacklist rules remain blocked",
+    "executionControlTitle": "Session execution controls: Bash/file permissions and development/execution mode",
+    "runtimeTitle": "Runtime mode",
+    "runtimeDev": "Development",
+    "runtimeDevDesc": "Develop and modify Agents, Skills, Workflows, Tools, and more under ~/.flocks/plugins",
+    "runtimeExe": "Execution",
+    "runtimeExeDesc": "Prevents changes to ~/.flocks/plugins; Project directories and workspace Output are unaffected",
+    "viewDetails": "View details"
+  },
   "agentPicker": {
     "title": "Choose Chat Agent",
     "hint": "Rex is the default; selections route the current message as a subagent reference",

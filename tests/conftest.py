@@ -86,3 +86,32 @@ def _home_honors_env(monkeypatch):
     monkeypatch.setattr(os.path, "expanduser", _expanduser)
 
 
+@pytest.fixture(autouse=True)
+async def _cleanup_runtime_singletons_after_test():
+    """Best-effort runtime cleanup to prevent cross-test thread leaks.
+
+    Several code paths lazily initialize singleton stores backed by
+    ``aiosqlite`` worker threads. If a test exits without closing them,
+    pytest can hang at interpreter shutdown while waiting for non-daemon
+    threads. Keep cleanup centralized here so individual tests do not need
+    bespoke teardown blocks.
+    """
+    yield
+
+    # Close workflow store first because it owns its own long-lived
+    # connection in addition to the shared storage layer.
+    try:
+        from flocks.workflow.store import WorkflowStore
+
+        await WorkflowStore.close()
+    except Exception:
+        pass
+
+    # Then run storage shutdown (idempotent when not initialized).
+    try:
+        from flocks.storage.storage import Storage
+
+        await Storage.shutdown()
+    except Exception:
+        pass
+

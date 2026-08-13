@@ -235,6 +235,65 @@ async def test_goal_evaluation_uses_model_judge_when_provider_model_are_availabl
 
 
 @pytest.mark.asyncio
+async def test_goal_model_judge_applies_llm_before_hook(monkeypatch: pytest.MonkeyPatch):
+    session_id = "goal_model_judge_redaction_session"
+    await GoalManager.set_goal(session_id, "handle alice@example.com")
+    provider = SimpleNamespace(
+        chat=AsyncMock(return_value=SimpleNamespace(
+            content='{"verdict": "continue", "reason": "Need more work for [[V_EMAIL_1]]."}'
+        ))
+    )
+
+    async def _run_llm_before(payload):
+        assert payload["sessionID"] == session_id
+        assert "alice@example.com" in payload["request"]["messages"][1]["content"]
+        updated_request = dict(payload["request"])
+        updated_request["messages"] = [
+            payload["request"]["messages"][0],
+            {
+                **payload["request"]["messages"][1],
+                "content": payload["request"]["messages"][1]["content"].replace(
+                    "alice@example.com",
+                    "[[V_EMAIL_1]]",
+                ),
+            },
+        ]
+        return SimpleNamespace(
+            output={
+                "request": updated_request,
+                "redaction": {
+                    "streamTextReplacements": [
+                        {"placeholder": "[[V_EMAIL_1]]", "value": "alice@example.com"}
+                    ]
+                },
+            }
+        )
+
+    monkeypatch.setattr(
+        "flocks.hooks.pipeline.HookPipeline.has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        "flocks.hooks.pipeline.HookPipeline.run_llm_before",
+        AsyncMock(side_effect=_run_llm_before),
+    )
+
+    with patch("flocks.session.goal.Provider.get", return_value=provider):
+        decision = await GoalManager.evaluate_after_turn(
+            session_id,
+            "Latest response mentions alice@example.com.",
+            provider_id="test-provider",
+            model_id="test-model",
+        )
+
+    provider.chat.assert_awaited_once()
+    sent_prompt = provider.chat.await_args.kwargs["messages"][1].content
+    assert "alice@example.com" not in sent_prompt
+    assert "[[V_EMAIL_1]]" in sent_prompt
+    assert decision.reason == "Need more work for alice@example.com."
+
+
+@pytest.mark.asyncio
 async def test_goal_model_judge_receives_initial_clarification():
     session_id = "goal_model_judge_clarification_session"
     await GoalManager.set_goal(session_id, "make it work")

@@ -37,6 +37,7 @@ class QueuedPrompt(BaseModel):
     tools: Optional[Dict[str, bool]] = None
     system: Optional[str] = None
     executionMode: SessionExecutionMode = SessionExecutionMode.BUILD
+    execution_context: Optional[Dict[str, Any]] = None
     status: str = "pending"
     createdAt: int = Field(default_factory=lambda: int(time.time() * 1000))
     updatedAt: int = Field(default_factory=lambda: int(time.time() * 1000))
@@ -73,6 +74,7 @@ class InteractionQueue:
         tools: Optional[Dict[str, bool]] = None,
         system: Optional[str] = None,
         execution_mode: SessionExecutionMode = SessionExecutionMode.BUILD,
+        execution_context: Optional[Dict[str, Any]] = None,
     ) -> QueuedPrompt:
         async with cls._lock_for(session_id):
             queue = cls._queues.setdefault(session_id, [])
@@ -92,6 +94,11 @@ class InteractionQueue:
                 tools=dict(tools) if tools else None,
                 system=system,
                 executionMode=execution_mode,
+                execution_context=(
+                    dict(execution_context)
+                    if isinstance(execution_context, dict)
+                    else None
+                ),
             )
             queue.append(item)
             return item

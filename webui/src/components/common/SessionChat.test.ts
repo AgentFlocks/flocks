@@ -3869,6 +3869,29 @@ describe('ChatToolPart bash rendering', () => {
     expect(screen.getByText('$').closest('pre')).toHaveClass('max-h-64');
     expect(screen.getByText('tests passed').closest('pre')).toHaveClass('max-h-64');
   });
+
+  it.each([
+    'Tool execution was interrupted',
+    'Command failed with exit code 1',
+  ])('renders the bash error once: %s', (error) => {
+    render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'bash-error-part',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call-bash-error',
+          state: {
+            status: 'error',
+            input: { command: 'exit 1' },
+            error,
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getAllByText(error)).toHaveLength(1);
+  });
 });
 
 describe('ChatToolPart question result rendering', () => {

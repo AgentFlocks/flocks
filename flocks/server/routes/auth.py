@@ -184,54 +184,6 @@ def _raise_login_rate_limited(retry_after: int) -> None:
     )
 
 
-def _parse_event_type(event_type: str) -> tuple[str, str]:
-    if "." in event_type:
-        category, action = event_type.split(".", 1)
-        return category, action
-    return event_type, "event"
-
-
-async def _emit_auth_audit_fallback(event_type: str, payload: dict[str, Any]) -> None:
-    """Persist auth audit directly when flocks audit sink is still no-op."""
-    try:
-        from flocks.audit import NullAuditSink, get_sink
-
-        sink_cls = get_sink()
-        if sink_cls is not NullAuditSink:
-            return
-    except Exception:
-        return
-
-    try:
-        from flockspro.audit.service import AuditEvent
-        from flockspro.audit.sinks import SqliteAuditSink
-    except Exception:
-        # OSS or flockspro not installed: nothing to persist.
-        return
-
-    category, action = _parse_event_type(event_type)
-    failed = "failed" in action or bool(payload.get("error") or payload.get("reason"))
-    user_id = payload.get("user_id")
-    username = payload.get("username")
-    session_id = payload.get("session_id")
-    event = AuditEvent(
-        event_type=event_type,
-        category=category,
-        action=action,
-        status="error" if failed else "ok",
-        result="failed" if failed else "success",
-        user_id=str(user_id) if user_id else None,
-        user_name=str(username) if username else None,
-        resource_type="session",
-        resource_id=str(session_id) if session_id else None,
-        session_id=str(session_id) if session_id else None,
-        ip=str(payload.get("ip")) if payload.get("ip") else None,
-        payload=payload,
-        metadata=payload,
-    )
-    await SqliteAuditSink().write(event)
-
-
 async def _emit_auth_audit(event_type: str, payload: dict) -> None:
     try:
         from flocks.audit import emit_audit_event
@@ -240,12 +192,6 @@ async def _emit_auth_audit(event_type: str, payload: dict) -> None:
     except Exception:
         # Audit failures must not block auth flow.
         pass
-    try:
-        await _emit_auth_audit_fallback(event_type, payload)
-    except Exception:
-        pass
-
-
 class BootstrapStatusResponse(BaseModel):
     bootstrapped: bool
 

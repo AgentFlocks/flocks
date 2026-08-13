@@ -18,6 +18,7 @@ from flocks.provider.provider import (
 )
 from flocks.provider.sdk.openai_base import (
     DEFAULT_HTTP_TIMEOUT,
+    create_openai_http_client,
     _normalize_stream_usage,
     build_reasoning_metadata,
     _coerce_bool,
@@ -25,6 +26,7 @@ from flocks.provider.sdk.openai_base import (
     extract_reasoning_details,
     format_openai_content,
     format_openai_messages,
+    raise_if_response_body_unsafe,
     resolve_verify_ssl,
 )
 from flocks.utils.log import Log
@@ -83,10 +85,11 @@ class OpenAIProvider(BaseProvider):
                 if isinstance(cfg_settings, dict) and "trust_env" in cfg_settings:
                     trust_env = _coerce_bool(cfg_settings.get("trust_env"), trust_env)
                 verify_ssl = resolve_verify_ssl(cfg_settings, default=True)
-                http_client = httpx.AsyncClient(
+                http_client = create_openai_http_client(
                     trust_env=trust_env,
                     verify=verify_ssl,
                     timeout=DEFAULT_HTTP_TIMEOUT,
+                    custom_settings=cfg_settings,
                 )
 
                 if base_url:
@@ -94,6 +97,7 @@ class OpenAIProvider(BaseProvider):
                         api_key=api_key,
                         base_url=base_url,
                         http_client=http_client,
+                        max_retries=0,
                     )
                     self.log.info(
                         "openai.client.created",
@@ -104,7 +108,11 @@ class OpenAIProvider(BaseProvider):
                         },
                     )
                 else:
-                    self._client = AsyncOpenAI(api_key=api_key, http_client=http_client)
+                    self._client = AsyncOpenAI(
+                        api_key=api_key,
+                        http_client=http_client,
+                        max_retries=0,
+                    )
                     self.log.info(
                         "openai.client.created",
                         {"trust_env": trust_env, "verify_ssl": verify_ssl},
@@ -158,7 +166,11 @@ class OpenAIProvider(BaseProvider):
         if kwargs.get("reasoningEffort"):
             request_params["reasoning_effort"] = kwargs["reasoningEffort"]
         
-        response = await client.chat.completions.create(**request_params)
+        try:
+            response = await client.chat.completions.create(**request_params)
+        except Exception as exc:
+            raise_if_response_body_unsafe(exc)
+            raise
         choice = response.choices[0]
         assistant_message = getattr(choice, "message", None)
         text_content = (

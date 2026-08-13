@@ -21,43 +21,41 @@ log = Log.create(service="provider.azure")
 
 class AzureProvider(BaseProvider):
     """Azure OpenAI provider"""
-    
+
     def __init__(self):
         super().__init__(provider_id="azure", name="Azure OpenAI")
         self._api_key = os.getenv("AZURE_OPENAI_API_KEY")
         self._endpoint = os.getenv("AZURE_OPENAI_ENDPOINT")
         self._client = None
-    
+
     def _get_client(self):
         """Get or create Azure OpenAI client"""
         if self._client is None:
             try:
                 from openai import AsyncAzureOpenAI
-                
+
                 # Get API key
                 api_key = self._config.api_key if self._config else self._api_key
                 if not api_key:
                     api_key = os.getenv("AZURE_OPENAI_API_KEY")
                 if not api_key:
                     raise ValueError("Azure OpenAI API key not configured")
-                
+
                 # Get endpoint
                 endpoint = None
                 if self._config and self._config.base_url:
                     endpoint = self._config.base_url
                 else:
                     endpoint = self._endpoint or os.getenv("AZURE_OPENAI_ENDPOINT")
-                
+
                 if not endpoint:
                     raise ValueError("Azure OpenAI endpoint not configured")
-                
+
                 # Get API version
-                api_version = (
-                    self._config.custom_settings.get("api_version") 
-                    if self._config 
-                    else None
-                ) or os.getenv("AZURE_OPENAI_API_VERSION", "2024-02-15-preview")
-                
+                api_version = (self._config.custom_settings.get("api_version") if self._config else None) or os.getenv(
+                    "AZURE_OPENAI_API_VERSION", "2025-04-01-preview"
+                )
+
                 # Create client
                 self._client = AsyncAzureOpenAI(
                     api_key=api_key,
@@ -65,11 +63,11 @@ class AzureProvider(BaseProvider):
                     api_version=api_version,
                 )
                 self.log.info("azure.client.created", {"endpoint": endpoint})
-                    
+
             except ImportError:
                 raise ImportError("openai package not installed. Install with: pip install openai")
         return self._client
-    
+
     def get_models(self) -> List[ModelInfo]:
         """Get list of Azure OpenAI models.
 
@@ -109,37 +107,35 @@ class AzureProvider(BaseProvider):
                 ),
             ),
         ]
-    
-    async def chat(
-        self,
-        model_id: str,
-        messages: List[ChatMessage],
-        **kwargs
-    ) -> ChatResponse:
+
+    async def chat(self, model_id: str, messages: List[ChatMessage], **kwargs) -> ChatResponse:
         """Send chat completion request to Azure OpenAI"""
         client = self._get_client()
-        
+
         formatted_messages = format_openai_messages(messages)
-        
+
         # Extract parameters
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens")
         tools = kwargs.get("tools")
-        
+
         # Make request
         request_params = {
             "model": model_id,
             "messages": formatted_messages,
-            "temperature": temperature,
         }
-        
+
         if max_tokens:
             # Newer Azure models (GPT-4o, GPT-5.x) require max_completion_tokens;
             # try that first and fall back to max_tokens for older deployments.
             request_params["max_completion_tokens"] = max_tokens
         if tools:
             request_params["tools"] = tools
-        
+        if kwargs.get("reasoningEffort"):
+            request_params["reasoning_effort"] = kwargs["reasoningEffort"]
+        else:
+            request_params["temperature"] = temperature
+
         try:
             response = await client.chat.completions.create(**request_params)
         except Exception as e:
@@ -149,7 +145,7 @@ class AzureProvider(BaseProvider):
                 response = await client.chat.completions.create(**request_params)
             else:
                 raise
-        
+
         # Format response
         choice = response.choices[0]
         return ChatResponse(
@@ -161,38 +157,36 @@ class AzureProvider(BaseProvider):
                 "prompt_tokens": response.usage.prompt_tokens,
                 "completion_tokens": response.usage.completion_tokens,
                 "total_tokens": response.usage.total_tokens,
-            }
+            },
         )
-    
-    async def chat_stream(
-        self,
-        model_id: str,
-        messages: List[ChatMessage],
-        **kwargs
-    ) -> AsyncIterator[StreamChunk]:
+
+    async def chat_stream(self, model_id: str, messages: List[ChatMessage], **kwargs) -> AsyncIterator[StreamChunk]:
         """Send streaming chat completion request to Azure OpenAI"""
         client = self._get_client()
-        
+
         formatted_messages = format_openai_messages(messages)
-        
+
         # Extract parameters
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens")
         tools = kwargs.get("tools")
-        
+
         # Make streaming request
         request_params = {
             "model": model_id,
             "messages": formatted_messages,
-            "temperature": temperature,
             "stream": True,
         }
-        
+
         if max_tokens:
             request_params["max_completion_tokens"] = max_tokens
         if tools:
             request_params["tools"] = tools
-        
+        if kwargs.get("reasoningEffort"):
+            request_params["reasoning_effort"] = kwargs["reasoningEffort"]
+        else:
+            request_params["temperature"] = temperature
+
         try:
             stream = await client.chat.completions.create(**request_params)
         except Exception as e:
@@ -202,7 +196,7 @@ class AzureProvider(BaseProvider):
                 stream = await client.chat.completions.create(**request_params)
             else:
                 raise
-        
+
         tool_calls: Dict[int, Dict[str, Any]] = {}
 
         async for chunk in stream:

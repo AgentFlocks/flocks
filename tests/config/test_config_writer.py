@@ -309,6 +309,35 @@ class TestConfigWriterModelSettings:
         assert "anthropic/claude-sonnet" in all_settings
         assert len(all_settings) == 2
 
+    def test_effective_default_parameters_follow_scope_precedence(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        data = ConfigWriter._read_raw()
+        data["default_models"] = {
+            "default_parameters": {
+                "reasoning_effort": "low",
+                "temperature": 0.1,
+            },
+        }
+        data["model_settings"] = {
+            "anthropic/claude-sonnet-4-5": {
+                "default_parameters": {
+                    "reasoning_effort": "high",
+                }
+            }
+        }
+        ConfigWriter._write_raw(data)
+
+        parameters = ConfigWriter.get_effective_model_default_parameters(
+            "anthropic",
+            "claude-sonnet-4-5",
+        )
+
+        assert parameters == {
+            "reasoning_effort": "high",
+            "temperature": 0.1,
+        }
+
     def test_model_settings_preserve_other_sections(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
         ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
@@ -438,6 +467,26 @@ class TestConfigWriterDefaultModels:
         assert "llm" in all_defaults
         assert "text-embedding" in all_defaults
         assert len(all_defaults) == 2
+
+    def test_get_all_default_models_excludes_default_parameters(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        data = ConfigWriter._read_raw()
+        data["default_models"] = {
+            "default_parameters": {"reasoning_effort": "medium"},
+            "llm": {
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet",
+            },
+        }
+        ConfigWriter._write_raw(data)
+
+        assert ConfigWriter.get_all_default_models() == {
+            "llm": {
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet",
+            }
+        }
 
     def test_default_models_preserve_other_sections(self, temp_project):
         from flocks.config.config_writer import ConfigWriter

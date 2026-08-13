@@ -144,3 +144,22 @@ async def test_cleanup_workflow_tool_context_preserves_parent_with_child_session
     assert cleaned is False
     assert await Session.get_by_id(parent.id) is not None
     assert await Session.get_by_id(child.id) is not None
+
+
+@pytest.mark.asyncio
+async def test_build_workflow_tool_context_carries_opaque_execution_context(
+    tmp_path: Path,
+    isolated_storage,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    tool_context = await build_workflow_tool_context(
+        workflow_id="wf-1",
+        action_name="schedule",
+        execution_context={"workflow_transfer": "opaque-token"},
+    )
+
+    assert tool_context.extra["execution_context"] == {
+        "workflow_transfer": "opaque-token"
+    }

@@ -74,7 +74,8 @@ def test_local_debugging_setup_lines_use_windows_user_data_dir() -> None:
     lines = "\n".join(admin._local_debugging_setup_lines("Windows"))
 
     assert "chrome://inspect" in lines
-    assert "does not reliably show it" in lines
+    assert "Fallback only" in lines
+    assert "Flocks discovers the endpoint itself" in lines
     assert "--remote-debugging-port=9222" in lines
     assert '--user-data-dir="$env:USERPROFILE\\.flocks\\chrome-debug-profile"' in lines
     assert "msedge.exe" in lines
@@ -97,7 +98,7 @@ def test_local_debugging_setup_lines_list_chromium_browser_candidates() -> None:
     assert "brave-browser" in linux_lines
 
 
-def test_browser_skill_docs_do_not_reintroduce_inspect_allow_setup_flow() -> None:
+def test_browser_skill_docs_keep_inspect_allow_as_primary_setup_flow() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     docs = [
         repo_root / ".flocks/plugins/skills/browser-use/SKILL.md",
@@ -106,9 +107,10 @@ def test_browser_skill_docs_do_not_reintroduce_inspect_allow_setup_flow() -> Non
     ]
     text = "\n".join(path.read_text(encoding="utf-8") for path in docs)
 
-    assert "chrome://inspect/#remote-debugging" not in text
-    assert "edge://inspect/#remote-debugging" not in text
-    assert "Allow remote debugging" not in text
+    assert "chrome://inspect/#remote-debugging" in text
+    assert "edge://inspect/#remote-debugging" in text
+    assert "Allow remote debugging" in text
+    assert "不要从 chrome://inspect 查找 webSocketDebuggerUrl" in text
 
 
 def test_daemon_endpoint_names_discovers_default_and_named_sessions(tmp_path, monkeypatch) -> None:
@@ -243,9 +245,10 @@ def test_ensure_daemon_retries_after_lock_holder_exits_without_endpoint(tmp_path
     assert len(spawned) == 2
 
 
-def test_ensure_daemon_prints_manual_guidance_without_blind_retry(tmp_path, monkeypatch, capsys) -> None:
+def test_ensure_daemon_opens_inspect_and_retries_current_profile(tmp_path, monkeypatch, capsys) -> None:
     spawned = []
     restarted = []
+    open_calls = []
 
     class FakeProcess:
         def poll(self):
@@ -265,16 +268,16 @@ def test_ensure_daemon_prints_manual_guidance_without_blind_retry(tmp_path, monk
         lambda name: "Chromium-based browser remote debugging is not reachable for any detected profile",
     )
     monkeypatch.setattr(admin, "restart_daemon", lambda name=None: restarted.append(name))
-    monkeypatch.setattr(admin, "_local_debugging_setup_lines", lambda: ["debug browser instructions"])
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: open_calls.append(True))
 
     with pytest.raises(RuntimeError):
         admin.ensure_daemon(wait=1.0, name="manual-session")
 
     err = capsys.readouterr().err
-    assert "local Chromium-based browser remote debugging is not reachable" in err
-    assert "debug browser instructions" in err
-    assert len(spawned) == 1
+    assert "click Allow on your browser's inspect page" in err
+    assert len(spawned) == 2
     assert restarted == ["manual-session"]
+    assert open_calls == [True]
 
 
 def test_run_doctor_prints_active_browser_connections_and_active_pages(monkeypatch, capsys) -> None:
@@ -363,21 +366,21 @@ def test_run_doctor_suggests_setup_when_target_exists_but_daemon_missing(monkeyp
 def test_run_setup_uses_generic_missing_browser_wording(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "daemon_alive", lambda: False)
     monkeypatch.setattr(admin, "_chrome_running", lambda: False)
-    monkeypatch.setattr(admin, "_local_debugging_setup_lines", lambda: ["debug browser instructions"])
 
     assert admin.run_setup() == 1
 
     out = capsys.readouterr().out
     assert "no Chrome/Chromium/Edge/Brave process detected" in out
-    assert "start a Chromium-based browser with remote debugging" in out
-    assert "debug browser instructions" in out
+    assert "start Chrome, Chromium, Edge, or Brave" in out
+    assert "--remote-debugging-port" not in out
 
 
-def test_run_setup_prints_remote_debugging_guidance_without_blind_retry(monkeypatch, capsys) -> None:
+def test_run_setup_opens_inspect_and_retries_current_profile(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "daemon_alive", lambda: False)
     monkeypatch.setattr(admin, "_chrome_running", lambda: True)
     monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
-    monkeypatch.setattr(admin, "_local_debugging_setup_lines", lambda: ["debug browser instructions"])
+    open_calls = []
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: open_calls.append(True), raising=False)
 
     calls = {"count": 0}
 
@@ -391,13 +394,43 @@ def test_run_setup_prints_remote_debugging_guidance_without_blind_retry(monkeypa
 
     monkeypatch.setattr(admin, "ensure_daemon", fake_ensure_daemon)
 
-    assert admin.run_setup() == 1
+    assert admin.run_setup() == 0
 
     out = capsys.readouterr().out
-    assert "Chromium-based browser remote debugging is not reachable for the current profile." in out
-    assert "debug browser instructions" in out
-    assert "opening your browser's inspect page" not in out
-    assert calls["count"] == 1
+    assert "browser remote debugging is not enabled on the current profile." in out
+    assert "opening your browser's inspect page" in out
+    assert "pick your normal profile" in out
+    assert open_calls == [True]
+    assert calls["count"] == 2
+
+
+def test_run_setup_prints_isolated_fallback_only_after_inspect_retry_fails(monkeypatch, capsys) -> None:
+    monkeypatch.setattr(admin, "daemon_alive", lambda: False)
+    monkeypatch.setattr(admin, "_chrome_running", lambda: True)
+    monkeypatch.setattr(admin, "_is_local_chrome_mode", lambda env=None: True)
+    monkeypatch.setattr(admin, "_local_debugging_setup_lines", lambda: ["isolated fallback instructions"])
+    open_calls = []
+    monkeypatch.setattr(admin, "_open_browser_inspect", lambda: open_calls.append(True))
+    ensure_calls = []
+
+    def fake_ensure_daemon(**kwargs):
+        ensure_calls.append(kwargs)
+        raise RuntimeError("DevToolsActivePort not found")
+
+    monkeypatch.setattr(admin, "ensure_daemon", fake_ensure_daemon)
+
+    assert admin.run_setup() == 1
+
+    output = capsys.readouterr()
+    assert "opening your browser's inspect page" in output.out
+    assert "isolated fallback instructions" not in output.out
+    assert "optional isolated-browser fallback" in output.err
+    assert "isolated fallback instructions" in output.err
+    assert open_calls == [True]
+    assert ensure_calls == [
+        {"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False},
+        {"wait": admin._SETUP_RETRY_WAIT, "_open_inspect": False},
+    ]
 
 
 def test_run_setup_restarts_stale_existing_local_daemon(monkeypatch, capsys) -> None:
@@ -415,7 +448,7 @@ def test_run_setup_restarts_stale_existing_local_daemon(monkeypatch, capsys) -> 
     assert "browser connection is stale; restarting" in out
     assert "daemon is up." in out
     assert restarted == [None]
-    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_show_debugging_guidance": False}]
+    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False}]
 
 
 def test_run_setup_retries_at_most_once(monkeypatch, capsys) -> None:
@@ -435,8 +468,8 @@ def test_run_setup_retries_at_most_once(monkeypatch, capsys) -> None:
     out = capsys.readouterr()
     assert "retrying once" in out.out
     assert ensure_calls == [
-        {"wait": admin._SETUP_ATTACH_WAIT, "_show_debugging_guidance": False},
-        {"wait": admin._SETUP_RETRY_WAIT, "_show_debugging_guidance": False},
+        {"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False},
+        {"wait": admin._SETUP_RETRY_WAIT, "_open_inspect": False},
     ]
 
 
@@ -452,7 +485,7 @@ def test_run_setup_allows_explicit_remote_cdp_without_local_browser(monkeypatch,
     out = capsys.readouterr().out
     assert "attaching via BU_CDP_WS" in out
     assert "daemon is up." in out
-    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_show_debugging_guidance": False}]
+    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False}]
 
 
 def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch, capsys) -> None:
@@ -473,7 +506,7 @@ def test_run_setup_restarts_existing_daemon_for_explicit_remote_cdp(monkeypatch,
     assert "restarting to attach via BU_CDP_URL" in out
     assert "daemon is up." in out
     assert restarted == [None]
-    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_show_debugging_guidance": False}]
+    assert ensure_calls == [{"wait": admin._SETUP_ATTACH_WAIT, "_open_inspect": False}]
 
 
 def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsys) -> None:
@@ -492,7 +525,7 @@ def test_run_doctor_uses_generic_browser_wording_when_missing(monkeypatch, capsy
     assert "next action       start Chrome/Chromium/Edge/Brave or provide BU_CDP_URL/BU_CDP_WS" in out
 
 
-def test_run_doctor_points_to_debug_browser_instructions_when_daemon_missing(monkeypatch, capsys) -> None:
+def test_run_doctor_points_to_inspect_flow_when_daemon_missing(monkeypatch, capsys) -> None:
     monkeypatch.setattr(admin, "_version", lambda: "0.1.0")
     monkeypatch.setattr(admin, "_install_mode", lambda: "git")
     monkeypatch.setattr(admin, "_chrome_running", lambda: True)
@@ -503,9 +536,8 @@ def test_run_doctor_points_to_debug_browser_instructions_when_daemon_missing(mon
     assert admin.run_doctor() == 1
 
     out = capsys.readouterr().out
-    assert "follow its debug-browser instructions" in out
-    assert "remote debugging is not reachable" in out
-    assert "inspect-page prompt" not in out
+    assert "remote debugging is disabled" in out
+    assert "follow its inspect-page prompt" in out
 
 
 def test_run_doctor_accepts_explicit_remote_cdp_without_local_browser(monkeypatch, capsys) -> None:

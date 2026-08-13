@@ -93,6 +93,22 @@ describe('useDefaultModelVision', () => {
     await waitFor(() => expect(result.current).toBe(true));
   });
 
+  it.each(['qwen3.8-max', 'qwen3.7-plus', 'qwen3.7-flash'])(
+    'returns true for the predefined Alibaba vision model %s',
+    async (modelId) => {
+      mockResolved.mockResolvedValue(makeResolvedResp('alibaba', modelId));
+      mockDefinitions.mockResolvedValue(makeDefinitionsResp(
+        { supports_vision: true },
+        'predefined',
+        'alibaba',
+        modelId,
+      ));
+
+      const { result } = renderHook(() => useDefaultModelVision());
+      await waitFor(() => expect(result.current).toBe(true));
+    },
+  );
+
   it('returns true for the predefined kimi-k2.7-code model', async () => {
     mockResolved.mockResolvedValue(makeResolvedResp('threatbook-cn-llm', 'kimi-k2.7-code'));
     mockDefinitions.mockResolvedValue(makeDefinitionsResp(

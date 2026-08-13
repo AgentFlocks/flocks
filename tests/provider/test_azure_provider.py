@@ -39,6 +39,35 @@ class _FakeAzureClient:
         self.chat = SimpleNamespace(completions=self.completions)
 
 
+class _FakeAzureChatCompletions:
+    def __init__(self):
+        self.last_request = None
+
+    async def create(self, **kwargs):
+        self.last_request = kwargs
+        return SimpleNamespace(
+            id="response-1",
+            model=kwargs["model"],
+            choices=[
+                SimpleNamespace(
+                    message=SimpleNamespace(content="hello"),
+                    finish_reason="stop",
+                )
+            ],
+            usage=SimpleNamespace(
+                prompt_tokens=1,
+                completion_tokens=1,
+                total_tokens=2,
+            ),
+        )
+
+
+class _FakeAzureChatClient:
+    def __init__(self):
+        self.completions = _FakeAzureChatCompletions()
+        self.chat = SimpleNamespace(completions=self.completions)
+
+
 def _chunk(delta=None, finish_reason=None):
     return SimpleNamespace(
         choices=[
@@ -87,6 +116,40 @@ def test_azure_provider_returns_fallback_models_without_config():
 
     assert {m.id for m in models} == {"gpt-5.4", "gpt-5-mini"}
     assert all(m.provider_id == "azure" for m in models)
+
+
+def test_azure_client_defaults_to_reasoning_capable_api_version(monkeypatch):
+    client_args = {}
+
+    class FakeAsyncAzureOpenAI:
+        def __init__(self, **kwargs):
+            client_args.update(kwargs)
+
+    monkeypatch.setattr("openai.AsyncAzureOpenAI", FakeAsyncAzureOpenAI)
+    monkeypatch.setenv("AZURE_OPENAI_API_KEY", "test-key")
+    monkeypatch.setenv("AZURE_OPENAI_ENDPOINT", "https://example.openai.azure.com")
+    monkeypatch.delenv("AZURE_OPENAI_API_VERSION", raising=False)
+
+    AzureProvider()._get_client()
+
+    assert client_args["api_version"] == "2025-04-01-preview"
+
+
+@pytest.mark.asyncio
+async def test_azure_chat_omits_temperature_for_reasoning_model():
+    client = _FakeAzureChatClient()
+    provider = AzureProvider()
+    provider._get_client = lambda: client
+
+    await provider.chat(
+        model_id="gpt-5.4",
+        messages=[ChatMessage(role="user", content="hi")],
+        temperature=0.2,
+        reasoningEffort="high",
+    )
+
+    assert client.completions.last_request["reasoning_effort"] == "high"
+    assert "temperature" not in client.completions.last_request
 
 
 @pytest.mark.asyncio
@@ -144,6 +207,7 @@ async def test_azure_chat_stream_emits_tool_calls():
     ]
 
     assert client.completions.last_request["tools"]
+    assert client.completions.last_request["temperature"] == 0.7
     assert len(emitted) == 1
     assert emitted[0].finish_reason == "tool_calls"
     assert emitted[0].tool_calls == [
@@ -160,13 +224,15 @@ async def test_azure_chat_stream_emits_tool_calls():
 
 @pytest.mark.asyncio
 async def test_azure_chat_stream_still_emits_text_chunks():
-    client = _FakeAzureClient([
-        _chunk(delta=SimpleNamespace(content="hello", tool_calls=None)),
-        _chunk(
-            delta=SimpleNamespace(content=None, tool_calls=None),
-            finish_reason="stop",
-        ),
-    ])
+    client = _FakeAzureClient(
+        [
+            _chunk(delta=SimpleNamespace(content="hello", tool_calls=None)),
+            _chunk(
+                delta=SimpleNamespace(content=None, tool_calls=None),
+                finish_reason="stop",
+            ),
+        ]
+    )
     provider = AzureProvider()
     provider._get_client = lambda: client
 
@@ -175,21 +241,27 @@ async def test_azure_chat_stream_still_emits_text_chunks():
         async for chunk in provider.chat_stream(
             model_id="gpt-5.4-mini",
             messages=[ChatMessage(role="user", content="hi")],
+            temperature=0.2,
+            reasoningEffort="xhigh",
         )
     ]
 
     assert [chunk.delta for chunk in emitted] == ["hello", ""]
     assert emitted[-1].finish_reason == "stop"
+    assert client.completions.last_request["reasoning_effort"] == "xhigh"
+    assert "temperature" not in client.completions.last_request
 
 
 @pytest.mark.asyncio
 async def test_azure_chat_stream_preserves_tool_call_history():
-    client = _FakeAzureClient([
-        _chunk(
-            delta=SimpleNamespace(content=None, tool_calls=None),
-            finish_reason="stop",
-        ),
-    ])
+    client = _FakeAzureClient(
+        [
+            _chunk(
+                delta=SimpleNamespace(content=None, tool_calls=None),
+                finish_reason="stop",
+            ),
+        ]
+    )
     provider = AzureProvider()
     provider._get_client = lambda: client
 

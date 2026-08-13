@@ -166,17 +166,6 @@ async def glob_tool(
     search_path = resolution.resolved_path
     title = resolution.display_path
 
-    # Request permission
-    await ctx.ask(
-        permission="glob",
-        patterns=[resolution.permission_pattern],
-        always=["*"],
-        metadata={
-            "pattern": pattern,
-            "path": search_path,
-        }
-    )
-    
     # Find files
     rg_path = find_ripgrep()
     files: List[Dict[str, Any]] = []

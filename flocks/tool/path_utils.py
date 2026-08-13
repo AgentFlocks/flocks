@@ -39,6 +39,36 @@ def get_tool_worktree() -> str:
     return Instance.get_worktree() or get_tool_base_dir()
 
 
+def _context_workspace_dir(ctx: ToolContext) -> str | None:
+    """Return the session-owned workspace supplied by the execution runtime."""
+    extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+    workspace_dir = str(extra.get("workspace_dir") or "").strip()
+    return workspace_dir or None
+
+
+def _assert_verified_path(ctx: ToolContext, raw_path: str, resolved_path: str) -> None:
+    """Reject a path whose canonical target changed after policy approval."""
+    extra = ctx.extra if isinstance(ctx.extra, dict) else {}
+    binding = extra.get("filesystem_path_binding")
+    if not isinstance(binding, dict):
+        return
+    for side in ("source", "target"):
+        if str(binding.get(f"{side}_path") or "") != str(raw_path):
+            continue
+        expected = binding.get(f"{side}_canonical")
+        if not isinstance(expected, dict):
+            continue
+        current_realpath = os.path.realpath(resolved_path)
+        current_parent = os.path.realpath(os.path.dirname(resolved_path))
+        if (
+            expected.get("realpath") != current_realpath
+            or expected.get("parent_realpath") != current_parent
+            or expected.get("final_target") != current_realpath
+        ):
+            raise ValueError("Filesystem path changed after policy approval")
+        return
+
+
 def safe_relpath(path: str, start: Optional[str]) -> str:
     """Return a relative path when possible, otherwise keep the absolute path."""
     if not start:
@@ -131,17 +161,9 @@ async def resolve_tool_path(
     - optionally allow the host Memory root or self-improve's user Skill root
     """
     raw_path = path
-    context_workspace = (
-        ctx.extra.get("workspace_dir")
-        if isinstance(ctx.extra, dict)
-        else None
-    )
-    resolved_base = normalize_user_path(
-        base_dir or context_workspace or get_tool_base_dir()
-    )
-    resolved_worktree = normalize_user_path(
-        worktree or context_workspace or get_tool_worktree()
-    )
+    session_workspace_dir = _context_workspace_dir(ctx)
+    resolved_base = normalize_user_path(base_dir or session_workspace_dir or get_tool_base_dir())
+    resolved_worktree = normalize_user_path(worktree or session_workspace_dir or get_tool_worktree())
 
     sandbox = ctx.extra.get("sandbox") if ctx.extra else None
     sandbox_root = sandbox.get("workspace_dir") if isinstance(sandbox, dict) else None
@@ -190,6 +212,7 @@ async def resolve_tool_path(
     else:
         resolved_path = resolve_host_path(normalized_input, base_dir=resolved_base)
 
+    _assert_verified_path(ctx, str(raw_path), resolved_path)
     display_path = safe_relpath(resolved_path, resolved_worktree)
     return ToolPathResolution(
         raw_path=raw_path,
