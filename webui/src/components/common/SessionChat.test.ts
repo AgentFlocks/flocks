@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import userEvent from '@testing-library/user-event';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { ContextUsageSnapshot } from '@/api/session';
 import type { Message } from '@/types';
 
 import {
@@ -75,7 +76,6 @@ const tMock = (key: string, options?: Record<string, unknown>) => {
   'chat.contextUsage.close': 'Close',
   'chat.contextUsage.full': '13% Full',
   'chat.contextUsage.tokens': '~13 / 100 Tokens',
-  'chat.contextUsage.excludedTokens': '100 excluded',
   'chat.contextUsage.noAttributedSegments': 'No attributed breakdown',
   'chat.contextUsage.breakdown.systemPrompt': 'System prompt',
   'chat.contextUsage.breakdown.toolDefinitions': 'Tool definitions',
@@ -303,6 +303,16 @@ function makeMessage(overrides: Partial<Message> & { id: string }): Message {
   } as Message;
 }
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
 type FetchedMessageFixture = {
   info: {
     id: string;
@@ -380,9 +390,9 @@ async function startFallbackPolling(onStreamingDone: () => void) {
   });
 }
 
-function mockStatefulSessionMessages() {
+function mockStatefulSessionMessages(initialMessages: Message[] = []) {
   useSessionMessagesMock.mockImplementation(() => {
-    const [messages, setMessages] = React.useState<Message[]>([]);
+    const [messages, setMessages] = React.useState<Message[]>(initialMessages);
     const upsertMessage = (messageInfo: Partial<Message> & { id: string }) => setMessages((prev) => {
       const existingIndex = prev.findIndex((message) => message.id === messageInfo.id);
       if (existingIndex >= 0) {
@@ -420,7 +430,18 @@ function mockStatefulSessionMessages() {
         (message) => message.id !== messageId,
       )),
       clearMessages: () => setMessages([]),
-      replaceMessageText: vi.fn(),
+      replaceMessageText: (messageId: string, partId: string, text: string) => setMessages((prev) => (
+        prev.map((message) => (
+          message.id === messageId
+            ? {
+                ...message,
+                parts: message.parts.map((part) => (
+                  part.id === partId ? { ...part, text } : part
+                )),
+              }
+            : message
+        ))
+      )),
       markMessageStopped: (messageId: string) => setMessages((prev) => prev.map(
         (message) => (message.id === messageId ? { ...message, finish: 'stop' } : message),
       )),
@@ -628,6 +649,8 @@ describe('buildContextUsageBreakdown', () => {
       ['skillLoad', 0],
       ['agentDelegation', 0],
     ]);
+    expect(breakdown.segments.find((segment) => segment.key === 'systemPrompt')?.included).toBe(false);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(false);
     expect(breakdown.excludedSegments).toEqual([]);
   });
 
@@ -678,18 +701,85 @@ describe('buildContextUsageBreakdown', () => {
       ],
     });
 
-    expect(breakdown.usedTokens).toBe(140);
+    expect(breakdown.usedTokens).toBe(85);
     expect(breakdown.compactedTokens).toBe(50);
-    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens])).toEqual([
-      ['systemPrompt', 15],
-      ['toolDefinitions', 10],
-      ['conversation', 40],
-      ['reasoning', 5],
-      ['tools', 40],
-      ['skillLoad', 20],
-      ['agentDelegation', 10],
+    expect(breakdown.segments.map((segment) => [segment.key, segment.tokens, segment.included])).toEqual([
+      ['systemPrompt', 15, false],
+      ['toolDefinitions', 10, false],
+      ['conversation', 10, true],
+      ['reasoning', 5, true],
+      ['tools', 40, true],
+      ['skillLoad', 20, true],
+      ['agentDelegation', 10, true],
     ]);
     expect(breakdown.excludedSegments).toEqual([]);
+  });
+
+  it('applies and clamps pending removals by attributed segment', () => {
+    const breakdown = buildContextUsageBreakdown([], '', {
+      sessionID: 'sess-1',
+      usedTokens: 260,
+      contextWindow: 1000,
+      percent: 26,
+      source: 'estimated',
+      estimatedTokens: 260,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 100, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 50, included: true, source: 'estimated' },
+        { key: 'tools', tokens: 30, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    }, {
+      pendingTokenDeltas: { reasoning: -50, tools: -300 },
+    });
+
+    expect(breakdown.usedTokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
+    expect(breakdown.segments.find((segment) => segment.key === 'tools')?.tokens).toBe(0);
+  });
+
+  it('uses snapshot fixed costs with local messages and explicit pending removals', () => {
+    const breakdown = buildContextUsageBreakdown([
+      makeMessage({
+        id: 'edited-user',
+        role: 'user',
+        parts: [{ id: 'edited-user-text', type: 'text', text: 'x'.repeat(400) }],
+      }),
+      makeMessage({
+        id: 'discarded-assistant',
+        parts: [
+          { id: 'discarded-text', type: 'text', text: 'y'.repeat(400) },
+          { id: 'discarded-reasoning', type: 'reasoning', text: 'z'.repeat(400) },
+        ],
+      }),
+    ], '', {
+      sessionID: 'sess-1',
+      usedTokens: 330,
+      contextWindow: 1000,
+      percent: 33,
+      source: 'observed',
+      estimatedTokens: 320,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 110, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 100, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    }, {
+      pendingTokenDeltas: { conversation: -100, reasoning: -100 },
+      useLocalMessageUsage: true,
+    });
+
+    expect(breakdown.usedTokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.tokens).toBe(40);
+    expect(breakdown.segments.find((segment) => segment.key === 'toolDefinitions')?.included).toBe(false);
+    expect(breakdown.segments.find((segment) => segment.key === 'conversation')?.tokens).toBe(100);
+    expect(breakdown.segments.find((segment) => segment.key === 'reasoning')?.tokens).toBe(0);
   });
 });
 
@@ -3728,6 +3818,29 @@ describe('ChatToolPart bash rendering', () => {
     expect(screen.getByText('$').closest('pre')).toHaveClass('max-h-64');
     expect(screen.getByText('tests passed').closest('pre')).toHaveClass('max-h-64');
   });
+
+  it.each([
+    'Tool execution was interrupted',
+    'Command failed with exit code 1',
+  ])('renders the bash error once: %s', (error) => {
+    render(
+      React.createElement(ChatToolPart, {
+        part: {
+          id: 'bash-error-part',
+          type: 'tool',
+          tool: 'bash',
+          callID: 'call-bash-error',
+          state: {
+            status: 'error',
+            input: { command: 'exit 1' },
+            error,
+          },
+        } as any,
+      }),
+    );
+
+    expect(screen.getAllByText(error)).toHaveLength(1);
+  });
 });
 
 describe('ChatToolPart question result rendering', () => {
@@ -3767,8 +3880,9 @@ describe('ChatToolPart question result rendering', () => {
 });
 
 describe('SessionChat context usage popover', () => {
-  it('always shows fixed usage rows and hides compacted history', async () => {
-    const user = userEvent.setup();
+  it('counts a first prompt handed off as an optimistic new-session message', async () => {
+    const prompt = 'x'.repeat(400);
+    mockStatefulSessionMessages();
     sessionApiGetContextUsageMock.mockResolvedValue({
       sessionID: 'sess-1',
       usedTokens: 120,
@@ -3779,11 +3893,553 @@ describe('SessionChat context usage popover', () => {
       compactedTokens: 0,
       segments: [
         { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+      initialOptimisticMessage: makeMessage({
+        id: 'optimistic-user-1',
+        sessionID: 'sess-1',
+        role: 'user',
+        parts: [{
+          id: 'optimistic-part-1',
+          type: 'text',
+          text: prompt,
+          metadata: { displayText: 'Visible label' },
+        }],
+      }),
+    }));
+
+    const contextButton = screen.getByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => {
+      expect(contextButton).toHaveTextContent('10%');
+    });
+    expect(screen.getByText('Visible label')).toBeInTheDocument();
+    expect(screen.queryByText(prompt)).not.toBeInTheDocument();
+  });
+
+  it('counts only the current draft before the first user prompt', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 120,
+      contextWindow: 1000,
+      percent: 12,
+      source: 'estimated',
+      estimatedTokens: 120,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 120, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveTextContent('0%');
+
+    fireEvent.change(screen.getByPlaceholderText('请输入消息'), {
+      target: { value: 'x'.repeat(400) },
+    });
+    expect(contextButton).toHaveTextContent('10%');
+
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    expect(conversationRow).not.toBeNull();
+    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+  });
+
+  it('keeps the submitted prompt in usage while the first model call is running', async () => {
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    expect(contextButton).toHaveTextContent('10%');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.any(Object),
+      );
+    });
+    expect(contextButton).toHaveTextContent('10%');
+
+    const user = userEvent.setup();
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+  });
+
+  it('keeps draft usage frozen during the automatic-model preflight', async () => {
+    const modelUpdate = deferred<unknown>();
+    mockStatefulSessionMessages();
+    sessionApiUpdateMock.mockReturnValue(modelUpdate.promise);
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+      modelAuto: true,
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    expect(contextButton).toHaveTextContent('10%');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => {
+      expect(sessionApiUpdateMock).toHaveBeenCalledWith('sess-1', {
+        model_auto: true,
+        model_pinned: false,
+      });
+    });
+    expect(clientPostMock).not.toHaveBeenCalledWith(
+      '/api/session/sess-1/prompt_async',
+      expect.any(Object),
+    );
+    expect(contextButton).toHaveTextContent('10%');
+
+    await act(async () => {
+      modelUpdate.resolve({});
+      await modelUpdate.promise;
+    });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.any(Object),
+      );
+    });
+    expect(contextButton).toHaveTextContent('10%');
+  });
+
+  it('counts the real prompt instead of its shorter display label while submitting', async () => {
+    const prompt = 'x'.repeat(400);
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 80,
+      contextWindow: 1000,
+      percent: 8,
+      source: 'estimated',
+      estimatedTokens: 80,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      initialMessage: prompt,
+      initialDisplayText: 'Visible label',
+      contextWindowTokens: 1000,
+    }));
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.objectContaining({ displayText: 'Visible label' }),
+      );
+      expect(screen.getByRole('button', { name: 'chat.contextUsageTitle' })).toHaveTextContent('10%');
+    });
+    expect(screen.getByText('Visible label')).toBeInTheDocument();
+    expect(screen.queryByText(prompt)).not.toBeInTheDocument();
+  });
+
+  it('does not double-count a prompt when the initial snapshot resolves after submission', async () => {
+    const request = deferred<ContextUsageSnapshot>();
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockReturnValue(request.promise);
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+    }));
+
+    const contextButton = screen.getByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/prompt_async',
+        expect.any(Object),
+      );
+      expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1);
+    });
+    expect(contextButton).toHaveTextContent('10%');
+
+    await act(async () => {
+      request.resolve({
+        sessionID: 'sess-1',
+        usedTokens: 220,
+        contextWindow: 1000,
+        percent: 22,
+        source: 'estimated',
+        estimatedTokens: 220,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+          { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+          { key: 'conversation', tokens: 100, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+      await request.promise;
+    });
+
+    expect(contextButton).toHaveTextContent('10%');
+  });
+
+  it('keeps a newer prompt pending when the previous turn refresh resolves', async () => {
+    const previousTurnRefresh = deferred<ContextUsageSnapshot>();
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 80,
+        contextWindow: 1000,
+        percent: 8,
+        source: 'estimated',
+        estimatedTokens: 80,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockReturnValueOnce(previousTurnRefresh.promise);
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'a'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+
+    act(() => {
+      useSSEOptionsRef.current.onEvent({
+        type: 'message.updated',
+        properties: {
+          info: {
+            id: 'assistant-turn-1',
+            sessionID: 'sess-1',
+            role: 'assistant',
+            providerID: 'openai',
+            modelID: 'gpt-test',
+            time: { completed: Date.now() },
+            finish: 'stop',
+          },
+        },
+      });
+    });
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(2));
+
+    fireEvent.change(textarea, { target: { value: 'b'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledTimes(2);
+      expect(contextButton).toHaveTextContent('20%');
+    });
+
+    await act(async () => {
+      previousTurnRefresh.resolve({
+        sessionID: 'sess-1',
+        usedTokens: 180,
+        contextWindow: 1000,
+        percent: 18,
+        source: 'estimated',
+        estimatedTokens: 180,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+          { key: 'conversation', tokens: 100, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+      await previousTurnRefresh.promise;
+    });
+
+    await waitFor(() => expect(contextButton).toHaveTextContent('20%'));
+  });
+
+  it('drops pending usage during the first render of a different session', async () => {
+    const layoutPercentages: string[] = [];
+    const firstSnapshot: ContextUsageSnapshot = {
+      sessionID: 'sess-1',
+      usedTokens: 580,
+      contextWindow: 1000,
+      percent: 58,
+      source: 'estimated',
+      estimatedTokens: 580,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 500, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    };
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'existing-user-1',
+        sessionID: 'sess-1',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'existing-user-part-1', type: 'text', text: 'x'.repeat(2000) }],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockImplementation((activeSessionId: string) => (
+      activeSessionId === 'sess-1'
+        ? Promise.resolve(firstSnapshot)
+        : new Promise(() => {})
+    ));
+
+    function SessionSwitchProbe({ activeSessionId }: { activeSessionId: string }) {
+      React.useLayoutEffect(() => {
+        const contextButton = document.querySelector<HTMLButtonElement>(
+          'button[aria-label="chat.contextUsageTitle"]',
+        );
+        layoutPercentages.push(contextButton?.textContent || '');
+      }, [activeSessionId]);
+
+      return React.createElement(SessionChat, {
+        sessionId: activeSessionId,
+        contextWindowTokens: 1000,
+      });
+    }
+
+    const rendered = render(React.createElement(SessionSwitchProbe, {
+      activeSessionId: 'sess-1',
+    }));
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('50%'));
+
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+    await waitFor(() => expect(contextButton).toHaveTextContent('60%'));
+
+    rendered.rerender(React.createElement(SessionSwitchProbe, {
+      activeSessionId: 'sess-2',
+    }));
+
+    expect(layoutPercentages[layoutPercentages.length - 1]).toBe('0%');
+    expect(contextButton).toHaveTextContent('0%');
+  });
+
+  it('retains pending prompt usage when the completion refresh fails', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    const failedRefresh = deferred<ContextUsageSnapshot>();
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock
+      .mockResolvedValueOnce({
+        sessionID: 'sess-1',
+        usedTokens: 80,
+        contextWindow: 1000,
+        percent: 8,
+        source: 'estimated',
+        estimatedTokens: 80,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      })
+      .mockReturnValueOnce(failedRefresh.promise);
+
+    try {
+      render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
+
+      const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+      const textarea = screen.getByPlaceholderText('请输入消息');
+      fireEvent.change(textarea, { target: { value: 'x'.repeat(400) } });
+      fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+      await waitFor(() => {
+        expect(contextButton).toHaveTextContent('10%');
+      });
+
+      act(() => {
+        useSSEOptionsRef.current.onEvent({
+          type: 'message.updated',
+          properties: {
+            info: {
+              id: 'assistant-1',
+              sessionID: 'sess-1',
+              role: 'assistant',
+              time: { completed: Date.now() },
+              finish: 'stop',
+            },
+          },
+        });
+      });
+
+      await waitFor(() => {
+        expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(2);
+      });
+      await act(async () => {
+        failedRefresh.reject(new Error('context usage unavailable'));
+        await failedRefresh.promise.catch(() => undefined);
+      });
+      await waitFor(() => {
+        expect(warnSpy).toHaveBeenCalled();
+      });
+      expect(contextButton).toHaveTextContent('10%');
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it('does not activate model context for a built-in slash command', async () => {
+    mockStatefulSessionMessages();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 100,
+      contextWindow: 100,
+      percent: 100,
+      source: 'estimated',
+      estimatedTokens: 100,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 60, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 100,
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    const textarea = screen.getByPlaceholderText('请输入消息');
+    fireEvent.change(textarea, { target: { value: '/tools' } });
+    expect(contextButton).toHaveTextContent('1%');
+
+    fireEvent.keyDown(textarea, { key: 'Enter', code: 'Enter' });
+
+    await waitFor(() => {
+      expect(clientPostMock).toHaveBeenCalledWith(
+        '/api/session/sess-1/command',
+        expect.any(Object),
+      );
+    });
+    expect(contextButton).toHaveTextContent('0%');
+  });
+
+  it('ignores command-only history before a context snapshot is available', () => {
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'command-user',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'command-part', type: 'text', text: 'x'.repeat(400), ignored: true }],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockReturnValue(new Promise(() => {}));
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+    }));
+
+    expect(screen.getByRole('button', { name: 'chat.contextUsageTitle' })).toHaveTextContent('0%');
+  });
+
+  it('does not attribute observed fixed-cost drift to a short model conversation', async () => {
+    const user = userEvent.setup();
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 23210,
+      contextWindow: 1000000,
+      percent: 2,
+      source: 'observed',
+      observedTokens: 23210,
+      estimatedTokens: 20010,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 8000, included: true, source: 'estimated' },
+        { key: 'toolDefinitions', tokens: 12000, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 3210, included: true, source: 'estimated' },
         { key: 'agentDelegation', tokens: 0, included: true, source: 'estimated' },
       ],
       excludedSegments: [
         { key: 'compactedHistory', tokens: 12000, included: false, source: 'estimated' },
       ],
+    });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [
+        makeMessage({
+          id: 'user-1',
+          role: 'user',
+          parts: [{ id: 'user-part-1', type: 'text', text: 'prompt' }],
+        }),
+        makeMessage({
+          id: 'assistant-1',
+          role: 'assistant',
+          providerID: 'openai',
+          modelID: 'gpt-test',
+          parts: [{ id: 'assistant-part-1', type: 'text', text: 'response' }],
+        }),
+      ],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
     });
 
     render(React.createElement(SessionChat, { sessionId: 'sess-1' }));
@@ -3791,18 +4447,156 @@ describe('SessionChat context usage popover', () => {
     const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
     expect(contextButton).toHaveClass('h-6');
     expect(contextButton).not.toHaveClass('w-6');
-    expect(contextButton).toHaveTextContent('12%');
+    expect(contextButton).toHaveTextContent('0%');
     await user.click(contextButton);
 
-    expect(screen.getByText('System prompt')).toBeInTheDocument();
-    expect(screen.getByText('Tool definitions')).toBeInTheDocument();
-    expect(screen.getByText('Conversation')).toBeInTheDocument();
+    expect(screen.queryByText('System prompt')).not.toBeInTheDocument();
+    expect(screen.queryByText('Tool definitions')).not.toBeInTheDocument();
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    expect(within(conversationRow as HTMLElement).getByText('10')).toBeInTheDocument();
     expect(screen.getByText('Reasoning')).toBeInTheDocument();
     expect(screen.getByText('Tool calls')).toBeInTheDocument();
     expect(screen.getByText('Skill loads')).toBeInTheDocument();
     expect(screen.getByText('Agent delegation')).toBeInTheDocument();
-    expect(screen.getAllByText('0').length).toBeGreaterThanOrEqual(4);
     expect(screen.queryByText('Compacted history')).not.toBeInTheDocument();
+  });
+
+  it('tracks the token delta while an edited user message is being resent', async () => {
+    const user = userEvent.setup();
+    const originalText = 'x'.repeat(40);
+    const editedText = 'x'.repeat(400);
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'user-1',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'user-part-1', type: 'text', text: originalText }],
+      }),
+      makeMessage({
+        id: 'assistant-1',
+        role: 'assistant',
+        providerID: 'openai',
+        modelID: 'gpt-test',
+        parentID: 'user-1',
+        parts: [
+          { id: 'assistant-part-1', type: 'text', text: 'y'.repeat(400) },
+          { id: 'assistant-reasoning-1', type: 'reasoning', text: 'z'.repeat(400) },
+        ],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockResolvedValue({
+      sessionID: 'sess-1',
+      usedTokens: 290,
+      contextWindow: 1000,
+      percent: 29,
+      source: 'estimated',
+      estimatedTokens: 290,
+      compactedTokens: 0,
+      segments: [
+        { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+        { key: 'conversation', tokens: 110, included: true, source: 'estimated' },
+        { key: 'reasoning', tokens: 100, included: true, source: 'estimated' },
+      ],
+      excludedSegments: [],
+    });
+    sessionApiResendMessageMock.mockReturnValue(new Promise(() => {}));
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      display: { compact: false, showActions: true },
+    }));
+
+    const contextButton = await screen.findByRole('button', { name: 'chat.contextUsageTitle' });
+    expect(contextButton).toHaveTextContent('21%');
+
+    await user.click(screen.getByLabelText('chat.edit'));
+    fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
+    await user.click(screen.getByLabelText('chat.sendEdited'));
+
+    await waitFor(() => {
+      expect(sessionApiResendMessageMock).toHaveBeenCalledWith(
+        'sess-1',
+        'user-1',
+        'user-part-1',
+        editedText,
+      );
+    });
+    expect(contextButton).toHaveTextContent('10%');
+
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    const reasoningRow = screen.getByText('Reasoning').closest('[role="menuitem"]');
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+    expect(within(reasoningRow as HTMLElement).getByText('0')).toBeInTheDocument();
+  });
+
+  it('preserves edit removals when the initial context snapshot resolves late', async () => {
+    const request = deferred<ContextUsageSnapshot>();
+    const user = userEvent.setup();
+    const originalText = 'x'.repeat(40);
+    const editedText = 'x'.repeat(400);
+    mockStatefulSessionMessages([
+      makeMessage({
+        id: 'user-late-snapshot',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'user-late-part', type: 'text', text: originalText }],
+      }),
+      makeMessage({
+        id: 'assistant-late-snapshot',
+        role: 'assistant',
+        providerID: 'openai',
+        modelID: 'gpt-test',
+        parentID: 'user-late-snapshot',
+        parts: [
+          { id: 'assistant-late-text', type: 'text', text: 'y'.repeat(400) },
+          { id: 'assistant-late-reasoning', type: 'reasoning', text: 'z'.repeat(400) },
+        ],
+      }),
+    ]);
+    sessionApiGetContextUsageMock.mockReturnValue(request.promise);
+    sessionApiResendMessageMock.mockReturnValue(new Promise(() => {}));
+
+    render(React.createElement(SessionChat, {
+      sessionId: 'sess-1',
+      contextWindowTokens: 1000,
+      display: { compact: false, showActions: true },
+    }));
+
+    await waitFor(() => expect(sessionApiGetContextUsageMock).toHaveBeenCalledTimes(1));
+    const contextButton = screen.getByRole('button', { name: 'chat.contextUsageTitle' });
+    await user.click(screen.getByLabelText('chat.edit'));
+    fireEvent.change(screen.getByDisplayValue(originalText), { target: { value: editedText } });
+    await user.click(screen.getByLabelText('chat.sendEdited'));
+
+    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+
+    await act(async () => {
+      request.resolve({
+        sessionID: 'sess-1',
+        usedTokens: 330,
+        contextWindow: 1000,
+        percent: 33,
+        source: 'observed',
+        estimatedTokens: 320,
+        compactedTokens: 0,
+        segments: [
+          { key: 'systemPrompt', tokens: 80, included: true, source: 'estimated' },
+          { key: 'toolDefinitions', tokens: 40, included: true, source: 'estimated' },
+          { key: 'conversation', tokens: 110, included: true, source: 'estimated' },
+          { key: 'reasoning', tokens: 100, included: true, source: 'estimated' },
+        ],
+        excludedSegments: [],
+      });
+      await request.promise;
+    });
+
+    await waitFor(() => expect(contextButton).toHaveTextContent('10%'));
+    await user.click(contextButton);
+    const conversationRow = screen.getByText('Conversation').closest('[role="menuitem"]');
+    const reasoningRow = screen.getByText('Reasoning').closest('[role="menuitem"]');
+    expect(within(conversationRow as HTMLElement).getByText('100')).toBeInTheDocument();
+    expect(within(reasoningRow as HTMLElement).getByText('0')).toBeInTheDocument();
   });
 
   it('keeps usage visible while recalculating after compaction succeeds', async () => {
@@ -3839,6 +4633,7 @@ describe('SessionChat context usage popover', () => {
         makeMessage({
           id: 'stale-user',
           role: 'user',
+          model: 'openai/gpt-test',
           parts: [{ id: 'stale-user-part', type: 'text', text: 'x'.repeat(4000) }] as Message['parts'],
         }),
       ],
@@ -3902,6 +4697,25 @@ describe('SessionChat context usage popover', () => {
         ],
         excludedSegments: [],
       });
+    useSessionMessagesMock.mockReturnValue({
+      messages: [makeMessage({
+        id: 'user-1',
+        role: 'user',
+        model: 'openai/gpt-test',
+        parts: [{ id: 'user-part-1', type: 'text', text: 'prompt' }],
+      })],
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+      addMessage: vi.fn(),
+      updateMessage: vi.fn(),
+      updateMessagePart: vi.fn(),
+      removeMessage: vi.fn(),
+      clearMessages: vi.fn(),
+      replaceMessageText: vi.fn(),
+      markMessageStopped: vi.fn(),
+      truncateAfterMessage: vi.fn(),
+    });
 
     render(React.createElement(SessionChat, { sessionId: 'sess-1', live: true, onError }));
 

@@ -22,6 +22,7 @@ import { StreamingMarkdown, useStreamingContent } from './StreamingMarkdown';
 import { useTranslation } from 'react-i18next';
 import LoadingSpinner from './LoadingSpinner';
 import { QuestionTool, type QuestionItem } from './QuestionTool';
+import { PermissionApprovalDialog, type PermissionDecision } from './PermissionApprovalDialog';
 import DelegateTaskCard, { isDelegateTool, shouldRenderDelegateTaskCard } from './DelegateTaskCard';
 import CommandDropdown, { isSlashCommandName, parseSlashCommand } from './CommandDropdown';
 import ImageLightbox from './ImageLightbox';
@@ -29,6 +30,7 @@ import { useSessionMessages } from '@/hooks/useSessions';
 import { useSSE, type SSEConnectionStatus } from '@/hooks/useSSE';
 import { useReasoningToggle } from '@/hooks/useReasoningToggle';
 import { sessionApi, type ContextUsageSnapshot, type QueuedPrompt } from '@/api/session';
+import { permissionApi, type PendingPermission } from '@/api/permission';
 import client, { getApiBase } from '@/api/client';
 import type { Command } from '@/api/skill';
 import type { Agent } from '@/api/agent';
@@ -371,6 +373,7 @@ function stringifyToolPayload(value: unknown): string {
 }
 
 function estimatePartTokens(part: MessagePart): number {
+  if (part.ignored) return 0;
   if (part.type === 'text') {
     return countTokensLikeCompaction(part.text);
   }
@@ -411,6 +414,25 @@ export interface ContextUsageBreakdown {
   excludedSegments: ContextUsageBreakdownSegment[];
 }
 
+interface ContextUsageBreakdownOptions {
+  includeSnapshotUsage?: boolean;
+  pendingTokenDeltas?: ContextUsageTokenDeltas;
+  useLocalMessageUsage?: boolean;
+}
+
+type ContextUsageTokenDeltas = Partial<Record<ContextUsageBreakdownSegment['key'], number>>;
+
+interface PendingContextUsageEntry {
+  snapshotTokenDeltas: ContextUsageTokenDeltas;
+  localTokenDeltas: ContextUsageTokenDeltas;
+}
+
+interface PendingContextUsageState {
+  sessionId: string | null;
+  baselineSnapshot: ContextUsageSnapshot | null;
+  entries: Record<string, PendingContextUsageEntry>;
+}
+
 const CONTEXT_SEGMENT_COLORS: Record<ContextUsageBreakdownSegment['key'], string> = {
   systemPrompt: 'bg-zinc-400',
   toolDefinitions: 'bg-violet-400',
@@ -441,9 +463,23 @@ function estimateMessageTokens(message: Message): number {
   return message.parts.reduce((sum, part) => sum + estimatePartTokens(part), 0);
 }
 
+function isModelInvocationMessage(message: Message): boolean {
+  if (message.role === 'user') {
+    return Boolean(message.model)
+      && message.parts.some((part) => part.ignored !== true);
+  }
+  return message.role === 'assistant'
+    && message.providerID !== 'builtin'
+    && message.modelID !== 'command'
+    && Boolean(message.providerID || message.modelID);
+}
+
 function estimateActiveMessageBreakdown(messages: Message[]): Pick<ContextUsageBreakdown, 'segments' | 'usedTokens'> {
   let conversationTokens = 0;
   let reasoningTokens = 0;
+  let toolTokens = 0;
+  let skillLoadTokens = 0;
+  let agentDelegationTokens = 0;
 
   messages.forEach((message) => {
     if (message.compacted) return;
@@ -451,6 +487,14 @@ function estimateActiveMessageBreakdown(messages: Message[]): Pick<ContextUsageB
       const tokens = estimatePartTokens(part);
       if (part.type === 'reasoning' || part.type === 'thinking') {
         reasoningTokens += tokens;
+      } else if (part.type === 'tool') {
+        if (part.tool === 'skill_load') {
+          skillLoadTokens += tokens;
+        } else if (isDelegateTool(part.tool || '')) {
+          agentDelegationTokens += tokens;
+        } else {
+          toolTokens += tokens;
+        }
       } else {
         conversationTokens += tokens;
       }
@@ -474,11 +518,48 @@ function estimateActiveMessageBreakdown(messages: Message[]): Pick<ContextUsageB
       included: true,
     });
   }
+  if (toolTokens > 0) {
+    segments.push({
+      key: 'tools',
+      tokens: toolTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.tools,
+      included: true,
+    });
+  }
+  if (skillLoadTokens > 0) {
+    segments.push({
+      key: 'skillLoad',
+      tokens: skillLoadTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.skillLoad,
+      included: true,
+    });
+  }
+  if (agentDelegationTokens > 0) {
+    segments.push({
+      key: 'agentDelegation',
+      tokens: agentDelegationTokens,
+      colorClass: CONTEXT_SEGMENT_COLORS.agentDelegation,
+      included: true,
+    });
+  }
 
   return {
-    usedTokens: conversationTokens + reasoningTokens,
+    usedTokens: conversationTokens
+      + reasoningTokens
+      + toolTokens
+      + skillLoadTokens
+      + agentDelegationTokens,
     segments,
   };
+}
+
+function addContextTokenDelta(
+  deltas: ContextUsageTokenDeltas,
+  key: ContextUsageBreakdownSegment['key'],
+  tokenDelta: number,
+): void {
+  if (tokenDelta === 0) return;
+  deltas[key] = (deltas[key] || 0) + tokenDelta;
 }
 
 function normalizeContextSegment(segment: {
@@ -518,6 +599,24 @@ function addContextSegmentTokens(
   });
 }
 
+function adjustContextSegmentTokens(
+  segments: ContextUsageBreakdownSegment[],
+  key: ContextUsageBreakdownSegment['key'],
+  tokenDelta: number,
+): number {
+  if (tokenDelta === 0) return 0;
+  const existing = segments.find((segment) => segment.key === key);
+  if (existing) {
+    const previousTokens = existing.tokens;
+    existing.tokens = Math.max(0, previousTokens + tokenDelta);
+    return existing.tokens - previousTokens;
+  } else if (tokenDelta > 0) {
+    addContextSegmentTokens(segments, key, tokenDelta);
+    return tokenDelta;
+  }
+  return 0;
+}
+
 function normalizeFixedContextSegments(
   segments: ContextUsageBreakdownSegment[],
 ): ContextUsageBreakdownSegment[] {
@@ -552,6 +651,7 @@ export function buildContextUsageBreakdown(
   messages: Message[],
   draft: string,
   snapshot?: ContextUsageSnapshot | null,
+  options?: ContextUsageBreakdownOptions,
 ): ContextUsageBreakdown {
   const compactedTokens = messages.reduce((total, message) => (
     message.compacted ? total + estimateMessageTokens(message) : total
@@ -562,27 +662,94 @@ export function buildContextUsageBreakdown(
     const serverSegments = (snapshot.segments || [])
       .map(normalizeContextSegment)
       .filter((segment): segment is ContextUsageBreakdownSegment => Boolean(segment));
-    const segments = [...serverSegments];
+    const includeSnapshotUsage = options?.includeSnapshotUsage !== false;
+    const useLocalMessageUsage = includeSnapshotUsage && options?.useLocalMessageUsage === true;
+    const activeBreakdown = useLocalMessageUsage
+      ? estimateActiveMessageBreakdown(messages)
+      : null;
+    const segments = includeSnapshotUsage
+      ? useLocalMessageUsage
+        ? serverSegments.filter((segment) => (
+            segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+          ))
+        : [...serverSegments]
+      : serverSegments.filter((segment) => segment.key === 'systemPrompt');
+    activeBreakdown?.segments.forEach((segment) => {
+      addContextSegmentTokens(segments, segment.key, segment.tokens);
+    });
+    const includedSystemPromptTokens = serverSegments.reduce((total, segment) => (
+      segment.key === 'systemPrompt' && segment.included ? total + segment.tokens : total
+    ), 0);
+    const includedToolDefinitionTokens = serverSegments.reduce((total, segment) => (
+      segment.key === 'toolDefinitions' && segment.included ? total + segment.tokens : total
+    ), 0);
+    const estimatedSnapshotTokens = snapshot.estimatedTokens > 0
+      ? snapshot.estimatedTokens
+      : snapshot.usedTokens || 0;
+    if (includeSnapshotUsage && !useLocalMessageUsage) {
+      adjustContextSegmentTokens(
+        segments,
+        'conversation',
+        -Math.max(0, (snapshot.usedTokens || 0) - estimatedSnapshotTokens),
+      );
+    }
+    const pendingTokenDeltas = includeSnapshotUsage ? options?.pendingTokenDeltas || {} : {};
+    const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
+      (total, [key, tokenDelta]) => total + adjustContextSegmentTokens(
+        segments,
+        key as ContextUsageBreakdownSegment['key'],
+        tokenDelta || 0,
+      ),
+      0,
+    );
 
     addContextSegmentTokens(segments, 'conversation', draftTokens);
 
     return {
-      usedTokens: Math.max(0, snapshot.usedTokens || 0) + draftTokens,
+      usedTokens: (
+        includeSnapshotUsage
+          ? Math.max(
+              0,
+              (
+                useLocalMessageUsage
+                  ? activeBreakdown?.usedTokens || 0
+                  : estimatedSnapshotTokens - includedSystemPromptTokens - includedToolDefinitionTokens
+              ) + pendingTokenDeltaTotal,
+            )
+          : 0
+      ) + draftTokens,
       compactedTokens: Math.max(0, snapshot.compactedTokens || 0),
-      segments: normalizeFixedContextSegments(segments),
+      segments: normalizeFixedContextSegments(segments).map((segment) => (
+        segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+          ? { ...segment, included: false }
+          : segment
+      )),
       excludedSegments: [],
     };
   }
 
   const activeBreakdown = estimateActiveMessageBreakdown(messages);
   const segments: ContextUsageBreakdownSegment[] = [...activeBreakdown.segments];
+  const pendingTokenDeltas = options?.pendingTokenDeltas || {};
+  const pendingTokenDeltaTotal = Object.entries(pendingTokenDeltas).reduce(
+    (total, [key, tokenDelta]) => total + adjustContextSegmentTokens(
+      segments,
+      key as ContextUsageBreakdownSegment['key'],
+      tokenDelta || 0,
+    ),
+    0,
+  );
 
   addContextSegmentTokens(segments, 'conversation', draftTokens);
 
   return {
-    usedTokens: activeBreakdown.usedTokens + draftTokens,
+    usedTokens: Math.max(0, activeBreakdown.usedTokens + pendingTokenDeltaTotal) + draftTokens,
     compactedTokens,
-    segments: normalizeFixedContextSegments(segments),
+    segments: normalizeFixedContextSegments(segments).map((segment) => (
+      segment.key === 'systemPrompt' || segment.key === 'toolDefinitions'
+        ? { ...segment, included: false }
+        : segment
+    )),
     excludedSegments: [],
   };
 }
@@ -640,8 +807,10 @@ function ContextUsageRing({
       : clamped >= 50
         ? 'stroke-sky-500'
         : 'stroke-zinc-400';
-  const rows = breakdown.segments;
-  const activeSegments = breakdown.segments.filter((segment) => segment.tokens > 0);
+  const rows = breakdown.segments.filter((segment) => (
+    segment.key !== 'systemPrompt' && segment.key !== 'toolDefinitions'
+  ));
+  const activeSegments = breakdown.segments.filter((segment) => segment.included && segment.tokens > 0);
 
   useEffect(() => {
     if (!open) return undefined;
@@ -750,9 +919,7 @@ function ContextUsageRing({
                   </span>
                 </div>
                 <span className={segment.included ? 'shrink-0 text-zinc-600 dark:text-zinc-300' : 'shrink-0 text-zinc-400 dark:text-zinc-500'}>
-                  {segment.included
-                    ? formatTokenCount(segment.tokens)
-                    : t('chat.contextUsage.excludedTokens', { tokens: formatTokenCount(segment.tokens) })}
+                  {formatTokenCount(segment.included ? segment.tokens : 0)}
                 </span>
               </div>
             ))}
@@ -1654,6 +1821,25 @@ export default function SessionChat({
   // sidebar → Agents → back to Sessions) doesn't wipe the user's half-typed
   // message. Subsequent session changes are re-hydrated by the effect below.
   const [input, setInput] = useState<string>(() => readChatDraft(sessionId));
+  const [submittedModelPromptSessionId, setSubmittedModelPromptSessionId] = useState<string | null>(null);
+  const [pendingContextUsage, setPendingContextUsage] = useState<PendingContextUsageState>({
+    sessionId: null,
+    baselineSnapshot: null,
+    entries: {},
+  });
+  const pendingContextUsageRef = useRef(pendingContextUsage);
+  pendingContextUsageRef.current = pendingContextUsage;
+  const pendingContextSnapshotKeysRef = useRef<{
+    sessionId: string;
+    keys: string[];
+  } | null>(null);
+  const updatePendingContextUsage = useCallback((
+    updater: (current: PendingContextUsageState) => PendingContextUsageState,
+  ) => {
+    const next = updater(pendingContextUsageRef.current);
+    pendingContextUsageRef.current = next;
+    setPendingContextUsage(next);
+  }, []);
   const [composerReferences, setComposerReferences] = useState<ComposerReference[]>([]);
   const [sending, setSending] = useState(false);
   const [isStreaming, setIsStreaming] = useState(false);
@@ -1686,6 +1872,11 @@ export default function SessionChat({
     remove: removeQueuedPrompt,
     runNow: runQueuedPromptNow,
   } = useSessionPromptQueue(sessionId);
+  const [pendingPermissions, setPendingPermissions] = useState<PendingPermission[]>([]);
+  const [permissionSubmitting, setPermissionSubmitting] = useState(false);
+  const [permissionError, setPermissionError] = useState<string | null>(null);
+  const activePermissionSessionRef = useRef<string | null>(sessionId ?? null);
+  activePermissionSessionRef.current = sessionId ?? null;
   const [processGroupOpenState, setProcessGroupOpenState] = useState<ProcessGroupOpenState>(() => (
     readProcessGroupOpenState(sessionId)
   ));
@@ -1756,6 +1947,80 @@ export default function SessionChat({
     applyPushSnapshot: applyContextUsagePushSnapshot,
     stopRefreshing: stopContextUsageRefreshing,
   } = useSessionContextUsage(sessionId);
+  const activeContextUsageSnapshot = contextUsageSnapshot?.sessionID === sessionId
+    ? contextUsageSnapshot
+    : null;
+  const beginPendingContextUsage = useCallback((
+    key: string,
+    snapshotTokenDeltas: ContextUsageTokenDeltas,
+    baselineSnapshot: ContextUsageSnapshot | null = activeContextUsageSnapshot,
+    localTokenDeltas: ContextUsageTokenDeltas = {},
+  ) => {
+    updatePendingContextUsage((current) => {
+      const continueCurrent = current.sessionId === sessionId
+        && Object.keys(current.entries).length > 0;
+      return {
+        sessionId: sessionId || null,
+        baselineSnapshot: continueCurrent ? current.baselineSnapshot : baselineSnapshot,
+        entries: {
+          ...(continueCurrent ? current.entries : {}),
+          [key]: { snapshotTokenDeltas, localTokenDeltas },
+        },
+      };
+    });
+  }, [activeContextUsageSnapshot, sessionId, updatePendingContextUsage]);
+  const resolvePendingContextUsage = useCallback((
+    keys: string[],
+    expectedSessionId: string,
+    nextBaselineSnapshot?: ContextUsageSnapshot | null,
+  ) => {
+    if (keys.length === 0) return;
+    updatePendingContextUsage((current) => {
+      if (current.sessionId !== expectedSessionId) return current;
+      const entries = { ...current.entries };
+      keys.forEach((key) => delete entries[key]);
+      const hasEntries = Object.keys(entries).length > 0;
+      return {
+        sessionId: hasEntries ? current.sessionId : null,
+        baselineSnapshot: hasEntries
+          ? nextBaselineSnapshot ?? current.baselineSnapshot
+          : null,
+        entries,
+      };
+    });
+  }, [updatePendingContextUsage]);
+  const removePendingContextUsage = useCallback((key: string) => {
+    resolvePendingContextUsage([key], sessionId || '');
+  }, [resolvePendingContextUsage, sessionId]);
+  const clearPendingContextUsage = useCallback(() => {
+    pendingContextSnapshotKeysRef.current = null;
+    updatePendingContextUsage(() => ({ sessionId: null, baselineSnapshot: null, entries: {} }));
+  }, [updatePendingContextUsage]);
+  const refreshContextUsageAfterTurn = useCallback((options?: Parameters<typeof refreshContextUsage>[0]) => {
+    if (!sessionId) return;
+    const pendingAtStart = pendingContextUsageRef.current;
+    const pendingKeys = pendingAtStart.sessionId === sessionId
+      ? Object.keys(pendingAtStart.entries)
+      : [];
+    const capturedPending = pendingKeys.length > 0
+      ? { sessionId, keys: pendingKeys }
+      : null;
+    if (capturedPending) pendingContextSnapshotKeysRef.current = capturedPending;
+    const request = refreshContextUsage({ ...options, force: true });
+    if (request) {
+      void request.then((snapshot) => {
+        if (!snapshot || !capturedPending) return;
+        resolvePendingContextUsage(
+          capturedPending.keys,
+          capturedPending.sessionId,
+          snapshot,
+        );
+        if (pendingContextSnapshotKeysRef.current === capturedPending) {
+          pendingContextSnapshotKeysRef.current = null;
+        }
+      });
+    }
+  }, [refreshContextUsage, resolvePendingContextUsage, sessionId]);
   const isCompactingRef = useRef(false);
   const prevStreamingRef = useRef(false);
   // Tracks "sessionId::message" key to prevent double-send in React StrictMode
@@ -1910,6 +2175,11 @@ export default function SessionChat({
   } =
     useSessionMessages(sessionId || undefined);
 
+  useEffect(() => {
+    setSubmittedModelPromptSessionId(null);
+    clearPendingContextUsage();
+  }, [sessionId, clearPendingContextUsage]);
+
   const seededOptimisticMessageIdRef = useRef('');
   useEffect(() => {
     if (
@@ -1919,10 +2189,17 @@ export default function SessionChat({
     ) return;
 
     seededOptimisticMessageIdRef.current = initialOptimisticMessage.id;
+    setSubmittedModelPromptSessionId(sessionId || null);
+    beginPendingContextUsage(
+      initialOptimisticMessage.id,
+      { conversation: estimateMessageTokens(initialOptimisticMessage) },
+      null,
+    );
     addMessage(initialOptimisticMessage);
     onInitialOptimisticMessageConsumed?.(initialOptimisticMessage.id);
   }, [
     addMessage,
+    beginPendingContextUsage,
     initialOptimisticMessage,
     onInitialOptimisticMessageConsumed,
     sessionId,
@@ -1949,15 +2226,94 @@ export default function SessionChat({
     onFocusMessageConsumed?.();
   }, [focusMessageId, loading, messages.length, onFocusMessageConsumed]);
 
-  const contextUsageMessages = contextUsageRefreshing && !contextUsageSnapshot ? [] : messages;
+  const sessionMessagesForContextUsage = useMemo(
+    () => messages.filter((message) => !message.sessionID || message.sessionID === sessionId),
+    [messages, sessionId],
+  );
+  const hasUserMessage = useMemo(
+    () => sessionMessagesForContextUsage.some((message) => message.role === 'user'),
+    [sessionMessagesForContextUsage],
+  );
+  const hasPersistedModelInvocation = useMemo(
+    () => sessionMessagesForContextUsage.some(isModelInvocationMessage),
+    [sessionMessagesForContextUsage],
+  );
+  const pendingContextSnapshotTokenDeltas = useMemo(
+    () => Object.values(pendingContextUsage.entries).reduce<ContextUsageTokenDeltas>(
+      (totals, entry) => {
+        Object.entries(entry.snapshotTokenDeltas).forEach(([key, tokenDelta]) => {
+          addContextTokenDelta(
+            totals,
+            key as ContextUsageBreakdownSegment['key'],
+            tokenDelta || 0,
+          );
+        });
+        return totals;
+      },
+      {},
+    ),
+    [pendingContextUsage.entries],
+  );
+  const pendingContextLocalTokenDeltas = useMemo(
+    () => Object.values(pendingContextUsage.entries).reduce<ContextUsageTokenDeltas>(
+      (totals, entry) => {
+        Object.entries(entry.localTokenDeltas).forEach(([key, tokenDelta]) => {
+          addContextTokenDelta(
+            totals,
+            key as ContextUsageBreakdownSegment['key'],
+            tokenDelta || 0,
+          );
+        });
+        return totals;
+      },
+      {},
+    ),
+    [pendingContextUsage.entries],
+  );
+  const hasPendingContextUsage = pendingContextUsage.sessionId === sessionId
+    && Object.keys(pendingContextUsage.entries).length > 0;
+  const hasModelInvocation = submittedModelPromptSessionId === sessionId
+    || hasPersistedModelInvocation
+    || hasPendingContextUsage;
+  const canReconcilePendingWithLiveSnapshot = hasPendingContextUsage
+    && !pendingContextUsage.baselineSnapshot
+    && Boolean(activeContextUsageSnapshot);
+  const contextUsageSnapshotForBreakdown = hasPendingContextUsage
+    ? canReconcilePendingWithLiveSnapshot
+      ? activeContextUsageSnapshot
+      : pendingContextUsage.baselineSnapshot
+    : activeContextUsageSnapshot;
+  const pendingTokenDeltasForBreakdown = canReconcilePendingWithLiveSnapshot
+    ? pendingContextLocalTokenDeltas
+    : hasPendingContextUsage
+      ? pendingContextUsage.baselineSnapshot
+        ? pendingContextSnapshotTokenDeltas
+        : pendingContextLocalTokenDeltas
+      : {};
+  const contextUsageMessages = !hasModelInvocation
+    ? []
+    : contextUsageRefreshing && !contextUsageSnapshotForBreakdown && !hasPendingContextUsage
+      ? []
+      : sessionMessagesForContextUsage;
   const contextUsageBreakdown = useMemo(
-    () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshot),
-    [contextUsageMessages, input, contextUsageSnapshot],
+    () => buildContextUsageBreakdown(contextUsageMessages, input, contextUsageSnapshotForBreakdown, {
+      includeSnapshotUsage: hasModelInvocation,
+      pendingTokenDeltas: pendingTokenDeltasForBreakdown,
+      useLocalMessageUsage: canReconcilePendingWithLiveSnapshot,
+    }),
+    [
+      contextUsageMessages,
+      contextUsageSnapshotForBreakdown,
+      hasModelInvocation,
+      input,
+      pendingTokenDeltasForBreakdown,
+      canReconcilePendingWithLiveSnapshot,
+    ],
   );
   const estimatedContextTokens = contextUsageBreakdown.usedTokens;
-  const resolvedContextWindowTokens = contextUsageSnapshot?.contextWindow && contextUsageSnapshot.contextWindow > 0
-    ? contextUsageSnapshot.contextWindow
-    : contextUsageWindowTokens > 0
+  const resolvedContextWindowTokens = activeContextUsageSnapshot?.contextWindow && activeContextUsageSnapshot.contextWindow > 0
+    ? activeContextUsageSnapshot.contextWindow
+    : activeContextUsageSnapshot && contextUsageWindowTokens > 0
       ? contextUsageWindowTokens
     : (contextWindowTokens || 0);
   const contextUsagePercent = resolvedContextWindowTokens > 0
@@ -1977,7 +2333,50 @@ export default function SessionChat({
   const pendingQuestionsRef = useRef(pendingQuestions);
   useEffect(() => { pendingQuestionsRef.current = pendingQuestions; }, [pendingQuestions]);
 
-  const hasUserMessage = useMemo(() => messages.some((m) => m.role === 'user'), [messages]);
+  const addPendingPermission = useCallback((request: PendingPermission) => {
+    setPendingPermissions((previous) => (
+      previous.some((item) => item.id === request.id)
+        ? previous
+        : [...previous, request]
+    ));
+  }, []);
+
+  const fetchPendingPermissions = useCallback(async () => {
+    if (!sessionId) {
+      setPendingPermissions([]);
+      return;
+    }
+    const targetSessionId = sessionId;
+    const requests = await permissionApi.list();
+    if (activePermissionSessionRef.current !== targetSessionId) return;
+    setPendingPermissions(requests.filter((item) => item.sessionID === targetSessionId));
+  }, [sessionId]);
+
+  const handlePermissionReply = useCallback(async (decision: PermissionDecision) => {
+    const request = pendingPermissions[0];
+    if (!request || permissionSubmitting) return;
+
+    setPermissionSubmitting(true);
+    setPermissionError(null);
+    try {
+      if (decision === 'trust_tool_network') {
+        await permissionApi.reply(request.id, { allow: true, response: 'trust_tool_network' });
+      } else if (decision === 'trust_network_target') {
+        await permissionApi.reply(request.id, { allow: true, response: 'trust_network_target' });
+      } else {
+        await permissionApi.reply(request.id, {
+          allow: decision !== 'deny',
+          always: decision === 'always',
+        });
+      }
+      setPendingPermissions((previous) => previous.filter((item) => item.id !== request.id));
+    } catch (error: unknown) {
+      const message = error instanceof Error ? error.message : String(error);
+      setPermissionError(message || '提交确认失败，请重试。');
+    } finally {
+      setPermissionSubmitting(false);
+    }
+  }, [pendingPermissions, permissionSubmitting]);
 
   const sseEnabled = Boolean(sessionId) && (live || isStreaming || !hideInput);
 
@@ -2012,6 +2411,39 @@ export default function SessionChat({
       // stream can be very noisy when multiple sessions run in parallel.
       if (shouldForwardSSEEventToParent(event, sessionId)) onSSEEvent?.(event);
 
+      const properties = event.properties;
+      if (
+        event.type === 'permission.request'
+        && properties
+        && properties.sessionID === sessionId
+      ) {
+        const requestID = typeof properties.requestID === 'string' ? properties.requestID : '';
+        if (requestID) {
+          addPendingPermission({
+            id: requestID,
+            sessionID: sessionId ?? '',
+            messageID: typeof properties.messageID === 'string' ? properties.messageID : '',
+            toolID: typeof properties.tool?.name === 'string'
+              ? properties.tool.name
+              : typeof properties.permission === 'string'
+                ? properties.permission
+                : '',
+            permission: typeof properties.permission === 'string' ? properties.permission : '',
+            patterns: Array.isArray(properties.patterns)
+              ? properties.patterns.filter((pattern): pattern is string => typeof pattern === 'string')
+              : [],
+            always: Array.isArray(properties.always)
+              ? properties.always.filter((pattern): pattern is string => typeof pattern === 'string')
+              : [],
+            metadata: properties.metadata && typeof properties.metadata === 'object'
+              ? properties.metadata as Record<string, unknown>
+              : {},
+            time: { created: Date.now() },
+          });
+          setPermissionError(null);
+        }
+      }
+
       const action = resolveSessionChatSSEAction(event, sessionId);
 
       switch (action.kind) {
@@ -2027,6 +2459,8 @@ export default function SessionChat({
           setIsStreaming(false);
           setGoalBanner(null);
           setDismissedGoalKey('');
+          setSubmittedModelPromptSessionId(null);
+          clearPendingContextUsage();
           clearMessages();
           void refreshContextUsage({ clear: true });
           return;
@@ -2062,7 +2496,7 @@ export default function SessionChat({
             setCompactingMessage('');
             setCompactionStages([]);
             refetch();
-            void refreshContextUsage({ skipIfFreshMs: 500 });
+            refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
           }
           return;
         case 'message-updated': {
@@ -2079,7 +2513,7 @@ export default function SessionChat({
             setIsStreaming(false);
             setSending(false);
             if (info.finish || info.time?.completed) {
-              void refreshContextUsage();
+              refreshContextUsageAfterTurn();
             }
           } else if (info.finish || info.time?.completed) {
             const shouldRefetch = shouldRefetchFinishedMessage({
@@ -2095,7 +2529,7 @@ export default function SessionChat({
                 setIsStreaming(false);
               }
             }
-            void refreshContextUsage();
+            refreshContextUsageAfterTurn();
             abortingRef.current = false;
             abortedMessageIdRef.current = null;
           } else if (
@@ -2115,6 +2549,8 @@ export default function SessionChat({
           if (abortedMessageIdRef.current === action.messageID) {
             abortedMessageIdRef.current = null;
           }
+          removePendingContextUsage(action.messageID);
+          removePendingContextUsage(`edit:${action.messageID}`);
           removeMessage(action.messageID);
           return;
         }
@@ -2175,15 +2611,25 @@ export default function SessionChat({
         case 'context-compacted':
           void refreshContextUsage({ skipIfFreshMs: 500 });
           return;
-        case 'context-usage-updated':
+        case 'context-usage-updated': {
+          const capturedPending = pendingContextSnapshotKeysRef.current;
+          if (capturedPending?.sessionId === action.snapshot.sessionID) {
+            resolvePendingContextUsage(
+              capturedPending.keys,
+              capturedPending.sessionId,
+              action.snapshot,
+            );
+            pendingContextSnapshotKeysRef.current = null;
+          }
           applyContextUsagePushSnapshot(action.snapshot);
           return;
+        }
         case 'session-error':
           setIsStreaming(false);
           setIsCompacting(false);
           setCompactionStages([]);
           stopContextUsageRefreshing();
-          void refreshContextUsage({ skipIfFreshMs: 500 });
+          refreshContextUsageAfterTurn({ skipIfFreshMs: 500 });
           abortingRef.current = false;
           sessionBusyRef.current = false;
           activeToolPartIdsRef.current.clear();
@@ -2199,11 +2645,16 @@ export default function SessionChat({
       clearMessages,
       refetch,
       refreshContextUsage,
+      refreshContextUsageAfterTurn,
       applyContextUsagePushSnapshot,
       stopContextUsageRefreshing,
+      clearPendingContextUsage,
+      resolvePendingContextUsage,
+      removePendingContextUsage,
       handleQuestionAsked,
       removeByRequestId,
       applyPromptQueueItems,
+      addPendingPermission,
       onSSEEvent,
       onError,
       scrollToBottom,
@@ -2290,8 +2741,11 @@ export default function SessionChat({
       if (!sessionId) return;
       void reconcileSessionStatusAfterReconnect();
       refetch();
-      refreshContextUsage();
+      void refreshContextUsage();
       fetchPromptQueue();
+      fetchPendingPermissions().catch((err) => {
+        console.warn('[SessionChat] Failed to recover pending permissions after reconnect:', err);
+      });
       fetchPendingQuestions(sessionId).catch((err) => {
         console.warn('[SessionChat] Failed to recover pending questions after reconnect:', err);
       });
@@ -2362,6 +2816,8 @@ export default function SessionChat({
     statusCheckedRef.current = null;
     isAtBottomRef.current = true;
     clearPendingQuestions();
+    setPendingPermissions([]);
+    setPermissionError(null);
     // Swap the draft when the session changes — needed for callers that
     // don't force a remount (Session/index.tsx does, but other consumers
     // such as WorkflowDetail/ChatTab may swap sessionId without a remount).
@@ -2382,6 +2838,12 @@ export default function SessionChat({
   useEffect(() => {
     fetchPromptQueue();
   }, [fetchPromptQueue]);
+
+  useEffect(() => {
+    fetchPendingPermissions().catch((err) => {
+      console.warn('[SessionChat] Failed to fetch pending permissions:', err);
+    });
+  }, [fetchPendingPermissions]);
 
   // Persist the draft on every keystroke. localStorage writes are synchronous
   // and cheap, so debouncing isn't worth the added latency on send (which
@@ -2776,9 +3238,7 @@ export default function SessionChat({
     options?: PromptDisplayOptions,
   ) => {
     if (!sessionId) return;
-    await ensureAutoModelSession();
     const effectiveAgent = agentOverride || agentName;
-    const visibleText = options?.displayText || text;
     // Clear abort state immediately so SSE events for the new stream are not suppressed
     abortingRef.current = false;
     abortedMessageIdRef.current = null;
@@ -2791,21 +3251,33 @@ export default function SessionChat({
 
     const messageId = createMessageId();
     const tempParts: MessagePart[] = [];
-    if (visibleText) tempParts.push({ id: `temp-${messageId}-text`, type: 'text', text: visibleText });
+    const optimisticTextPart: MessagePart = {
+      id: `temp-${messageId}-text`,
+      type: 'text',
+      text,
+      ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
+    };
+    if (text || options?.displayText) tempParts.push(optimisticTextPart);
     imageParts.forEach((img, i) => {
       tempParts.push({ id: `temp-${messageId}-img-${i}`, type: 'file', url: img.url, mime: img.mime, filename: img.filename });
     });
 
-    addMessage({
+    const optimisticMessage = {
       id: messageId,
       sessionID: sessionId,
       role: 'user',
-      parts: tempParts.length > 0 ? tempParts : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+      parts: tempParts.length > 0 ? tempParts : [optimisticTextPart],
       timestamp: Date.now(),
       agent: effectiveAgent,
-    } as Message);
+    } as Message;
+    setSubmittedModelPromptSessionId(sessionId);
+    beginPendingContextUsage(messageId, {
+      conversation: estimateMessageTokens(optimisticMessage),
+    });
+    addMessage(optimisticMessage);
 
     try {
+      await ensureAutoModelSession();
       const payload: Record<string, unknown> = {
         parts: buildPromptParts(text, imageParts),
         messageID: messageId,
@@ -2826,6 +3298,12 @@ export default function SessionChat({
     } catch (err: unknown) {
       setIsStreaming(false);
       removeMessage(messageId);
+      removePendingContextUsage(messageId);
+      if (!hasPersistedModelInvocation) {
+        setSubmittedModelPromptSessionId((currentSessionId) => (
+          currentSessionId === sessionId ? null : currentSessionId
+        ));
+      }
       const axiosErr = err as any;
       if (axiosErr?.response?.status === 404) {
         onError?.(`Session not found. Please start a new session.`);
@@ -3410,13 +3888,50 @@ export default function SessionChat({
     suppressStreamingUntilIdleRef.current = false;
     isAtBottomRef.current = true;
     setActionMessageId(editingMessageId);
+    const sourceMessage = messagesRef.current.find((message) => message.id === editingMessageId);
+    const sourceMessageIndex = messagesRef.current.findIndex((message) => message.id === editingMessageId);
+    const sourcePart = sourceMessage?.parts.find((part) => part.id === editingPartId);
+    const originalText = sourcePart?.text || '';
+    const pendingContextKey = `edit:${editingMessageId}`;
+    const editedMessageTokenDelta = sourceMessage
+      ? estimateMessageTokens({
+          ...sourceMessage,
+          parts: sourceMessage.parts.map((part) => (
+            part.id === editingPartId ? { ...part, text } : part
+          )),
+        }) - estimateMessageTokens(sourceMessage)
+      : countTokensLikeCompaction(text) - countTokensLikeCompaction(originalText);
+    const snapshotTokenDeltas: ContextUsageTokenDeltas = { conversation: editedMessageTokenDelta };
+    const localTokenDeltas: ContextUsageTokenDeltas = {};
+    if (sourceMessageIndex >= 0) {
+      estimateActiveMessageBreakdown(
+        messagesRef.current.slice(sourceMessageIndex + 1),
+      ).segments.forEach((segment) => {
+        addContextTokenDelta(snapshotTokenDeltas, segment.key, -segment.tokens);
+        addContextTokenDelta(localTokenDeltas, segment.key, -segment.tokens);
+      });
+    }
+    setSubmittedModelPromptSessionId(sessionId);
+    beginPendingContextUsage(
+      pendingContextKey,
+      snapshotTokenDeltas,
+      activeContextUsageSnapshot,
+      localTokenDeltas,
+    );
+    replaceMessageText(editingMessageId, editingPartId, text);
     try {
       await sessionApi.resendMessage(sessionId, editingMessageId, editingPartId, text);
-      replaceMessageText(editingMessageId, editingPartId, text);
       truncateAfterMessage(editingMessageId);
       setIsStreaming(true);
       resetEditingState();
     } catch (err) {
+      replaceMessageText(editingMessageId, editingPartId, originalText);
+      removePendingContextUsage(pendingContextKey);
+      if (!hasPersistedModelInvocation) {
+        setSubmittedModelPromptSessionId((currentSessionId) => (
+          currentSessionId === sessionId ? null : currentSessionId
+        ));
+      }
       reportActionError(t('chat.errors.resendFailed'), err);
     } finally {
       setActionMessageId(null);
@@ -3426,7 +3941,11 @@ export default function SessionChat({
     editingPartId,
     editingRole,
     editingText,
+    activeContextUsageSnapshot,
+    beginPendingContextUsage,
+    hasPersistedModelInvocation,
     replaceMessageText,
+    removePendingContextUsage,
     reportActionError,
     resetEditingState,
     sessionId,
@@ -3727,6 +4246,19 @@ export default function SessionChat({
       )}
 
       {/* Follow-up input */}
+      {hideInput && (pendingPermissions[0] || permissionError) && (
+        <div className="flex-shrink-0 border-t border-amber-200/60 bg-white px-3 py-2 dark:border-amber-500/35 dark:bg-zinc-950">
+          <div className={!compact ? (fullWidth ? 'w-full px-5' : 'w-[min(76%,64rem)] mx-auto px-6') : ''}>
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
+            />
+          </div>
+        </div>
+      )}
+
       {!hideInput && (
         <div
           className={`flex-shrink-0 ${
@@ -3787,6 +4319,12 @@ export default function SessionChat({
               onEditSave={handleQueuedEditSave}
               onRemove={handleQueuedRemove}
               onRunNow={handleQueuedRunNow}
+            />
+            <PermissionApprovalDialog
+              request={pendingPermissions[0] ?? null}
+              submitting={permissionSubmitting}
+              error={permissionError}
+              onReply={handlePermissionReply}
             />
             <input
               ref={fileInputRef}
@@ -5853,7 +6391,7 @@ export function ChatToolPart({ part, pendingQuestion, onAnswer, onReject, proces
         </details>
       )}
 
-      {status === 'error' && state.error && (
+      {!isBashTool && status === 'error' && state.error && (
         <div className="rounded-md border border-red-100 bg-red-50 px-2.5 py-1.5 text-[11px] text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-300">
           {state.error}
         </div>

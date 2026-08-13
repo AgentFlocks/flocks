@@ -8,7 +8,7 @@ from flocks.tool.channel.channel_message import (
     _normalize_channel_type,
     channel_message,
 )
-from flocks.tool.registry import ToolContext, ToolRegistry
+from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 
 
 def test_channel_message_normalizes_weixin_aliases() -> None:
@@ -61,6 +61,25 @@ def test_channel_message_schema_includes_builtin_channels() -> None:
         "邮件",
     ):
         assert value in channel_enum
+
+
+@pytest.mark.asyncio
+async def test_channel_message_uses_runtime_server_port(monkeypatch) -> None:
+    monkeypatch.setenv("_FLOCKS_SERVER_PORT", "5173")
+    http_send = AsyncMock(return_value=ToolResult(success=True, output="ok"))
+
+    with patch(
+        "flocks.tool.channel.channel_message._http_session_send",
+        http_send,
+    ):
+        result = await channel_message(
+            ToolContext(session_id="ses_current", message_id="msg_1"),
+            session_id="ses_target",
+            message="hello",
+        )
+
+    assert result.success is True
+    assert http_send.await_args.args[0] == 5173
 
 
 @pytest.mark.asyncio

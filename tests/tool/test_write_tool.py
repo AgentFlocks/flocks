@@ -15,6 +15,7 @@ from unittest.mock import patch
 import datetime as dt
 
 from flocks.tool.registry import ToolRegistry, ToolContext
+from flocks.tool.path_utils import resolve_tool_path
 from flocks.workspace.manager import WorkspaceManager
 
 
@@ -64,6 +65,49 @@ async def test_write_to_workspace_outputs_no_modification(tmp_path):
     assert result.success, f"write failed: {result.error}"
     assert target.exists()
     assert target.read_text() == 'print("hi")'
+
+
+@pytest.mark.asyncio
+async def test_relative_path_uses_session_workspace_not_global_instance(tmp_path):
+    """Filesystem paths must resolve relative inputs from the session workspace."""
+    session_workspace = tmp_path / "session-workspace"
+    global_workspace = tmp_path / "global-workspace"
+    session_workspace.mkdir()
+    global_workspace.mkdir()
+    ctx = _make_ctx(extra={"workspace_dir": str(session_workspace)})
+
+    with patch("flocks.tool.path_utils.Instance.get_directory", return_value=str(global_workspace)):
+        resolution = await resolve_tool_path(ctx, "session.txt")
+
+    assert resolution.resolved_path == str(session_workspace / "session.txt")
+
+
+@pytest.mark.asyncio
+async def test_verified_path_rejects_a_replaced_symlink(tmp_path):
+    approved_target = tmp_path / "approved.txt"
+    replacement_target = tmp_path / "replacement.txt"
+    approved_target.write_text("approved")
+    replacement_target.write_text("replacement")
+    link = tmp_path / "link.txt"
+    link.symlink_to(approved_target)
+    ctx = _make_ctx(
+        extra={
+            "workspace_dir": str(tmp_path),
+            "filesystem_path_binding": {
+                "target_path": "link.txt",
+                "target_canonical": {
+                    "realpath": str(approved_target),
+                    "parent_realpath": str(tmp_path),
+                    "final_target": str(approved_target),
+                },
+            },
+        },
+    )
+    link.unlink()
+    link.symlink_to(replacement_target)
+
+    with pytest.raises(ValueError, match="changed after policy approval"):
+        await resolve_tool_path(ctx, "link.txt")
 
 
 @pytest.mark.asyncio

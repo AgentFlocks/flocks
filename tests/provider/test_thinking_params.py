@@ -41,7 +41,7 @@ These tests verify four properties of the new path:
 
 from __future__ import annotations
 
-from typing import Any, Dict, Iterator, Tuple
+from typing import Any, Dict, Iterator, Optional, Tuple
 
 import pytest
 
@@ -49,7 +49,10 @@ from flocks.provider import model_catalog
 from flocks.provider import options as provider_options
 from flocks.provider.interleaved import is_kimi_k27_code_model, is_kimi_k3_model
 
-DEEPSEEK_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
+DEEPSEEK_THINKING_EXTRA_BODY = {
+    "thinking": {"type": "enabled"},
+    "reasoning_effort": "high",
+}
 GLM_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled", "clear_thinking": False}}
 KIMI_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
 MIMO_THINKING_EXTRA_BODY = {"thinking": {"type": "enabled"}}
@@ -100,7 +103,7 @@ def _expected_generic_chat_extra_body(
     if "mimo" in model_lower:
         return MIMO_THINKING_EXTRA_BODY
     if is_kimi_k3_model(model_id):
-        return {"reasoning_effort": "max"}
+        return {"reasoning_effort": "high"}
     if is_kimi_k27_code_model(model_id):
         return KIMI_THINKING_EXTRA_BODY
     if "kimi" in model_lower:
@@ -444,7 +447,7 @@ class TestDispatchShape:
             ("kimi-k2.6-uncatalogued", KIMI_THINKING_EXTRA_BODY),
             ("kimi-k2.7-code", KIMI_THINKING_EXTRA_BODY),
             ("kimi-k2.7-code-highspeed", KIMI_THINKING_EXTRA_BODY),
-            ("kimi-k3", {"reasoning_effort": "max"}),
+            ("kimi-k3", None),
             ("mimo-v2.5-pro-uncatalogued", MIMO_THINKING_EXTRA_BODY),
             ("minimax-m4-uncatalogued", {"reasoning_split": True}),
             ("step-3.5-flash-uncatalogued", {"enable_thinking": True}),
@@ -453,11 +456,12 @@ class TestDispatchShape:
     def test_series_token_fallback_emits_expected_extra_body(
         self,
         model_id: str,
-        expected_extra_body: Dict[str, Any],
+        expected_extra_body: Optional[Dict[str, Any]],
     ) -> None:
         """Models matching a known series token in
-        ``infer_interleaved_capability`` get the expected extra_body on the wire
-        even when the catalog has no explicit declaration for them.
+        ``infer_interleaved_capability`` get the safe extra_body on the wire even
+        when the catalog has no explicit declaration for them. Effort-only models
+        omit the effort when no model capability map is available.
 
         This is the regression net for the design choice that the dispatch
         is *not* provider-keyed: a user-configured openai-compatible

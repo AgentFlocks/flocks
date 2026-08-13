@@ -63,6 +63,7 @@ class TestOpenAICompatibleProviderConfiguration:
             api_key="test-api-key",
             base_url="https://gateway.internal/v1",
             http_client=http_client,
+            max_retries=0,
         )
 
 

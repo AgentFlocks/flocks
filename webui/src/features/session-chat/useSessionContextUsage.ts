@@ -4,6 +4,7 @@ import { sessionApi, type ContextUsageSnapshot } from '@/api/session';
 
 export interface RefreshContextUsageOptions {
   clear?: boolean;
+  force?: boolean;
   skipIfFreshMs?: number;
 }
 
@@ -11,9 +12,14 @@ export function useSessionContextUsage(sessionId?: string | null) {
   const [snapshot, setSnapshot] = useState<ContextUsageSnapshot | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [contextWindowTokens, setContextWindowTokens] = useState(0);
-  const requestRef = useRef<{ sessionId: string; promise: Promise<void> } | null>(null);
+  const requestRef = useRef<{
+    sessionId: string;
+    promise: Promise<ContextUsageSnapshot | null>;
+  } | null>(null);
   const requestSeqRef = useRef(0);
   const lastPushAtRef = useRef(0);
+  const activeSessionIdRef = useRef(sessionId);
+  activeSessionIdRef.current = sessionId;
 
   const reset = useCallback((nextRefreshing = false) => {
     setSnapshot(null);
@@ -37,6 +43,9 @@ export function useSessionContextUsage(sessionId?: string | null) {
       Date.now() - lastPushAtRef.current < options.skipIfFreshMs
     ) {
       return;
+    } else if (options?.force) {
+      requestSeqRef.current += 1;
+      requestRef.current = null;
     }
 
     const existingRequest = requestRef.current;
@@ -47,16 +56,28 @@ export function useSessionContextUsage(sessionId?: string | null) {
     const requestSessionId = sessionId;
     const requestSeq = requestSeqRef.current;
     const request = sessionApi.getContextUsage(requestSessionId).then((nextSnapshot) => {
-      if (requestSeq === requestSeqRef.current && nextSnapshot.sessionID === sessionId) {
+      if (
+        requestSeq === requestSeqRef.current
+        && requestSessionId === activeSessionIdRef.current
+        && nextSnapshot.sessionID === activeSessionIdRef.current
+      ) {
         setSnapshot(nextSnapshot);
         if (nextSnapshot.contextWindow && nextSnapshot.contextWindow > 0) {
           setContextWindowTokens(nextSnapshot.contextWindow);
         }
         setRefreshing(false);
+        return nextSnapshot;
       }
+      return null;
     }).catch((err) => {
-      setRefreshing(false);
+      if (
+        requestSeq === requestSeqRef.current
+        && requestSessionId === activeSessionIdRef.current
+      ) {
+        setRefreshing(false);
+      }
       console.warn('[SessionChat] Failed to fetch context usage:', err);
+      return null;
     }).finally(() => {
       if (requestRef.current?.promise === request) {
         requestRef.current = null;

@@ -31,6 +31,141 @@ log = Log.create(service="provider.openai_base")
 # timeout) let small control-plane requests fail fast while multimodal
 # (image) uploads get the headroom they need on slow links.
 DEFAULT_HTTP_TIMEOUT = httpx.Timeout(connect=30.0, read=180.0, write=1800.0, pool=60.0)
+DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024 * 1024
+
+
+class ResponseBodySafetyError(httpx.TransportError):
+    """Raised when an LLM response cannot be safely consumed."""
+
+
+class ResponseBodyTooLargeError(ResponseBodySafetyError):
+    """Raised before an OpenAI-style response can be fully buffered."""
+
+    def __init__(self, max_bytes: int, received_bytes: int) -> None:
+        self.max_bytes = max_bytes
+        self.received_bytes = received_bytes
+        super().__init__(
+            "LLM response body exceeded the configured limit: "
+            f"{received_bytes} bytes received (limit {max_bytes} bytes)"
+        )
+
+
+class ResponseBodyUnsupportedEncodingError(ResponseBodySafetyError):
+    """Raised before compressed response content can bypass the byte cap."""
+
+    def __init__(self, content_encoding: str) -> None:
+        self.content_encoding = content_encoding
+        super().__init__(
+            "LLM response uses unsupported content encoding "
+            f"{content_encoding!r}; expected identity"
+        )
+
+
+class LLMResponseSafetyError(RuntimeError):
+    """Provider-facing error for a response rejected by the memory guard."""
+
+
+class LLMResponseTooLargeError(LLMResponseSafetyError):
+    """Provider-facing error that preserves an HTTP response-size failure."""
+
+
+class LLMResponseUnsupportedEncodingError(LLMResponseSafetyError):
+    """Provider-facing error for a compressed response body."""
+
+
+class _ResponseSizeLimitedStream(httpx.AsyncByteStream):
+    def __init__(self, stream: httpx.AsyncByteStream, max_bytes: int) -> None:
+        self._stream = stream
+        self._max_bytes = max_bytes
+        self._received_bytes = 0
+
+    async def __aiter__(self) -> AsyncIterator[bytes]:
+        async for chunk in self._stream:
+            self._received_bytes += len(chunk)
+            if self._received_bytes > self._max_bytes:
+                await self.aclose()
+                raise ResponseBodyTooLargeError(
+                    self._max_bytes,
+                    self._received_bytes,
+                )
+            yield chunk
+
+    async def aclose(self) -> None:
+        await self._stream.aclose()
+
+
+def resolve_max_response_bytes(custom_settings: Any = None) -> int:
+    """Resolve the hard byte cap before model responses are buffered."""
+    configured = None
+    if isinstance(custom_settings, dict):
+        configured = custom_settings.get("max_response_bytes")
+    if configured is None:
+        configured = os.getenv("FLOCKS_LLM_MAX_RESPONSE_BYTES")
+    try:
+        value = int(configured)
+    except (TypeError, ValueError):
+        return DEFAULT_MAX_RESPONSE_BYTES
+    return value if value > 0 else DEFAULT_MAX_RESPONSE_BYTES
+
+
+def response_size_limit_hook(max_bytes: int):
+    """Create an httpx response hook that rejects oversized bodies early."""
+    async def _limit(response: httpx.Response) -> None:
+        content_encoding = response.headers.get("content-encoding", "").strip().lower()
+        if content_encoding not in ("", "identity"):
+            await response.aclose()
+            raise ResponseBodyUnsupportedEncodingError(content_encoding)
+        content_length = response.headers.get("content-length")
+        try:
+            declared_bytes = int(content_length) if content_length is not None else 0
+        except ValueError:
+            declared_bytes = 0
+        if declared_bytes > max_bytes:
+            await response.aclose()
+            raise ResponseBodyTooLargeError(max_bytes, declared_bytes)
+        response.stream = _ResponseSizeLimitedStream(response.stream, max_bytes)
+
+    return _limit
+
+
+def create_openai_http_client(
+    *,
+    trust_env: bool,
+    verify: bool,
+    timeout: httpx.Timeout = DEFAULT_HTTP_TIMEOUT,
+    custom_settings: Any = None,
+) -> httpx.AsyncClient:
+    """Build the shared OpenAI-compatible client with an ingress size cap."""
+    max_response_bytes = resolve_max_response_bytes(custom_settings)
+    return httpx.AsyncClient(
+        trust_env=trust_env,
+        verify=verify,
+        timeout=timeout,
+        headers={"Accept-Encoding": "identity"},
+        event_hooks={"response": [response_size_limit_hook(max_response_bytes)]},
+    )
+
+
+def _response_body_safety_error(exc: BaseException) -> Optional[ResponseBodySafetyError]:
+    """Find a transport response-safety error after the OpenAI SDK wraps it."""
+    seen = set()
+    current: Optional[BaseException] = exc
+    while current is not None and id(current) not in seen:
+        if isinstance(current, ResponseBodySafetyError):
+            return current
+        seen.add(id(current))
+        next_exc = current.__cause__ or current.__context__
+        current = next_exc if isinstance(next_exc, BaseException) else None
+    return None
+
+
+def raise_if_response_body_unsafe(exc: BaseException) -> None:
+    """Expose a useful error instead of the SDK's generic connection error."""
+    safety_error = _response_body_safety_error(exc)
+    if isinstance(safety_error, ResponseBodyTooLargeError):
+        raise LLMResponseTooLargeError(str(safety_error)) from exc
+    if isinstance(safety_error, ResponseBodyUnsupportedEncodingError):
+        raise LLMResponseUnsupportedEncodingError(str(safety_error)) from exc
 
 
 # Canonical OpenAI-style content translation, shared by every provider that
@@ -454,6 +589,7 @@ async def create_chat_completion_with_fallbacks(
         try:
             return await create_call(**current_params)
         except Exception as exc:
+            raise_if_response_body_unsafe(exc)
             if (
                 not max_completion_tokens_retried
                 and max_tokens is not None
@@ -901,16 +1037,18 @@ class OpenAIBaseProvider(BaseProvider):
             if isinstance(custom_settings, dict) and "trust_env" in custom_settings:
                 trust_env = _coerce_bool(custom_settings.get("trust_env"), trust_env)
             timeout = DEFAULT_HTTP_TIMEOUT
-            http_client = httpx.AsyncClient(
+            http_client = create_openai_http_client(
                 trust_env=trust_env,
                 verify=verify_ssl,
                 timeout=timeout,
+                custom_settings=custom_settings,
             )
 
             self._client = AsyncOpenAI(
                 api_key=api_key,
                 base_url=base_url,
                 http_client=http_client,
+                max_retries=0,
             )
             log.info("openai_base.client.created", {
                 "provider_id": getattr(self._config, "id", None),

@@ -89,11 +89,11 @@ from flocks.workflow.triggers.compat import (
     syslog_trigger_to_legacy_config,
 )
 from flocks.config.config import Config
+from flocks.hooks.execution import current_execution_context
 from flocks.storage.storage import Storage
 from flocks.server.routes.event import publish_event
 from flocks.tool import ToolContext
 from flocks.utils.log import Log
-
 
 router = APIRouter()
 webhook_router = APIRouter()
@@ -402,6 +402,10 @@ async def _build_workflow_tool_context(
     agent: Optional[str] = None,
 ) -> ToolContext:
     """Build a real ToolContext for workflow execution."""
+    context_kwargs: Dict[str, Any] = {}
+    execution_context = current_execution_context()
+    if execution_context:
+        context_kwargs["execution_context"] = execution_context
     return await build_workflow_tool_context(
         workflow_id=workflow_id,
         action_name=action_name,
@@ -409,6 +413,7 @@ async def _build_workflow_tool_context(
         message_id=message_id,
         agent=agent,
         event_publish_callback=publish_event,
+        **context_kwargs,
     )
 
 

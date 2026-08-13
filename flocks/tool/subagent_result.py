@@ -46,6 +46,16 @@ async def format_sync_subagent_result(
             metadata=final_metadata,
         )
 
+    loop_metadata = getattr(loop_result, "metadata", None)
+    if isinstance(loop_metadata, dict) and loop_metadata.get("aborted") is True:
+        final_metadata["status"] = "interrupted"
+        return ToolResult(
+            success=False,
+            error=(f"Sub-agent execution was interrupted.\n\n{_task_metadata_block(session_id)}"),
+            title=description,
+            metadata=final_metadata,
+        )
+
     last_message = getattr(loop_result, "last_message", None)
     if not last_message:
         return ToolResult(

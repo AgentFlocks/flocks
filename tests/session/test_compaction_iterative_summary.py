@@ -25,10 +25,12 @@ from flocks.session.lifecycle.compaction import (
 )
 from flocks.session.lifecycle.compaction import compaction as compaction_module
 from flocks.session.lifecycle.compaction.summary import (
+    _llm_chat_with_timeout,
     build_iterative_prompt,
     summarize_chunked_iterative,
     summarize_single_pass,
 )
+from flocks.provider.provider import ChatMessage
 
 
 # ---------------------------------------------------------------------------
@@ -610,3 +612,36 @@ class TestSummarizeSinglePassWithPrevious:
         body = call.kwargs["messages"][0].content
         assert "<<<PREVIOUS_SUMMARY>>>" not in body
         assert "## Decisions" in body
+
+
+@pytest.mark.asyncio
+async def test_compaction_provider_call_blocks_when_llm_before_hook_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from flocks.hooks.pipeline import HookPipeline, HookStage
+
+    provider = MagicMock()
+    provider.chat = AsyncMock(side_effect=AssertionError("provider must not be called"))
+
+    monkeypatch.setattr(
+        HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(side_effect=lambda stage, _metadata=None: stage == HookStage.LLM_BEFORE),
+    )
+    monkeypatch.setattr(
+        HookPipeline,
+        "run_llm_before",
+        AsyncMock(side_effect=RuntimeError("hook boom")),
+    )
+
+    with pytest.raises(RuntimeError, match="request was not sent"):
+        await _llm_chat_with_timeout(
+            provider_client=provider,
+            model_id="test-model",
+            messages=[ChatMessage(role="user", content="email alice@example.com")],
+            max_tokens=100,
+            timeout=5,
+            session_id="ses_compaction_hook_fail",
+        )
+
+    provider.chat.assert_not_awaited()

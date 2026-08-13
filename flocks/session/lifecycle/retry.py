@@ -19,6 +19,7 @@ RETRY_INITIAL_DELAY = 2000  # 2 seconds in milliseconds
 RETRY_BACKOFF_FACTOR = 2
 RETRY_MAX_DELAY_NO_HEADERS = 30_000  # 30 seconds
 RETRY_MAX_DELAY = 2_147_483_647  # max 32-bit signed integer
+MAX_ERROR_RETRIES = 5
 CONNECTION_ERROR_DISPLAY_MESSAGE = (
     "Model is unavailable. Please check the provider connection and model configuration."
 )

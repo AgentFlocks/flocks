@@ -72,6 +72,31 @@ def test_email_channel_meta_and_validate_config() -> None:
     assert error and "authservId" in error
 
 
+def test_validate_config_requires_netease_smtp_ssl_port() -> None:
+    plugin = EmailChannel()
+
+    error = plugin.validate_config({
+        "address": "agent@163.com",
+        "password": "pw",
+        "imapHost": "imap.163.com",
+        "smtpHost": "smtp.163.com",
+        "smtpPort": 587,
+        "smtpSecurity": "ssl",
+        "allowAll": True,
+    })
+
+    assert error == "NetEase 163/126 SMTP requires smtpPort=465 and smtpSecurity=ssl"
+    assert plugin.validate_config({
+        "address": "agent@163.com",
+        "password": "pw",
+        "imapHost": "imap.163.com",
+        "smtpHost": "smtp.163.com",
+        "smtpPort": 465,
+        "smtpSecurity": "ssl",
+        "allowAll": True,
+    }) is None
+
+
 def test_email_channel_registered_as_builtin() -> None:
     from flocks.channel.registry import ChannelRegistry
 
@@ -92,7 +117,51 @@ def test_config_normalizes_allowed_senders() -> None:
     })
 
     assert cfg["address"] == "agent@example.com"
+    assert cfg["username"] == "agent@example.com"
     assert parse_allowed_senders(cfg) == {"user@example.com", "second@example.com"}
+
+
+def test_config_allows_distinct_login_username() -> None:
+    plugin = EmailChannel()
+    cfg = resolved_config({
+        "address": "Agent@Example.COM",
+        "username": r"EXAMPLE\AgentUser",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    assert cfg["address"] == "agent@example.com"
+    assert cfg["username"] == r"EXAMPLE\AgentUser"
+    assert plugin.validate_config(cfg) is None
+
+
+def test_config_supports_xoauth2_auth_mode_without_password() -> None:
+    plugin = EmailChannel()
+    cfg = resolved_config({
+        "address": "agent@example.com",
+        "username": "agent-login",
+        "authMode": "oauth2",
+        "access_token": "access-token",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    assert cfg["authMode"] == "xoauth2"
+    assert cfg["accessToken"] == "access-token"
+    assert plugin.validate_config(cfg) is None
+    assert (
+        plugin.validate_config({
+            "address": "agent@example.com",
+            "authMode": "xoauth2",
+            "imapHost": "imap.example.com",
+            "smtpHost": "smtp.example.com",
+            "allowAll": True,
+        })
+        == "Missing required config: accessToken"
+    )
 
 
 def test_email_parsing_helpers() -> None:
@@ -266,6 +335,7 @@ def test_send_email_threads_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     plugin = EmailChannel()
     plugin._resolved = resolved_config({
         "address": "agent@example.com",
+        "username": "agent-login",
         "password": "pw",
         "imapHost": "imap.example.com",
         "smtpHost": "smtp.example.com",
@@ -298,6 +368,8 @@ def test_send_email_threads_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     assert msg["Subject"] == "Re: Question"
     assert msg["In-Reply-To"] == "<orig@example.com>"
     assert msg["References"] == "<root@example.com>"
+    assert msg["From"] == "agent@example.com"
+    assert sent["login"] == ("agent-login", "pw")
 
 
 def test_send_email_prefers_requested_thread_context(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -366,11 +438,14 @@ def test_email_password_is_extracted_to_secret(monkeypatch: pytest.MonkeyPatch) 
             "enabled": True,
             "address": "agent@example.com",
             "password": "plain-password",
+            "accessToken": "plain-access-token",
         }
     })
 
     assert result["email"]["password"] == "{secret:channel_email_password}"
+    assert result["email"]["accessToken"] == "{secret:channel_email_accessToken}"
     assert fake.values["channel_email_password"] == "plain-password"
+    assert fake.values["channel_email_accessToken"] == "plain-access-token"
 
 
 @pytest.mark.asyncio
@@ -408,6 +483,7 @@ def test_fetch_new_messages_skips_malformed_imap_response(monkeypatch: pytest.Mo
     ])
 
     fake_imap = MagicMock()
+    fake_imap.select.return_value = ("OK", [b"2"])
     fake_imap.uid.side_effect = lambda command, *args: (
         ("OK", [b"1 2"]) if command == "search" else next(fetch_calls)
     )
@@ -422,6 +498,164 @@ def test_fetch_new_messages_skips_malformed_imap_response(monkeypatch: pytest.Mo
     assert len(messages) == 1
     _, inbound = messages[0]
     assert inbound.sender_id == "user@example.com"
+
+
+def test_fetch_new_messages_sends_imap_id_before_select(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "username": "agent-login",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    calls: list[str] = []
+
+    class FakeIMAP:
+        def login(self, username, password):
+            assert (username, password) == ("agent-login", "pw")
+            calls.append("login")
+            return "OK", [b"LOGIN completed"]
+
+        def xatom(self, name, *args):
+            calls.append(f"xatom:{name}")
+            assert args and '"name" "Flocks"' in args[0]
+            return "OK", [b"ID completed"]
+
+        def select(self, mailbox):
+            calls.append(f"select:{mailbox}")
+            return "OK", [b"0"]
+
+        def uid(self, command, *args):
+            calls.append(f"uid:{command}")
+            return "OK", [b""]
+
+        def logout(self):
+            calls.append("logout")
+
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: FakeIMAP())
+
+    assert plugin._fetch_new_messages() == []
+    assert calls[:4] == ["login", "xatom:ID", "select:INBOX", "uid:search"]
+
+
+def test_test_connections_uses_login_username(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "username": "agent-login",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+        "skipExistingOnStart": False,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.login.return_value = ("OK", [b"LOGIN completed"])
+    fake_imap.xatom.return_value = ("OK", [b"ID completed"])
+    fake_imap.select.return_value = ("OK", [b"0"])
+    fake_smtp = MagicMock()
+
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: fake_imap)
+    monkeypatch.setattr(plugin, "_connect_smtp", lambda: fake_smtp)
+
+    plugin._test_connections()
+
+    fake_imap.login.assert_called_once_with("agent-login", "pw")
+    fake_smtp.login.assert_called_once_with("agent-login", "pw")
+
+
+def test_xoauth2_authenticates_imap_and_smtp() -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "username": "agent-login",
+        "authMode": "xoauth2",
+        "accessToken": "access-token",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    calls: dict[str, object] = {}
+
+    class FakeIMAP:
+        def authenticate(self, mechanism, authobject):
+            calls["imap_mechanism"] = mechanism
+            calls["imap_response"] = authobject(b"")
+            return "OK", [b"authenticated"]
+
+    class FakeSMTP:
+        def auth(self, mechanism, authobject):
+            calls["smtp_mechanism"] = mechanism
+            calls["smtp_response"] = authobject()
+            return 235, b"authenticated"
+
+    plugin._authenticate_imap(FakeIMAP())
+    plugin._authenticate_smtp(FakeSMTP())
+
+    expected = "user=agent-login\x01auth=Bearer access-token\x01\x01"
+    assert calls["imap_mechanism"] == "XOAUTH2"
+    assert calls["imap_response"] == expected.encode("utf-8")
+    assert calls["smtp_mechanism"] == "XOAUTH2"
+    assert calls["smtp_response"] == expected
+
+
+def test_fetch_new_messages_reports_select_failure_without_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.login.return_value = ("OK", [b"LOGIN completed"])
+    fake_imap.xatom.return_value = ("OK", [b"ID completed"])
+    fake_imap.select.return_value = (
+        "NO",
+        [b"SELECT Unsafe Login. Please contact kefu@188.com for help"],
+    )
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: fake_imap)
+
+    with pytest.raises(RuntimeError, match="Unsafe Login"):
+        plugin._fetch_new_messages()
+
+    fake_imap.xatom.assert_called_once()
+    fake_imap.select.assert_called_once_with("INBOX")
+    fake_imap.uid.assert_not_called()
+
+
+def test_test_connections_labels_smtp_failures(monkeypatch: pytest.MonkeyPatch) -> None:
+    plugin = EmailChannel()
+    plugin._resolved = resolved_config({
+        "address": "agent@example.com",
+        "password": "pw",
+        "imapHost": "imap.example.com",
+        "smtpHost": "smtp.example.com",
+        "allowAll": True,
+        "skipExistingOnStart": False,
+    })
+
+    fake_imap = MagicMock()
+    fake_imap.login.return_value = ("OK", [b"LOGIN completed"])
+    fake_imap.xatom.return_value = ("OK", [b"ID completed"])
+    fake_imap.select.return_value = ("OK", [b"0"])
+
+    monkeypatch.setattr(plugin, "_connect_imap", lambda: fake_imap)
+    monkeypatch.setattr(
+        plugin,
+        "_connect_smtp",
+        lambda: (_ for _ in ()).throw(ConnectionError("Connection unexpectedly closed")),
+    )
+
+    with pytest.raises(RuntimeError, match="SMTP connection test failed"):
+        plugin._test_connections()
 
 
 def test_connect_smtp_starttls_fails_when_not_supported(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -554,6 +788,7 @@ def test_fetch_new_messages_marks_seen_for_rejected_sender(monkeypatch: pytest.M
     })
 
     fake_imap = MagicMock()
+    fake_imap.select.return_value = ("OK", [b"1"])
     monkeypatch.setattr(
         "flocks.channel.builtin.email.channel.imaplib.IMAP4_SSL",
         lambda *args, **kwargs: fake_imap,
@@ -579,6 +814,7 @@ def test_fetch_new_messages_does_not_mark_seen_when_parse_fails(monkeypatch: pyt
     })
 
     fake_imap = MagicMock()
+    fake_imap.select.return_value = ("OK", [b"1"])
     fake_imap.uid.side_effect = lambda command, *args: (
         ("OK", [b"1"]) if command == "search" else ("OK", [(b"1 (BODY.PEEK[] {123})", b"invalid-bytes")])
     )

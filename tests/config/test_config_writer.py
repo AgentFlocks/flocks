@@ -309,6 +309,35 @@ class TestConfigWriterModelSettings:
         assert "anthropic/claude-sonnet" in all_settings
         assert len(all_settings) == 2
 
+    def test_effective_default_parameters_follow_scope_precedence(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        data = ConfigWriter._read_raw()
+        data["default_models"] = {
+            "default_parameters": {
+                "reasoning_effort": "low",
+                "temperature": 0.1,
+            },
+        }
+        data["model_settings"] = {
+            "anthropic/claude-sonnet-4-5": {
+                "default_parameters": {
+                    "reasoning_effort": "high",
+                }
+            }
+        }
+        ConfigWriter._write_raw(data)
+
+        parameters = ConfigWriter.get_effective_model_default_parameters(
+            "anthropic",
+            "claude-sonnet-4-5",
+        )
+
+        assert parameters == {
+            "reasoning_effort": "high",
+            "temperature": 0.1,
+        }
+
     def test_model_settings_preserve_other_sections(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
         ConfigWriter.set_model_setting("openai", "gpt-4o", {"enabled": True})
@@ -439,6 +468,26 @@ class TestConfigWriterDefaultModels:
         assert "text-embedding" in all_defaults
         assert len(all_defaults) == 2
 
+    def test_get_all_default_models_excludes_default_parameters(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        data = ConfigWriter._read_raw()
+        data["default_models"] = {
+            "default_parameters": {"reasoning_effort": "medium"},
+            "llm": {
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet",
+            },
+        }
+        ConfigWriter._write_raw(data)
+
+        assert ConfigWriter.get_all_default_models() == {
+            "llm": {
+                "provider_id": "anthropic",
+                "model_id": "claude-sonnet",
+            }
+        }
+
     def test_default_models_preserve_other_sections(self, temp_project):
         from flocks.config.config_writer import ConfigWriter
         ConfigWriter.set_default_model("llm", "anthropic", "claude")
@@ -446,3 +495,182 @@ class TestConfigWriterDefaultModels:
         data = ConfigWriter._read_raw()
         assert "provider" in data
         assert "mcp" in data
+
+
+class TestConfigWriterFallbackModels:
+    """Test ordered runtime fallback configuration."""
+
+    def test_get_fallback_providers_empty(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        assert ConfigWriter.get_fallback_providers() == []
+
+    def test_set_and_get_fallback_providers_preserves_order(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        fallbacks = [
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+            {"provider_id": "google", "model_id": "gemini-flash"},
+        ]
+
+        ConfigWriter.set_fallback_providers(fallbacks)
+
+        assert ConfigWriter.get_fallback_providers() == fallbacks
+
+    def test_set_fallback_providers_preserves_other_config(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw["smallModel"] = "openai/gpt-4o-mini"
+        ConfigWriter._write_raw(raw)
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "google", "model_id": "gemini-flash"},
+        ])
+
+        updated = ConfigWriter._read_raw()
+        assert updated["smallModel"] == "openai/gpt-4o-mini"
+        assert "provider" in updated
+        assert "mcp" in updated
+
+    def test_set_fallback_providers_reads_jsonc(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        json_path = temp_project / "flocks.json"
+        jsonc_path = temp_project / "flocks.jsonc"
+        jsonc_path.write_text(
+            """{
+              // Preserve provider configuration while updating fallbacks.
+              "provider": {"anthropic": {"models": {}}},
+              "smallModel": "anthropic/claude-haiku"
+            }
+            """,
+            encoding="utf-8",
+        )
+        json_path.unlink()
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+        ])
+
+        updated = ConfigWriter._read_raw()
+        assert "anthropic" in updated["provider"]
+        assert updated["smallModel"] == "anthropic/claude-haiku"
+        assert updated["fallback_providers"] == [
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+        ]
+
+    def test_invalid_config_is_not_overwritten(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        config_path = temp_project / "flocks.json"
+        config_path.write_text("{ invalid", encoding="utf-8")
+
+        with pytest.raises(ValueError, match="Unable to read config file"):
+            ConfigWriter.set_fallback_providers([
+                {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+            ])
+
+        assert config_path.read_text(encoding="utf-8") == "{ invalid"
+
+    def test_empty_fallback_providers_removes_key(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        ConfigWriter.set_fallback_providers([
+            {"provider_id": "openai", "model_id": "gpt-4o-mini"},
+        ])
+        ConfigWriter.set_fallback_providers([])
+
+        assert "fallback_providers" not in ConfigWriter._read_raw()
+
+    def test_detects_inline_fallback_override(self, temp_project, monkeypatch):
+        from flocks.config.config_writer import ConfigWriter
+
+        monkeypatch.setenv(
+            "FLOCKS_CONFIG_CONTENT",
+            json.dumps({"fallback_providers": []}),
+        )
+        Config._global_config = None
+
+        assert (
+            ConfigWriter.get_fallback_override_source()
+            == "FLOCKS_CONFIG_CONTENT"
+        )
+
+    def test_detects_custom_config_fallback_override(
+        self,
+        temp_project,
+        tmp_path,
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        custom_path = tmp_path / "custom.jsonc"
+        custom_path.write_text(
+            '{"fallback_providers": [/* external */ '
+            '{"provider_id": "openai", "model_id": "gpt-4o"}]}',
+            encoding="utf-8",
+        )
+        Config.get_global().config_path = str(custom_path)
+
+        assert ConfigWriter.get_fallback_override_source() == "FLOCKS_CONFIG"
+
+    def test_detects_config_json_fallback_override(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        (temp_project / "config.json").write_text(
+            json.dumps({"fallback_providers": []}),
+            encoding="utf-8",
+        )
+
+        assert ConfigWriter.get_fallback_override_source() == "config.json"
+
+    def test_higher_priority_config_without_fallback_allows_save(
+        self,
+        temp_project,
+    ):
+        from flocks.config.config_writer import ConfigWriter
+
+        (temp_project / "config.json").write_text(
+            json.dumps({"smallModel": "anthropic/claude-haiku"}),
+            encoding="utf-8",
+        )
+
+        assert ConfigWriter.get_fallback_override_source() is None
+
+    def test_get_skips_malformed_entries_without_rewriting(self, temp_project):
+        from flocks.config.config_writer import ConfigWriter
+
+        raw = ConfigWriter._read_raw()
+        raw_entries = [
+            {"provider_id": " openai ", "model_id": " gpt-4o "},
+            {"provider_id": "openai", "model_id": "gpt-4o"},
+            {"provider_id": "", "model_id": "empty-provider"},
+            {"provider_id": "stale", "model_id": "removed/model"},
+            "invalid",
+        ]
+        raw["fallback_providers"] = raw_entries
+        ConfigWriter._write_raw(raw)
+
+        assert ConfigWriter.get_fallback_providers() == [
+            {"provider_id": "openai", "model_id": "gpt-4o"},
+            {"provider_id": "stale", "model_id": "removed/model"},
+        ]
+        assert ConfigWriter._read_raw()["fallback_providers"] == raw_entries
+
+    def test_typed_config_normalizes_malformed_and_duplicate_entries(self):
+        from flocks.config.config import ConfigInfo
+
+        config = ConfigInfo.model_validate({
+            "smallModel": "openai/gpt-4o-mini",
+            "fallback_providers": [
+                {"provider_id": " openai ", "model_id": " gpt-4o "},
+                {"provider_id": "openai", "model_id": "gpt-4o"},
+                {"provider_id": "", "model_id": "missing"},
+                "invalid",
+            ],
+        })
+
+        assert config.small_model == "openai/gpt-4o-mini"
+        assert [entry.model_dump() for entry in config.fallback_providers or []] == [
+            {"provider_id": "openai", "model_id": "gpt-4o"},
+        ]

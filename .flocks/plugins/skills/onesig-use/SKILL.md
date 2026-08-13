@@ -1,6 +1,6 @@
 ---
 name: onesig-use
-description: 用于处理 OneSIG（安全互联网网关 / Secure Internet Gateway）相关任务，当前项目内优先适配 OneSIG Strategy API v2.5.3（`onesig_strategy_api_query` / `onesig_strategy_api_ops`）：设备状态、资产、策略、全局白名单、全局黑名单、封禁白名单、HTTP 黑名单的查询与写操作。只要用户提到 OneSIG、SIG、安全互联网网关、微步互联网网关等相关操作时，必须先加载本 skill。本 skill 是 OneSIG 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `onesig_*` tool，也不要把 OneSEC 的调用约定套用到 OneSIG。
+description: 用于处理 OneSIG（安全互联网网关 / Secure Internet Gateway）相关任务，支持通过API或者结合浏览器进行操作。只要用户提到 OneSIG、SIG、微步互联网网关等相关操作时，必须先加载本 skill。本 skill 是 OneSIG 平台操作的唯一决策入口：在未阅读本 skill 并完成模式判断前，不要直接调用任何 `onesig_*` tool。
 ---
 
 # OneSIG Use

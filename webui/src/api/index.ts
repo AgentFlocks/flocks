@@ -7,6 +7,7 @@ export * from './skill';
 export * from './monitoring';
 export * from './tool';
 export * from './provider';
+export * from './permission';
 export * from './mcp';
 export * from './hub';
 export * from './webuiContractPages';

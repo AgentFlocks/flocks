@@ -195,6 +195,10 @@ class WorkflowEngine:
                 cancel_checker=self.runtime.cancel_checker,
                 cleanup_globals_after_execute=self.runtime.cleanup_globals_after_execute,
                 enable_cancel_trace=self.runtime.enable_cancel_trace,
+                isolated_rpc_max_bytes=self.runtime.isolated_rpc_max_bytes,
+                isolated_rpc_max_inflight_bytes=self.runtime.isolated_rpc_max_inflight_bytes,
+                isolated_rpc_max_response_bytes=self.runtime.isolated_rpc_max_response_bytes,
+                isolated_rpc_max_workers=self.runtime.isolated_rpc_max_workers,
             )
         return self.runtime
 
@@ -854,6 +858,10 @@ class WorkflowEngine:
                     cancel_checker=_rt.cancel_checker,
                     inherited_fd_keys=tuple(node.process_inherit_fd_keys),
                     retained_fd_keys=tuple(node.process_retain_fd_keys),
+                    rpc_max_bytes=_rt.isolated_rpc_max_bytes,
+                    rpc_max_inflight_bytes=_rt.isolated_rpc_max_inflight_bytes,
+                    rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
+                    rpc_max_workers=_rt.isolated_rpc_max_workers,
                 )
             return _rt.execute(node.code, inputs)
         if node.type == "logic":
@@ -875,6 +883,10 @@ class WorkflowEngine:
                     cancel_checker=_rt.cancel_checker,
                     inherited_fd_keys=tuple(node.process_inherit_fd_keys),
                     retained_fd_keys=tuple(node.process_retain_fd_keys),
+                    rpc_max_bytes=_rt.isolated_rpc_max_bytes,
+                    rpc_max_inflight_bytes=_rt.isolated_rpc_max_inflight_bytes,
+                    rpc_max_response_bytes=_rt.isolated_rpc_max_response_bytes,
+                    rpc_max_workers=_rt.isolated_rpc_max_workers,
                 )
             return _rt.execute(code, inputs)
         if node.type in {"branch", "loop"}:

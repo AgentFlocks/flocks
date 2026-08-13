@@ -220,6 +220,38 @@ class FeishuChannel(ChannelPlugin):
         if task is None or task.done():
             self._webhook_dedup_flush_tasks[account_id] = await dedup.start_background_flush()
 
+    async def webhook_authentication_evidence(
+        self,
+        body: bytes,
+        headers: dict,
+    ) -> dict:
+        """Expose Feishu's existing verification result as neutral evidence."""
+        from flocks.channel.builtin.feishu.config import (
+            resolve_webhook_account_config,
+            verify_webhook_timestamp,
+        )
+
+        try:
+            data = json.loads(body)
+        except (TypeError, ValueError):
+            return {"plugin_authenticated": False, "provider": "feishu"}
+        if not isinstance(data, dict) or not verify_webhook_timestamp(headers):
+            return {"plugin_authenticated": False, "provider": "feishu"}
+        resolved = resolve_webhook_account_config(
+            self._config,
+            body=body,
+            headers=headers,
+            data=data,
+        )
+        if not resolved:
+            return {"plugin_authenticated": False, "provider": "feishu"}
+        return {
+            "plugin_authenticated": True,
+            "provider": "feishu",
+            # The concrete handler owns and applies event-id/nonce dedup.
+            "replay_protection": "plugin_dedup",
+        }
+
     async def handle_webhook(self, body: bytes, headers: dict) -> Optional[dict]:
         from flocks.channel.builtin.feishu.config import (
             build_webhook_replay_key,

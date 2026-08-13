@@ -23,6 +23,14 @@ import SuiteInstallProgressPanel, {
   type SuiteInstallProgressState,
 } from '@/components/hub/SuiteInstallProgressPanel';
 import { sessionApi } from '@/api/session';
+import {
+  flocksproPolicyApi,
+  isSessionExecutionSettingsUnsupported,
+  type NetworkMode,
+  type PermissionMode,
+  type RuntimeMode,
+} from '@/api/flocksproPolicy';
+import { flocksproUsersApi } from '@/api/flocksproUsers';
 import { hubAPI, type HubInstallProgressEvent } from '@/api/hub';
 import { skillAPI, type Skill } from '@/api/skill';
 import { workflowAPI, type WorkflowSummary } from '@/api/workflow';
@@ -676,6 +684,18 @@ export default function SessionPage() {
   const [showModelOptions, setShowModelOptions] = useState(false);
   const modelSelectorRef = useRef<HTMLDivElement>(null);
   const [modelMenuLeftOffset, setModelMenuLeftOffset] = useState(0);
+  const [showPermissionModeOptions, setShowPermissionModeOptions] = useState(false);
+  const [proPolicyEnabled, setProPolicyEnabled] = useState(false);
+  const [sessionPermissionMode, setSessionPermissionMode] = useState<PermissionMode | null>(null);
+  const [draftPermissionMode, setDraftPermissionMode] = useState<PermissionMode>('require-confirm');
+  const [sessionRuntimeMode, setSessionRuntimeMode] = useState<RuntimeMode | null>(null);
+  const [sessionNetworkMode, setSessionNetworkMode] = useState<NetworkMode | null>(null);
+  const [sessionNetworkModeDefault, setSessionNetworkModeDefault] = useState<NetworkMode | null>(null);
+  const [sessionNetworkModeOverridden, setSessionNetworkModeOverridden] = useState(false);
+  const [sessionEntry, setSessionEntry] = useState<string>('unknown');
+  const [sessionExecutionRevision, setSessionExecutionRevision] = useState<number | null>(null);
+  const [draftRuntimeMode, setDraftRuntimeMode] = useState<RuntimeMode>('dev-mode');
+  const [draftNetworkMode, setDraftNetworkMode] = useState<NetworkMode>('require-confirm');
   const [sseStatus, setSseStatus] = useState<SSEConnectionStatus>('disconnected');
   const [runningSessionIds, setRunningSessionIds] = useState<Set<string>>(new Set());
   const [relativeTimeClock, setRelativeTimeClock] = useState(0);
@@ -1405,6 +1425,217 @@ export default function SessionPage() {
   }, [showModelOptions]);
 
   useEffect(() => {
+    if (!showPermissionModeOptions) return;
+    const handle = (event: MouseEvent) => {
+      if (!(event.target as HTMLElement).closest('[data-permission-mode-selector]')) {
+        setShowPermissionModeOptions(false);
+      }
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [showPermissionModeOptions]);
+
+  useEffect(() => {
+    void flocksproUsersApi.hasCapability().then(setProPolicyEnabled);
+  }, []);
+
+  useEffect(() => {
+    if (!proPolicyEnabled || !selectedSessionId) {
+      setSessionPermissionMode(null);
+      setSessionRuntimeMode(null);
+      setSessionNetworkMode(null);
+      setSessionNetworkModeDefault(null);
+      setSessionNetworkModeOverridden(false);
+      setSessionEntry('unknown');
+      setSessionExecutionRevision(null);
+      return;
+    }
+    void flocksproPolicyApi.getSessionExecutionSettings(selectedSessionId)
+      .then((result) => {
+        setSessionPermissionMode(result.permissionMode);
+        setSessionRuntimeMode(result.runtimeMode);
+        setSessionNetworkMode(result.networkMode);
+        setSessionNetworkModeDefault(result.networkModeDefault);
+        setSessionNetworkModeOverridden(result.networkModeOverridden);
+        setSessionEntry(result.entry);
+        setSessionExecutionRevision(result.revision);
+      })
+      .catch(() => {
+        setSessionPermissionMode(null);
+        setSessionRuntimeMode(null);
+        setSessionNetworkMode(null);
+        setSessionNetworkModeDefault(null);
+        setSessionNetworkModeOverridden(false);
+        setSessionEntry('unknown');
+        setSessionExecutionRevision(null);
+      });
+  }, [proPolicyEnabled, selectedSessionId]);
+
+  const handlePermissionModeChange = useCallback(async (permissionMode: PermissionMode) => {
+    if (!proPolicyEnabled) return;
+    if (!selectedSessionId) {
+      setDraftPermissionMode(permissionMode);
+      return;
+    }
+    try {
+      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
+        permissionMode,
+        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
+      });
+      setSessionPermissionMode(updated.permissionMode);
+      setSessionRuntimeMode(updated.runtimeMode);
+      setSessionNetworkMode(updated.networkMode);
+      setSessionNetworkModeDefault(updated.networkModeDefault);
+      setSessionNetworkModeOverridden(updated.networkModeOverridden);
+      setSessionEntry(updated.entry);
+      setSessionExecutionRevision(updated.revision);
+    } catch (error: unknown) {
+      if (isSessionExecutionSettingsUnsupported(error)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('chat.error', 'Error'), message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
+
+  const handleRuntimeModeChange = useCallback(async (runtimeMode: RuntimeMode) => {
+    if (!proPolicyEnabled) return;
+    if (!selectedSessionId) {
+      setDraftRuntimeMode(runtimeMode);
+      return;
+    }
+    try {
+      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
+        runtimeMode,
+        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
+      });
+      setSessionPermissionMode(updated.permissionMode);
+      setSessionRuntimeMode(updated.runtimeMode);
+      setSessionNetworkMode(updated.networkMode);
+      setSessionNetworkModeDefault(updated.networkModeDefault);
+      setSessionNetworkModeOverridden(updated.networkModeOverridden);
+      setSessionEntry(updated.entry);
+      setSessionExecutionRevision(updated.revision);
+    } catch (error: unknown) {
+      if (isSessionExecutionSettingsUnsupported(error)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('chat.error', 'Error'), message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
+
+  const handleNetworkModeChange = useCallback(async (networkMode: NetworkMode) => {
+    if (!proPolicyEnabled) return;
+    if (!selectedSessionId) {
+      setDraftNetworkMode(networkMode);
+      return;
+    }
+    try {
+      const updated = await flocksproPolicyApi.setSessionExecutionSettings(selectedSessionId, {
+        networkMode,
+        ...(sessionExecutionRevision === null ? {} : { revision: sessionExecutionRevision }),
+      });
+      setSessionPermissionMode(updated.permissionMode);
+      setSessionRuntimeMode(updated.runtimeMode);
+      setSessionNetworkMode(updated.networkMode);
+      setSessionNetworkModeDefault(updated.networkModeDefault);
+      setSessionNetworkModeOverridden(updated.networkModeOverridden);
+      setSessionEntry(updated.entry);
+      setSessionExecutionRevision(updated.revision);
+    } catch (error: unknown) {
+      if (isSessionExecutionSettingsUnsupported(error)) return;
+      const message = error instanceof Error ? error.message : String(error);
+      toast.error(t('chat.error', 'Error'), message);
+    }
+  }, [proPolicyEnabled, selectedSessionId, sessionExecutionRevision, t, toast]);
+
+  const permissionModeLabels = useMemo<Record<PermissionMode, string>>(
+    () => ({
+      readonly: t('permissionMode.readonly'),
+      'require-confirm': t('permissionMode.requireConfirm'),
+      'auto-allow-all': t('permissionMode.autoAllowAll'),
+    }),
+    [t],
+  );
+
+  const permissionModeOptions = useMemo(
+    () => ([
+      {
+        value: 'readonly' as const,
+        label: permissionModeLabels.readonly,
+        description: t('permissionMode.readonlyDesc'),
+      },
+      {
+        value: 'require-confirm' as const,
+        label: permissionModeLabels['require-confirm'],
+        description: t('permissionMode.requireConfirmDesc'),
+      },
+      {
+        value: 'auto-allow-all' as const,
+        label: permissionModeLabels['auto-allow-all'],
+        description: t('permissionMode.autoAllowAllDesc'),
+      },
+    ]),
+    [permissionModeLabels, t],
+  );
+  const runtimeModeLabels = useMemo<Record<RuntimeMode, string>>(
+    () => ({
+      'dev-mode': t('permissionMode.runtimeDev', '开发模式'),
+      'exe-mode': t('permissionMode.runtimeExe', '执行模式'),
+    }),
+    [t],
+  );
+  const runtimeModeOptions = useMemo(
+    () => ([
+      {
+        value: 'dev-mode' as const,
+        label: runtimeModeLabels['dev-mode'],
+        description: t('permissionMode.runtimeDevDesc', 'Plugins 与代码目录按当前会话权限模式处理'),
+      },
+      {
+        value: 'exe-mode' as const,
+        label: runtimeModeLabels['exe-mode'],
+        description: t('permissionMode.runtimeExeDesc', 'Plugins 与代码目录固定 readonly'),
+      },
+    ]),
+    [runtimeModeLabels, t],
+  );
+  const networkModeLabels = useMemo<Record<NetworkMode, string>>(
+    () => ({
+      'auto-deny-all': t('permissionMode.networkAutoDenyAll', '自动拒绝全部'),
+      'require-confirm': t('permissionMode.networkRequireConfirm', '访问前确认'),
+      'auto-allow-all': t('permissionMode.networkAutoAllowAll', '自动允许全部'),
+    }),
+    [t],
+  );
+  const networkModeOptions = useMemo(
+    () => ([
+      {
+        value: 'auto-deny-all' as const,
+        label: networkModeLabels['auto-deny-all'],
+        description: t('permissionMode.networkAutoDenyAllDesc', '未命中白名单的网络请求全部拒绝。'),
+      },
+      {
+        value: 'require-confirm' as const,
+        label: networkModeLabels['require-confirm'],
+        description: t('permissionMode.networkRequireConfirmDesc', '未命中白名单时弹出独立网络确认。'),
+      },
+      {
+        value: 'auto-allow-all' as const,
+        label: networkModeLabels['auto-allow-all'],
+        description: t('permissionMode.networkAutoAllowAllDesc', '未命中黑白名单时自动放行。'),
+      },
+    ]),
+    [networkModeLabels, t],
+  );
+  const currentPermissionMode = selectedSessionId
+    ? (sessionPermissionMode ?? 'require-confirm')
+    : draftPermissionMode;
+  const currentRuntimeMode = selectedSessionId
+    ? (sessionRuntimeMode ?? 'dev-mode')
+    : draftRuntimeMode;
+  const currentNetworkMode = selectedSessionId
+    ? (sessionNetworkMode ?? 'require-confirm')
+    : draftNetworkMode;
+
+  useEffect(() => {
     if (selectedSession?.model_auto) {
       setSelectedModelKey(AUTO_MODEL_KEY);
       return;
@@ -1618,14 +1849,14 @@ export default function SessionPage() {
       });
       const newSessionId = response.data.id;
       const messageId = createMessageId();
-      const visibleText = options?.displayText || text;
       const effectiveAgent = agentOverride || selectedAgent || 'rex';
       const optimisticParts: Message['parts'] = [];
-      if (visibleText) {
+      if (text || options?.displayText) {
         optimisticParts.push({
           id: `temp-${messageId}-text`,
           type: 'text',
-          text: visibleText,
+          text,
+          ...(options?.displayText ? { metadata: { displayText: options.displayText } } : {}),
         });
       }
       imageParts?.forEach((image, index) => {
@@ -1646,6 +1877,32 @@ export default function SessionPage() {
       if (!selectedModelAuto && modelOverride) payload.model = modelOverride;
       if (options?.displayText) payload.displayText = options.displayText;
       payload.executionMode = effectiveExecutionMode;
+
+      if (proPolicyEnabled) {
+        try {
+          const updated = await flocksproPolicyApi.setSessionExecutionSettings(newSessionId, {
+            permissionMode: draftPermissionMode,
+            runtimeMode: draftRuntimeMode,
+            networkMode: draftNetworkMode,
+          });
+          setSessionPermissionMode(updated.permissionMode);
+          setSessionRuntimeMode(updated.runtimeMode);
+          setSessionNetworkMode(updated.networkMode);
+          setSessionNetworkModeDefault(updated.networkModeDefault);
+          setSessionNetworkModeOverridden(updated.networkModeOverridden);
+          setSessionEntry(updated.entry);
+          setSessionExecutionRevision(updated.revision);
+        } catch (error: unknown) {
+          if (isSessionExecutionSettingsUnsupported(error)) {
+            // Backward compatibility: older backends may not expose execution-settings yet.
+            // Session creation and prompt sending should continue without interruption.
+          } else {
+            const message = error instanceof Error ? error.message : String(error);
+            toast.error(t('chat.error', 'Error'), message);
+            throw error;
+          }
+        }
+      }
       await client.post(`/api/session/${newSessionId}/prompt_async`, payload);
 
       addSession(response.data);
@@ -1674,7 +1931,7 @@ export default function SessionPage() {
         role: 'user',
         parts: optimisticParts.length > 0
           ? optimisticParts
-          : [{ id: `temp-${messageId}-part`, type: 'text', text: visibleText }],
+          : [{ id: `temp-${messageId}-part`, type: 'text', text }],
         timestamp: Date.now(),
         agent: effectiveAgent,
       });
@@ -1698,6 +1955,10 @@ export default function SessionPage() {
     selectedExecutionMode,
     selectedModelAuto,
     selectedProjectIDForCreate,
+    draftPermissionMode,
+    draftRuntimeMode,
+    draftNetworkMode,
+    proPolicyEnabled,
     toast,
     t,
   ]);
@@ -2985,10 +3246,10 @@ export default function SessionPage() {
                               insertMention(agent.name);
                               closeMenu();
                             }}
-                            className={`w-full min-w-0 rounded-lg px-2.5 py-2 text-left transition-colors ${
+                            className={`w-full min-w-0 rounded-lg border px-2.5 py-2 text-left transition-colors ${
                               selectedAgent === agent.name
-                                ? 'bg-zinc-100/90 text-zinc-900 dark:bg-white/[0.09] dark:text-zinc-50'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-white/[0.06] dark:hover:text-zinc-50'
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
@@ -3029,6 +3290,7 @@ export default function SessionPage() {
                                   <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                 </span>
                               )}
+                              {selectedAgent === agent.name && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                             </div>
                           </button>
                         );
@@ -3136,29 +3398,30 @@ export default function SessionPage() {
                             role="menuitemradio"
                             aria-checked={selected}
                             onClick={() => handleSelectExecutionMode(mode)}
-                            className={`flex w-full items-start gap-2 rounded-md px-2 py-2 text-left transition-colors ${
+                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
                               selected
-                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                             }`}
                           >
-                            <ExecutionModeIcon
-                              mode={mode}
-                              className={`mt-0.5 h-3.5 w-3.5 shrink-0 ${
-                                selected
-                                  ? 'text-zinc-700 dark:text-zinc-100'
-                                  : 'text-zinc-400 dark:text-zinc-500'
-                              }`}
-                            />
-                            <span className="min-w-0 flex-1">
-                              <span className="block text-xs font-medium">
-                                {t(`executionMode.options.${mode}.label`)}
-                              </span>
-                              <span className="mt-0.5 block text-[10px] leading-4 text-zinc-400 dark:text-zinc-500">
-                                {t(`executionMode.options.${mode}.description`)}
-                              </span>
-                            </span>
-                            {selected && <Check className="mt-0.5 h-3.5 w-3.5 shrink-0" />}
+                            <div className="flex w-20 shrink-0 items-center gap-1.5 text-sm font-medium">
+                              <ExecutionModeIcon
+                                mode={mode}
+                                className={`h-3.5 w-3.5 shrink-0 ${
+                                  selected
+                                    ? 'text-zinc-700 dark:text-zinc-100'
+                                    : 'text-zinc-400 dark:text-zinc-500'
+                                }`}
+                              />
+                              <span>{t(`executionMode.options.${mode}.label`)}</span>
+                            </div>
+                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                              selected ? 'text-zinc-700 dark:text-zinc-200' : 'text-zinc-500 dark:text-zinc-400'
+                            }`}
+                            >
+                              {t(`executionMode.options.${mode}.description`)}
+                            </div>
+                            {selected && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                           </button>
                         );
                       })}
@@ -3201,11 +3464,15 @@ export default function SessionPage() {
                           setSelectedProjectId(group.id);
                           setShowProjectOptions(false);
                         }}
-                        className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                        className={`flex h-8 w-full items-center gap-2 rounded-lg border px-2 text-left text-xs transition-colors ${
+                          selectedProjectId === group.id
+                            ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                            : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                        }`}
                       >
-                        <FolderGit2 className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                        <FolderGit2 className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === group.id ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                         <span className="min-w-0 flex-1 truncate">{group.label}</span>
-                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-[#4f92e8]" />}
+                        {selectedProjectId === group.id && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                       </button>
                     ))}
                     <div className="mx-2 my-0.5 border-t border-black/[0.07] dark:border-white/[0.08]" />
@@ -3217,11 +3484,15 @@ export default function SessionPage() {
                         setSelectedProjectId(TASK_SESSION_GROUP_ID);
                         setShowProjectOptions(false);
                       }}
-                      className="flex h-8 w-full items-center gap-2 rounded-lg px-2 text-left text-xs text-[#4e5359] transition-colors hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white"
+                      className={`flex h-8 w-full items-center gap-2 rounded-lg border px-2 text-left text-xs transition-colors ${
+                        selectedProjectId === TASK_SESSION_GROUP_ID
+                          ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                          : 'border-transparent text-[#4e5359] hover:bg-black/[0.04] hover:text-[#202328] dark:text-[#c3ccd6] dark:hover:bg-white/[0.06] dark:hover:text-white'
+                      }`}
                     >
-                      <X className="h-3.5 w-3.5 shrink-0 text-[#7b8087] dark:text-[#9aa7b4]" />
+                      <X className={`h-3.5 w-3.5 shrink-0 ${selectedProjectId === TASK_SESSION_GROUP_ID ? 'text-blue-600 dark:text-blue-300' : 'text-[#7b8087] dark:text-[#9aa7b4]'}`} />
                       <span className="min-w-0 flex-1 truncate">{t('projectPicker.none')}</span>
-                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-[#4f92e8]" />}
+                      {selectedProjectId === TASK_SESSION_GROUP_ID && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                     </button>
                     <button
                       type="button"
@@ -3242,7 +3513,8 @@ export default function SessionPage() {
             </div>
           }
           centerToolbarSlot={
-            <div ref={modelSelectorRef} className="relative" data-model-selector>
+            <div className="flex items-center gap-1">
+              <div ref={modelSelectorRef} className="relative" data-model-selector>
               <button
                 type="button"
                 onClick={() => {
@@ -3289,10 +3561,10 @@ export default function SessionPage() {
                             type="button"
                             onClick={() => void handleSelectAutoModel()}
                             disabled={!canSelectAuto}
-                            className={`w-full rounded-md px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
+                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors disabled:cursor-not-allowed disabled:opacity-45 ${
                               selectedModelAuto
-                                ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                             }`}
                           >
                             <div className="flex min-w-0 items-center gap-2">
@@ -3312,6 +3584,7 @@ export default function SessionPage() {
                               >
                                 <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                               </span>
+                              {selectedModelAuto && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                             </div>
                           </button>
                         </div>
@@ -3329,10 +3602,10 @@ export default function SessionPage() {
                                 key={option.key}
                                 type="button"
                                 onClick={() => void handleSelectModel(option)}
-                                className={`w-full rounded-md px-2 py-1.5 text-left transition-colors ${
+                            className={`w-full rounded-md border px-2 py-1.5 text-left transition-colors ${
                                   selectedModelOption?.key === option.key
-                                    ? 'bg-zinc-50 text-zinc-900 shadow-[inset_2px_0_0_#a1a1aa] dark:bg-zinc-800 dark:text-zinc-50 dark:shadow-[inset_2px_0_0_#539bf5]'
-                                    : 'text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
+                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800 dark:hover:text-zinc-50'
                                 }`}
                               >
                                 <div className="flex min-w-0 items-center gap-2">
@@ -3357,6 +3630,7 @@ export default function SessionPage() {
                                       <Info className="h-3 w-3 text-zinc-300 transition-colors group-hover:text-zinc-500 dark:text-zinc-600 dark:group-hover:text-zinc-300" />
                                     </span>
                                   </div>
+                                  {selectedModelOption?.key === option.key && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
                                 </div>
                               </button>
                             ))}
@@ -3382,6 +3656,140 @@ export default function SessionPage() {
                       {t('modelPicker.addModel')}
                     </button>
                   </div>
+                </div>
+              )}
+              </div>
+              {proPolicyEnabled && (
+                <div className="relative" data-permission-mode-selector>
+                  <button
+                    type="button"
+                    onClick={() => setShowPermissionModeOptions((open) => !open)}
+                    className="flex h-7 items-center gap-1.5 rounded-lg px-2 text-xs text-zinc-600 transition-colors hover:bg-zinc-200/60 hover:text-zinc-900 dark:text-zinc-400 dark:hover:bg-zinc-800 dark:hover:text-zinc-100"
+                    title={t('permissionMode.executionControlTitle')}
+                  >
+                    <Shield className="h-3 w-3 shrink-0" />
+                    <span className="max-w-[116px] truncate font-medium">
+                      {permissionModeLabels[currentPermissionMode]}
+                    </span>
+                    <ChevronDown className={`h-3 w-3 shrink-0 transition-transform ${showPermissionModeOptions ? 'rotate-180' : ''}`} />
+                  </button>
+                  {showPermissionModeOptions && (
+                    <div className="absolute bottom-full left-0 z-50 mb-2 w-[520px] max-w-[calc(100vw-2rem)] rounded-lg border border-zinc-200 bg-white shadow-sm dark:border-zinc-800 dark:bg-zinc-900 dark:shadow-xl dark:shadow-black/30">
+                      <div className="space-y-3 p-2">
+                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+                        <div className="flex items-center justify-between px-1">
+                          <div className="text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.runtimeTitle', '平台开发模式')}
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setShowPermissionModeOptions(false);
+                              navigate('/settings/security-config');
+                            }}
+                            className="text-[11px] font-medium text-blue-600 hover:underline dark:text-blue-400"
+                          >
+                            {t('permissionMode.viewDetails')}
+                          </button>
+                        </div>
+                        <div className="mt-1 space-y-1">
+                        {runtimeModeOptions.map(({ value: mode, label, description }) => (
+                          <button
+                            key={mode}
+                            type="button"
+                            onClick={() => {
+                              void handleRuntimeModeChange(mode);
+                              setShowPermissionModeOptions(false);
+                            }}
+                            className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
+                              currentRuntimeMode === mode
+                                ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                            }`}
+                          >
+                            <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
+                            <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                              currentRuntimeMode === mode
+                                ? 'text-zinc-700 dark:text-zinc-200'
+                                : 'text-zinc-500 dark:text-zinc-400'
+                            }`}
+                            >
+                              {description}
+                            </div>
+                            {currentRuntimeMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                          </button>
+                        ))}
+                        </div>
+                        </section>
+                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.networkTitle', '网络访问模式')}
+                          </div>
+                          <div className="mt-1 space-y-1">
+                            {networkModeOptions.map(({ value: mode, label, description }) => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => {
+                                  void handleNetworkModeChange(mode);
+                                  setShowPermissionModeOptions(false);
+                                }}
+                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
+                                  currentNetworkMode === mode
+                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                }`}
+                              >
+                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
+                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                                  currentNetworkMode === mode
+                                    ? 'text-zinc-700 dark:text-zinc-200'
+                                    : 'text-zinc-500 dark:text-zinc-400'
+                                }`}
+                                >
+                                  {description}
+                                </div>
+                                {currentNetworkMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                        <section className="rounded-lg border border-zinc-200 bg-zinc-50/50 p-2 dark:border-zinc-800 dark:bg-zinc-900/50">
+                          <div className="px-1 text-[11px] font-semibold text-zinc-500 dark:text-zinc-400">
+                            {t('permissionMode.title')}
+                          </div>
+                          <div className="mt-1 space-y-1">
+                            {permissionModeOptions.map(({ value: mode, label, description }) => (
+                              <button
+                                key={mode}
+                                type="button"
+                                onClick={() => {
+                                  void handlePermissionModeChange(mode);
+                                  setShowPermissionModeOptions(false);
+                                }}
+                                className={`flex w-full items-center gap-3 rounded-lg border px-2.5 py-1.5 text-left transition-colors ${
+                                  currentPermissionMode === mode
+                                    ? 'border-blue-300 bg-blue-50 text-zinc-950 shadow-sm dark:border-blue-500/60 dark:bg-blue-500/15 dark:text-zinc-50'
+                                    : 'border-transparent text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                                }`}
+                              >
+                                <div className="w-24 shrink-0 whitespace-nowrap text-sm font-medium">{label}</div>
+                                <div className={`min-w-0 flex-1 truncate text-[11px] ${
+                                  currentPermissionMode === mode
+                                    ? 'text-zinc-700 dark:text-zinc-200'
+                                    : 'text-zinc-500 dark:text-zinc-400'
+                                }`}
+                                >
+                                  {description}
+                                </div>
+                                {currentPermissionMode === mode && <Check className="h-3.5 w-3.5 shrink-0 text-blue-600 dark:text-blue-300" />}
+                              </button>
+                            ))}
+                          </div>
+                        </section>
+                      </div>
+                    </div>
+                  )}
                 </div>
               )}
             </div>

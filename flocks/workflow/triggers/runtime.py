@@ -7,6 +7,8 @@ import json
 import time
 from typing import Any, Dict, List, Optional, Tuple
 
+from flocks.hooks.execution import current_execution_context, execute_with_hooks
+from flocks.hooks.pipeline import HookPipeline
 from flocks.utils.log import Log
 from flocks.workflow.execution_store import (
     compact_history_for_storage,
@@ -216,6 +218,33 @@ class TriggerRuntime:
         trigger: TriggerDefinition,
         mapped_inputs: Dict[str, Any],
     ) -> Dict[str, Any]:
+        action_payload = {
+            "operation": "workflow.trigger.execute",
+            "transport": "headless",
+            "workflow_id": workflow_id,
+            "trigger": trigger,
+            "inputs": mapped_inputs,
+        }
+        return await execute_with_hooks(
+            action_payload,
+            lambda: self._execute_workflow_effect(
+                workflow_id=workflow_id,
+                workflow_json=workflow_json,
+                trigger=trigger,
+                mapped_inputs=mapped_inputs,
+            ),
+            before=HookPipeline.run_ingress_before,
+            after=HookPipeline.run_ingress_after,
+        )
+
+    async def _execute_workflow_effect(
+        self,
+        *,
+        workflow_id: str,
+        workflow_json: Dict[str, Any],
+        trigger: TriggerDefinition,
+        mapped_inputs: Dict[str, Any],
+    ) -> Dict[str, Any]:
         exec_data = await create_execution_record(
             workflow_id,
             input_params=mapped_inputs,
@@ -224,9 +253,14 @@ class TriggerRuntime:
         started_at = time.time()
         tool_context = None
         try:
+            context_kwargs: dict[str, Any] = {}
+            execution_context = current_execution_context()
+            if execution_context:
+                context_kwargs["execution_context"] = execution_context
             tool_context = await build_workflow_tool_context(
                 workflow_id=workflow_id,
                 action_name=f"trigger:{trigger.type}",
+                **context_kwargs,
             )
             result = await asyncio.to_thread(
                 run_workflow,

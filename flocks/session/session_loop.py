@@ -16,7 +16,7 @@ import asyncio
 import hashlib
 import inspect
 import time
-from typing import Optional, List, Dict, Any, Callable, Awaitable
+from typing import Optional, List, Dict, Any, Callable, Awaitable, Literal
 from dataclasses import dataclass, field
 from datetime import datetime
 
@@ -100,11 +100,10 @@ class LoopContext:
     # Cooldown window to prefer cheap cleanup over repeated full compaction.
     last_compaction_step: Optional[int] = None
     last_cleanup_step: Optional[int] = None
-    # ``input + cache.read + output`` reported by the provider on the most
-    # recent finished assistant turn.  When non-zero this beats the
-    # synthetic estimate from ``estimate_full_context_tokens`` because it
-    # is what the upstream will actually bill us for on the next turn
-    # (matches the "observed value wins" rule from docs/design/context-compaction-v2.md §B3).
+    # ``input + cache.read + output + reasoning`` reported by the provider on
+    # the most recent finished assistant turn.  Overflow decisions compare it
+    # with a current message estimate so tool output produced after that model
+    # call cannot be missed.
     last_observed_prompt_tokens: int = 0
     auto_failover: bool = False
     # Entrypoint authorization is separate from persisted model_auto. Only a
@@ -112,6 +111,7 @@ class LoopContext:
     auto_failover_allowed: bool = False
     model_candidates: List[RuntimeModel] = field(default_factory=list)
     candidate_index: int = 0
+    model_candidate_policy: Literal["fixed", "automatic", "configured"] = "automatic"
     turn_user_id: Optional[str] = None
     turn_additional_context: Optional[str] = None
     stop_hook_active: bool = False
@@ -235,14 +235,56 @@ class SessionLoop:
         *,
         route_seed: str,
         preferred: Optional[RuntimeModel] = None,
+        config: Optional[Any] = None,
     ) -> List[RuntimeModel]:
-        """Build a stable per-turn primary, same-provider, cross-provider chain."""
+        """Build a configured chain or the stable automatic discovery chain."""
         from flocks.config.config import Config
         from flocks.provider.model_manager import get_model_manager
         from flocks.provider.types import ModelType
 
-        config = await Config.get()
+        config = config or await Config.get()
         await Provider.apply_config(config)
+
+        configured_fallbacks = getattr(config, "fallback_providers", None) or []
+        if configured_fallbacks:
+            candidates = [primary]
+            seen = {(primary.provider_id, primary.model_id)}
+            for index, raw in enumerate(configured_fallbacks):
+                provider_id = (
+                    raw.get("provider_id")
+                    if isinstance(raw, dict)
+                    else raw.provider_id
+                )
+                model_id = (
+                    raw.get("model_id")
+                    if isinstance(raw, dict)
+                    else raw.model_id
+                )
+                candidate = RuntimeModel(
+                    provider_id=provider_id,
+                    model_id=model_id,
+                )
+                identity = (candidate.provider_id, candidate.model_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+
+                available, reason = await cls.validate_runtime_model(
+                    candidate.provider_id,
+                    candidate.model_id,
+                    config=config,
+                )
+                if not available:
+                    log.warn("session.model.fallback_skipped", {
+                        "provider_id": candidate.provider_id,
+                        "model_id": candidate.model_id,
+                        "configured_index": index,
+                        "reason": reason,
+                    })
+                    continue
+                candidates.append(candidate)
+            return candidates
+
         definitions = get_model_manager().list_models(
             model_type=ModelType.LLM,
             enabled_only=True,
@@ -876,6 +918,43 @@ class SessionLoop:
         return resolved_provider, resolved_model
 
     @classmethod
+    async def _reset_auto_turn_candidates(
+        cls,
+        ctx: LoopContext,
+        primary: RuntimeModel,
+        user_message_id: str,
+        config: Any,
+    ) -> int:
+        """Rebuild and activate the configured or automatic chain for one turn."""
+        configured = bool(getattr(config, "fallback_providers", None))
+        if configured:
+            cls.clear_auto_failover_state(ctx.session.id)
+            preferred = None
+        else:
+            preferred = cls._active_cooldown_model(ctx.session.id, primary)
+
+        ctx.model_candidates = await cls._build_model_candidates(
+            primary,
+            route_seed=f"{ctx.session.id}:{user_message_id}",
+            preferred=preferred,
+            config=config,
+        )
+        ctx.model_candidate_policy = (
+            "configured" if configured else "automatic"
+        )
+        ctx.auto_failover = True
+        next_index = (
+            0
+            if configured
+            else cls._cooldown_candidate_index(
+                ctx.session.id,
+                ctx.model_candidates,
+            )
+        )
+        cls._select_candidate(ctx, next_index)
+        return next_index
+
+    @classmethod
     async def _prepare_auto_turn(
         cls,
         ctx: LoopContext,
@@ -896,21 +975,16 @@ class SessionLoop:
         if ctx.turn_user_id is None:
             ctx.turn_user_id = last_user.id
             if ctx.auto_failover and ctx.auto_failover_allowed:
+                from flocks.config.config import Config
+
                 primary = ctx.model_candidates[0]
-                preferred = cls._active_cooldown_model(
-                    ctx.session.id,
+                config = await Config.get()
+                await cls._reset_auto_turn_candidates(
+                    ctx,
                     primary,
+                    last_user.id,
+                    config=config,
                 )
-                ctx.model_candidates = await cls._build_model_candidates(
-                    primary,
-                    route_seed=f"{ctx.session.id}:{last_user.id}",
-                    preferred=preferred,
-                )
-                next_index = cls._cooldown_candidate_index(
-                    ctx.session.id,
-                    ctx.model_candidates,
-                )
-                cls._select_candidate(ctx, next_index)
             return True
 
         ctx.turn_user_id = last_user.id
@@ -947,6 +1021,7 @@ class SessionLoop:
                 else user_model_id
             ) or ctx.model_id
             ctx.model_candidates = [RuntimeModel(provider_id, model_id)]
+            ctx.model_candidate_policy = "fixed"
             cls._select_candidate(ctx, 0)
             log.info("session.model.auto_disabled_for_turn", {
                 "session_id": ctx.session.id,
@@ -957,27 +1032,19 @@ class SessionLoop:
 
         from flocks.config.config import Config
 
+        config = await Config.get()
         previous = RuntimeModel(ctx.provider_id, ctx.model_id)
         default_llm = await Config.resolve_default_llm()
         primary = RuntimeModel(
             provider_id=(default_llm or {}).get("provider_id") or user_provider_id or ctx.provider_id,
             model_id=(default_llm or {}).get("model_id") or user_model_id or ctx.model_id,
         )
-        # Rebuild once for every real turn. The user message ID makes the
-        # pseudo-random choices stable throughout that turn, while an active
-        # cooldown keeps its valid target in the newly sampled tier.
-        preferred = cls._active_cooldown_model(ctx.session.id, primary)
-        ctx.model_candidates = await cls._build_model_candidates(
+        next_index = await cls._reset_auto_turn_candidates(
+            ctx,
             primary,
-            route_seed=f"{ctx.session.id}:{last_user.id}",
-            preferred=preferred,
+            last_user.id,
+            config=config,
         )
-        ctx.auto_failover = True
-        next_index = cls._cooldown_candidate_index(
-            ctx.session.id,
-            ctx.model_candidates,
-        )
-        cls._select_candidate(ctx, next_index)
         active = ctx.model_candidates[next_index]
         log.info("session.model.auto_turn_reset", {
             "session_id": ctx.session.id,
@@ -990,17 +1057,17 @@ class SessionLoop:
         return True
 
     @classmethod
-    async def _run_user_prompt_submit_hook(
+    async def _run_user_prompt_before_hook(
         cls,
         ctx: LoopContext,
         last_user: MessageInfo,
     ) -> None:
-        """Run UserPromptSubmit once for a newly observed real user turn."""
+        """Run UserPromptBefore once for a newly observed real user turn."""
         try:
             from flocks.hooks.pipeline import HookPipeline
 
             prompt = await Message.get_text_content(last_user)
-            hook_ctx = await HookPipeline.run_user_prompt_submit({
+            hook_ctx = await HookPipeline.run_user_prompt_before({
                 "sessionID": ctx.session.id,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_user, "agent", None) or ctx.agent_name,
@@ -1015,21 +1082,21 @@ class SessionLoop:
             if isinstance(additional_context, str) and additional_context.strip():
                 ctx.turn_additional_context = additional_context.strip()
         except Exception as exc:
-            log.debug("loop.hook.user_prompt_submit.error", {
+            log.debug("loop.hook.user_prompt_before.error", {
                 "session_id": ctx.session.id,
                 "message_id": last_user.id,
                 "error": str(exc),
             })
 
     @classmethod
-    async def _run_turn_finish_hook(
+    async def _run_turn_after_hook(
         cls,
         ctx: LoopContext,
         callbacks: LoopCallbacks,
         last_user: MessageInfo,
         last_message: MessageInfo,
     ) -> bool:
-        """Run TurnFinish and continue the loop when the hook blocks stopping."""
+        """Run turn.after with terminal facts; never continue from hook output."""
         try:
             from flocks.hooks.pipeline import HookPipeline
 
@@ -1041,7 +1108,7 @@ class SessionLoop:
                 )
             user_text = await Message.get_text_content(hook_user)
             assistant_text = await Message.get_text_content(last_message)
-            hook_ctx = await HookPipeline.run_turn_finish({
+            await HookPipeline.run_turn_after({
                 "sessionID": ctx.session.id,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_message, "agent", None) or ctx.agent_name,
@@ -1058,137 +1125,19 @@ class SessionLoop:
                     "id": last_message.id,
                     "content": assistant_text,
                 },
-                "finishReason": "stop",
-                "stopHookActive": ctx.stop_hook_active,
+                "terminalOutcome": {
+                    "status": "success",
+                    "finish_reason": "stop",
+                },
             })
         except Exception as exc:
-            log.debug("loop.hook.turn_finish.error", {
+            log.debug("loop.hook.turn_after.error", {
                 "session_id": ctx.session.id,
                 "message_id": getattr(last_message, "id", None),
                 "error": str(exc),
             })
             return False
-
-        decision = str(hook_ctx.output.get("decision") or "").strip().lower()
-        reason = str(hook_ctx.output.get("reason") or "").strip()
-        if decision != "block":
-            return False
-        if not reason:
-            log.warn("loop.hook.turn_finish.missing_reason", {
-                "session_id": ctx.session.id,
-                "message_id": last_message.id,
-            })
-            return False
-        if ctx.should_abort():
-            log.info("loop.hook.turn_finish.ignored_after_abort", {
-                "session_id": ctx.session.id,
-                "message_id": last_message.id,
-            })
-            return False
-
-        try:
-            if ctx.session_ctx:
-                post_hook_messages = await ctx.session_ctx.get_messages()
-            else:
-                post_hook_messages = await Message.list(ctx.session.id)
-            queued_user = await cls._detect_queued_user_message(
-                ctx.session.id,
-                post_hook_messages,
-                last_user.id,
-                last_message,
-            )
-        except Exception as exc:
-            queued_user = None
-            log.debug("loop.hook.turn_finish.queued_recheck_error", {
-                "session_id": ctx.session.id,
-                "error": str(exc),
-            })
-        if queued_user is not None:
-            turn_state = set_turn_state(
-                ctx.session.id,
-                step=ctx.step,
-                status="continued",
-                continue_reason="queued_message",
-                queued_message_detected=True,
-            )
-            await cls._publish_runtime_event(callbacks, "turn.continued", {
-                **turn_state.model_dump(by_alias=True),
-                "queuedUserMessageID": queued_user.id,
-            })
-            log.info("loop.hook.turn_finish.queued_message_won", {
-                "session_id": ctx.session.id,
-                "queued_user_id": queued_user.id,
-                "source_assistant_message_id": last_message.id,
-            })
-            return True
-
-        from flocks.agent.registry import Agent
-        from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
-
-        try:
-            agent = await Agent.get(
-                getattr(last_message, "agent", None) or ctx.agent_name
-            )
-        except Exception as exc:
-            log.debug("loop.hook.turn_finish.agent_load_error", {
-                "session_id": ctx.session.id,
-                "error": str(exc),
-            })
-            agent = None
-        max_steps = (
-            agent.steps
-            if agent is not None and getattr(agent, "steps", None) is not None
-            else DEFAULT_MAX_TOOL_STEPS
-        )
-        if ctx.trace_step >= max_steps:
-            log.warn("loop.hook.turn_finish.step_limit", {
-                "session_id": ctx.session.id,
-                "step": ctx.trace_step,
-                "max_steps": max_steps,
-            })
-            return False
-
-        try:
-            continuation = await Message.create(
-                session_id=ctx.session.id,
-                role=MessageRole.USER,
-                content=reason,
-                agent=getattr(hook_user, "agent", None) or ctx.agent_name,
-                model={
-                    "providerID": ctx.provider_id,
-                    "modelID": ctx.model_id,
-                },
-                synthetic=True,
-                part_metadata={
-                    "turnFinishContinuation": True,
-                    "stopHookActive": True,
-                    "sourceAssistantMessageID": last_message.id,
-                },
-            )
-        except Exception as exc:
-            log.error("loop.hook.turn_finish.continuation_error", {
-                "session_id": ctx.session.id,
-                "error": str(exc),
-            })
-            return False
-        ctx.stop_hook_active = True
-        turn_state = set_turn_state(
-            ctx.session.id,
-            step=ctx.step,
-            status="continued",
-            continue_reason="turn_finish_hook",
-            queued_message_detected=False,
-        )
-        await cls._publish_runtime_event(callbacks, "turn.continued", {
-            **turn_state.model_dump(by_alias=True),
-            "turnFinishMessageID": continuation.id,
-        })
-        log.info("loop.continuing_for_turn_finish_hook", {
-            "session_id": ctx.session.id,
-            "continuation_message_id": continuation.id,
-            "source_assistant_message_id": last_message.id,
-        })
-        return True
+        return False
 
     @classmethod
     async def _finalize_deferred_failure(
@@ -1268,7 +1217,8 @@ class SessionLoop:
             has_next = next_index < len(ctx.model_candidates)
             if not failure.allow_fallback or not has_next:
                 if (
-                    failure.allow_fallback
+                    ctx.model_candidate_policy == "automatic"
+                    and failure.allow_fallback
                     and not has_next
                     and ctx.candidate_index > 0
                     and failure.reason not in {"rate_limit", "billing"}
@@ -1315,17 +1265,18 @@ class SessionLoop:
             previous = ctx.model_candidates[ctx.candidate_index]
             next_candidate = ctx.model_candidates[next_index]
 
-            if ctx.candidate_index == 0 and failure.reason in {"rate_limit", "billing"}:
-                cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
-                    model=next_candidate,
-                    primary=ctx.model_candidates[0],
-                    expires_at=time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS,
-                    reason=failure.reason,
-                )
-            else:
-                cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
-                if cooldown and cooldown.expires_at > time.monotonic():
-                    cooldown.model = next_candidate
+            if ctx.model_candidate_policy == "automatic":
+                if ctx.candidate_index == 0 and failure.reason in {"rate_limit", "billing"}:
+                    cls._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+                        model=next_candidate,
+                        primary=ctx.model_candidates[0],
+                        expires_at=time.monotonic() + RATE_LIMIT_COOLDOWN_SECONDS,
+                        reason=failure.reason,
+                    )
+                else:
+                    cooldown = cls._auto_failover_cooldowns.get(ctx.session.id)
+                    if cooldown and cooldown.expires_at > time.monotonic():
+                        cooldown.model = next_candidate
 
             cls._select_candidate(ctx, next_index)
             event_payload = {
@@ -1495,7 +1446,7 @@ class SessionLoop:
             if await cls._prepare_auto_turn(ctx, last_user):
                 ctx.turn_additional_context = None
                 ctx.stop_hook_active = False
-                await cls._run_user_prompt_submit_hook(ctx, last_user)
+                await cls._run_user_prompt_before_hook(ctx, last_user)
             
             # Bootstrap memory on first step (once per loop, stored in ctx)
             if ctx.step == 1 and ctx.session.memory_enabled and ctx.memory_bootstrap_data is None:
@@ -1673,40 +1624,79 @@ class SessionLoop:
                     _cache = tokens_dict.get("cache") or {}
                     cache_read = _cache.get("read", 0) if isinstance(_cache, dict) else 0
                     output_tokens = tokens_dict.get("output", 0)
-                    reported_total = input_tokens + cache_read + output_tokens
+                    reasoning_tokens = tokens_dict.get("reasoning", 0)
+                    observed_prompt_tokens = input_tokens + cache_read
+                    reported_total = observed_prompt_tokens + output_tokens + reasoning_tokens
 
-                    # B3 — Observed-value-first token decision.  Always prefer
-                    # the provider's actual usage figure (input + cache_read)
-                    # over our synthetic estimate, because that is what the
-                    # next turn's prompt will be billed against.  Cache it on
-                    # the LoopContext so subsequent turns can reuse it as a
-                    # baseline.  Estimation only kicks in when the provider
-                    # genuinely reports no usage (all zero) — we feed the
-                    # compaction policy into ``estimate_full_context_tokens``
-                    # so it includes system-prompt + tool-schema overhead
-                    # and applies the 1.2 safety margin.
+                    # Provider usage describes the prompt before the latest
+                    # assistant response and its tool results.  Always compare
+                    # it with a lightweight estimate of the current messages
+                    # so newly produced tool output cannot be missed.
                     if reported_total > 0:
-                        ctx.last_observed_prompt_tokens = input_tokens + cache_read + output_tokens
-                        log.info("loop.tokens_decision", {
-                            "session_id": ctx.session.id,
-                            "source": "observed",
-                            "effective_tokens": input_tokens + cache_read,
-                            "overflow_threshold": compaction_policy.overflow_threshold,
-                        })
-                    else:
-                        estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
-                            ctx.session.id,
-                            messages,
-                            policy=compaction_policy,
+                        ctx.last_observed_prompt_tokens = reported_total
+                    # The assistant is marked ``tool-calls`` before its tools
+                    # finish, so a concurrent UI estimate may have cached this
+                    # message without the completed tool output.
+                    SessionPrompt.invalidate_message_cache(last_finished.id)
+                    last_finished_index = next(
+                        (
+                            index
+                            for index, message in enumerate(messages)
+                            if message.id == last_finished.id
+                        ),
+                        len(messages) - 1,
+                    )
+
+                    async def _estimate_effective_tokens() -> tuple[int, int, str]:
+                        if observed_prompt_tokens > 0:
+                            tool_result_tokens = (
+                                await SessionPrompt.estimate_tool_result_tokens(
+                                    ctx.session.id,
+                                    last_finished.id,
+                                )
+                            )
+                            later_tokens = (
+                                await SessionPrompt.estimate_full_context_tokens(
+                                    ctx.session.id,
+                                    messages[last_finished_index + 1:],
+                                    policy=compaction_policy,
+                                )
+                            )
+                            delta_tokens = tool_result_tokens + later_tokens
+                            return (
+                                reported_total + delta_tokens,
+                                delta_tokens,
+                                "observed+estimated_delta",
+                            )
+
+                        estimated_tokens = (
+                            await SessionPrompt.estimate_full_context_tokens(
+                                ctx.session.id,
+                                messages,
+                                policy=compaction_policy,
+                            )
                         )
-                        tokens_dict = {"input": estimated_tokens, "output": 0, "cache": {"read": 0, "write": 0}}
-                        log.info("loop.tokens_decision", {
-                            "session_id": ctx.session.id,
-                            "source": "estimated",
-                            "effective_tokens": estimated_tokens,
-                            "message_count": len(messages),
-                            "overflow_threshold": compaction_policy.overflow_threshold,
-                        })
+                        return max(reported_total, estimated_tokens), estimated_tokens, "estimated"
+
+                    (
+                        effective_tokens,
+                        estimated_component_tokens,
+                        decision_source,
+                    ) = await _estimate_effective_tokens()
+                    tokens_dict = {
+                        "input": effective_tokens,
+                        "output": 0,
+                        "cache": {"read": 0, "write": 0},
+                    }
+                    log.info("loop.tokens_decision", {
+                        "session_id": ctx.session.id,
+                        "source": decision_source,
+                        "effective_tokens": effective_tokens,
+                        "observed_tokens": reported_total,
+                        "estimated_component_tokens": estimated_component_tokens,
+                        "message_count": len(messages),
+                        "overflow_threshold": compaction_policy.overflow_threshold,
+                    })
                     
                     try:
                         _tok_cache = tokens_dict.get("cache") or {}
@@ -1719,6 +1709,13 @@ class SessionLoop:
 
                         if near_overflow and ctx.last_cleanup_step != ctx.step:
                             try:
+                                message_tokens_before_cleanup = (
+                                    await SessionPrompt.estimate_full_context_tokens(
+                                        ctx.session.id,
+                                        messages,
+                                        policy=compaction_policy,
+                                    )
+                                )
                                 trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
                                     ctx.session.id,
                                     context_window_tokens=model_context,
@@ -1746,19 +1743,45 @@ class SessionLoop:
                                         "input_tokens": current_input_tokens,
                                         "cooldown_active": recent_compaction,
                                     })
-                                    turn_state = set_turn_state(
-                                        ctx.session.id,
-                                        step=ctx.step,
-                                        status="continued",
-                                        continue_reason="pre_compact_cleanup",
-                                        queued_message_detected=False,
+                                    message_tokens_after_cleanup = (
+                                        await SessionPrompt.estimate_full_context_tokens(
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
+                                        )
                                     )
-                                    await cls._publish_runtime_event(
-                                        callbacks,
-                                        "turn.continued",
-                                        turn_state.model_dump(by_alias=True),
+                                    baseline_offset_tokens = max(
+                                        0,
+                                        effective_tokens - message_tokens_before_cleanup,
                                     )
-                                    continue
+                                    effective_tokens = (
+                                        message_tokens_after_cleanup + baseline_offset_tokens
+                                    )
+                                    tokens_dict["input"] = effective_tokens
+                                    current_input_tokens = effective_tokens
+                                    log.info("loop.pre_compact_cleanup_rechecked", {
+                                        "session_id": ctx.session.id,
+                                        "effective_tokens": effective_tokens,
+                                        "message_tokens": message_tokens_after_cleanup,
+                                        "baseline_offset_tokens": baseline_offset_tokens,
+                                        "overflow_threshold": (
+                                            compaction_policy.overflow_threshold
+                                        ),
+                                    })
+                                    if effective_tokens <= compaction_policy.overflow_threshold:
+                                        turn_state = set_turn_state(
+                                            ctx.session.id,
+                                            step=ctx.step,
+                                            status="continued",
+                                            continue_reason="pre_compact_cleanup",
+                                            queued_message_detected=False,
+                                        )
+                                        await cls._publish_runtime_event(
+                                            callbacks,
+                                            "turn.continued",
+                                            turn_state.model_dump(by_alias=True),
+                                        )
+                                        continue
                             except Exception as trunc_err:
                                 log.warn("loop.pre_compact_cleanup_error", {
                                     "session_id": ctx.session.id,
@@ -1867,6 +1890,13 @@ class SessionLoop:
                             if not ctx.tool_result_truncation_attempted:
                                 ctx.tool_result_truncation_attempted = True
                                 try:
+                                    message_tokens_before_cleanup = (
+                                        await SessionPrompt.estimate_full_context_tokens(
+                                            ctx.session.id,
+                                            messages,
+                                            policy=compaction_policy,
+                                        )
+                                    )
                                     trunc_count = await SessionCompaction.truncate_oversized_tool_outputs(
                                         ctx.session.id,
                                         context_window_tokens=model_context,
@@ -1877,15 +1907,26 @@ class SessionLoop:
                                             "truncated": trunc_count,
                                         })
                                         # Re-check overflow after truncation
-                                        # (B3) Reuse the active v2 policy so the
-                                        # re-estimate includes the same overhead
-                                        # + safety margin as the first decision.
-                                        re_est = await SessionPrompt.estimate_full_context_tokens(
-                                            ctx.session.id,
-                                            messages,
-                                            policy=compaction_policy,
+                                        message_tokens_after_cleanup = (
+                                            await SessionPrompt.estimate_full_context_tokens(
+                                                ctx.session.id,
+                                                messages,
+                                                policy=compaction_policy,
+                                            )
                                         )
-                                        re_tokens = {"input": re_est, "output": 0, "cache": {"read": 0, "write": 0}}
+                                        baseline_offset_tokens = max(
+                                            0,
+                                            effective_tokens - message_tokens_before_cleanup,
+                                        )
+                                        re_est = (
+                                            message_tokens_after_cleanup
+                                            + baseline_offset_tokens
+                                        )
+                                        re_tokens = {
+                                            "input": re_est,
+                                            "output": 0,
+                                            "cache": {"read": 0, "write": 0},
+                                        }
                                         still_overflow = await SessionCompaction.is_overflow(
                                             tokens=re_tokens,
                                             model_context=model_context,
@@ -2168,7 +2209,7 @@ class SessionLoop:
                     and not ctx.should_abort()
                     and last_message is not None
                     and getattr(last_message, "finish", None) == "stop"
-                    and await cls._run_turn_finish_hook(
+                    and await cls._run_turn_after_hook(
                         ctx,
                         callbacks,
                         last_user,

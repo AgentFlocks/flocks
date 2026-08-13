@@ -200,6 +200,7 @@ class TestChannelConfigMerge:
         assert cfg.enabled is False
         assert cfg.group_trigger == "mention"
         assert cfg.default_agent is None
+        assert not hasattr(cfg, "permission_mode")
 
     def test_channel_config_extra_fields(self):
         cfg = ChannelConfig(enabled=True, appId="abc", appSecret="xyz")
@@ -404,6 +405,7 @@ class TestFeishuNativeCommands:
         from flocks.channel.inbound.session_binding import SessionBinding
 
         dispatcher = InboundDispatcher()
+        dispatcher._trigger_command_hook = AsyncMock()
         binding = SessionBinding(
             channel_id="feishu",
             account_id="default",
@@ -473,7 +475,6 @@ class TestFeishuNativeCommands:
         from flocks.channel.inbound.session_binding import SessionBinding
 
         dispatcher = InboundDispatcher()
-        dispatcher._trigger_command_hook = AsyncMock()
         binding = SessionBinding(
             channel_id="feishu",
             account_id="default",
@@ -633,7 +634,11 @@ class TestFeishuNativeCommands:
         monkeypatch.setattr("flocks.session.session.Session.create", create_mock)
         update_mock = AsyncMock(return_value=None)
         monkeypatch.setattr("flocks.session.session.Session.update", update_mock)
-
+        profile_upsert = AsyncMock(return_value=None)
+        monkeypatch.setattr(
+            "flocks.session.execution_profile.upsert_session_execution_profile",
+            profile_upsert,
+        )
         handled = await dispatcher._handle_feishu_native_command(
             binding=binding,
             msg=msg,
@@ -651,6 +656,14 @@ class TestFeishuNativeCommands:
         assert "session_new" in delivered[0]
         assert "已开始全新对话。" in delivered[0]
         # Starting a new conversation must not archive the previous session.
+        update_mock.assert_not_awaited()
+        profile_upsert.assert_awaited_once()
+        assert profile_upsert.await_args.args[0] == "session_new"
+        assert profile_upsert.await_args.kwargs["patch"]["entry"] == "channel"
+        assert profile_upsert.await_args.kwargs["patch"]["channel_id"] == "feishu"
+        assert profile_upsert.await_args.kwargs["patch"]["account_id"] == "default"
+        # Rebinding only changes the active IM target; it must preserve the
+        # existing session and its history for later WebUI inspection.
         update_mock.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1770,6 +1783,87 @@ class TestMediaFilenameHelpers:
         from flocks.channel.media_filename import sanitize_filename
 
         assert sanitize_filename("../report.bin") == "report.bin"
+
+
+class TestChannelPolicySecurityConfig:
+    @pytest.mark.asyncio
+    async def test_get_channel_config_force_refresh_bypasses_fresh_cache(
+        self, monkeypatch
+    ):
+        from flocks.channel.inbound.dispatcher import (
+            InboundDispatcher,
+            _CachedConfig,
+            _channel_config_cache,
+        )
+
+        _channel_config_cache.clear()
+        _channel_config_cache["weixin"] = _CachedConfig(
+            ChannelConfig(permission_mode="auto-allow-all")
+        )
+
+        fake_config = SimpleNamespace(
+            get_channel_config=lambda _channel_id: ChannelConfig(permission_mode="readonly")
+        )
+        monkeypatch.setattr(
+            "flocks.config.config.Config.get",
+            AsyncMock(return_value=fake_config),
+        )
+
+        cached = await InboundDispatcher._get_channel_config("weixin")
+        refreshed = await InboundDispatcher._get_channel_config(
+            "weixin",
+            force_refresh=True,
+        )
+
+        assert cached.permission_mode == "auto-allow-all"
+        assert refreshed.permission_mode == "readonly"
+        assert _channel_config_cache["weixin"].config.permission_mode == "readonly"
+
+    @pytest.mark.asyncio
+    async def test_session_binding_enforces_visible_agents_for_existing_binding(
+        self, monkeypatch, tmp_path
+    ):
+        from flocks.channel.inbound.session_binding import (
+            SessionBindingService,
+            close_binding_db,
+        )
+        from flocks.storage.storage import Storage
+
+        await Storage.init(tmp_path / "channel-binding-visible-agent.db")
+        monkeypatch.setattr(
+            "flocks.session.session.Session.create",
+            AsyncMock(return_value=SimpleNamespace(id="session_1")),
+        )
+        monkeypatch.setattr(
+            "flocks.session.session.Session.get_by_id",
+            AsyncMock(return_value=SimpleNamespace(id="session_1")),
+        )
+        service = SessionBindingService()
+        msg = InboundMessage(
+            channel_id="feishu",
+            account_id="default",
+            message_id="msg_1",
+            sender_id="ou_user",
+            chat_id="ou_user",
+            chat_type=ChatType.DIRECT,
+            text="hello",
+        )
+
+        try:
+            created = await service.resolve_or_create(
+                msg,
+                default_agent="legacy-agent",
+            )
+            assert created.agent_id == "legacy-agent"
+
+            rebound = await service.resolve_or_create(
+                msg,
+                default_agent="security-agent",
+                visible_agents=["security-agent", "assistant-agent"],
+            )
+            assert rebound.agent_id == "security-agent"
+        finally:
+            await close_binding_db()
 
 
 # ------------------------------------------------------------------
