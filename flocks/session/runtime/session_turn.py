@@ -121,7 +121,6 @@ class LoopContext:
     model_candidate_policy: Literal["fixed", "automatic", "configured"] = "automatic"
     turn_user_id: Optional[str] = None
     turn_additional_context: Optional[str] = None
-    stop_hook_active: bool = False
     prepared_user_id: Optional[str] = None
     prepared_messages: Optional[List[MessageInfo]] = field(default=None, repr=False)
     session_start_pending: bool = False

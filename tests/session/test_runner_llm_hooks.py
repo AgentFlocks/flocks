@@ -39,6 +39,7 @@ class _FakeProcessor:
     def __init__(self, **_: object):
         self._text_parts: list[str] = []
         self._reasoning_parts: list[str] = []
+        self.reasoning_metadata: list[dict[str, object]] = []
         self.finish_reason = "stop"
         self.tool_calls = {}
         self._langfuse_generation = None
@@ -49,6 +50,7 @@ class _FakeProcessor:
             self._text_parts.append(event.text)
         elif event_name == "ReasoningDeltaEvent":
             self._reasoning_parts.append(event.text)
+            self.reasoning_metadata.append(event.metadata)
         elif event_name == "FinishEvent":
             self.finish_reason = event.finish_reason
 
@@ -420,6 +422,138 @@ async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypa
     assert "alice@example.com" not in str(generation_inputs)
     assert "alice@example.com" not in str(trace_inputs)
     assert "[[V_EMAIL_1]]" in str(generation_inputs)
+
+
+@pytest.mark.asyncio
+async def test_call_llm_restores_stream_replacements_across_chunks_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _make_runner("ses_runner_stream_replacements")
+    assistant_msg = SimpleNamespace(id="msg_assistant_stream_replacements")
+    agent = SimpleNamespace(name="rex")
+    processors: list[_FakeProcessor] = []
+
+    async def _before(payload):
+        return SimpleNamespace(
+            output={
+                "request": {
+                    **payload["request"],
+                    "messages": [
+                        {"role": "user", "content": "email [[V_EMAIL_1]]"}
+                    ],
+                    "providerOptions": {},
+                },
+                "redaction": {
+                    "streamTextReplacements": [
+                        {
+                            "placeholder": "[[V_EMAIL_1]]",
+                            "value": "alice@example.com",
+                        }
+                    ],
+                },
+            }
+        )
+
+    class _RecordingProcessor(_FakeProcessor):
+        def __init__(self, **kwargs: object):
+            super().__init__(**kwargs)
+            processors.append(self)
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _RecordingProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(
+            side_effect=lambda stage, _metadata=None: (
+                stage == runner_mod.HookStage.LLM_BEFORE
+            )
+        ),
+    )
+    run_before = AsyncMock(side_effect=_before)
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_before", run_before)
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
+        _FakeToolAccumulator,
+    )
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            assert kwargs["messages"][0].content == "email [[V_EMAIL_1]]"
+
+            async def _gen():
+                yield SimpleNamespace(
+                    delta="",
+                    reasoning="Contact [[V_EM",
+                    metadata={"reasoningContent": "Contact [[V_EMAIL_1]]"},
+                    event_type="reasoning",
+                    tool_calls=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    delta="",
+                    reasoning="AIL_1]]",
+                    metadata={},
+                    event_type="reasoning",
+                    tool_calls=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    delta="Reply to [[V_EM",
+                    reasoning=None,
+                    metadata={},
+                    event_type=None,
+                    tool_calls=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    delta="AIL_1]]",
+                    reasoning=None,
+                    metadata={},
+                    event_type=None,
+                    tool_calls=None,
+                    finish_reason="stop",
+                    usage=None,
+                )
+
+            return _gen()
+
+    results = []
+    for _ in range(2):
+        results.append(
+            await runner._call_llm(
+                provider=_Provider(),
+                messages=[
+                    ChatMessage(role="user", content="email alice@example.com")
+                ],
+                tools=[],
+                agent=agent,
+                assistant_msg=assistant_msg,
+            )
+        )
+
+    assert [result.content for result in results] == [
+        "Reply to alice@example.com",
+        "Reply to alice@example.com",
+    ]
+    assert [processor.get_reasoning_content() for processor in processors] == [
+        "Contact alice@example.com",
+        "Contact alice@example.com",
+    ]
+    assert all(
+        "alice@example.com" in str(processor.reasoning_metadata)
+        and "[[V_EMAIL_1]]" not in str(processor.reasoning_metadata)
+        for processor in processors
+    )
+    run_before.assert_awaited_once()
 
 
 @pytest.mark.asyncio

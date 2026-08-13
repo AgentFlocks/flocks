@@ -49,6 +49,11 @@ from flocks.session.lifecycle.retry import (
     SessionRetry,
 )
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionPolicy
+from flocks.session.llm_hook_utils import (
+    StreamingTextReplacementBuffer,
+    restore_value_with_replacements,
+    stream_text_replacements_from_hook_output,
+)
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.streaming.stream_events import (
     StartEvent,
@@ -98,6 +103,7 @@ log = Log.create(service="session.step_engine")
 TOOL_RESULT_CHAR_BUDGET_RATIO = 0.70
 TOOL_RESULT_TURN_BUDGET_RATIO = 0.35
 TOOL_RESULT_MIN_CHAR_BUDGET = 8_000
+STREAM_TEXT_REPLACEMENTS_METADATA_KEY = "llmHookStreamTextReplacements"
 
 
 def _annotate_with_provider_version(tool_info: Any, description: Optional[str]) -> str:
@@ -3241,6 +3247,9 @@ class StepEngine:
                 metadata.get("providerToolsEnabled"),
             ),
         )
+        metadata[STREAM_TEXT_REPLACEMENTS_METADATA_KEY] = (
+            stream_text_replacements_from_hook_output(hook_output)
+        )
         return ModelRequest(
             provider_id=request.provider_id,
             model_id=request.model_id,
@@ -3344,6 +3353,25 @@ class StepEngine:
         self._active_model_request = request
         messages = request.provider_messages()
         tools = request.provider_tools()
+        replacements = [
+            (replacement[0], replacement[1])
+            for replacement in request.metadata.get(
+                STREAM_TEXT_REPLACEMENTS_METADATA_KEY,
+                (),
+            )
+            if (
+                isinstance(replacement, (list, tuple))
+                and len(replacement) == 2
+                and isinstance(replacement[0], str)
+                and isinstance(replacement[1], str)
+            )
+        ]
+        stream_text_rewriter = (
+            StreamingTextReplacementBuffer(replacements) if replacements else None
+        )
+        stream_reasoning_rewriter = (
+            StreamingTextReplacementBuffer(replacements) if replacements else None
+        )
 
         # Create stream processor
         main_session_key = self.session.id
@@ -3401,6 +3429,28 @@ class StepEngine:
             plan_relative_path=turn_plan_file.relative_path,
             plan_permission_path=turn_plan_file.permission_path,
         )
+
+        async def _flush_reasoning_rewriter() -> None:
+            if stream_reasoning_rewriter is None or not hasattr(
+                self,
+                "_current_reasoning_id",
+            ):
+                return
+            trailing_reasoning = stream_reasoning_rewriter.flush()
+            if not trailing_reasoning:
+                return
+            reasoning_metadata = getattr(
+                self,
+                "_current_reasoning_metadata",
+                {},
+            ) or {}
+            await processor.process_event(
+                ReasoningDeltaEvent(
+                    id=self._current_reasoning_id,
+                    text=trailing_reasoning,
+                    metadata=reasoning_metadata,
+                )
+            )
 
         provider_options = request.provider_options()
         provider_tools = (
@@ -3578,24 +3628,30 @@ class StepEngine:
                 # reasoning text.
                 event_type = getattr(chunk, 'event_type', None)
                 chunk_metadata = getattr(chunk, 'metadata', None) or {}
+                display_chunk_metadata = (
+                    restore_value_with_replacements(chunk_metadata, replacements)
+                    if replacements
+                    else chunk_metadata
+                )
                 reasoning_event_types = {"reasoning", "reasoning-start", "reasoning-end"}
 
-                if hasattr(self, '_current_reasoning_id') and chunk_metadata:
+                if hasattr(self, '_current_reasoning_id') and display_chunk_metadata:
                     current_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
-                    current_metadata.update(chunk_metadata)
+                    current_metadata.update(display_chunk_metadata)
                     self._current_reasoning_metadata = current_metadata
 
                 if event_type == "reasoning-start" and not hasattr(self, '_current_reasoning_id'):
                     self._attempt_state.observable_output_started = True
                     reasoning_id_counter += 1
                     self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
-                    self._current_reasoning_metadata = dict(chunk_metadata)
+                    self._current_reasoning_metadata = dict(display_chunk_metadata)
                     await processor.process_event(ReasoningStartEvent(
                         id=self._current_reasoning_id,
-                        metadata=chunk_metadata,
+                        metadata=display_chunk_metadata,
                     ))
 
                 if event_type == "reasoning-end" and hasattr(self, '_current_reasoning_id'):
+                    await _flush_reasoning_rewriter()
                     reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
                     await processor.process_event(ReasoningEndEvent(
                         id=self._current_reasoning_id,
@@ -3637,22 +3693,28 @@ class StepEngine:
                     if not hasattr(self, '_current_reasoning_id'):
                         reasoning_id_counter += 1
                         self._current_reasoning_id = f"reasoning-{reasoning_id_counter}"
-                        self._current_reasoning_metadata = dict(chunk_metadata)
+                        self._current_reasoning_metadata = dict(display_chunk_metadata)
                         await processor.process_event(ReasoningStartEvent(
                             id=self._current_reasoning_id,
-                            metadata=chunk_metadata,
+                            metadata=display_chunk_metadata,
                         ))
 
                     if chunk_reasoning:
-                        await processor.process_event(ReasoningDeltaEvent(
-                            id=self._current_reasoning_id,
-                            text=chunk_reasoning,
-                            metadata=chunk_metadata,
-                        ))
+                        if stream_reasoning_rewriter is not None:
+                            reasoning_text = stream_reasoning_rewriter.feed(
+                                reasoning_text,
+                            )
+                        if reasoning_text:
+                            await processor.process_event(ReasoningDeltaEvent(
+                                id=self._current_reasoning_id,
+                                text=reasoning_text,
+                                metadata=display_chunk_metadata,
+                            ))
 
                 # 2) End reasoning block when this chunk also carries non-reasoning
                 #    content (or once the stream moves away from reasoning).
                 if (chunk_text or chunk_tool_calls) and hasattr(self, '_current_reasoning_id'):
+                    await _flush_reasoning_rewriter()
                     reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
                     await processor.process_event(ReasoningEndEvent(
                         id=self._current_reasoning_id,
@@ -3663,9 +3725,14 @@ class StepEngine:
                         delattr(self, '_current_reasoning_metadata')
 
                 # 3) Process text delta.
-                if chunk_text:
+                raw_chunk_text = chunk_text
+                if chunk_text and stream_text_rewriter is not None:
+                    chunk_text = stream_text_rewriter.feed(chunk_text)
+
+                if raw_chunk_text:
                     self._attempt_state.observable_output_started = True
                     chunk_counts["text"] += 1
+                if chunk_text:
                     if not text_started:
                         await processor.process_event(TextStartEvent())
                         text_started = True
@@ -3728,12 +3795,21 @@ class StepEngine:
 
         await tool_accumulator.flush_remaining(stream_finish_reason)
 
+        if stream_text_rewriter is not None:
+            trailing_text = stream_text_rewriter.flush()
+            if trailing_text:
+                if not text_started:
+                    await processor.process_event(TextStartEvent())
+                    text_started = True
+                await processor.process_event(TextDeltaEvent(text=trailing_text))
+
         # End text block if started
         if text_started:
             await processor.process_event(TextEndEvent())
 
         # End any remaining reasoning block
         if hasattr(self, '_current_reasoning_id'):
+            await _flush_reasoning_rewriter()
             reasoning_end_metadata = getattr(self, '_current_reasoning_metadata', {}) or {}
             await processor.process_event(ReasoningEndEvent(
                 id=self._current_reasoning_id,

@@ -80,7 +80,6 @@ class ContinuationPolicy:
         )
         if is_real_user_turn:
             context.turn_additional_context = None
-            context.stop_hook_active = False
             await self.run_user_prompt_submit(context, last_user)
         context.prepared_user_id = last_user.id
 
@@ -120,7 +119,7 @@ class ContinuationPolicy:
         context: Any,
         outcome: AgentRunOutcome[MessageInfo],
     ) -> ContinuationDecision[MessageInfo]:
-        """Resolve goal and TurnFinish into a new logical turn."""
+        """Resolve queued input and goal continuation, then observe turn completion."""
         last_user = outcome.last_user
         last_message = outcome.last_message
         if last_user is None or last_message is None:
@@ -232,13 +231,19 @@ class ContinuationPolicy:
             return queued_decision
 
         if not context.should_abort() and getattr(last_message, "finish", None) == "stop":
-            hook_decision = await self.run_turn_finish(
+            await self.run_turn_after(
                 context,
                 last_user,
                 last_message,
             )
-            if hook_decision.should_continue:
-                return hook_decision
+
+            queued_decision = await self._materialize_continuation(
+                context,
+                last_user,
+                last_message,
+            )
+            if queued_decision.should_continue:
+                return queued_decision
 
         stop_reason = getattr(last_message, "finish", None) or "stop"
         await self.publish_turn_stopped(
@@ -247,20 +252,20 @@ class ContinuationPolicy:
         )
         return ContinuationDecision()
 
-    async def run_turn_finish(
+    async def run_turn_after(
         self,
         context: Any,
         last_user: MessageInfo,
         last_message: MessageInfo,
-    ) -> ContinuationDecision[MessageInfo]:
-        """Run TurnFinish and materialize a blocked-stop continuation."""
+    ) -> None:
+        """Publish terminal turn facts without changing continuation control flow."""
         try:
             hook_user = last_user
             if context.turn_user_id:
                 hook_user = await Message.get(context.session.id, context.turn_user_id) or last_user
             user_text = await Message.get_text_content(hook_user)
             assistant_text = await Message.get_text_content(last_message)
-            hook_context = await HookPipeline.run_turn_finish(
+            await HookPipeline.run_turn_after(
                 {
                     "sessionID": context.session.id,
                     "workspace": context.session.directory,
@@ -278,51 +283,21 @@ class ContinuationPolicy:
                         "id": last_message.id,
                         "content": assistant_text,
                     },
-                    "finishReason": "stop",
-                    "stopHookActive": context.stop_hook_active,
+                    "terminalOutcome": {
+                        "status": "success",
+                        "finish_reason": "stop",
+                    },
                 }
             )
         except Exception as exc:
             log.debug(
-                "session.hook.turn_finish_error",
+                "session.hook.turn_after_error",
                 {
                     "session_id": context.session.id,
                     "message_id": getattr(last_message, "id", None),
                     "error": str(exc),
                 },
             )
-            return ContinuationDecision()
-
-        decision = str(hook_context.output.get("decision") or "").strip().lower()
-        reason = str(hook_context.output.get("reason") or "").strip()
-        if decision != "block" or not reason or context.should_abort():
-            return ContinuationDecision()
-
-        allow_synthetic = await self._synthetic_continuation_allowed(
-            context,
-            last_message,
-        )
-        continuation = await self._materialize_continuation(
-            context,
-            last_user,
-            last_message,
-            candidate_reason="turn_finish_hook",
-            content=reason,
-            agent=getattr(hook_user, "agent", None) or context.agent_name,
-            model={
-                "providerID": context.provider_id,
-                "modelID": context.model_id,
-            },
-            part_metadata={
-                "turnFinishContinuation": True,
-                "stopHookActive": True,
-                "sourceAssistantMessageID": last_message.id,
-            },
-            allow_synthetic=allow_synthetic,
-        )
-        if continuation.reason == "turn_finish_hook":
-            context.stop_hook_active = True
-        return continuation
 
     @staticmethod
     async def _synthetic_continuation_allowed(
@@ -448,7 +423,6 @@ class ContinuationPolicy:
         message_id_key = {
             "queued_message": "queuedUserMessageID",
             "goal": "goalMessageID",
-            "turn_finish_hook": "turnFinishMessageID",
         }.get(reason, "continuationMessageID")
         await SessionEventSink.emit(
             context.callbacks,
