@@ -1,0 +1,11 @@
+{
+  "id": "threat-intel-dashboard",
+  "title": "情报封禁大屏",
+  "route": "/contracts/webui/threat-intel-dashboard",
+  "icon": "ShieldAlert",
+  "order": 100,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}

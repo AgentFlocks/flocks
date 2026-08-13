@@ -1,0 +1,11 @@
+{
+  "id": "cross-device-investigation",
+  "title": "跨设备分析调查",
+  "route": "/contracts/webui/cross-device-investigation",
+  "icon": "Network",
+  "order": 100,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}

@@ -1,0 +1,11 @@
+{
+  "id": "dlp-audit-dashboard",
+  "title": "DLP外发审计大屏",
+  "route": "/contracts/webui/dlp-audit-dashboard",
+  "icon": "ShieldAlert",
+  "order": 100,
+  "enabled": true,
+  "placement": "home.after",
+  "entry": "src/index.tsx",
+  "updatedAt": 0
+}
