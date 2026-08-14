@@ -575,6 +575,13 @@ class Provider:
         (e.g. interleaved reasoning rules) are derived from the current
         provider, not whichever provider last wrote the shared model ID.
 
+        Supplier-routed gateways may require an upstream model ID such as
+        ``bailian:deepseek-v4-pro`` while the local catalog stores metadata
+        under ``deepseek-v4-pro``. Within each provider metadata source, exact
+        IDs win; when no exact match exists, the suffix after the first colon
+        is used for metadata only. The caller still sends the original model
+        ID to the provider.
+
         Lookup order:
           1. provider.get_model_definitions() (config-aware, catalog-enriched)
           2. provider._config_models
@@ -582,6 +589,12 @@ class Provider:
           4. Provider._models global registry
         """
         cls._ensure_initialized()
+
+        candidate_model_ids = [model_id]
+        if ":" in model_id:
+            supplier_suffix = model_id.split(":", 1)[1].strip()
+            if supplier_suffix and supplier_suffix != model_id:
+                candidate_model_ids.append(supplier_suffix)
 
         provider = cls._providers.get(provider_id)
         provider_base_url = None
@@ -593,8 +606,10 @@ class Provider:
             )
         if provider is not None:
             try:
-                for model in provider.get_model_definitions():
-                    if getattr(model, "id", None) == model_id:
+                definitions = list(provider.get_model_definitions())
+                for candidate in candidate_model_ids:
+                    model = next((item for item in definitions if getattr(item, "id", None) == candidate), None)
+                    if model is not None:
                         return apply_interleaved_capability_defaults(
                             model,
                             provider_id=provider_id,
@@ -607,8 +622,10 @@ class Provider:
                     "error": str(exc),
                 })
 
-            for model in getattr(provider, "_config_models", []):
-                if getattr(model, "id", None) == model_id:
+            config_models = list(getattr(provider, "_config_models", []))
+            for candidate in candidate_model_ids:
+                model = next((item for item in config_models if getattr(item, "id", None) == candidate), None)
+                if model is not None:
                     return apply_interleaved_capability_defaults(
                         model,
                         provider_id=provider_id,
@@ -616,8 +633,10 @@ class Provider:
                     )
 
             try:
-                for model in provider.get_models():
-                    if getattr(model, "id", None) == model_id:
+                runtime_models = list(provider.get_models())
+                for candidate in candidate_model_ids:
+                    model = next((item for item in runtime_models if getattr(item, "id", None) == candidate), None)
+                    if model is not None:
                         return apply_interleaved_capability_defaults(
                             model,
                             provider_id=provider_id,
@@ -630,7 +649,7 @@ class Provider:
                     "error": str(exc),
                 })
 
-        model = cls._models.get(model_id)
+        model = next((cls._models[candidate] for candidate in candidate_model_ids if candidate in cls._models), None)
         if model is None:
             return None
         return apply_interleaved_capability_defaults(

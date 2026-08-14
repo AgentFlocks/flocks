@@ -973,6 +973,35 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
     instance_project = Instance.get_project()
     project_id = instance_project.id if instance_project else DEFAULT_PROJECT_ID
     parent_session: Optional[SessionModel] = None
+    report_project = None
+    report_session_id: Optional[str] = None
+
+    from flocks.situation_report.product.project_workspace import (
+        REPORT_SESSION_CATEGORY,
+        create_report_project,
+        rollback_report_project,
+    )
+
+    if request.category == REPORT_SESSION_CATEGORY:
+        if current_user.id != API_TOKEN_SERVICE_USER_ID:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Managed report Sessions can only be created by the API service identity",
+            )
+        if request.parentID is not None or request.projectID is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="Managed report Session creation does not accept parentID or projectID",
+            )
+        from flocks.utils.id import Identifier
+
+        report_session_id = Identifier.descending("session")
+        report_project = await create_report_project(
+            session_id=report_session_id,
+            title=request.title,
+        )
+        project_id = report_project.id
+        directory = report_project.worktree
 
     # "default" is accepted for compatibility with older WebUI clients, but
     # ordinary sessions use the current request context rather than a virtual
@@ -1067,6 +1096,15 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
                 status_code=status.HTTP_409_CONFLICT,
                 detail=f"Project {request.projectID} is no longer available",
             )
+    managed_session_fields: Dict[str, Any] = {}
+    if report_session_id is not None:
+        from flocks.situation_report.product.orchestrator import PRODUCTION_AGENT
+
+        managed_session_fields = {
+            "id": report_session_id,
+            "agent": PRODUCTION_AGENT,
+        }
+
     try:
         session = await Session.create(
             project_id=project_id,
@@ -1078,13 +1116,20 @@ async def create_session(http_request: Request, request: Optional[SessionCreateR
             owner_username=(parent_session.owner_username if parent_session else current_user.username),
             model_auto=request.model_auto,
             model_pinned=False,
+            **managed_session_fields,
             **({"category": request.category} if request.category else {}),
         )
     except ProjectDeletionError as exc:
+        if report_project is not None:
+            await rollback_report_project(report_project)
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=str(exc),
         ) from exc
+    except Exception:
+        if report_project is not None:
+            await rollback_report_project(report_project)
+        raise
     Project.invalidate_session_stats()
 
     log.info("session.created", {"session_id": session.id})
@@ -4696,14 +4741,18 @@ async def send_session_message_async(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Session {sessionID} not found"
         )
-    if http_request is not None:
-        current_user = require_user(http_request)
+    current_user = require_user(http_request) if http_request is not None else None
+    if current_user is not None:
         _require_session_write_access(session, current_user)
+    from flocks.situation_report.product.orchestrator import PRODUCTION_AGENT
+
+    product_request = request.agent == PRODUCTION_AGENT
     lifecycle_generation = Session.lifecycle_generation(sessionID)
     
     working_directory = await _resolve_session_working_directory(session)
     _validate_execution_mode_request(request)
-    await _require_agent_usable_for_chat(request.agent)
+    if not product_request:
+        await _require_agent_usable_for_chat(request.agent)
     
     log.info("session.prompt_async.accepted", {
         "sessionID": sessionID,
@@ -4739,6 +4788,22 @@ async def send_session_message_async(
         executionMode=request.execution_mode,
         working_directory=working_directory,
     )
+
+    if product_request:
+        from flocks.situation_report.product.dispatch import dispatch_product_prompt
+
+        return await dispatch_product_prompt(
+            session=session,
+            request=request,
+            event=event,
+            current_user=current_user,
+            working_directory=working_directory,
+            is_running=SessionLoop.is_running,
+            is_chain_active=_is_prompt_chain_active,
+            set_chain_active=_set_prompt_chain_active,
+            schedule_background=_schedule_background_coro,
+            generic_runner=_run_prompt_event_chain,
+        )
 
     existing_queue = await InteractionQueue.list(sessionID)
     if SessionLoop.is_running(sessionID) or existing_queue or _is_prompt_chain_active(sessionID):

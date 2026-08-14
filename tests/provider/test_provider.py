@@ -132,6 +132,52 @@ def test_resolve_model_prefers_provider_specific_runtime_model(monkeypatch):
     assert resolved.capabilities.interleaved["field"] == "reasoning_content"
 
 
+def test_resolve_model_uses_supplier_suffix_only_when_exact_id_is_absent(monkeypatch):
+    suffix_model = SimpleNamespace(
+        id="deepseek-v4-pro",
+        capabilities=SimpleNamespace(interleaved={"field": "reasoning_content"}),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [suffix_model],
+        get_models=lambda: [],
+        _config_models=[],
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"threatbook-cn-llm": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model("threatbook-cn-llm", "bailian:deepseek-v4-pro")
+
+    assert resolved is suffix_model
+    assert resolved.capabilities.interleaved["field"] == "reasoning_content"
+
+
+def test_resolve_model_prefers_exact_supplier_id_over_suffix(monkeypatch):
+    exact_model = SimpleNamespace(
+        id="bailian:deepseek-v4-pro",
+        capabilities=SimpleNamespace(interleaved={"field": "exact"}),
+    )
+    suffix_model = SimpleNamespace(
+        id="deepseek-v4-pro",
+        capabilities=SimpleNamespace(interleaved={"field": "suffix"}),
+    )
+    fake_provider = SimpleNamespace(
+        get_model_definitions=lambda: [suffix_model, exact_model],
+        get_models=lambda: [],
+        _config_models=[],
+    )
+
+    monkeypatch.setattr(Provider, "_initialized", True)
+    monkeypatch.setattr(Provider, "_providers", {"threatbook-cn-llm": fake_provider})
+    monkeypatch.setattr(Provider, "_models", {})
+
+    resolved = Provider.resolve_model("threatbook-cn-llm", "bailian:deepseek-v4-pro")
+
+    assert resolved is exact_model
+    assert resolved.capabilities.interleaved["field"] == "exact"
+
+
 def test_dynamic_openai_compatible_provider_prefers_max_completion_tokens(monkeypatch):
     monkeypatch.setattr(Provider, "_providers", {})
     monkeypatch.setattr(Provider, "_models", {})

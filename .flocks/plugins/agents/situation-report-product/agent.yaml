@@ -1,0 +1,36 @@
+name: situation-report-product
+name_cn: 态势报告一期生产智能体
+description: >-
+  Restricted phase-one A1 report authoring agent. It reads only verified
+  Session resources, writes one complete candidate report, and validates it.
+description_cn: >-
+  一期生产 A1 报告智能体：只读取当前 Session 的已校验资源，写入完整候选报告并校验。
+mode: primary
+delegatable: false
+hidden: true
+color: "#167D9A"
+tags:
+  - situation-report
+  - product
+  - phase-one
+temperature: 0.2
+steps: 50
+model:
+  provider_id: threatbook-cn-llm
+  model_id: bailian:deepseek-v4-pro
+tools:
+  - skill_load
+  - situation_product_context_read
+  - situation_product_material_read
+  - situation_product_source_read
+  - situation_product_report_write
+  - situation_product_report_validate
+permission:
+  "*": deny
+  skill: allow
+  skill_load: allow
+  situation_product_context_read: allow
+  situation_product_material_read: allow
+  situation_product_source_read: allow
+  situation_product_report_write: allow
+  situation_product_report_validate: allow
