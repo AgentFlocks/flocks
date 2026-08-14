@@ -578,7 +578,11 @@ async def _persist_active_session_write(
         ) from exc
 
 
-async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
+async def _require_agent_usable_for_chat(
+    agent_name: Optional[str],
+    *,
+    internal_agent_name: Optional[str] = None,
+) -> None:
     """Validate an explicitly requested chat agent.
 
     The Agent page "enabled" toggle is stored as ``delegatable`` for backward
@@ -598,7 +602,8 @@ async def _require_agent_usable_for_chat(agent_name: Optional[str]) -> None:
         )
 
     tags = getattr(agent, "tags", None) or []
-    if getattr(agent, "hidden", False) or "system" in tags:
+    is_internal_agent = agent_name == internal_agent_name
+    if (getattr(agent, "hidden", False) or "system" in tags) and not is_internal_agent:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f'Agent "{agent_name}" is not available for chat',
@@ -3489,6 +3494,7 @@ async def _process_session_message(
     working_directory: str,
     *,
     lifecycle_generation: Optional[int] = None,
+    internal_agent_name: Optional[str] = None,
 ):
     """
     Process session message within Instance context.
@@ -3543,7 +3549,10 @@ async def _process_session_message(
     # ------------------------------------------------------------------
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
-    await _require_agent_usable_for_chat(request.agent)
+    await _require_agent_usable_for_chat(
+        request.agent,
+        internal_agent_name=internal_agent_name,
+    )
     agent_name = request.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
     
@@ -4268,7 +4277,14 @@ async def _drain_prompt_queue_locked(session_id: str, working_directory: str) ->
         )
 
 
-async def _run_prompt_event_chain(session_id: str, session, event, working_directory: str) -> None:
+async def _run_prompt_event_chain(
+    session_id: str,
+    session,
+    event,
+    working_directory: str,
+    *,
+    internal_agent_name: Optional[str] = None,
+) -> None:
     from flocks.project.bootstrap import instance_bootstrap
     from flocks.project.instance import Instance
 
@@ -4279,7 +4295,13 @@ async def _run_prompt_event_chain(session_id: str, session, event, working_direc
                 await Instance.provide(
                     directory=working_directory,
                     init=instance_bootstrap,
-                    fn=lambda: _dispatch_sse_input(session_id, session, event, working_directory),
+                    fn=lambda: _dispatch_sse_input(
+                        session_id,
+                        session,
+                        event,
+                        working_directory,
+                        internal_agent_name=internal_agent_name,
+                    ),
                 )
             except Exception:
                 dispatch_failed = True
@@ -4371,7 +4393,14 @@ def _build_prompt_request_from_event(event, prompt_text: str, display_text: Opti
     )
 
 
-async def _dispatch_sse_input(sessionID: str, session, event, working_directory: str) -> None:
+async def _dispatch_sse_input(
+    sessionID: str,
+    session,
+    event,
+    working_directory: str,
+    *,
+    internal_agent_name: Optional[str] = None,
+) -> None:
     import time as _time
 
     from flocks.input.dispatcher import dispatch_user_input, parse_slash_command
@@ -4517,6 +4546,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
             request,
             working_directory,
             lifecycle_generation=lifecycle_generation,
+            internal_agent_name=internal_agent_name,
         )
 
     async def _clear_history() -> None:
@@ -4561,6 +4591,34 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
         clear_history=_clear_history,
     )
     await dispatch_user_input(event, sink)
+
+
+async def _run_managed_product_event_chain(
+    session_id: str,
+    session,
+    event,
+    working_directory: str,
+) -> None:
+    from flocks.situation_report.product.orchestrator import PRODUCTION_AGENT
+
+    report_metadata = event.metadata.get("situationReport") if isinstance(event.metadata, dict) else None
+    valid_report_metadata = (
+        isinstance(report_metadata, dict)
+        and isinstance(report_metadata.get("generationID"), str)
+        and report_metadata.get("operation") in {"generate", "modify", "regenerate"}
+    )
+    if event.agent != PRODUCTION_AGENT or not valid_report_metadata:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Invalid internal situation-report dispatch",
+        )
+    await _run_prompt_event_chain(
+        session_id,
+        session,
+        event,
+        working_directory,
+        internal_agent_name=PRODUCTION_AGENT,
+    )
 
 
 class PromptQueueUpdateRequest(BaseModel):
@@ -4802,7 +4860,7 @@ async def send_session_message_async(
             is_chain_active=_is_prompt_chain_active,
             set_chain_active=_set_prompt_chain_active,
             schedule_background=_schedule_background_coro,
-            generic_runner=_run_prompt_event_chain,
+            generic_runner=_run_managed_product_event_chain,
         )
 
     existing_queue = await InteractionQueue.list(sessionID)

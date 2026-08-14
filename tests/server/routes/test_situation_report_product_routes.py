@@ -110,6 +110,50 @@ async def test_prompt_async_dispatches_product_agent_on_a_managed_report_session
     runner.assert_awaited_once()
     assert runner.await_args.kwargs["session"].id == session_id
     assert runner.await_args.kwargs["decision"].kind == "execute"
+    assert runner.await_args.kwargs["generic_runner"].__name__ == "_run_managed_product_event_chain"
+
+
+@pytest.mark.asyncio
+async def test_hidden_product_agent_is_only_allowed_by_internal_runner(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import session as session_routes
+
+    hidden_agent = SimpleNamespace(hidden=True, tags=[], mode="primary", delegatable=False)
+    monkeypatch.setattr(
+        "flocks.agent.registry.Agent.get",
+        AsyncMock(return_value=hidden_agent),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await session_routes._require_agent_usable_for_chat("situation-report-product")
+    assert exc_info.value.status_code == 400
+
+    await session_routes._require_agent_usable_for_chat(
+        "situation-report-product",
+        internal_agent_name="situation-report-product",
+    )
+
+
+@pytest.mark.asyncio
+async def test_managed_product_runner_rejects_unprepared_internal_events(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    from flocks.server.routes import session as session_routes
+
+    inner = AsyncMock()
+    monkeypatch.setattr(session_routes, "_run_prompt_event_chain", inner)
+    prepared = SimpleNamespace(
+        agent="situation-report-product",
+        metadata={"situationReport": {"generationID": "gen-internal", "operation": "generate"}},
+    )
+    await session_routes._run_managed_product_event_chain("ses-internal", object(), prepared, "/tmp")
+    assert inner.await_args.kwargs["internal_agent_name"] == "situation-report-product"
+
+    unprepared = SimpleNamespace(agent="situation-report-product", metadata={})
+    with pytest.raises(HTTPException) as exc_info:
+        await session_routes._run_managed_product_event_chain("ses-internal", object(), unprepared, "/tmp")
+    assert exc_info.value.status_code == 403
 
 
 @pytest.mark.asyncio
