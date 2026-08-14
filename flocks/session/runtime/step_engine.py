@@ -274,6 +274,11 @@ class StepEngine:
             str,
             Tuple[ModelRequest[ChatMessage], bool],
         ] = {}
+        self._pending_llm_after: Dict[
+            str,
+            Tuple[Dict[str, Any], List[Dict[str, Any]]],
+        ] = {}
+        self._llm_retry_scope_active = False
         self._turn: Optional[Any] = None
         self._model_policy: ModelRoutingPolicy = DEFAULT_MODEL_ROUTING_POLICY
         self._step_agent: Optional[AgentInfo] = None
@@ -1547,6 +1552,7 @@ class StepEngine:
         MAX_EMPTY_RETRIES = 3
         error_attempt = 0
         empty_attempt = 0
+        self._llm_retry_scope_active = True
 
         while not self.is_aborted:
             try:
@@ -1563,6 +1569,7 @@ class StepEngine:
                 )
 
                 if getattr(self, "_llm_call_aborted", False):
+                    await self._emit_pending_llm_after(assistant_msg.id)
                     await Message.update(
                         self.session.id,
                         assistant_msg.id,
@@ -1642,6 +1649,7 @@ class StepEngine:
                                 "attempts": empty_attempt,
                             },
                         }
+                        await self._emit_pending_llm_after(assistant_msg.id)
                         if self._defer_step_errors:
                             return self._deferred_failure_result(
                                 message=empty_error_msg,
@@ -1696,6 +1704,7 @@ class StepEngine:
                 finish = "tool-calls" if result.tool_calls else "stop"
                 await Message.update(self.session.id, assistant_msg.id, finish=finish)
                 await self._record_usage_if_available(result.usage, message_id=assistant_msg.id)
+                await self._emit_pending_llm_after(assistant_msg.id)
 
                 # Note: Compaction check is now done in the main loop (run()) before processing step
                 # This matches Flocks's logic: check lastFinished.tokens at loop start
@@ -1789,6 +1798,7 @@ class StepEngine:
                         final_error_message = CONNECTION_ERROR_DISPLAY_MESSAGE
                         error_dict["data"]["displayMessage"] = CONNECTION_ERROR_DISPLAY_MESSAGE
 
+                    await self._emit_pending_llm_after(assistant_msg.id)
                     if self._defer_step_errors:
                         return self._deferred_failure_result(
                             message=final_error_message,
@@ -1817,6 +1827,7 @@ class StepEngine:
                     return StepResult(action="stop", error=final_error_message)
 
         # Aborted
+        await self._emit_pending_llm_after(assistant_msg.id)
         return StepResult(action="stop", error="Aborted")
 
     @staticmethod
@@ -3764,23 +3775,21 @@ class StepEngine:
                 reasoning=processor.get_reasoning_content(),
                 tool_calls=[],
             )
-            if llm_after_enabled:
-                try:
-                    await HookPipeline.run_llm_after(
-                        llm_hook_metadata,
-                        {
-                            "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
-                            "error": {
-                                "type": type(exc).__name__,
-                                "message": str(exc),
-                            },
-                            "response": partial_response,
-                            "usage": stream_usage,
-                            "chunkCounts": dict(chunk_counts),
-                        },
-                    )
-                except Exception as hook_exc:
-                    log.debug("runner.hook.llm_after.error", {"error": str(hook_exc)})
+            await self._record_llm_after_attempt(
+                message_id=assistant_msg.id,
+                metadata=llm_hook_metadata,
+                enabled=llm_after_enabled,
+                output={
+                    "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
+                    "error": {
+                        "type": type(exc).__name__,
+                        "message": str(exc),
+                    },
+                    "response": partial_response,
+                    "usage": stream_usage,
+                    "chunkCounts": dict(chunk_counts),
+                },
+            )
             raise
 
         log.debug("runner.stream.summary", {
@@ -3884,35 +3893,26 @@ class StepEngine:
             reasoning=reasoning,
             tool_calls=tool_calls_for_result,
         )
-        if llm_after_enabled:
-            try:
-                hook_started_at = time.perf_counter()
-                await HookPipeline.run_llm_after(
-                    llm_hook_metadata,
-                    {
-                        "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
-                        "finishReason": processor.get_finish_reason(),
-                        "contentLength": len(content),
-                        "reasoningLength": len(reasoning),
-                        "toolCallCount": len(tool_calls_for_result),
-                        "toolCalls": [
-                            {"id": tool_call.id, "name": tool_call.name}
-                            for tool_call in tool_calls_for_result[:30]
-                        ],
-                        "response": response_payload,
-                        "usage": stream_usage,
-                        "chunkCounts": dict(chunk_counts),
-                        "action": result_action,
-                    },
-                )
-                self._log_perf(
-                    "runner.hook.llm_after.complete",
-                    hook_started_at,
-                    action=result_action,
-                    tool_call_count=len(tool_calls_for_result),
-                )
-            except Exception as exc:
-                log.debug("runner.hook.llm_after.error", {"error": str(exc)})
+        await self._record_llm_after_attempt(
+            message_id=assistant_msg.id,
+            metadata=llm_hook_metadata,
+            enabled=llm_after_enabled,
+            output={
+                "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
+                "finishReason": processor.get_finish_reason(),
+                "contentLength": len(content),
+                "reasoningLength": len(reasoning),
+                "toolCallCount": len(tool_calls_for_result),
+                "toolCalls": [
+                    {"id": tool_call.id, "name": tool_call.name}
+                    for tool_call in tool_calls_for_result[:30]
+                ],
+                "response": response_payload,
+                "usage": stream_usage,
+                "chunkCounts": dict(chunk_counts),
+                "action": result_action,
+            },
+        )
 
         if tool_calls_for_result:
             response_payload = self._build_langfuse_response_payload(
@@ -3959,6 +3959,56 @@ class StepEngine:
             trace_output=response_payload,
         )
         return StepResult(action=result_action, content=content, usage=stream_usage)
+
+    async def _record_llm_after_attempt(
+        self,
+        *,
+        message_id: str,
+        metadata: Dict[str, Any],
+        enabled: bool,
+        output: Dict[str, Any],
+    ) -> None:
+        """Record one provider attempt and close direct calls immediately."""
+        if not enabled:
+            return
+        pending = self._pending_llm_after.get(message_id)
+        if pending is None:
+            attempts: List[Dict[str, Any]] = []
+            self._pending_llm_after[message_id] = (metadata, attempts)
+        else:
+            _, attempts = pending
+        attempts.append(output)
+        if not self._llm_retry_scope_active:
+            await self._emit_pending_llm_after(message_id)
+
+    async def _emit_pending_llm_after(self, message_id: str) -> None:
+        """Emit one terminal after-hook for a logical model request."""
+        self._llm_retry_scope_active = False
+        pending = self._pending_llm_after.pop(message_id, None)
+        if pending is None:
+            return
+        metadata, attempts = pending
+        if not attempts:
+            return
+        output = dict(attempts[-1])
+        output["attemptCount"] = len(attempts)
+        output["failedAttempts"] = [
+            dict(attempt)
+            for attempt in attempts[:-1]
+            if attempt.get("error") is not None
+        ]
+        try:
+            hook_started_at = time.perf_counter()
+            await HookPipeline.run_llm_after(metadata, output)
+            self._log_perf(
+                "runner.hook.llm_after.complete",
+                hook_started_at,
+                action=output.get("action"),
+                tool_call_count=output.get("toolCallCount", 0),
+                attempt_count=len(attempts),
+            )
+        except Exception as exc:
+            log.debug("runner.hook.llm_after.error", {"error": str(exc)})
 
     @staticmethod
     def _end_observability(

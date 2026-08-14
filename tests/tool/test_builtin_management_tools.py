@@ -58,6 +58,15 @@ def test_delegate_task_remains_native_when_declared() -> None:
     assert tool.info.native is True
 
 
+def test_task_alias_remains_non_native_when_declared() -> None:
+    ToolRegistry.init()
+
+    tool = ToolRegistry.get("task")
+
+    assert tool is not None
+    assert tool.info.native is False
+
+
 def test_model_config_tools_remain_non_native_by_default() -> None:
     ToolRegistry.init()
 

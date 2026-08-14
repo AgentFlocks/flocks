@@ -739,6 +739,62 @@ class TestTurnLifecycle:
         assert cleanup_turn["status"] == "continued"
 
     @pytest.mark.asyncio
+    async def test_post_observation_tool_delta_combines_with_observed_prompt(self):
+        session = SimpleNamespace(
+            id="turn_stale_usage_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        assistant = self._make_msg(
+            "stale_usage_assistant",
+            "assistant",
+            finish="tool-calls",
+            tokens={
+                "input": 95_000,
+                "output": 2_000,
+                "reasoning": 3_000,
+                "cache": {"read": 0, "write": 0},
+            },
+        )
+        later_user = self._make_msg("stale_usage_later_user", "user")
+        messages = [assistant, later_user]
+        cleanup = AsyncMock(return_value=object())
+
+        with patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(128_000, 8_192, None),
+        ), patch(
+            "flocks.session.runtime.session_turn.SessionPrompt.invalidate_message_cache",
+            MagicMock(),
+        ), patch(
+            "flocks.session.runtime.session_turn.SessionPrompt.estimate_tool_result_tokens",
+            AsyncMock(return_value=20_000),
+        ), patch(
+            "flocks.session.runtime.session_turn.SessionPrompt.estimate_full_context_tokens",
+            AsyncMock(return_value=5_000),
+        ), patch.object(
+            ctx,
+            "_prepare_tool_result_cleanup",
+            cleanup,
+        ):
+            result = await ctx._prepare_context_window(
+                messages,
+                later_user,
+                assistant,
+            )
+
+        assert result is cleanup.return_value
+        assert cleanup.await_args.args[2] == 125_000
+        assert ctx.last_observed_prompt_tokens == 100_000
+
+    @pytest.mark.asyncio
     async def test_run_loop_skips_exit_condition_when_assistant_has_tool_parts(self):
         session = SimpleNamespace(
             id="loop_tool_part_session",

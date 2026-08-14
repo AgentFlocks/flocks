@@ -557,6 +557,38 @@ async def test_call_llm_restores_stream_replacements_across_chunks_and_retries(
 
 
 @pytest.mark.asyncio
+async def test_llm_after_aggregates_same_model_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _make_runner("ses_runner_llm_hook_retry_pair")
+    runner._llm_retry_scope_active = True
+    run_after = AsyncMock()
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", run_after)
+    metadata = {"messageID": "msg_assistant_hook_retry_pair"}
+    await runner._record_llm_after_attempt(
+        message_id=metadata["messageID"],
+        metadata=metadata,
+        enabled=True,
+        output={"error": {"message": "first attempt failed"}},
+    )
+    await runner._record_llm_after_attempt(
+        message_id=metadata["messageID"],
+        metadata=metadata,
+        enabled=True,
+        output={"action": "stop"},
+    )
+    run_after.assert_not_awaited()
+    await runner._emit_pending_llm_after(metadata["messageID"])
+
+    run_after.assert_awaited_once()
+    after_payload = run_after.await_args.args[1]
+    assert after_payload["attemptCount"] == 2
+    assert after_payload["failedAttempts"] == [
+        {"error": {"message": "first attempt failed"}}
+    ]
+
+
+@pytest.mark.asyncio
 async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_error")
     assistant_msg = SimpleNamespace(id="msg_assistant_error")

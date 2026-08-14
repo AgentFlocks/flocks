@@ -26,7 +26,7 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
   // Filter agents by permissions if agent provided
   const caller = ctx?.agent
   const accessibleAgents = caller
-    ? agents.filter((a) => PermissionNext.evaluate("task", a.name, caller.permission).action !== "deny")
+    ? agents.filter((a) => PermissionNext.evaluate("delegate_task", a.name, caller.permission).action !== "deny")
     : agents
 
   const description = DESCRIPTION.replace(
@@ -43,7 +43,7 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
 
       if (!ctx.extra?.bypassAgentCheck) {
         await ctx.ask({
-          permission: "task",
+          permission: "delegate_task",
           patterns: [params.subagent_type],
           always: ["*"],
           metadata: {
@@ -56,7 +56,7 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
       const agent = await Agent.get(params.subagent_type)
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
 
-      const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
+      const hasDelegatePermission = agent.permission.some((rule) => rule.permission === "delegate_task")
 
       const session = await iife(async () => {
         if (params.session_id) {
@@ -73,11 +73,11 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
               pattern: "*",
               action: "deny",
             },
-            ...(hasTaskPermission
+            ...(hasDelegatePermission
               ? []
               : [
                   {
-                    permission: "task" as const,
+                    permission: "delegate_task" as const,
                     pattern: "*" as const,
                     action: "deny" as const,
                   },
@@ -146,7 +146,7 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
         agent: agent.name,
         tools: {
           todo: false,
-          ...(hasTaskPermission ? {} : { task: false }),
+          ...(hasDelegatePermission ? {} : { delegate_task: false }),
           ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
         },
         parts: promptParts,

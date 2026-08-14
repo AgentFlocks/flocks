@@ -20,8 +20,9 @@ class TestDelegateTaskTolerance:
         assert "Do not delegate trivial edits" in DESCRIPTION
         assert "The task requires multiple steps or research" not in DESCRIPTION
 
-    def test_delegate_schema_exposes_only_subagent_routing(self):
-        schema = ToolRegistry.get_schema("delegate_task")
+    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
+    def test_delegate_schema_exposes_only_subagent_routing(self, tool_name):
+        schema = ToolRegistry.get_schema(tool_name)
         assert schema is not None
         assert "prompt" in schema.required
         assert "subagent_type" in schema.properties

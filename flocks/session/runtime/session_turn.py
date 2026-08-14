@@ -598,39 +598,63 @@ class LoopContext:
         cache = tokens.get("cache") or {}
         cache_read = cache.get("read", 0) if isinstance(cache, dict) else 0
         output_tokens = tokens.get("output", 0)
-        reported_total = input_tokens + cache_read + output_tokens
+        reasoning_tokens = tokens.get("reasoning", 0)
+        observed_prompt_tokens = input_tokens + cache_read
+        reported_total = observed_prompt_tokens + output_tokens + reasoning_tokens
         if reported_total > 0:
             self.last_observed_prompt_tokens = reported_total
-            log.info(
-                "loop.tokens_decision",
-                {
-                    "session_id": self.session.id,
-                    "source": "observed",
-                    "effective_tokens": input_tokens + cache_read,
-                    "overflow_threshold": policy.overflow_threshold,
-                },
+
+        # Provider usage predates the latest assistant response and its tool
+        # results. Invalidate the estimate cached while tools were running and
+        # add only the messages created after that observation.
+        SessionPrompt.invalidate_message_cache(last_finished.id)
+        last_finished_index = next(
+            (
+                index
+                for index, message in enumerate(messages)
+                if message.id == last_finished.id
+            ),
+            len(messages) - 1,
+        )
+        if observed_prompt_tokens > 0:
+            tool_result_tokens = await SessionPrompt.estimate_tool_result_tokens(
+                self.session.id,
+                last_finished.id,
             )
+            later_tokens = await SessionPrompt.estimate_full_context_tokens(
+                self.session.id,
+                messages[last_finished_index + 1:],
+                policy=policy,
+            )
+            estimated_component_tokens = tool_result_tokens + later_tokens
+            effective_tokens = reported_total + estimated_component_tokens
+            decision_source = "observed+estimated_delta"
         else:
-            estimated_tokens = await SessionPrompt.estimate_full_context_tokens(
+            effective_tokens = await SessionPrompt.estimate_full_context_tokens(
                 self.session.id,
                 messages,
                 policy=policy,
             )
-            tokens = {
-                "input": estimated_tokens,
-                "output": 0,
-                "cache": {"read": 0, "write": 0},
-            }
-            log.info(
-                "loop.tokens_decision",
-                {
-                    "session_id": self.session.id,
-                    "source": "estimated",
-                    "effective_tokens": estimated_tokens,
-                    "message_count": len(messages),
-                    "overflow_threshold": policy.overflow_threshold,
-                },
-            )
+            estimated_component_tokens = effective_tokens
+            decision_source = "estimated"
+
+        tokens = {
+            "input": effective_tokens,
+            "output": 0,
+            "cache": {"read": 0, "write": 0},
+        }
+        log.info(
+            "loop.tokens_decision",
+            {
+                "session_id": self.session.id,
+                "source": decision_source,
+                "effective_tokens": effective_tokens,
+                "observed_tokens": reported_total,
+                "estimated_component_tokens": estimated_component_tokens,
+                "message_count": len(messages),
+                "overflow_threshold": policy.overflow_threshold,
+            },
+        )
 
         try:
             cache = tokens.get("cache") or {}

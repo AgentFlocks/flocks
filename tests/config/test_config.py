@@ -153,6 +153,17 @@ def test_legacy_todo_permission_names_migrate_to_todo():
     assert dumped["bash"] == PermissionAction.ASK
 
 
+def test_legacy_task_permission_name_migrates_to_delegate_task():
+    permission = PermissionConfig.model_validate({
+        "delegate_task": "allow",
+        "task": {"explore": "deny"},
+    })
+
+    dumped = permission.model_dump(exclude_none=True)
+    assert dumped["delegate_task"] == PermissionAction.DENY
+    assert "task" not in dumped
+
+
 def test_legacy_todo_tool_flags_migrate_to_todo_permission():
     config = ConfigInfo.model_validate({
         "tools": {

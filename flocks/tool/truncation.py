@@ -100,7 +100,7 @@ def truncate_output(
         max_lines: Maximum number of lines to keep.
         max_bytes: Maximum byte size to keep.
         direction: "head" keeps the first N lines, "tail" keeps the last N.
-        has_task_tool: Whether the current agent can delegate via task tool.
+        has_task_tool: Whether the current agent can use delegate_task.
 
     Returns:
         TruncateResult with (possibly truncated) content.
@@ -163,7 +163,7 @@ def truncate_output(
         hint = (
             f"The tool call succeeded but the output was truncated. "
             f"Full output saved to: {filepath_str}\n"
-            f"Use the Task tool to have explore agent process this file with Grep and Read "
+            f"Use delegate_task to have an explore agent process this file with Grep and Read "
             f"(with offset/limit). Do NOT read the full file yourself - delegate to save context."
         )
     elif filepath_str:
