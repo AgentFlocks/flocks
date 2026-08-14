@@ -95,7 +95,7 @@ Auth、Project API、Event 订阅和 File Download 均使用原始对外协议�
 ## 环境变量
 
 ```text
-THREATBOOK_CN_LLM_BASE_URL              开发环境使用 https://llm-test.threatbook-inc.cn/api
+THREATBOOK_CN_LLM_BASE_URL              办公网使用 https://llm-test.threatbook-inc.cn/api；云端开发服务器使用 http://10.66.96.126:8082
 THREATBOOK_CN_LLM_API_KEY               模型服务凭据，只能由环境或密钥管理注入
 SITUATION_REPORT_PRODUCT_ROOT          可选；默认位于 Config.get_data_path()；外置时同步配置 allowReadPaths
 SITUATION_REPORT_BACKEND_BASE_URL      后端内部 API 基址
@@ -113,6 +113,44 @@ SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 
 - 持久化 Flocks 数据目录；Docker 部署应挂载 `/home/flocks/.flocks`，避免 Session、Project registry 和报告版本随容器删除。
 - 启动后先确认 `situation-report-product` Agent、同名 Skill 和五个 `situation_product_*` 工具均可发现，再执行真实后端闭环。
 - 测试密钥不得写入仓库、镜像层、启动日志或普通配置文件。
+
+## 开发后端 Mock
+
+`scripts/situation_report_product_mock_backend.py` 是独立的开发联调进程，不进入
+Flocks 生产调用链。它从命令行指定的模板和 JSONL 素材初始化每个新 Session，持久化
+不可变快照与资源版本，并实现后端正式提供的两个 HTTP 能力：
+
+- `GET /internal/flocks/v1/report-sessions/{sessionID}/state/latest`
+- latest 返回的相对快照下载 URL
+
+Mock 的 `/__mock__/...` 路由仅用于联调控制，不是正式后端契约。其中
+`PUT /__mock__/report-sessions/{sessionID}/resources/{report|template|materials}?version=N`
+用于模拟后端消费成功 Event 后保存报告，或用户只保存配置后升级模板/素材版本。
+
+以已有真实小数据集启动：
+
+```bash
+export SITUATION_REPORT_MOCK_TOKEN='<仅从开发环境密钥注入>'
+python scripts/situation_report_product_mock_backend.py \
+  --state-dir /tmp/situation-report-product-mock \
+  --template flocks/situation_report/templates/report_standard.md \
+  --materials test_data/situation_report/T01_mixed_10_recent_3d/cards.jsonl \
+  --host 127.0.0.1 \
+  --port 18090
+```
+
+Flocks 进程使用相同的开发凭据连接 Mock：
+
+```text
+SITUATION_REPORT_BACKEND_BASE_URL=http://127.0.0.1:18090
+SITUATION_REPORT_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
+```
+
+真实闭环必须在提交 `prompt_async` 前订阅 Flocks `/api/event`。收到本 generation 的
+`situation.report.status: succeeded` 后，后端按 Event 的 `output.path` 调原始
+`/api/file/download` 保存报告版本。开发联调时再通过上述 `__mock__` PUT 导入该报告，
+即可继续验证 modify、regenerate 以及只保存模板/素材后的下一轮同步。Mock 不伪造模型
+输出，也不代替后端 Event 消费逻辑。
 
 ## 测试边界
 
