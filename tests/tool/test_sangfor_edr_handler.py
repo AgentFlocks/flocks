@@ -425,6 +425,237 @@ def test_asset_inventory_classify_response_has_readable_labels():
     ]
 
 
+def test_advanced_threat_request_definitions_match_capture(tmp_path, monkeypatch):
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    monkeypatch.setattr(advanced, "_request_uuid", lambda: "sf-id-2956")
+
+    common = {
+        "page_no": 1,
+        "page_limit": 50,
+        "threat_levels": [5, 4, 3, 2, 1],
+        "disposal_states": [0],
+        "event_disposal_states": [0, 1, 2],
+        "agent_types": [1],
+        "detect_sources": [1, 2, 3, 6, 8],
+        "event_types": [2, 0],
+        "begin_time": 1786032000000,
+        "end_time": 1786636800999,
+        "wl_switch": 0,
+        "uid": "cnki_edr",
+        "tid": "0",
+    }
+    incident_path, incident_payload = advanced._advanced_threat_request(
+        cfg, "token-value", "incidents", **common
+    )
+
+    assert incident_path.endswith(
+        "/api/edrgoweb/v1/advthreats/queryincidentinfo?_method=get&s=token-value"
+    )
+    assert incident_payload == {
+        "method": "get",
+        "pageNo": 1,
+        "pageLimit": 50,
+        "checkCount": 501,
+        "sortField": 1,
+        "sortType": 0,
+        "filter": {
+            "threatLevel": [5, 4, 3, 2, 1],
+            "wlSwitch": 0,
+            "disposalState": [0],
+            "eventType": [2, 0],
+            "beginTime": 1786032000000,
+            "endTime": 1786636800999,
+            "highConfidence": True,
+            "eventDisposalState": [0, 1, 2],
+            "agentType": [1],
+            "detectSource": [1, 2, 3, 6, 8],
+        },
+        "req": {"uuid": "sf-id-2956", "tid": "0", "uid": "cnki_edr", "token": "token-value"},
+    }
+
+    warning_path, warning_payload = advanced._advanced_threat_request(
+        cfg, "token-value", "warning_logs", **common
+    )
+    assert warning_path.endswith(
+        "/api/edrgoweb/v1/advthreats/querywarninglogs?_method=get&s=token-value"
+    )
+    assert warning_payload["filter"] == {"threatLevel": [5, 4, 3, 2, 1], "wlSwitch": 0}
+
+
+def test_advanced_threat_normalises_multiselect_filters_and_single_wl_switch():
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+
+    assert advanced._normalise_multi(
+        ["严重", "high", 3, "低危", "信息"],
+        advanced.THREAT_LEVEL_ALIASES,
+        "threat_levels",
+    ) == [5, 4, 3, 2, 1]
+    assert advanced._normalise_multi(
+        "IOC引擎,IOA引擎，AF联动",
+        advanced.DETECT_SOURCE_ALIASES,
+        "detect_sources",
+    ) == [1, 2, 8]
+    assert advanced._normalise_multi(
+        ["钓鱼攻击", "web入侵", "恶意病毒", "其他"],
+        advanced.EVENT_TYPE_ALIASES,
+        "event_types",
+    ) == [1, 2, 3, 0]
+    assert advanced._normalise_wl_switch("隐藏") == 0
+
+    try:
+        advanced._normalise_wl_switch([0, 1])
+    except ValueError as exc:
+        assert "exactly one" in str(exc)
+    else:
+        raise AssertionError("wl_switch must reject multiple values")
+
+
+def test_advanced_threat_time_range_requires_paired_values():
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+
+    begin_ms, end_ms = advanced._time_range(7, "2026-08-06", "2026-08-13")
+    assert begin_ms < end_ms
+    assert end_ms - begin_ms >= 7 * 24 * 60 * 60 * 1000
+
+    try:
+        advanced._time_range(7, "2026-08-06", None)
+    except ValueError as exc:
+        assert "provided together" in str(exc)
+    else:
+        raise AssertionError("explicit time range must be paired")
+
+
+def test_advanced_threat_pagination_keeps_items_when_total_is_zero(tmp_path, monkeypatch):
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    responses = iter(
+        [
+            {"code": 0, "data": {"totalNum": 0, "warningLogDatas": [{"warningLogs": {"warningId": "1"}}]}},
+            {"code": 0, "data": {"totalNum": 0, "warningLogDatas": []}},
+        ]
+    )
+    monkeypatch.setattr(advanced, "_post_json", lambda *args, **kwargs: next(responses))
+
+    result = advanced._collect_section(
+        object(),
+        cfg,
+        "secret-token",
+        "warning_logs",
+        page_no=1,
+        page_limit=1,
+        paginate=True,
+        request_kwargs={
+            "threat_levels": [5],
+            "disposal_states": [0],
+            "event_disposal_states": [],
+            "agent_types": [],
+            "detect_sources": [],
+            "event_types": [1],
+            "begin_time": 1,
+            "end_time": 2,
+            "wl_switch": 0,
+            "uid": "admin",
+            "tid": "0",
+        },
+    )
+
+    assert len(result["items"]) == 1
+    assert result["total_num"] == 1
+    assert result["reported_total_num"] == 0
+    assert result["pages_requested"] == 2
+    assert result["termination"] == "empty_page"
+
+
+def test_advanced_threat_pagination_stops_on_repeated_page(tmp_path, monkeypatch):
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    response = {"code": 0, "data": {"totalNum": 0, "incidentList": [{"incidentId": "same"}]}}
+    monkeypatch.setattr(advanced, "_post_json", lambda *args, **kwargs: response)
+
+    result = advanced._collect_section(
+        object(),
+        cfg,
+        "secret-token",
+        "incidents",
+        page_no=1,
+        page_limit=1,
+        paginate=True,
+        request_kwargs={
+            "threat_levels": [5],
+            "disposal_states": [0],
+            "event_disposal_states": [],
+            "agent_types": [],
+            "detect_sources": [],
+            "event_types": [1],
+            "begin_time": 1,
+            "end_time": 2,
+            "wl_switch": 0,
+            "uid": "admin",
+            "tid": "0",
+        },
+    )
+
+    assert len(result["items"]) == 1
+    assert result["termination"] == "repeated_page"
+    assert result["has_more"] is True
+
+
+def test_advanced_threat_readable_unknown_detect_source_keeps_raw_value():
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+
+    readable = advanced._warning_readable(
+        {
+            "agentName": "host-1",
+            "agentIp": "10.0.0.1",
+            "warningLogs": {
+                "warningId": "warning-1",
+                "threatLevel": 3,
+                "detectSource": 4,
+                "eventType": 1,
+            },
+        }
+    )
+
+    assert readable["threat_level_label"] == "中危"
+    assert readable["detect_source"] == 4
+    assert readable["detect_source_label"] == "未知"
+
+
+def test_advanced_threat_collection_does_not_return_auth_token(tmp_path, monkeypatch):
+    handler = _load_handler()
+    advanced = handler._advanced_threat_api_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    monkeypatch.setattr(advanced.auth, "ensure_http_auth_pair", lambda cfg: {"success": True, "status": "reused", "login_skipped": True})
+    monkeypatch.setattr(advanced.auth, "load_verified_auth_pair", lambda cfg: ({"cookies": []}, "secret-token"))
+    monkeypatch.setattr(advanced.auth, "dashboard_session", lambda cfg, state: object())
+    monkeypatch.setattr(
+        advanced,
+        "_collect_section",
+        lambda *args, **kwargs: {
+            "items": [],
+            "total_num": 0,
+            "reported_total_num": 0,
+            "page_no": 1,
+            "page_limit": 50,
+            "pages_requested": 1,
+            "last_page": 1,
+            "has_more": False,
+            "termination": "empty_page",
+        },
+    )
+
+    result = advanced.collect_advanced_threat(cfg, sections=["warning_logs"])
+
+    assert "secret-token" not in __import__("json").dumps(result, ensure_ascii=False)
+
+
 def test_auth_probe_requires_http_200_and_agent_overview_data(tmp_path, monkeypatch):
     handler = _load_handler()
     cfg = _cfg(handler, tmp_path / "auth-state.json")
@@ -548,6 +779,117 @@ def test_http_auth_relogs_and_confirms_when_probe_fails(tmp_path, monkeypatch):
     assert result["success"] is True
     assert result["previous_probe"]["reason"] == "auth_probe_unauthorized"
     assert result["probe"]["valid"] is True
+
+
+def test_http_auth_retries_three_times_then_uses_browser_fallback(tmp_path, monkeypatch):
+    handler = _load_handler()
+    http = handler._http_login_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    probes = iter(
+        [
+            {"valid": False, "reason": "auth_probe_unauthorized"},
+            {"valid": True, "reason": "auth_probe_succeeded"},
+        ]
+    )
+    http_attempts = []
+    browser_attempts = []
+
+    monkeypatch.setattr(http, "probe_auth_pair", lambda cfg: next(probes))
+
+    def fail_http_login(cfg, captcha_code=""):
+        http_attempts.append(captcha_code)
+        return {"success": False, "status": "http_login_failed", "reason": "invalid_credentials"}
+
+    def browser_fallback(cfg, captcha_code=""):
+        browser_attempts.append((cfg, captcha_code))
+        return {"success": True, "status": "browser_cdp_login_refreshed_auth_state"}
+
+    monkeypatch.setattr(http, "_http_login", fail_http_login)
+    monkeypatch.setattr(http, "_browser_login_fallback", browser_fallback)
+
+    result = http.ensure_http_auth_pair(cfg, captcha_code="1234")
+
+    assert http_attempts == ["1234", "1234", "1234"]
+    assert browser_attempts == [(cfg, "1234")]
+    assert result["success"] is True
+    assert result["valid"] is True
+    assert result["browser_fallback_attempted"] is True
+    assert [attempt["http_login_attempt"] for attempt in result["http_login_attempts"]] == [1, 2, 3]
+
+
+def test_http_auth_second_attempt_succeeds_without_browser(tmp_path, monkeypatch):
+    handler = _load_handler()
+    http = handler._http_login_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    probes = iter(
+        [
+            {"valid": False, "reason": "auth_probe_unauthorized"},
+            {"valid": True, "reason": "auth_probe_succeeded"},
+        ]
+    )
+    attempts = []
+
+    monkeypatch.setattr(http, "probe_auth_pair", lambda cfg: next(probes))
+
+    def login(cfg, captcha_code=""):
+        attempts.append(captcha_code)
+        if len(attempts) == 1:
+            return {"success": False, "status": "http_login_failed", "reason": "temporary_failure"}
+        return {"success": True, "status": "http_login_refreshed_auth_state"}
+
+    monkeypatch.setattr(http, "_http_login", login)
+    monkeypatch.setattr(
+        http,
+        "_browser_login_fallback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("browser fallback must be skipped")),
+    )
+
+    result = http.ensure_http_auth_pair(cfg)
+
+    assert len(attempts) == 2
+    assert result["success"] is True
+    assert result["http_login_attempt"] == 2
+    assert "browser_fallback_attempted" not in result
+
+
+def test_http_auth_missing_credentials_does_not_retry_or_open_browser(tmp_path, monkeypatch):
+    handler = _load_handler()
+    http = handler._http_login_module
+    cfg = _cfg(handler, tmp_path / "auth-state.json")
+    calls = []
+
+    monkeypatch.setattr(
+        http,
+        "probe_auth_pair",
+        lambda cfg: {"valid": False, "reason": "auth_state_not_found"},
+    )
+
+    def missing_credentials(cfg, captcha_code=""):
+        calls.append("http")
+        return {
+            "success": False,
+            "status": "http_login_credentials_required",
+            "reason": "missing_http_login_credentials",
+        }
+
+    monkeypatch.setattr(http, "_http_login", missing_credentials)
+    monkeypatch.setattr(
+        http,
+        "_browser_login_fallback",
+        lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("browser fallback must be skipped")),
+    )
+
+    result = http.ensure_http_auth_pair(cfg)
+
+    assert calls == ["http"]
+    assert result["status"] == "http_login_credentials_required"
+    assert "browser_fallback_attempted" not in result
+
+
+def test_handler_registers_cdp_fallback_for_http_auth():
+    handler = _load_handler()
+
+    assert handler._http_login_module._browser_login_fallback is handler._http_auth_browser_fallback
 
 
 def test_dashboard_error_redacts_login_token():
