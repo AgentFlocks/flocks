@@ -376,21 +376,23 @@ async def _http_session_send(
 @ToolRegistry.register_function(
     name="channel_message",
     description=(
-        "Resolve a connected messaging target and optionally send a message. "
-        "Use this tool for WeCom/企业微信, Weixin/微信, Feishu, DingTalk, Telegram, "
-        "WhatsApp, Email/邮件, Slack, and custom messaging channels. "
-        "Provide message to resolve the target and send. Omit message to resolve and "
-        "return the target without sending, for example before creating a scheduled task. "
-        "Provide session_id for deterministic workflow and background delivery. "
-        "When session_id is omitted, the tool resolves the current messaging session or "
-        "searches using target and channel_type. Interactive sessions may ask the user to "
-        "choose when multiple targets match. Workflows and background tasks must provide "
-        "an exact session_id."
+        "Resolve a connected messaging destination or send a message to it. "
+        "Supported channels include WeCom/企业微信, Weixin/微信, Feishu, DingTalk, "
+        "Telegram, WhatsApp, Email/邮件, Slack, and custom messaging channels. "
+        "Provide a non-empty message to send. Omit message to resolve and return the "
+        "destination without sending. Provide session_id when the destination is already "
+        "known; otherwise use target and optionally channel_type. Interactive sessions "
+        "may ask the user to choose when multiple destinations match. Workflows and "
+        "background tasks must provide session_id and must not depend on interactive "
+        "selection. Use account_id and chat_id only with values returned by destination "
+        "resolution or SessionBinding; never guess them."
     ),
     description_cn=(
-        "解析已连接的消息渠道目标，并可选择发送消息。提供 message 时解析并发送；"
-        "不提供 message 时只返回目标，可用于创建定时任务前确定 session_id。"
-        "Workflow 和后台任务应提供明确的 session_id。"
+        "解析已连接的消息渠道目标，或向该目标发送消息。"
+        "提供非空 message 时发送；省略 message 时只解析并返回目标。"
+        "已知目标时提供 session_id，否则使用 target 和可选的 channel_type 解析。"
+        "Workflow 和后台任务必须提供 session_id，不得依赖交互选择。"
+        "account_id 和 chat_id 只能使用目标解析或 SessionBinding 返回的值，不得猜测。"
     ),
     category=ToolCategory.SYSTEM,
     parameters=[
