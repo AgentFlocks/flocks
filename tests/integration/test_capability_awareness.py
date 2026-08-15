@@ -298,12 +298,13 @@ class TestRexPromptAwareness:
         assert "Category + Skills Delegation System" not in prompt
 
     @pytest.mark.asyncio
-    async def test_rex_prompt_points_to_im_send_tool(self):
-        """Rex prompt 应只指向 im_send_message 工具，不内嵌完整 IM SOP。"""
+    async def test_rex_prompt_points_to_channel_message_tool(self):
+        """Rex prompt 应只指向 channel_message 工具，不内嵌完整 IM SOP。"""
         from flocks.agent.registry import Agent
         rex = await Agent.get("rex")
         prompt = rex.prompt or ""
-        assert "im_send_message" in prompt
+        assert "channel_message" in prompt
+        assert "im_send_message" not in prompt
         assert 'skill_load(name="im-send")' not in prompt
         assert "### IM Send Protocol" not in prompt
         assert "Execute this exact sequence" not in prompt

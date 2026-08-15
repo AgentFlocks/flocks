@@ -59,7 +59,6 @@ const BUILT_IN_TOOLS = [
   'skill_load',
   'device_manage',
   'channel_message',
-  'im_send_message',
   'wecom_mcp',
   'get_time',
 ];

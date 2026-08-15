@@ -72,7 +72,7 @@ class TestTaskCenterCompatibility:
             + " "
             + schema.properties["description"]["description"]
         ).lower()
-        for value in ("im_send_message", "resolve_only", "channel_type", "session_id"):
+        for value in ("channel_message", "without message", "channel_type", "session_id"):
             assert value in text
 
     def test_task_schema_exposes_actions_resources_and_trigger_fields(self):

@@ -55,7 +55,7 @@ def build_dynamic_rex_prompt(
     skills_section = _build_rex_skills_section(available_skills)
     workflows_section = build_workflows_section(available_workflows or [])
     security_priority = _build_security_priority_section(available_agents)
-    im_send_section = _build_im_send_pointer_section()
+    channel_message_section = _build_channel_message_pointer_section()
     anti_patterns = _build_rex_anti_patterns_section()
     command_guidance_section = _build_command_guidance_section()
     task_management_section = _task_management_section(use_task_system)
@@ -168,7 +168,7 @@ Reuse `session_id` when follow-up work belongs to the same delegated thread. Do 
 
 __TASK_MANAGEMENT_SECTION__
 
-__IM_SEND_SECTION__
+__CHANNEL_MESSAGE_SECTION__
 
 <Communication>
 ## Style
@@ -202,7 +202,7 @@ __COMMAND_GUIDANCE__
     prompt = prompt.replace("__SKILLS_SECTION__", skills_section)
     prompt = prompt.replace("__WORKFLOWS_SECTION__", workflows_section)
     prompt = prompt.replace("__SECURITY_PRIORITY__", security_priority)
-    prompt = prompt.replace("__IM_SEND_SECTION__", im_send_section)
+    prompt = prompt.replace("__CHANNEL_MESSAGE_SECTION__", channel_message_section)
     prompt = prompt.replace("__ANTI_PATTERNS__", anti_patterns)
     prompt = prompt.replace("__COMMAND_GUIDANCE__", command_guidance_section)
     prompt = prompt.replace("__TASK_MANAGEMENT_SECTION__", task_management_section)
@@ -430,8 +430,8 @@ Available security specialists: {agent_names}
 Security sub-agents still have dedicated toolsets and should be preferred for non-trivial security analysis."""
 
 
-def _build_im_send_pointer_section() -> str:
+def _build_channel_message_pointer_section() -> str:
     return """### IM Messaging
 
-When the user wants to send a message to a connected messaging channel (including IM platforms and email), call `im_send_message`.
-When creating a scheduled task that sends to a connected messaging channel later, resolve the target `session_id` with `im_send_message(resolve_only=true)` before calling `schedule_task(action="create", resource_type="scheduler", ...)`."""
+When the user wants to send a message to a connected messaging channel (including IM platforms and email), call `channel_message` with a non-empty `message`.
+When creating a scheduled task that sends to a connected messaging channel later, call `channel_message` without `message` to resolve the target `session_id` before calling `schedule_task(action="create", resource_type="scheduler", ...)`."""

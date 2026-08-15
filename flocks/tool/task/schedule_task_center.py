@@ -503,7 +503,7 @@ _SCHEDULE_TASK_ACTIONS_BY_RESOURCE = {
         "disable, delete, rerun. Execution actions: list, status, cancel, retry, "
         "delete, rerun. Create tasks only for explicitly deferred or scheduled work. "
         "For scheduled messaging, resolve channel_type and session_id with "
-        "im_send_message(resolve_only=true) first and include them in description and "
+        "channel_message without message first and include them in description and "
         "user_prompt."
     ),
     category=ToolCategory.SYSTEM,

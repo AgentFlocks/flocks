@@ -77,7 +77,7 @@ async def test_channel_session_send_returns_404_when_channel_binding_is_ambiguou
             )
 
     assert exc_info.value.status_code == 404
-    assert "im_send_message(resolve_only=true)" in str(exc_info.value.detail)
+    assert "channel_message" in str(exc_info.value.detail)
     svc.latest_active_user_binding.assert_awaited_once_with(
         channel_id="wecom",
         account_id=None,

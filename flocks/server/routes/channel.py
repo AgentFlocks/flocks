@@ -91,7 +91,7 @@ async def channel_session_send(req: SessionSendRequest):
             status_code=404,
             detail=(
                 f"未找到 session '{req.session_id}' 的渠道绑定；"
-                "请使用 im_send_message(resolve_only=true) 重新解析当前 IM 目标，"
+                "请使用不带 message 的 channel_message 重新解析当前 IM 目标，"
                 "或让用户确认目标 IM 会话。"
             ),
         )

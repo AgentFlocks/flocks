@@ -54,7 +54,6 @@ const STATIC_LABEL_KEYS: Record<string, string> = {
   ssh_host_cmd: 'chat.tool.actions.runRemoteCommand',
   ssh_run_script: 'chat.tool.actions.runRemoteScript',
   channel_message: 'chat.tool.actions.sendMessage',
-  im_send_message: 'chat.tool.actions.sendMessage',
   wecom_mcp: 'chat.tool.actions.useWeCom',
   get_time: 'chat.tool.actions.getTime',
 };
@@ -321,11 +320,6 @@ function buildDetail(
     case 'ssh_run_script':
       return joinDetail(stringValue(input, 'host'), stringValue(input, 'script_path'));
     case 'channel_message':
-      return joinDetail(
-        stringValue(input, 'channel_type'),
-        stringValue(input, 'chat_id', 'session_id'),
-      );
-    case 'im_send_message':
       return joinDetail(
         stringValue(input, 'channel_type'),
         stringValue(input, 'target', 'session_id'),
