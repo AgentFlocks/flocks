@@ -535,7 +535,7 @@
       "type": "agent",
       "name": "Report Generator",
       "description": "Delegates to this agent when the user needs to write a penetration test report, compile findings into a document, create an executive summary, format technical findings, or produce any security assessment documentation.",
-      "version": "1.0.0",
+      "version": "1.1.0",
       "category": "workflow-automation",
       "tags": [
         "integration",

@@ -10,6 +10,7 @@ export function shouldForwardSSEEventToParent(event: SSEChatEvent, sessionId?: s
   if (
     type === 'session.updated' ||
     type === 'task.updated' ||
+    type === 'report.task.updated' ||
     type.startsWith('workflow.')
   ) {
     return true;

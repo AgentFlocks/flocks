@@ -13,6 +13,10 @@ describe('shouldForwardSSEEventToParent', () => {
       properties: { executionID: 'task-1' },
     }, 'session-1')).toBe(true);
     expect(shouldForwardSSEEventToParent({
+      type: 'report.task.updated',
+      properties: { generationID: 'generation-1' },
+    }, 'session-1')).toBe(true);
+    expect(shouldForwardSSEEventToParent({
       type: 'workflow.updated',
       properties: { workflowID: 'workflow-1' },
     }, 'session-1')).toBe(true);

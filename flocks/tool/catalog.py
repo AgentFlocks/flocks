@@ -57,6 +57,7 @@ TOOL_TAGS: Dict[str, List[str]] = {
     "channel_message": ["messaging", "channel"],
     "im_send_message": ["messaging", "channel", "im"],
     "flocks_mcp": ["mcp", "management"],
+    "report_task_update": ["report", "report-generation", "sse", "ui-notification"],
     "wecom_mcp": ["enterprise", "wecom"],
     "get_time": ["system", "utility"],
 }
