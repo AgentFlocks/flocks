@@ -429,8 +429,10 @@ class TestTurnLifecycle:
         )
         user = self._make_msg("msg_001", "user")
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        assistant.parentID = user.id
         goal_user = self._make_msg("msg_003", "user")
         assistant_after_goal = self._make_msg("msg_004", "assistant", finish="stop")
+        assistant_after_goal.parentID = goal_user.id
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
@@ -474,6 +476,7 @@ class TestTurnLifecycle:
             result = await SessionLoop._run_loop(ctx, callbacks)
 
         assert result.action == "stop"
+        assert result.last_message is assistant_after_goal
         create_message.assert_awaited_once()
         assert create_message.await_args.kwargs["content"] == "continue toward goal"
         assert create_message.await_args.kwargs["synthetic"] is True
@@ -505,6 +508,7 @@ class TestTurnLifecycle:
         )
         user = self._make_msg("msg_001", "user")
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        assistant.parentID = user.id
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
@@ -561,6 +565,7 @@ class TestTurnLifecycle:
         )
         user = self._make_msg("msg_001", "user")
         assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        assistant.parentID = user.id
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
@@ -624,6 +629,7 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
+        messages[1].parentID = messages[0].id
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[[messages[0]], messages])
         )
@@ -842,6 +848,7 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
+        messages[1].parentID = messages[0].id
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[messages, messages])
         )
@@ -981,6 +988,64 @@ class TestTurnLifecycle:
             result = await SessionLoop._run_loop(ctx, LoopCallbacks())
 
         assert result.last_message is current_assistant
+        process_step.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_run_loop_does_not_return_previous_reply_when_current_step_fails(
+        self,
+    ) -> None:
+        session = SimpleNamespace(
+            id="loop_failed_current_turn_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        previous_user = self._make_msg("msg_previous_user", "user")
+        previous_assistant = self._make_msg(
+            "msg_previous_assistant",
+            "assistant",
+            finish="stop",
+        )
+        previous_assistant.parentID = previous_user.id
+        current_user = self._make_msg("msg_current_user", "user")
+        messages = [previous_user, previous_assistant, current_user]
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(side_effect=[messages, messages])
+        )
+        on_error = AsyncMock()
+        process_step = AsyncMock(
+            return_value=StepResult(action="stop", error="provider failed")
+        )
+
+        with patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ), patch(
+            "flocks.session.session_loop.fire_and_forget",
+            MagicMock(),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ):
+            result = await SessionLoop._run_loop(
+                ctx,
+                LoopCallbacks(on_error=on_error),
+            )
+
+        assert result.last_message is None
+        on_error.assert_awaited_once_with("provider failed")
         process_step.assert_awaited_once()
 
 
