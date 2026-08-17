@@ -393,6 +393,7 @@
       "historySummary": "{{count}} 条记录 · 最近 {{time}}",
       "historySummaryLoading": "正在加载执行历史",
       "noHistory": "暂无执行记录",
+      "executionNotFound": "未找到指定执行记录",
       "noOutput": "无输出数据",
       "stepsCompleted": "步已完成",
       "stepInputs": "输入",

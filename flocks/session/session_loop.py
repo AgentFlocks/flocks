@@ -1069,6 +1069,7 @@ class SessionLoop:
             prompt = await Message.get_text_content(last_user)
             hook_ctx = await HookPipeline.run_user_prompt_before({
                 "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_user, "agent", None) or ctx.agent_name,
                 "model": {
@@ -1110,6 +1111,7 @@ class SessionLoop:
             assistant_text = await Message.get_text_content(last_message)
             await HookPipeline.run_turn_after({
                 "sessionID": ctx.session.id,
+                "sessionCategory": ctx.session.category,
                 "workspace": ctx.session.directory,
                 "agent": getattr(last_message, "agent", None) or ctx.agent_name,
                 "model": {
@@ -2041,8 +2043,9 @@ class SessionLoop:
                             
                             # Continuation user message is now created inside
                             # SessionCompaction.process() (matching Flocks).
-                            # Just continue — the new user message flips the
-                            # ID ordering so _should_exit() won't trigger.
+                            # Just continue — the completed assistant belongs
+                            # to the preceding user turn, so _should_exit()
+                            # won't trigger for the continuation message.
                             continue
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
@@ -2088,16 +2091,15 @@ class SessionLoop:
                     post_messages = await ctx.session_ctx.get_messages()
                 else:
                     post_messages = await Message.list(ctx.session.id)
-                for msg in reversed(post_messages):
-                    if (
-                        msg.role == MessageRole.ASSISTANT
-                        and (
-                            not ctx.auto_failover
-                            or getattr(msg, "parentID", None) == last_user.id
-                        )
-                    ):
-                        last_message = msg
-                        break
+                last_message = next(
+                    (
+                        msg
+                        for msg in reversed(post_messages)
+                        if msg.role == MessageRole.ASSISTANT
+                        and getattr(msg, "parentID", None) == last_user.id
+                    ),
+                    None,
+                )
 
                 queued_user = await cls._detect_queued_user_message(
                     ctx.session.id,
@@ -2307,7 +2309,7 @@ class SessionLoop:
         
         Ported from original exit logic:
         - Exit if assistant has responded with finish != tool-calls
-        - Exit if assistant message is after user message
+        - Exit if assistant is a response to the latest user message
         """
         if not last_assistant:
             return False
@@ -2322,8 +2324,8 @@ class SessionLoop:
         if last_assistant.finish:
             if last_assistant.finish not in ("tool-calls", "unknown", "summary"):
                 # Assistant finished with stop/error/etc
-                if last_user.id < last_assistant.id:
-                    # Assistant responded after user
+                if getattr(last_assistant, "parentID", None) == last_user.id:
+                    # Assistant responded to this user turn
                     return True
         
         return False

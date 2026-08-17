@@ -7,12 +7,15 @@ from datetime import UTC, datetime
 import hashlib
 from pathlib import Path
 import sqlite3
-from typing import Any, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Any, Iterable, Optional, Sequence
 
 import aiosqlite
 
 from flocks.storage.storage import Storage
 from flocks.utils.log import Log
+
+if TYPE_CHECKING:
+    from flocks.memory.types import MemoryTimeRange
 
 log = Log.create(service="storage.session_search")
 
@@ -67,6 +70,9 @@ CREATE INDEX IF NOT EXISTS idx_session_transcript_state_session
 
 CREATE INDEX IF NOT EXISTS idx_session_transcript_state_project
     ON session_transcript_index_state(project_id);
+
+CREATE INDEX IF NOT EXISTS idx_session_transcript_state_project_created
+    ON session_transcript_index_state(project_id, created_at);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS session_transcript_fts USING fts5(
     text,
@@ -619,38 +625,54 @@ async def session_fts_search(
     query: str,
     max_results: int,
     readable_session_ids: Optional[set[str]] = None,
+    time_range: Optional[MemoryTimeRange] = None,
 ) -> list[dict[str, Any]]:
     """Search readable Session messages in the current project."""
     from flocks.storage.vector import build_fts_query
 
     require_session_search_available()
     fts_query = build_fts_query(query)
-    if not fts_query:
-        return []
     if readable_session_ids is not None and not readable_session_ids:
         return []
 
-    sql = """
+    text_expression = (
+        "snippet(session_transcript_fts, 0, '', '', ' … ', 24)"
+        if fts_query
+        else "session_transcript_fts.text"
+    )
+    sql = f"""
         SELECT
             s.message_id,
             s.session_id,
             s.role,
             s.created_at,
-            snippet(session_transcript_fts, 0, '', '', ' … ', 24),
-            bm25(session_transcript_fts)
+            {text_expression}
         FROM session_transcript_fts
         JOIN session_transcript_index_state s
             ON s.id = session_transcript_fts.rowid
-        WHERE session_transcript_fts MATCH ?
-            AND s.project_id = ?
+        WHERE s.project_id = ?
     """
-    params: list[Any] = [fts_query, project_id]
+    params: list[Any] = [project_id]
+    if fts_query:
+        sql += " AND session_transcript_fts MATCH ?"
+        params.append(fts_query)
     if readable_session_ids is not None:
         ordered_ids = sorted(readable_session_ids)
         placeholders = ",".join("?" for _ in ordered_ids)
         sql += f" AND s.session_id IN ({placeholders})"
         params.extend(ordered_ids)
-    sql += " ORDER BY bm25(session_transcript_fts) LIMIT ?"
+    if time_range is not None:
+        if time_range.start_ms is not None:
+            sql += " AND s.created_at >= ?"
+            params.append(time_range.start_ms)
+        if time_range.end_ms is not None:
+            sql += " AND s.created_at < ?"
+            params.append(time_range.end_ms)
+    if fts_query:
+        sql += " ORDER BY bm25(session_transcript_fts)"
+    else:
+        sql += " ORDER BY s.created_at DESC"
+    sql += " LIMIT ?"
     params.append(max_results)
 
     async with Storage.connect(db_path) as db:
@@ -660,8 +682,12 @@ async def session_fts_search(
     count = len(rows)
     results: list[dict[str, Any]] = []
     for index, row in enumerate(rows):
-        message_id, session_id, role, created_at, snippet, _rank = row
-        score = 1.0 if count == 1 else 1.0 - (index / (2 * count))
+        message_id, session_id, role, created_at, snippet = row
+        score = (
+            1.0
+            if not fts_query or count == 1
+            else 1.0 - (index / (2 * count))
+        )
         results.append(
             {
                 "path": f"sessions/{session_id}/messages/{message_id}",

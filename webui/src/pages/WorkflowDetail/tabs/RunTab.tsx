@@ -23,6 +23,7 @@ interface RunTabProps {
   embedded?: boolean;
   embeddedTabs?: boolean;
   hideSectionHeaders?: boolean;
+  focusExecutionId?: string;
 }
 
 export type RunTabSection = 'test' | 'history';
@@ -198,6 +199,224 @@ type SaveState = 'idle' | 'saving' | 'saved' | 'error';
 
 function isPlainObject(value: unknown): value is Record<string, any> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const MOCK_DASHBOARD_STORAGE_KEYS = [
+  'soc-dashboard-mock-v1',
+  'soc-dashboard-mock-activity-v1',
+  'soc-dashboard-mock-task-center-v1',
+];
+
+function isMockExecutionFallbackEnabled(): boolean {
+  if (typeof window === 'undefined') return false;
+  const params = new URLSearchParams(window.location.search);
+  if (
+    params.get('mockDashboard') === '1'
+    || params.get('mockActivity') === '1'
+    || params.get('mockTaskCenter') === '1'
+    || params.get('mockExecution') === '1'
+  ) {
+    return true;
+  }
+  try {
+    return MOCK_DASHBOARD_STORAGE_KEYS.some((key) => window.localStorage?.getItem(key) === '1');
+  } catch {
+    return false;
+  }
+}
+
+function createMockWorkflowExecutions(workflowId: string): WorkflowExecution[] {
+  const now = Date.now();
+  if (workflowId === 'stream_alert_triage') {
+    return [
+      {
+        id: 'mock-triage-run-002',
+        workflowId: 'stream_alert_triage',
+        inputParams: {
+          alert_id: 'mock-alert-rce',
+          source_type: 'tdp',
+          threat_name: '远程命令执行攻击（Mock）',
+          src_ip: '203.0.113.41',
+          dst_ip: '10.12.4.18',
+          request_uri: '/cgi-bin/luci/;stok=/locale',
+        },
+        status: 'running',
+        startedAt: now - 4 * 60 * 1000,
+        duration: 240.2,
+        outputResults: {
+          alert_id: 'mock-alert-rce',
+          verdict: '疑似攻击行为',
+          confidence: 0.82,
+          next_action: '等待证据汇总节点完成后自动提交研判结论',
+        },
+        executionLog: [
+          {
+            node_id: 'load_dedup_file',
+            node_type: 'python',
+            inputs: {
+              alert_id: 'mock-alert-rce',
+              dedup_path: '~/.flocks/workspace/outputs/2026-08-13/artifacts/dedup.jsonl',
+            },
+            outputs: {
+              related_count: 3,
+              cluster_id: 'MOCK-RCE-12',
+              latest_seen: new Date(now - 6 * 60 * 1000).toISOString(),
+            },
+            stdout: 'Loaded 3 related alerts from dedup artifact.',
+            duration_ms: 892,
+          },
+          {
+            node_id: 'concurrent_triage',
+            node_type: 'python',
+            inputs: {
+              alert_id: 'mock-alert-rce',
+              evidence_count: 3,
+              model: 'security-triage-llm',
+            },
+            outputs: {
+              verdict: '疑似攻击行为',
+              confidence: 0.82,
+              evidence: [
+                '请求路径命中历史 RCE 利用模式',
+                '源 IP 在最近窗口内触发多类探测',
+                '目标资产暴露管理接口',
+              ],
+            },
+            stdout: 'LLM triage completed; waiting for downstream cursor commit.',
+            duration_ms: 31244,
+          },
+        ],
+        triggerSource: 'workflow_execution',
+        currentNodeId: 'concurrent_triage',
+        currentNodeType: 'python',
+        currentPhase: 'running',
+        currentStepIndex: 2,
+        stepCount: 4,
+        stepLogOffset: 0,
+        stepLogLimit: 500,
+        stepLogTotal: 2,
+      },
+      {
+        id: 'mock-triage-run-003',
+        workflowId: 'stream_alert_triage',
+        inputParams: {
+          alert_id: 'mock-alert-sql',
+          source_type: 'onesec',
+          threat_name: 'SQL 注入探测（Mock）',
+        },
+        status: 'running',
+        startedAt: now - 18 * 1000,
+        duration: 18,
+        outputResults: {},
+        executionLog: [
+          {
+            node_id: 'load_dedup_file',
+            node_type: 'python',
+            inputs: { alert_id: 'mock-alert-sql' },
+            outputs: { related_count: 1, cluster_id: 'MOCK-SQL-04' },
+            stdout: 'Loaded 1 related alert.',
+            duration_ms: 711,
+          },
+        ],
+        triggerSource: 'workflow_execution',
+        currentNodeId: 'concurrent_triage',
+        currentNodeType: 'python',
+        currentPhase: 'running',
+        currentStepIndex: 1,
+        stepCount: 4,
+        stepLogOffset: 0,
+        stepLogLimit: 500,
+        stepLogTotal: 1,
+      },
+    ];
+  }
+  if (workflowId === 'stream_alert_denoise') {
+    return [
+      {
+        id: 'mock-denoise-run-001',
+        workflowId: 'stream_alert_denoise',
+        inputParams: {
+          batch_id: 'mock-alert-login-burst',
+          source_type: 'skyeye',
+          sample_count: 6,
+        },
+        status: 'running',
+        startedAt: now - 7 * 60 * 1000,
+        duration: 421.6,
+        outputResults: {
+          cluster_id: 'MOCK-LOGIN-07',
+          raw_count: 18,
+          reduced_count: 11,
+          unique_count: 7,
+          reduction_rate: 0.6111,
+        },
+        executionLog: [
+          {
+            node_id: 'normalize_alerts',
+            node_type: 'python',
+            inputs: { batch_id: 'mock-alert-login-burst', raw_count: 18 },
+            outputs: { normalized_count: 18 },
+            stdout: 'Normalized 18 alerts from skyeye.',
+            duration_ms: 1024,
+          },
+          {
+            node_id: 'cluster_alerts',
+            node_type: 'python',
+            inputs: { normalized_count: 18 },
+            outputs: { cluster_id: 'MOCK-LOGIN-07', duplicate_count: 7, unique_count: 7 },
+            stdout: 'Clustered alerts by source, target and login pattern.',
+            duration_ms: 2380,
+          },
+        ],
+        triggerSource: 'workflow_execution',
+        currentNodeId: 'cluster_alerts',
+        currentNodeType: 'python',
+        currentPhase: 'running',
+        currentStepIndex: 2,
+        stepCount: 5,
+        stepLogOffset: 0,
+        stepLogLimit: 500,
+        stepLogTotal: 2,
+      },
+      {
+        id: 'mock-denoise-run-004',
+        workflowId: 'stream_alert_denoise',
+        inputParams: {
+          batch_id: 'mock-alert-scan',
+          source_type: 'qingteng',
+          sample_count: 4,
+        },
+        status: 'running',
+        startedAt: now - 26 * 1000,
+        duration: 26,
+        outputResults: {},
+        executionLog: [
+          {
+            node_id: 'normalize_alerts',
+            node_type: 'python',
+            inputs: { batch_id: 'mock-alert-scan', raw_count: 12 },
+            outputs: { normalized_count: 12 },
+            stdout: 'Normalized 12 scan alerts.',
+            duration_ms: 944,
+          },
+        ],
+        triggerSource: 'workflow_execution',
+        currentNodeId: 'cluster_alerts',
+        currentNodeType: 'python',
+        currentPhase: 'running',
+        currentStepIndex: 1,
+        stepCount: 5,
+        stepLogOffset: 0,
+        stepLogLimit: 500,
+        stepLogTotal: 1,
+      },
+    ];
+  }
+  return [];
+}
+
+function getMockWorkflowExecution(workflowId: string, executionId: string): WorkflowExecution | null {
+  return createMockWorkflowExecutions(workflowId).find((execution) => execution.id === executionId) ?? null;
 }
 
 // ─────────────────────────────────────────────
@@ -724,12 +943,14 @@ function HistoryExecDetail({ exec: ex }: { exec: WorkflowExecution }) {
 function HistorySection({
   workflowId,
   latestExecutionId,
+  focusExecutionId,
   onLatestExecutionChange,
   embedded = false,
   hideSectionHeader = false,
 }: {
   workflowId: string;
   latestExecutionId?: string;
+  focusExecutionId?: string;
   onLatestExecutionChange?: (execution: WorkflowExecution | null) => void;
   embedded?: boolean;
   hideSectionHeader?: boolean;
@@ -739,26 +960,58 @@ function HistorySection({
   const [history, setHistory] = useState<WorkflowExecution[]>([]);
   const [loading, setLoading] = useState(true);
   const [selectedExec, setSelectedExec] = useState<WorkflowExecution | null>(null);
+  const [focusedExecutionError, setFocusedExecutionError] = useState('');
+  const executionNotFoundText = t('detail.run.executionNotFound');
+
+  const loadFocusedExecution = useCallback(async (executionId: string): Promise<WorkflowExecution | null> => {
+    try {
+      const res = await workflowAPI.getExecution(workflowId, executionId);
+      return res.data;
+    } catch {
+      if (!isMockExecutionFallbackEnabled()) return null;
+      return getMockWorkflowExecution(workflowId, executionId);
+    }
+  }, [workflowId]);
 
   const fetchHistory = useCallback(async () => {
     try {
+      setFocusedExecutionError('');
       const res = await workflowAPI.getHistory(workflowId, { limit: 10 });
-      setHistory(res.data);
-      if (res.data.length > 0) {
+      let nextHistory = res.data;
+      if (nextHistory.length === 0 && isMockExecutionFallbackEnabled()) {
+        nextHistory = createMockWorkflowExecutions(workflowId);
+      }
+      if (focusExecutionId && !nextHistory.some((item: WorkflowExecution) => item.id === focusExecutionId)) {
+        const focusedExecution = await loadFocusedExecution(focusExecutionId);
+        if (focusedExecution) {
+          nextHistory = [focusedExecution, ...nextHistory];
+        } else {
+          setFocusedExecutionError(executionNotFoundText);
+        }
+      }
+      setHistory(nextHistory);
+      if (focusExecutionId) {
+        const focusedExecution = nextHistory.find((item: WorkflowExecution) => item.id === focusExecutionId) ?? null;
+        if (focusedExecution) {
+          onLatestExecutionChange?.(focusedExecution);
+          setSelectedExec(focusedExecution);
+          setExpanded(true);
+        }
+      } else if (nextHistory.length > 0) {
         const matchingExecution = latestExecutionId
-          ? res.data.find((item: WorkflowExecution) => item.id === latestExecutionId)
-          : res.data[0];
+          ? nextHistory.find((item: WorkflowExecution) => item.id === latestExecutionId)
+          : nextHistory[0];
         if (matchingExecution) {
           onLatestExecutionChange?.(matchingExecution);
         } else if (!latestExecutionId) {
-          onLatestExecutionChange?.(res.data[0]);
+          onLatestExecutionChange?.(nextHistory[0]);
         }
       } else if (!latestExecutionId) {
         onLatestExecutionChange?.(null);
       }
       setSelectedExec(prev => {
         if (!prev) return null;
-        const updated = res.data.find((e: WorkflowExecution) => e.id === prev.id);
+        const updated = nextHistory.find((e: WorkflowExecution) => e.id === prev.id);
         if (!updated) return prev;
         return {
           ...updated,
@@ -769,11 +1022,32 @@ function HistorySection({
         };
       });
     } catch {
-      setHistory([]);
+      const fallbackHistory = isMockExecutionFallbackEnabled()
+        ? createMockWorkflowExecutions(workflowId)
+        : [];
+      let nextHistory = fallbackHistory;
+      if (focusExecutionId && !nextHistory.some((item) => item.id === focusExecutionId)) {
+        const focusedExecution = getMockWorkflowExecution(workflowId, focusExecutionId);
+        if (focusedExecution) {
+          nextHistory = [focusedExecution, ...nextHistory];
+        } else if (isMockExecutionFallbackEnabled()) {
+          setFocusedExecutionError(executionNotFoundText);
+        }
+      }
+      setHistory(nextHistory);
+      if (focusExecutionId) {
+        const focusedExecution = nextHistory.find((item) => item.id === focusExecutionId) ?? null;
+        setSelectedExec(focusedExecution);
+        if (focusedExecution) onLatestExecutionChange?.(focusedExecution);
+      } else if (nextHistory.length > 0) {
+        onLatestExecutionChange?.(nextHistory[0]);
+      } else {
+        onLatestExecutionChange?.(null);
+      }
     } finally {
       setLoading(false);
     }
-  }, [latestExecutionId, onLatestExecutionChange, workflowId]);
+  }, [executionNotFoundText, focusExecutionId, latestExecutionId, loadFocusedExecution, onLatestExecutionChange, workflowId]);
 
   const hasRunning = history.some(e => e.status === 'running');
 
@@ -808,7 +1082,11 @@ function HistorySection({
       const res = await workflowAPI.getExecution(workflowId, exec.id);
       setSelectedExec(res.data);
     } catch {
-      setSelectedExec(exec);
+      setSelectedExec(
+        isMockExecutionFallbackEnabled()
+          ? getMockWorkflowExecution(workflowId, exec.id) ?? exec
+          : exec,
+      );
     }
   };
 
@@ -827,6 +1105,11 @@ function HistorySection({
           {loading ? (
             <div className="flex items-center justify-center py-6">
               <Loader2 className="w-4 h-4 animate-spin text-gray-400" />
+            </div>
+          ) : focusedExecutionError ? (
+            <div className="py-6 text-center">
+              <AlertCircle className="w-8 h-8 text-orange-300 mx-auto mb-2" />
+              <p className="text-xs text-gray-400">{focusedExecutionError}</p>
             </div>
           ) : history.length === 0 ? (
             <div className="py-6 text-center">
@@ -881,11 +1164,17 @@ export default function RunTab({
   embedded = false,
   embeddedTabs = false,
   hideSectionHeaders = false,
+  focusExecutionId,
 }: RunTabProps) {
   const { t } = useTranslation('workflow');
-  const [activeEmbeddedSection, setActiveEmbeddedSection] = useState<RunTabSection>('test');
+  const [activeEmbeddedSection, setActiveEmbeddedSection] = useState<RunTabSection>(focusExecutionId ? 'history' : 'test');
   const showTest = sections.includes('test');
   const showHistory = sections.includes('history');
+  useEffect(() => {
+    if (focusExecutionId && showHistory) {
+      setActiveEmbeddedSection('history');
+    }
+  }, [focusExecutionId, showHistory]);
   const activeSection =
     activeEmbeddedSection === 'test' && showTest
       ? 'test'
@@ -936,6 +1225,7 @@ export default function RunTab({
               <HistorySection
                 workflowId={workflow.id}
                 latestExecutionId={latestExecution?.id}
+                focusExecutionId={focusExecutionId}
                 onLatestExecutionChange={onLatestExecutionChange}
                 embedded={embedded}
                 hideSectionHeader={hideSectionHeaders}
@@ -963,6 +1253,7 @@ export default function RunTab({
         <HistorySection
           workflowId={workflow.id}
           latestExecutionId={latestExecution?.id}
+          focusExecutionId={focusExecutionId}
           onLatestExecutionChange={onLatestExecutionChange}
           embedded={embedded}
           hideSectionHeader={hideSectionHeaders}

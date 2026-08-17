@@ -38,60 +38,89 @@ INITIAL_USER_PROFILE = """# User Profile
 ## Technical Level
 """
 
-# Default instructions informed by Hermes Agent and MiMo-Code memory prompts.
+# Default instructions informed by Claude Code, Hermes Agent, and MiMo Code.
 # Uses global storage paths for Flocks
 MEMORY_INSTRUCTIONS = """
 ## Memory System Guidance
 
-You have access to a persistent memory system for continuity across sessions.
-On-disk memory root (absolute path): `{memory_root}`.
-`USER.md` and Global `MEMORY.md` follow the open-source Hermes Agent split:
-USER describes the user; Memory contains the agent's durable notes.
+### Memory File Management
 
-### Memory Layers:
-1. `{memory_root}/USER.md` - Who the user is: stable identity, communication preferences, expectations, working style, and technical level (already injected above)
-2. `{memory_root}/MEMORY.md` - The agent's global notes: cross-project environment and tool facts, lessons and corrections, and external references (already injected above)
+Persistent Memory root: `{memory_root}`.
+
+1. `{memory_root}/USER.md` - Stable facts about the user: identity, preferences,
+   expectations, working style, and technical level.
+2. `{memory_root}/MEMORY.md` - Durable cross-project environment constraints,
+   lessons and corrections, and references.
 {project_file_instruction}
-4. `{memory_root}/daily/YYYY-MM-DD.md` - Lifecycle journal used as evidence for later consolidation. It is searchable but not curated or injected.
-5. Current examples: `{memory_root}/daily/{today}.md` and `{memory_root}/daily/{yesterday}.md`.
+4. `{memory_root}/daily/YYYY-MM-DD.md` - Lifecycle-owned evidence journal. It is
+   searchable but not curated or injected. Never write or edit it.
 
-### Managing Memory Files:
-- The injected USER, Global, and Project files are a snapshot for this run. Read the file again before changing it.
-- Use `read`, `glob`, and `grep` to inspect Memory explicitly, and `memory_search` for indexed recall across USER, Global, Daily, and the current Project.
-- Use `write` only to create a missing curated Memory file. Use `edit` for precise entry-level changes to an existing curated file.
-- Never write or edit `daily/`; only the Session lifecycle may append Daily entries.
-- **User profile**: Maintain `{memory_root}/USER.md` only for facts about the user.
-- **Global agent notes**: Maintain `{memory_root}/MEMORY.md` only for knowledge that remains useful across projects.
-{project_write_instruction}
-- If the user explicitly asks you to remember something, update the narrowest appropriate curated file without interrupting the current task.
+Before changing a curated file, read its current contents; use `write` only when
+it is missing and `edit` for precise updates. Modify only the curated files
+listed above.
 
-### Memory Write Decision:
-- Save information that is likely to reduce future user steering or prevent the same correction from being needed again.
-- Save only stable user facts, non-derivable project constraints, explicit corrections, and verified reusable experience.
-- Classify each candidate in this order:
-  1. If it contains secrets, credentials, guesses, transient task state, plans, one-off results, or facts that can be cheaply rediscovered from source code, configuration, or other authoritative files, do not save it.
-  2. If it describes how to repeatedly perform a task, it belongs in a Skill rather than Memory.
-  3. If it describes the user, including identity or preferences, store it in `USER.md`.
-  4. If it applies only to the current project, store it in Project `MEMORY.md`.
-  5. If it is declarative Agent or environment knowledge that applies across projects, store it in Global `MEMORY.md`.
-  6. If its destination is unclear, its evidence is weak, or equivalent knowledge already exists, make no change.
-- Give each accepted item exactly one canonical destination. Do not duplicate the same knowledge across `USER.md`, Global `MEMORY.md`, and Project `MEMORY.md`.
-- After choosing the destination file, use exactly one section:
-  - Global `MEMORY.md / Environment and Tools`: stable cross-project facts about the Agent's environment, tools, and integrations.
-  - Global `MEMORY.md / Lessons and Corrections`: cross-project conventions, verified tool quirks, successful practices, corrections, and reusable lessons.
-  - Global `MEMORY.md / References`: pointers to external systems or authoritative sources that apply across projects; store where to look, not copied content.
-  - Project `MEMORY.md / Project Context`: current-project goals, decisions, constraints, and durable facts that are not cheaply derivable from authoritative project files.
-  - Project `MEMORY.md / Lessons and Corrections`: current-project guidance, successful practices, corrections, and reusable lessons.
-  - Project `MEMORY.md / References`: pointers to external systems or authoritative sources that apply only to the current project; store where to look, not copied content.
-- Write declarative facts, not commands to your future self. For example, `User prefers concise answers` is better than `Always answer concisely`.
-- Check existing Memory first; merge or replace equivalent entries instead of duplicating them.
-- Verify stale or conflicting Memory against current authoritative evidence before replacing or removing it.
+### Memory Content Management
 
-### Available Tools:
-- `memory_search` - Reconcile and search USER, Global, Daily, and current Project Memory
-- `read`, `glob`, `grep` - Inspect Memory files
-- `write` - Create a missing Memory file
-- `edit` - Precisely update an existing Memory file
+**What to save**
+
+- Save compact, durable information that will improve future behavior or reduce
+  repeated user steering. Strong evidence is an explicit user statement, a
+  clear user-approved decision, or repeated verified experience across Sessions.
+- Do not save secrets, guesses, transient state, plans, task progress, Session
+  outcomes, completed-work logs, temporary TODOs, one-off results, research
+  summaries, raw dumps, copied external content, general public knowledge, or
+  information that matters only to the current conversation.
+- Do not save facts already recorded or cheaply retrievable from source code,
+  configuration, project instructions, documentation, Git history, or Session
+  history. Preserve only a non-obvious rationale or constraint that future
+  Sessions need.
+- A repeatable procedure belongs in a Skill, not a Memory file. Weak, duplicate,
+  or unclear candidates require no change.
+
+**Where to save**
+
+- `USER.md / Identity and Context`: the user's role, goals, responsibilities,
+  and other relevant personal context.
+- `USER.md / Communication Preferences`: how the user prefers to communicate
+  and receive responses.
+- `USER.md / Working Style`: stable preferences for collaboration and how work
+  should be approached, expressed as facts about the user rather than execution
+  rules for the Agent.
+- `USER.md / Technical Level`: the user's relevant knowledge and expertise.
+- Global `MEMORY.md / Environment and Tools`: stable environment, tool, or
+  integration facts that apply across projects.
+- Global `MEMORY.md / Lessons and Corrections`: cross-project guidance,
+  conventions, corrections, and user-validated practices that direct how the
+  Agent should work.
+- Global `MEMORY.md / References`: external pointers needed across projects.
+- Project `MEMORY.md / Project Context`: current-project goals, constraints,
+  decisions and rationale, and other durable context not derivable from project
+  files or Git history.
+- Project `MEMORY.md / Lessons and Corrections`: project-specific guidance,
+  conventions, corrections, and user-validated practices that direct how the
+  Agent should work in this project.
+- Project `MEMORY.md / References`: external pointers needed only by the current
+  project.
+
+Project destinations always mean the current Session's registered Project
+Memory. Never write another Project's Memory. If Project Memory is unavailable,
+do not promote project-specific content to Global Memory; make no change. Give
+each accepted item exactly one destination and one section.
+
+**How to maintain it**
+
+- If the user explicitly asks you to remember something, update the narrowest
+  valid destination without interrupting the current task. The request does not
+  override safety, durability, duplication, or scope rules.
+- Write declarative facts. Include the reason for guidance or a decision when it
+  is needed to apply the Memory correctly.
+- Check existing Memory first and update an equivalent entry instead of adding
+  a duplicate. Verify recalled or conflicting Memory against current
+  authoritative evidence before relying on, replacing, or removing it.
+- Store References as pointers with their purpose and when to consult them, not
+  copied source content. Retain one only when the user asks or recurring work
+  demonstrates an ongoing need; merely discussing or researching a topic is not
+  enough.
 """.strip()
 
 
@@ -395,30 +424,16 @@ class MemoryBootstrap:
                 "3. `"
                 f"{memory_root}/projects/{self.project_id}/MEMORY.md"
                 "` - Current project context, lessons and corrections, and "
-                "external references (already injected above)"
-            )
-            project_write_instruction = (
-                "- **Project Memory**: Maintain `"
-                f"{memory_root}/projects/{self.project_id}/MEMORY.md"
-                "` for current project context, lessons and corrections, and "
-                "external references"
+                "external references."
             )
         else:
             project_file_instruction = (
                 "3. Project Memory is unavailable because this is not a registered "
                 "project Session"
             )
-            project_write_instruction = (
-                "- **Project long-term**: unavailable in this default Session; "
-                "do not store project-only facts in Global Memory"
-            )
         instructions = instructions.replace(
             "{project_file_instruction}",
             project_file_instruction,
-        )
-        instructions = instructions.replace(
-            "{project_write_instruction}",
-            project_write_instruction,
         )
         instructions = instructions.replace("{today}", today)
         instructions = instructions.replace("{yesterday}", yesterday)

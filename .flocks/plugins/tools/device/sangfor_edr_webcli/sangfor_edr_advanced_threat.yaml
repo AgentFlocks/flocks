@@ -1,0 +1,93 @@
+name: sangfor_edr_advanced_threat
+description: >
+  Collect Sangfor EDR advanced-threat warning-mode and incident-mode lists
+  through authenticated HTTP APIs using one verified cookie/login_token pair.
+description_cn: >
+  使用同一套已验证 Cookie/login_token，通过 HTTP API 采集深信服 EDR
+  高级威胁的告警模式和事件模式列表，支持中文多选筛选、时间范围和自动分页。
+category: custom
+enabled: true
+requires_confirmation: false
+provider: sangfor_edr
+inputSchema:
+  type: object
+  properties:
+    sections:
+      type: array
+      items:
+        type: string
+        enum: [warning_logs, incidents]
+      description: Optional sections. Omit to collect both warning and incident lists.
+    threat_levels:
+      type: array
+      items: {}
+      description: Multi-select array; a one-item array represents a single value. 5 critical, 4 high, 3 medium, 2 low, 1 informational; Chinese labels are accepted.
+    disposal_states:
+      type: array
+      items: {}
+      description: Incident-mode array. 0 pending, 2 handled, 3 ignored; Chinese labels are accepted.
+    event_disposal_states:
+      type: array
+      items: {}
+      description: Incident-mode real-time protection array. 0 unsupported, 1 unhandled, 2 auto-processing, 3 auto-handled.
+    agent_types:
+      type: array
+      items: {}
+      description: Incident-mode array. 0 PC and 1 server; Chinese labels are accepted.
+    detect_sources:
+      type: array
+      items: {}
+      description: Incident-mode array. 1 IOC, 2 IOA, 3 SIP, 6 MS, 8 AF.
+    event_types:
+      type: array
+      items: {}
+      description: Incident-mode array. 1 phishing, 2 Web intrusion, 3 malware, 0 other; Chinese labels are accepted.
+    wl_switch:
+      type: integer
+      enum: [0, 1]
+      description: Single value. 0 hides excepted warnings and 1 shows them.
+      default: 0
+    days:
+      type: integer
+      minimum: 1
+      maximum: 90
+      default: 7
+      description: Relative time range used when begin_time and end_time are omitted.
+    begin_time:
+      type: string
+      description: Optional epoch seconds/milliseconds or ISO date/time; must be paired with end_time.
+    end_time:
+      type: string
+      description: Optional epoch seconds/milliseconds or ISO date/time; must be paired with begin_time.
+    page_no:
+      type: integer
+      minimum: 1
+      default: 1
+      description: One-based starting page number.
+    page_limit:
+      type: integer
+      minimum: 1
+      maximum: 500
+      default: 50
+      description: Number of records requested per page.
+    paginate:
+      type: boolean
+      default: true
+      description: Continue requesting pages until the list is exhausted.
+    uid:
+      type: string
+      description: Optional protocol UID override; defaults to the current EDR login username.
+    tid:
+      type: string
+      default: "0"
+      description: Optional tenant ID override.
+    base_url:
+      type: string
+      description: Optional EDR device URL.
+    auth_state_path:
+      type: string
+      description: Optional auth-state path.
+handler:
+  type: script
+  script_file: sangfor_edr.handler.py
+  function: handle_advanced_threat

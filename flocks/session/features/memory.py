@@ -188,10 +188,12 @@ class SessionMemory:
     
     async def search(
         self,
-        query: str,
+        query: str = "",
         max_results: Optional[int] = None,
         min_score: Optional[float] = None,
         sources: Optional[List[MemorySource]] = None,
+        start_time: Optional[str] = None,
+        end_time: Optional[str] = None,
     ) -> List[MemorySearchResult]:
         """
         Search memory within session context
@@ -201,6 +203,8 @@ class SessionMemory:
             max_results: Maximum results
             min_score: Minimum score
             sources: Sources to search (default from config)
+            start_time: Inclusive ISO 8601 lower bound
+            end_time: Exclusive ISO 8601 upper bound
             
         Returns:
             Search results
@@ -240,6 +244,8 @@ class SessionMemory:
                 min_score=min_score,
                 sources=sources,
                 readable_session_ids=readable_session_ids,
+                start_time=start_time,
+                end_time=end_time,
             )
             
             log.debug("session.memory.search", {

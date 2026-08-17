@@ -1638,7 +1638,7 @@ function WeComPanel({ config, agentOptions, onChange }: WeComPanelProps) {
         <FieldRow label={t('wecom.websocketUrl')} hint={t('wecom.websocketUrlHint')}>
           <TextInput
             value={config.websocketUrl ?? ''}
-            onChange={(v) => set('websocketUrl', v || undefined)}
+            onChange={(v) => set('websocketUrl', v)}
             placeholder={t('wecom.websocketUrlPlaceholder')}
           />
         </FieldRow>
@@ -3841,6 +3841,15 @@ function stripEmpty(obj: Record<string, any>): Record<string, any> {
 
 function stripChannelConfigForSave(channelId: string, cfg: Record<string, any>): Record<string, any> {
   const result = stripEmpty(cfg);
+
+  if (
+    channelId === 'wecom'
+    && Object.prototype.hasOwnProperty.call(cfg, 'websocketUrl')
+  ) {
+    // Config updates are deep-merged by the backend, so omitting a cleared URL
+    // would retain the previous custom endpoint instead of restoring the SDK default.
+    result.websocketUrl = cfg.websocketUrl ?? '';
+  }
 
   if (channelId === 'email') {
     if (result.authMode === 'xoauth2') {

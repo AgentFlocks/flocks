@@ -1,6 +1,6 @@
 ---
 name: sangfor-edr-use
-description: 深信服 EDR 登录态管理、首页仪表盘、威胁资产分析和资产清点分类统计 API 采集。用户提到深信服 EDR、EDR、资产清点或 sangfor EDR 时必须先加载本 skill。
+description: 深信服 EDR 登录态管理、首页仪表盘、威胁资产分析、资产清点和高级威胁 API 采集。用户提到深信服 EDR、EDR、资产清点、高级威胁或 sangfor EDR 时必须先加载本 skill。
 ---
 
 # 深信服 EDR Use
@@ -15,6 +15,8 @@ description: 深信服 EDR 登录态管理、首页仪表盘、威胁资产分�
 HTTP 登录模块验证过的同一套 Cookie/token。
 `sangfor_edr_asset_inventory_api.py` 负责资产清点页面 API 请求，同样只读取
 HTTP 登录模块验证过的同一套 Cookie/token。
+`sangfor_edr_advanced_threat_api.py` 负责高级威胁告警模式和事件模式 API 请求，
+同样只读取 HTTP 登录模块验证过的同一套 Cookie/token。
 
 - 管理同一次登录产生的 Cookie 与 `login_token`。
 - 默认使用 HTTP 登录，开始前必须向用户索取并保存 EDR 地址、用户名和密码。
@@ -24,6 +26,7 @@ HTTP 登录模块验证过的同一套 Cookie/token。
 - 通过 API 采集首页终端概况、受影响终端、漏洞、勒索防护、实时病毒、Top 5 终端和设备资源使用率。
 - 通过 API 采集威胁资产分析的风险汇总、资产分组和威胁终端事件列表，支持风险级别、资产分组、终端状态、隔离状态和分页筛选。
 - 通过 API 采集资产清点页面的资产分类统计。
+- 通过 API 采集高级威胁的告警模式和事件模式列表，支持多选筛选、时间范围和自动分页。
 
 ## 输入与输出
 
@@ -73,6 +76,20 @@ HTTP 登录模块验证过的同一套 Cookie/token。
 
 分类字段映射由采集模块维护；`Replace` 按页面显示映射为“真替真用”，英文保留原始字段名 `Replace`。
 
+### 高级威胁工具
+
+调用 `sangfor_edr_advanced_threat`，可输入：
+
+- `sections`：`warning_logs`、`incidents`；省略时采集两种模式。
+- `threat_levels`：威胁等级单值或多值。
+- `disposal_states`、`event_disposal_states`、`agent_types`、`detect_sources`、`event_types`：事件模式多选条件。
+- `wl_switch`：已例外告警单选；`0`=隐藏，`1`=显示。
+- `days`：默认最近 7 天；或成对提供 `begin_time`、`end_time`。
+- `page_no`、`page_limit`、`paginate`：分页配置，默认自动采集全部。
+- `base_url`、`auth_state_path`：可选运行时覆盖。
+
+输出包含 `data`/`raw_data`、`readable_data`、分页元数据和分项 `errors`；不得输出 Cookie、密码或 `login_token`。
+
 ## 关键配置
 
 - `base_url`：从用户提供的 EDR 地址提取 scheme、host 和 port；不得使用固定示例地址。
@@ -102,6 +119,18 @@ HTTP 登录模块验证过的同一套 Cookie/token。
    - `limit`：只能使用 `10/20/50/100/500`。
    - `zone_name`：先调用 `list_zones`，按返回的 `zone_name` 或 `full_zone_name` 精确匹配，再将对应的设备专属 `zone_id` 放入 `list_agent_event.filter.zone_id`；不能使用固定 zone ID，也不能把中文分组名直接作为 `zone_id`。
 8. 资产清点 API 使用 `POST /api/edrgoweb/v1/asset/inventory/classify?s={login_token}`，payload 为 `{"sceneType":"server_and_pc"}`；复用当前登录会话的 Cookie 和同一 `login_token`，接口返回 `code != 0` 时视为失败。
+9. 高级威胁 API 使用：
+   - `POST /api/edrgoweb/v1/advthreats/querywarninglogs?_method=get&s={login_token}`：告警模式列表，只发送已确认的 `threatLevel`、`wlSwitch` 筛选。
+   - `POST /api/edrgoweb/v1/advthreats/queryincidentinfo?_method=get&s={login_token}`：事件模式列表，发送威胁等级、处置状态、实时防护、终端类型、检测来源、事件标签、时间范围和已例外告警筛选。
+   - `uuid` 是动态请求关联标识，不是设备 ID；`uid` 默认使用当前登录用户名，`tid` 默认 `0`。
+10. 高级威胁筛选映射：
+   - `threatLevel`：`5`=严重、`4`=高危、`3`=中危、`2`=低危、`1`=信息。
+   - `disposalState`：`0`=待处置、`2`=已处置、`3`=已忽略。
+   - `eventDisposalState`：`0`=暂不支持、`1`=未处置、`2`=自动处置中、`3`=已自动处置。
+   - `agentType`：`0`=PC、`1`=服务器。
+   - `detectSource`：`1`=IOC引擎、`2`=IOA引擎、`3`=SIP联动、`6`=MS引擎、`8`=AF联动；响应中的未知值保留原值并标记“未知”。
+   - `eventType`：`1`=钓鱼攻击、`2`=Web入侵、`3`=恶意病毒、`0`=其他。
+   - 除时间范围和 `wlSwitch` 外，上述业务筛选均支持多选。
 
 ## 错误处理
 
@@ -111,6 +140,7 @@ HTTP 登录模块验证过的同一套 Cookie/token。
 - 认证探测失败：禁止继续业务 API；先执行 HTTP 重登并再次探测，连续 3 次 HTTP 仍失败则按 browser/CDP 自动化登录→手动登录降级。
 - 仪表盘部分接口失败：保留成功数据，在 `errors` 中按采集项返回失败原因。
 - 资产清点接口失败：在 `errors` 中返回接口失败原因，不输出敏感认证信息。
+- 高级威胁单个模式失败：保留另一个模式的成功数据，并在 `errors` 中按模式返回脱敏原因。
 - Cookie、密码和 `login_token` 不得回显、记录日志或混入业务输出。
 
 ## 执行约束
@@ -124,4 +154,5 @@ HTTP 登录模块验证过的同一套 Cookie/token。
 - 任何 API 采集前必须完成认证探测；认证探测失败时不得继续调用业务接口。
 - 威胁资产分析的分页请求必须复用同一套 Cookie/token，不得在分页过程中重新拼接或替换认证参数。
 - 资产清点 API 请求必须复用同一套 Cookie/token；不得把抓包中的 sessionid、token 或设备地址写死为通用凭据或地址。
+- 高级威胁分页必须复用同一套 Cookie/token；不得输出响应 `req` 中的 token，也不得把抓包中的 `uid`、token、Cookie 或设备地址写死。
 - 用户未提供接口参数名时，必须根据中文语义完成上述映射；无法确认的筛选条件不得猜测数值，应省略筛选或向用户确认。

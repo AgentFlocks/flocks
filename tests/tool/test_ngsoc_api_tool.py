@@ -56,8 +56,8 @@ _PLUGIN_DIR = (
     / ".flocks"
     / "plugins"
     / "tools"
-    / "api"
-    / "ngsoc"
+    / "device"
+    / "ngsoc_v4_15_1"
 )
 _HANDLER_PATH = _PLUGIN_DIR / "ngsoc.handler.py"
 
@@ -850,8 +850,8 @@ def test_yaml_manifest_loads_and_binds_to_handler(yaml_name, function_name):
     raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
     tool = yaml_to_tool(raw, yaml_path)
 
-    assert tool.info.provider == "ngsoc_api"
-    assert tool.info.source == "api"
+    assert tool.info.provider == "ngsoc_api_v4_15_1"
+    assert tool.info.provider_version == "4.15.1"
     # Every group manifest pins the manual version so downstream agents
     # can disambiguate R4.15.x from older NGSOC R3.x deployments.
     assert raw["version"] == "4.15.1"

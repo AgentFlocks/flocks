@@ -64,12 +64,11 @@ log = Log.create(service="kafka.manager")
 
 # Maximum concurrent workflow executions per workflow to avoid FD exhaustion and
 # SQLite write contention. Kafka messages can carry large JSON payloads, so keep
-# this lower than syslog to avoid several full workflow histories being resident
-# at the same time.
-_MAX_CONCURRENT_EXECUTIONS = 2
+# this bounded even when a trigger requests a larger worker pool.
+_MAX_CONCURRENT_EXECUTIONS = 8
 # Maximum number of buffered Kafka messages per workflow.  Unlike syslog we do
 # not drop on overflow; a full queue applies backpressure to the consumer loop.
-_MAX_QUEUE_SIZE = 100
+_MAX_QUEUE_SIZE = 1000
 # Maximum time we wait for the consumer to either connect successfully or fail
 # during ``restart_workflow`` so the HTTP save endpoint can surface connection
 # errors instead of pretending the consumer is running.

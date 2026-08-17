@@ -22,6 +22,7 @@ import { Snapshot } from "@/snapshot"
 import type { Provider } from "@/provider/provider"
 import { PermissionNext } from "@/permission/next"
 import { Global } from "@/global"
+import { normalizeCacheUsage, normalizeUsageToken } from "./usage"
 
 export namespace Session {
   const log = Log.create({ service: "session" })
@@ -416,29 +417,18 @@ export namespace Session {
       metadata: z.custom<ProviderMetadata>().optional(),
     }),
     (input) => {
-      const cachedInputTokens = input.usage.cachedInputTokens ?? 0
+      const cache = normalizeCacheUsage(input)
       const excludesCachedTokens = !!(input.metadata?.["anthropic"] || input.metadata?.["bedrock"])
       const adjustedInputTokens = excludesCachedTokens
         ? (input.usage.inputTokens ?? 0)
-        : (input.usage.inputTokens ?? 0) - cachedInputTokens
-      const safe = (value: number) => {
-        if (!Number.isFinite(value)) return 0
-        return value
-      }
+        : (input.usage.inputTokens ?? 0) - cache.read
+      const safe = normalizeUsageToken
 
       const tokens = {
         input: safe(adjustedInputTokens),
         output: safe(input.usage.outputTokens ?? 0),
         reasoning: safe(input.usage?.reasoningTokens ?? 0),
-        cache: {
-          write: safe(
-            (input.metadata?.["anthropic"]?.["cacheCreationInputTokens"] ??
-              // @ts-expect-error
-              input.metadata?.["bedrock"]?.["usage"]?.["cacheWriteInputTokens"] ??
-              0) as number,
-          ),
-          read: safe(cachedInputTokens),
-        },
+        cache,
       }
 
       const costInfo =

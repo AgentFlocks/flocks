@@ -38,10 +38,6 @@ class TestCountTokens:
     def test_empty_string_returns_zero(self):
         assert SessionPrompt.count_tokens("") == 0
 
-    def test_none_equivalent_empty(self):
-        # Passing falsy value
-        assert SessionPrompt.count_tokens("") == 0
-
     def test_short_text_returns_positive(self):
         result = SessionPrompt.count_tokens("hello world")
         assert result > 0
@@ -308,6 +304,39 @@ class TestBuildSystemPrompts:
 
         assert len(prompts) > 2
         assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+
+    @pytest.mark.asyncio
+    async def test_evolution_subagent_child_uses_full_prompt(self):
+        agent = AgentInfo(
+            name="self-improve",
+            mode="subagent",
+            tags=["system", "evolution"],
+            prompt="You are the self-improve Agent.",
+        )
+        with (
+            patch("flocks.agent.registry.Agent.get", AsyncMock(return_value=agent)),
+            patch(
+                "flocks.session.session.Session.get_by_id",
+                AsyncMock(
+                    return_value=SimpleNamespace(
+                        parent_id="ses-parent",
+                        metadata={"evolution": "self-improve"},
+                    )
+                ),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses-self-improve",
+                session_directory="/tmp/project",
+                agent_name="self-improve",
+                agent_prompt=agent.prompt,
+                provider_id="anthropic",
+                model_id="claude-sonnet",
+            )
+
+        assert len(prompts) > 2
+        assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
+        assert agent.prompt in prompts
 
     @pytest.mark.asyncio
     async def test_full_prompt_requires_question_approval_for_flocks_config_operations(self):

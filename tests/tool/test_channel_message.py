@@ -5,41 +5,33 @@ import pytest
 
 from flocks.channel.base import DeliveryResult
 from flocks.tool.channel.channel_message import (
-    _normalize_channel_type,
+    _normalize_channel_type as _normalize_channel_message_type,
     channel_message,
+)
+from flocks.tool.channel.im_send_message import (
+    _normalize_channel_type as _normalize_im_send_message_type,
 )
 from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
 
 
-def test_channel_message_normalizes_weixin_aliases() -> None:
-    assert _normalize_channel_type("weixin") == "weixin"
-    assert _normalize_channel_type("微信") == "weixin"
-    assert _normalize_channel_type("wechat") == "weixin"
-    assert _normalize_channel_type("wx") == "weixin"
+@pytest.mark.parametrize(
+    "normalizer",
+    [_normalize_channel_message_type, _normalize_im_send_message_type],
+    ids=["channel_message", "im_send_message"],
+)
+def test_message_tools_normalize_channel_aliases(normalizer) -> None:
+    aliases = {
+        "weixin": ("weixin", "微信", "wechat", "wx"),
+        "wecom": ("wecom", "企业微信", "企微", "wechat_work", "wxwork"),
+        "slack": ("slack", "sl"),
+        "telegram": ("telegram", "tg", "tele"),
+        "whatsapp": ("whatsapp", "wa"),
+        "email": ("email", "mail", "邮件"),
+    }
 
-
-def test_channel_message_normalizes_wecom_aliases() -> None:
-    assert _normalize_channel_type("wecom") == "wecom"
-    assert _normalize_channel_type("企业微信") == "wecom"
-    assert _normalize_channel_type("企微") == "wecom"
-    assert _normalize_channel_type("wechat_work") == "wecom"
-    assert _normalize_channel_type("wxwork") == "wecom"
-
-
-def test_channel_message_normalizes_slack_aliases() -> None:
-    assert _normalize_channel_type("slack") == "slack"
-    assert _normalize_channel_type("sl") == "slack"
-
-
-def test_channel_message_normalizes_telegram_whatsapp_email_aliases() -> None:
-    assert _normalize_channel_type("telegram") == "telegram"
-    assert _normalize_channel_type("tg") == "telegram"
-    assert _normalize_channel_type("tele") == "telegram"
-    assert _normalize_channel_type("whatsapp") == "whatsapp"
-    assert _normalize_channel_type("wa") == "whatsapp"
-    assert _normalize_channel_type("email") == "email"
-    assert _normalize_channel_type("mail") == "email"
-    assert _normalize_channel_type("邮件") == "email"
+    for expected, values in aliases.items():
+        for value in values:
+            assert normalizer(value) == expected, value
 
 
 def test_channel_message_schema_includes_builtin_channels() -> None:

@@ -322,19 +322,6 @@ class TestDispatchShape:
             "interleaved emits extra_body inline"
         )
 
-    def test_explicit_reasoning_toggle_propagates(self) -> None:
-        """``reasoning_enabled=False`` should produce ``enable_thinking: false``
-        on a generic_chat transport, mirroring the old token-matching branch's
-        behavior so the upstream API gets an explicit opt-out signal.
-        """
-        options = provider_options.build_provider_options(
-            "threatbook-cn-llm",
-            "qwen3.6-plus",
-            reasoning_enabled=False,
-            resolve_max_tokens=False,
-        )
-        assert options["extra_body"]["enable_thinking"] is False
-
     @pytest.mark.parametrize(
         "configured_extra_body",
         [

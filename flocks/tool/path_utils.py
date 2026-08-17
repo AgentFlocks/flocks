@@ -116,6 +116,28 @@ def _resolve_host_memory_path(path: str) -> Optional[tuple[str, str]]:
     return str(candidate), str(memory_root)
 
 
+def _resolve_host_skill_path(
+    ctx: ToolContext,
+    path: str,
+) -> Optional[tuple[str, str]]:
+    """Resolve self-improve writes inside the host user Skill root."""
+    if ctx.agent != "self-improve":
+        return None
+    expanded = Path(str(path).strip()).expanduser()
+    if not expanded.is_absolute():
+        return None
+
+    from flocks.memory.paths import path_is_within
+
+    skill_root = (
+        Path.home() / ".flocks" / "plugins" / "skills"
+    ).resolve(strict=False)
+    candidate = expanded.resolve(strict=False)
+    if not path_is_within(skill_root, candidate):
+        return None
+    return str(candidate), str(skill_root)
+
+
 async def resolve_tool_path(
     ctx: ToolContext,
     path: str,
@@ -123,6 +145,7 @@ async def resolve_tool_path(
     base_dir: Optional[str] = None,
     worktree: Optional[str] = None,
     allow_host_memory: bool = False,
+    allow_host_skills: bool = False,
 ) -> ToolPathResolution:
     """
     Resolve a tool path consistently across host and sandbox contexts.
@@ -135,7 +158,7 @@ async def resolve_tool_path(
     Sandbox mode:
     - resolve against sandbox workspace root
     - reject path traversal and symlink escapes
-    - optionally allow the host Memory root
+    - optionally allow the host Memory root or self-improve's user Skill root
     """
     raw_path = path
     session_workspace_dir = _context_workspace_dir(ctx)
@@ -154,6 +177,8 @@ async def resolve_tool_path(
             if allow_host_memory
             else None
         )
+        if host_path is None and allow_host_skills:
+            host_path = _resolve_host_skill_path(ctx, normalized_input)
         if host_path is not None:
             resolved_path, host_root = host_path
             resolved_base = host_root
@@ -173,7 +198,7 @@ async def resolve_tool_path(
             except Exception as exc:
                 allowed_locations = (
                     "the sandbox workspace or an allowed Flocks data root"
-                    if allow_host_memory
+                    if allow_host_memory or allow_host_skills
                     else "the sandbox workspace"
                 )
                 raise ValueError(

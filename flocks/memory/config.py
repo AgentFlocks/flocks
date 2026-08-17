@@ -22,17 +22,9 @@ class MemoryEmbeddingConfig(BaseModel):
         "text-embedding-3-small",
         description="Embedding model name"
     )
-    api_key: Optional[str] = Field(
-        None,
-        description="API key (optional, can use env var)"
-    )
     local_model_path: Optional[str] = Field(
         None,
         description="Local model path for local provider"
-    )
-    timeout_ms: int = Field(
-        60000,
-        description="Request timeout in milliseconds"
     )
 
 
@@ -183,37 +175,24 @@ class MemoryAutoFlushConfig(BaseModel):
         2000,
         description="Reserved tokens"
     )
-    system_prompt: str = Field(
-        (
-            "Session nearing context limit. Perform only durable Memory "
-            "maintenance; the lifecycle will resume the current task."
-        ),
-        description="System prompt for memory flush"
+
+
+class MemoryDreamConfig(BaseModel):
+    """Scheduled and manual Dream self-improvement configuration."""
+
+    enabled: bool = Field(
+        True,
+        description="Enable scheduled and manual Dream self-improvement",
     )
-    user_prompt: str = Field(
-        """
-Preserve durable knowledge from this Session, then reply `NO_REPLY`.
-
-Classify each candidate in order:
-1. Secret, guess, transient state, one-off result, or cheaply rediscoverable
-   fact: skip it.
-2. Repeatable procedure: skip it; Dream self-improvement handles Skills.
-3. User information or preference: `USER.md`.
-4. Current-project-only knowledge: Project `MEMORY.md`.
-5. Cross-project declarative Agent or environment knowledge: Global `MEMORY.md`.
-6. Weak, unclear, or already represented knowledge: make no change.
-
-Store each accepted item in exactly one destination. Read the current file
-first; use `edit` for an existing file and `write` only when it is missing.
-Within Global `MEMORY.md`, use `Environment and Tools` for stable environment
-or tool facts, `Lessons and Corrections` for conventions and verified guidance,
-and `References` for cross-project external pointers. Within Project
-`MEMORY.md`, use `Project Context` for durable project facts, goals, decisions,
-and constraints, `Lessons and Corrections` for project-specific guidance and
-verified lessons, and `References` for project-specific external pointers.
-Never write or edit Daily Memory. Do not continue task work in this flush turn.
-""".strip(),
-        description="User prompt for memory flush"
+    interval_hours: float = Field(
+        24,
+        gt=0,
+        description="Hours between successful background Dream bridging runs",
+    )
+    recent_daily_days: int = Field(
+        7,
+        ge=0,
+        description="Number of recent daily memory files included in extraction",
     )
 
 
@@ -335,6 +314,10 @@ class MemoryConfig(BaseModel):
     auto_flush: MemoryAutoFlushConfig = Field(
         default_factory=MemoryAutoFlushConfig,
         description="Auto flush configuration"
+    )
+    dream: MemoryDreamConfig = Field(
+        default_factory=MemoryDreamConfig,
+        description="Scheduled and manual Dream self-improvement",
     )
     compaction: CompactionConfig = Field(
         default_factory=CompactionConfig,

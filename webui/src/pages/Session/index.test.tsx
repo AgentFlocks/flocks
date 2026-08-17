@@ -846,7 +846,7 @@ describe('SessionPage session actions menu', () => {
       data: url === '/api/session/status'
         ? {
             [session.id]: { type: 'busy' },
-            [secondSession.id]: { type: 'busy' },
+            [secondSession.id]: { type: 'dreaming', message: 'Dreaming...' },
           }
         : [{
             id: 'default',
