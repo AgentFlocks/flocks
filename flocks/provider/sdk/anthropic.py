@@ -32,11 +32,12 @@ class AnthropicProvider(BaseProvider):
     def __init__(self):
         super().__init__(provider_id="anthropic", name="Anthropic")
         self._api_key = os.getenv("ANTHROPIC_API_KEY")
+        self._base_url = os.getenv("ANTHROPIC_BASE_URL")
         self._client = None
     
     def is_configured(self) -> bool:
         """Check if provider is configured."""
-        api_key = self._config.api_key if self._config else self._api_key
+        api_key = (self._config.api_key if self._config else None) or self._api_key
         return bool(api_key)
 
     def get_meta(self):
@@ -48,12 +49,15 @@ class AnthropicProvider(BaseProvider):
         if self._client is None:
             try:
                 from anthropic import AsyncAnthropic
-                api_key = self._config.api_key if self._config else self._api_key
+                api_key = (self._config.api_key if self._config else None) or self._api_key
                 if not api_key:
                     raise ValueError("Anthropic API key not configured")
                 
                 # Support custom base URL from config
-                base_url = self._config.base_url if self._config else None
+                base_url = (
+                    (self._config.base_url if self._config else None)
+                    or self._base_url
+                )
                 
                 if base_url:
                     log.info("anthropic.client.init", {
@@ -103,6 +107,8 @@ class AnthropicProvider(BaseProvider):
     def _resolved_base_url(self) -> Optional[str]:
         if self._config and self._config.base_url:
             return self._config.base_url
+        if self._base_url:
+            return self._base_url
         return "https://api.anthropic.com"
 
     @staticmethod
