@@ -507,14 +507,24 @@ export namespace Config {
 
   const assignPermission = (target: Record<string, PermissionRule>, tool: string, action: PermissionRule) => {
     const canonical = canonicalPermissionToolName(tool)
-    const containsDeny = (value: PermissionRule): boolean =>
+    const existing = target[canonical]
+    if (typeof existing === "object" && typeof action === "object") {
+      target[canonical] = { ...action, ...existing }
+      for (const pattern of Object.keys(action)) {
+        if (pattern in existing && (existing[pattern] === "deny" || action[pattern] === "deny")) {
+          target[canonical][pattern] = "deny"
+        }
+      }
+      return
+    }
+    const containsDeny = (value: PermissionRule | undefined): boolean =>
       value === "deny" ||
       (typeof value === "object" && value !== null && Object.values(value).some((item) => containsDeny(item)))
-    if ((canonical in target && containsDeny(target[canonical])) || containsDeny(action)) {
+    if (containsDeny(existing) || containsDeny(action)) {
       target[canonical] = "deny"
       return
     }
-    if (!(canonical in target)) target[canonical] = action
+    if (existing === undefined) target[canonical] = action
   }
 
   const permissionTransform = (x: unknown): Record<string, PermissionRule> => {
@@ -523,7 +533,10 @@ export namespace Config {
     const { __originalKeys, ...rest } = obj
     const result: Record<string, PermissionRule> = {}
     const keys = __originalKeys ?? Object.keys(rest)
-    for (const key of keys) {
+    for (const key of keys.filter((key) => canonicalPermissionToolName(key) === key)) {
+      if (key in rest) assignPermission(result, key, rest[key] as PermissionRule)
+    }
+    for (const key of keys.filter((key) => canonicalPermissionToolName(key) !== key)) {
       if (key in rest) assignPermission(result, key, rest[key] as PermissionRule)
     }
     return result
@@ -563,6 +576,7 @@ export namespace Config {
     description: z.string().optional(),
     agent: z.string().optional(),
     model: z.string().optional(),
+    subtask: z.boolean().optional(),
   })
   export type Command = z.infer<typeof Command>
 

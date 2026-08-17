@@ -23,7 +23,7 @@ from flocks.utils.log import Log
 log = Log.create(service="context-usage")
 
 UsageSource = Literal["observed", "estimated"]
-DELEGATION_TOOLS = {"delegate_task"}
+DELEGATION_TOOLS = {"delegate_task", "task"}
 ZERO_VISIBLE_SEGMENTS = {"agentDelegation"}
 
 

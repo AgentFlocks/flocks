@@ -14,17 +14,7 @@ _LEGACY_PERMISSION_NAMES = {
 
 
 def _merge_legacy_permission(existing: Any, incoming: Any) -> Any:
-    """Merge aliases without allowing a legacy deny to become an allow."""
-    def contains_deny(value: Any) -> bool:
-        raw_value = getattr(value, "value", value)
-        if raw_value == "deny":
-            return True
-        if isinstance(raw_value, dict):
-            return any(contains_deny(item) for item in raw_value.values())
-        return False
-
-    if contains_deny(existing) or contains_deny(incoming):
-        return "deny"
+    """Merge a legacy alias into an existing canonical permission."""
     if isinstance(existing, dict) and isinstance(incoming, dict):
         merged = dict(existing)
         for pattern, action in incoming.items():
@@ -35,12 +25,29 @@ def _merge_legacy_permission(existing: Any, incoming: Any) -> Any:
             else:
                 merged[pattern] = action
         return merged
+
+    def contains_deny(value: Any) -> bool:
+        raw_value = getattr(value, "value", value)
+        if raw_value == "deny":
+            return True
+        if isinstance(raw_value, dict):
+            return any(contains_deny(item) for item in raw_value.values())
+        return False
+
+    if contains_deny(existing) or contains_deny(incoming):
+        return "deny"
     return existing
 
 
 def _canonicalize_permission_config(config: Dict[str, Any]) -> Dict[str, Any]:
-    canonical: Dict[str, Any] = {}
+    canonical = {
+        key: value
+        for key, value in config.items()
+        if key not in _LEGACY_PERMISSION_NAMES
+    }
     for key, value in config.items():
+        if key not in _LEGACY_PERMISSION_NAMES:
+            continue
         name = _LEGACY_PERMISSION_NAMES.get(key, key)
         if name in canonical:
             canonical[name] = _merge_legacy_permission(canonical[name], value)

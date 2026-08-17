@@ -280,7 +280,7 @@ async def test_context_usage_splits_skill_and_delegation_tools(context_usage_moc
             ),
             SimpleNamespace(
                 type="tool",
-                tool="delegate_task",
+                tool="task",
                 state=SimpleNamespace(input={}, output="d" * 40, time={"start": 4}),
             ),
             SimpleNamespace(

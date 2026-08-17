@@ -42,6 +42,7 @@ import { iife } from "@/util/iife"
 import { Shell } from "@/shell/shell"
 import { Truncate } from "@/tool/truncation"
 import { Ripgrep } from "../file/ripgrep"
+import { DelegateTaskTool } from "@/tool/delegate-task"
 
 // @ts-ignore
 globalThis.AI_SDK_LOG_WARNINGS = false
@@ -1475,6 +1476,167 @@ NOTE: At any point in time through this workflow you should feel free to ask the
   const argsRegex = /(?:\[Image\s+\d+\]|"[^"]*"|'[^']*'|[^\s"']+)/gi
   const placeholderRegex = /\$(\d+)/g
   const quoteTrimRegex = /^["']|["']$/g
+
+  async function executeDelegatedCommand(input: {
+    sessionID: string
+    parentID: string
+    parentAgent: Agent.Info
+    parentModel: { providerID: string; modelID: string }
+    taskAgent: Agent.Info
+    taskModel: Provider.Model
+    prompt: string
+    description: string
+    command: string
+    variant?: string
+  }) {
+    const assistantMessage = (await Session.updateMessage({
+      id: Identifier.ascending("message"),
+      role: "assistant",
+      parentID: input.parentID,
+      sessionID: input.sessionID,
+      mode: input.parentAgent.name,
+      agent: input.parentAgent.name,
+      path: {
+        cwd: Instance.directory,
+        root: Instance.worktree,
+      },
+      cost: 0,
+      tokens: {
+        input: 0,
+        output: 0,
+        reasoning: 0,
+        cache: { read: 0, write: 0 },
+      },
+      modelID: input.taskModel.id,
+      providerID: input.taskModel.providerID,
+      time: { created: Date.now() },
+    })) as MessageV2.Assistant
+    const taskArgs = {
+      prompt: input.prompt,
+      description: input.description,
+      subagent_type: input.taskAgent.name,
+      command: input.command,
+    }
+    let part = (await Session.updatePart({
+      id: Identifier.ascending("part"),
+      messageID: assistantMessage.id,
+      sessionID: input.sessionID,
+      type: "tool",
+      callID: ulid(),
+      tool: DelegateTaskTool.id,
+      state: {
+        status: "running",
+        input: taskArgs,
+        time: { start: Date.now() },
+      },
+    })) as MessageV2.ToolPart
+    const abort = start(input.sessionID)
+    if (!abort) throw new Session.BusyError(input.sessionID)
+    SessionStatus.set(input.sessionID, { type: "busy" })
+    using _ = defer(() => cancel(input.sessionID))
+    const taskTool = await DelegateTaskTool.init({ agent: input.parentAgent })
+    const taskCtx: Tool.Context = {
+      agent: input.parentAgent.name,
+      messageID: assistantMessage.id,
+      sessionID: input.sessionID,
+      abort,
+      callID: part.callID,
+      extra: { bypassAgentCheck: true },
+      async metadata(metadata) {
+        part = (await Session.updatePart({
+          ...part,
+          state: {
+            ...part.state,
+            ...metadata,
+          },
+        })) as MessageV2.ToolPart
+      },
+      async ask(request) {
+        const session = await Session.get(input.sessionID)
+        await PermissionNext.ask({
+          ...request,
+          sessionID: input.sessionID,
+          ruleset: PermissionNext.merge(input.parentAgent.permission, session.permission ?? []),
+        })
+      },
+    }
+
+    await Plugin.trigger(
+      "tool.execute.before",
+      {
+        tool: DelegateTaskTool.id,
+        sessionID: input.sessionID,
+        callID: part.callID,
+      },
+      { args: taskArgs },
+    )
+    let executionError: Error | undefined
+    const result = await taskTool.execute(taskArgs, taskCtx).catch((error) => {
+      executionError = error instanceof Error ? error : new Error(String(error))
+      log.error("delegated command failed", {
+        error: executionError,
+        agent: input.taskAgent.name,
+        description: input.description,
+      })
+      return undefined
+    })
+    await Plugin.trigger(
+      "tool.execute.after",
+      {
+        tool: DelegateTaskTool.id,
+        sessionID: input.sessionID,
+        callID: part.callID,
+      },
+      result,
+    )
+
+    assistantMessage.finish = "tool-calls"
+    assistantMessage.time.completed = Date.now()
+    await Session.updateMessage(assistantMessage)
+    if (result && part.state.status === "running") {
+      await Session.updatePart({
+        ...part,
+        state: {
+          status: "completed",
+          input: part.state.input,
+          title: result.title,
+          metadata: result.metadata,
+          output: result.output,
+          attachments: result.attachments,
+          time: { ...part.state.time, end: Date.now() },
+        },
+      } satisfies MessageV2.ToolPart)
+    } else if (!result) {
+      await Session.updatePart({
+        ...part,
+        state: {
+          status: "error",
+          error: executionError ? `Tool execution failed: ${executionError.message}` : "Tool execution failed",
+          time: {
+            start: part.state.status === "running" ? part.state.time.start : Date.now(),
+            end: Date.now(),
+          },
+          metadata: part.metadata,
+          input: part.state.input,
+        },
+      } satisfies MessageV2.ToolPart)
+    }
+
+    cancel(input.sessionID)
+    return prompt({
+      sessionID: input.sessionID,
+      model: input.parentModel,
+      agent: input.parentAgent.name,
+      variant: input.variant,
+      parts: [
+        {
+          type: "text",
+          text: "Summarize the delegate_task output above and continue with your task.",
+          synthetic: true,
+        },
+      ],
+    })
+  }
   /**
    * Regular expression to match @ file references in text
    * Matches @ followed by file paths, excluding commas, periods at end of sentences, and backticks
@@ -1565,6 +1727,7 @@ NOTE: At any point in time through this workflow you should feel free to ask the
 
     const templateParts = await resolvePromptParts(template)
     const parts = [...templateParts, ...(input.parts ?? [])]
+    const isSubtask = Command.shouldDelegate(command, agent.mode)
 
     await Plugin.trigger(
       "command.execute.before",
@@ -1576,14 +1739,44 @@ NOTE: At any point in time through this workflow you should feel free to ask the
       { parts },
     )
 
-    const result = (await prompt({
-      sessionID: input.sessionID,
-      messageID: input.messageID,
-      model: taskModel,
-      agent: agentName,
-      parts,
-      variant: input.variant,
-    })) as MessageV2.WithParts
+    const result = (await (async () => {
+      if (!isSubtask) {
+        return prompt({
+          sessionID: input.sessionID,
+          messageID: input.messageID,
+          model: taskModel,
+          agent: agentName,
+          parts,
+          variant: input.variant,
+        })
+      }
+
+      const parentAgentName = input.agent ?? (await Agent.defaultAgent())
+      const parentAgent = await Agent.get(parentAgentName)
+      if (!parentAgent) throw new Error(`Agent not found: "${parentAgentName}"`)
+      const parentModel = input.model ? Provider.parseModel(input.model) : await lastModel(input.sessionID)
+      const userMessage = await prompt({
+        sessionID: input.sessionID,
+        messageID: input.messageID,
+        model: parentModel,
+        agent: parentAgent.name,
+        parts: templateParts.filter((part) => part.type === "text"),
+        variant: input.variant,
+        noReply: true,
+      })
+      return executeDelegatedCommand({
+        sessionID: input.sessionID,
+        parentID: userMessage.info.id,
+        parentAgent,
+        parentModel,
+        taskAgent: agent,
+        taskModel: await Provider.getModel(taskModel.providerID, taskModel.modelID),
+        prompt: templateParts.find((part) => part.type === "text")?.text ?? "",
+        description: command.description ?? "",
+        command: input.command,
+        variant: input.variant,
+      })
+    })()) as MessageV2.WithParts
 
     Bus.publish(Command.Event.Executed, {
       name: input.command,

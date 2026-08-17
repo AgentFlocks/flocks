@@ -8,6 +8,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 from flocks.config.config import Config, GlobalConfig, ConfigInfo, PermissionAction, PermissionConfig
+from flocks.permission.helpers import from_config
 
 
 @pytest.fixture(autouse=True)
@@ -162,6 +163,38 @@ def test_legacy_task_permission_name_migrates_to_delegate_task():
     dumped = permission.model_dump(exclude_none=True)
     assert dumped["delegate_task"] == PermissionAction.DENY
     assert "task" not in dumped
+
+
+@pytest.mark.parametrize(
+    "raw_permission",
+    [
+        {
+            "task": {"explore": "allow", "legacy-only": "ask"},
+            "delegate_task": {"explore": "ask", "canonical-only": "allow"},
+        },
+        {
+            "delegate_task": {"explore": "ask", "canonical-only": "allow"},
+            "task": {"explore": "allow", "legacy-only": "ask"},
+        },
+    ],
+)
+def test_legacy_task_permission_merge_is_order_independent(raw_permission):
+    direct_rules = from_config(raw_permission)
+    model_rules = from_config(PermissionConfig.model_validate(raw_permission))
+
+    expected = {
+        ("delegate_task", "explore", "ask"),
+        ("delegate_task", "legacy-only", "ask"),
+        ("delegate_task", "canonical-only", "allow"),
+    }
+    assert {
+        (rule.permission, rule.pattern, rule.level.value)
+        for rule in direct_rules
+    } == expected
+    assert {
+        (rule.permission, rule.pattern, rule.level.value)
+        for rule in model_rules
+    } == expected
 
 
 def test_legacy_todo_tool_flags_migrate_to_todo_permission():

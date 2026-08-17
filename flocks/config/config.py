@@ -29,7 +29,7 @@ class PermissionAction(str, Enum):
 PermissionRule = Union[PermissionAction, Dict[str, Union[PermissionAction, Dict[str, PermissionAction]]]]
 
 
-_LEGACY_TODO_TOOL_NAMES = {"todowrite", "todoread"}
+_LEGACY_TODO_TOOL_NAMES = ("todowrite", "todoread")
 _LEGACY_PERMISSION_TOOL_NAMES = {
     **{name: "todo" for name in _LEGACY_TODO_TOOL_NAMES},
     "task": "delegate_task",
@@ -42,16 +42,6 @@ def _canonical_permission_tool_name(tool: str) -> str:
 
 def _merge_permission_action(existing: Any, incoming: Any) -> Any:
     """Merge duplicate legacy permission names conservatively."""
-    def contains_deny(value: Any) -> bool:
-        raw_value = value.value if hasattr(value, "value") else value
-        if raw_value == PermissionAction.DENY.value:
-            return True
-        if isinstance(raw_value, dict):
-            return any(contains_deny(item) for item in raw_value.values())
-        return False
-
-    if contains_deny(existing) or contains_deny(incoming):
-        return PermissionAction.DENY
     if isinstance(existing, dict) and isinstance(incoming, dict):
         merged = dict(existing)
         for pattern, action in incoming.items():
@@ -62,6 +52,17 @@ def _merge_permission_action(existing: Any, incoming: Any) -> Any:
             else:
                 merged[pattern] = action
         return merged
+
+    def contains_deny(value: Any) -> bool:
+        raw_value = value.value if hasattr(value, "value") else value
+        if raw_value == PermissionAction.DENY.value:
+            return True
+        if isinstance(raw_value, dict):
+            return any(contains_deny(item) for item in raw_value.values())
+        return False
+
+    if contains_deny(existing) or contains_deny(incoming):
+        return PermissionAction.DENY
     return existing if existing is not None else incoming
 
 
