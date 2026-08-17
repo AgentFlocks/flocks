@@ -2091,16 +2091,15 @@ class SessionLoop:
                     post_messages = await ctx.session_ctx.get_messages()
                 else:
                     post_messages = await Message.list(ctx.session.id)
-                for msg in reversed(post_messages):
-                    if (
-                        msg.role == MessageRole.ASSISTANT
-                        and (
-                            not ctx.auto_failover
-                            or getattr(msg, "parentID", None) == last_user.id
-                        )
-                    ):
-                        last_message = msg
-                        break
+                last_message = next(
+                    (
+                        msg
+                        for msg in reversed(post_messages)
+                        if msg.role == MessageRole.ASSISTANT
+                        and getattr(msg, "parentID", None) == last_user.id
+                    ),
+                    None,
+                )
 
                 queued_user = await cls._detect_queued_user_message(
                     ctx.session.id,
