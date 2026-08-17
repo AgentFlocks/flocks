@@ -27,6 +27,19 @@ def _policy(ctx: int, out: int = 4096, **overrides) -> CompactionPolicy:
     return CompactionPolicy.from_model(ctx, out, overrides=overrides or None)
 
 
+@pytest.mark.parametrize(
+    ("context_window", "max_output"),
+    [(128_000, 16_384), (200_000, 8_192)],
+    ids=["gpt-4o-128k", "claude-3.5-200k"],
+)
+def test_large_context_defaults(context_window: int, max_output: int):
+    """Large-context model profiles share the same tier defaults."""
+    policy = _policy(context_window, max_output)
+
+    assert policy.tier == ContextTier.LARGE
+    assert policy.preserve_last == 6
+
+
 # ---------------------------------------------------------------------------
 # Tier classification
 # ---------------------------------------------------------------------------
@@ -108,10 +121,6 @@ class TestGPT4o_128K:
     def policy(self) -> CompactionPolicy:
         return _policy(128_000, 16_384)
 
-    def test_tier(self, policy: CompactionPolicy):
-        # usable=111616 > 100K -> LARGE
-        assert policy.tier == ContextTier.LARGE
-
     def test_usable(self, policy: CompactionPolicy):
         assert policy.usable_context == 128_000 - 16_384
 
@@ -136,10 +145,6 @@ class TestGPT4o_128K:
         lo, hi = _BOUNDS["summary_max_tokens"]
         assert policy.summary_max_tokens == max(lo, min(hi, expected))
 
-    def test_preserve_last(self, policy: CompactionPolicy):
-        # LARGE tier -> preserve_last = 6
-        assert policy.preserve_last == 6
-
     def test_overflow_threshold(self, policy: CompactionPolicy):
         # Fixed 85 % of context_window regardless of tier
         assert policy.overflow_threshold == int(128_000 * 0.85)
@@ -151,9 +156,6 @@ class TestClaude35_200K:
     @pytest.fixture()
     def policy(self) -> CompactionPolicy:
         return _policy(200_000, 8_192)
-
-    def test_tier(self, policy: CompactionPolicy):
-        assert policy.tier == ContextTier.LARGE
 
     def test_usable(self, policy: CompactionPolicy):
         assert policy.usable_context == 200_000 - 8_192
@@ -171,9 +173,6 @@ class TestClaude35_200K:
         expected = int(usable * 0.05)
         lo, hi = _BOUNDS["summary_max_tokens"]
         assert policy.summary_max_tokens == max(lo, min(hi, expected))
-
-    def test_preserve_last(self, policy: CompactionPolicy):
-        assert policy.preserve_last == 6
 
     def test_overflow_threshold(self, policy: CompactionPolicy):
         # Fixed 85 % of context_window regardless of tier

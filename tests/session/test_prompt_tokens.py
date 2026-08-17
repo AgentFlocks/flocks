@@ -38,10 +38,6 @@ class TestCountTokens:
     def test_empty_string_returns_zero(self):
         assert SessionPrompt.count_tokens("") == 0
 
-    def test_none_equivalent_empty(self):
-        # Passing falsy value
-        assert SessionPrompt.count_tokens("") == 0
-
     def test_short_text_returns_positive(self):
         result = SessionPrompt.count_tokens("hello world")
         assert result > 0

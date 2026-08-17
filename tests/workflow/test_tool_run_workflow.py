@@ -558,7 +558,14 @@ class TestRunWorkflowToolExecution:
         assert nested_ctx.message_id == tool_context_with_permission.message_id
         assert nested_ctx.agent == tool_context_with_permission.agent
         assert nested_ctx.call_id == tool_context_with_permission.call_id
-        assert nested_ctx.extra == tool_context_with_permission.extra
+        assert nested_ctx.extra == {
+            **tool_context_with_permission.extra,
+            "workflow_context": {
+                "workflow_id": "test-workflow-001",
+                "source": "run_workflow_tool",
+                "action_name": "run_workflow",
+            },
+        }
         assert nested_ctx.abort is tool_context_with_permission.abort
         assert nested_ctx.event_publish_callback == tool_context_with_permission.event_publish_callback
         assert nested_ctx._permission_callback == tool_context_with_permission._permission_callback
