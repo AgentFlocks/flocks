@@ -1,27 +1,41 @@
 """Focused tests for WebUI Auto runtime model failover."""
 
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
+from flocks.session.runtime.continuation_policy import DEFAULT_CONTINUATION_POLICY
+from flocks.session.runtime.agent_loop import AgentLoop
+from flocks.session.runtime.contracts import (
+    AgentRunStatus,
+    AttemptEffects,
+    ModelTurnBoundary,
+    ModelTurnPreparation,
+    ModelTurnSnapshot,
+    RuntimeModel,
+    TurnPreparationStatus,
+)
 from flocks.session.message import Message, MessageRole
-from flocks.session.runner import (
-    LlmAttemptState,
-    SessionRunner,
+from flocks.session.runtime.model_policy import (
+    DEFAULT_MODEL_ROUTING_POLICY,
+    AutoFailoverCooldown,
+)
+from flocks.session.runtime.step_engine import (
+    StepEngine,
     StepFailure,
     StepResult,
 )
 from flocks.session.session import Session, SessionInfo
 from flocks.session.session_loop import (
-    AutoFailoverCooldown,
     LoopCallbacks,
     LoopContext,
     LoopResult,
-    RuntimeModel,
     SessionLoop,
 )
+from tests.session_runtime_testkit import run_logical_turns
 
 
 def _session(**updates) -> SessionInfo:
@@ -66,13 +80,29 @@ def _ctx(
     )
 
 
+async def _build_model_candidates(
+    primary: RuntimeModel,
+    *,
+    route_seed: str,
+    preferred: RuntimeModel | None = None,
+    config=None,
+):
+    return await DEFAULT_MODEL_ROUTING_POLICY.build_candidates(
+        primary,
+        route_seed=route_seed,
+        preferred=preferred,
+        config=config,
+        validate_model=DEFAULT_MODEL_ROUTING_POLICY.validate_runtime_model,
+    )
+
+
 def _failure(
     *,
     assistant_id: str,
     reason: str = "server_error",
     safe: bool = True,
 ) -> StepResult:
-    state = LlmAttemptState(observable_output_started=not safe)
+    state = AttemptEffects(observable_output_started=not safe)
     message = "provider failed"
     return StepResult(
         action="stop",
@@ -89,11 +119,28 @@ def _failure(
     )
 
 
+async def _process_step_with_failover(
+    turn: LoopContext,
+    callbacks: LoopCallbacks,
+    messages,
+    last_user,
+) -> StepResult:
+    turn.callbacks = callbacks
+    return await StepEngine.from_turn(turn).run(
+        ModelTurnSnapshot(
+            active_model=RuntimeModel(turn.provider_id, turn.model_id),
+            trace_step=turn.trace_step,
+            messages=tuple(messages),
+            last_user=last_user,
+        ),
+    )
+
+
 @pytest.fixture(autouse=True)
 def _clear_cooldowns():
-    SessionLoop._auto_failover_cooldowns.clear()
+    DEFAULT_MODEL_ROUTING_POLICY.cooldowns.clear()
     yield
-    SessionLoop._auto_failover_cooldowns.clear()
+    DEFAULT_MODEL_ROUTING_POLICY.cooldowns.clear()
 
 
 @pytest.mark.parametrize(
@@ -116,10 +163,12 @@ def test_failover_classifier(
     message: str,
     reason: str,
 ):
-    decision = SessionRunner.classify_failover_error({
-        "name": "APIError",
-        "data": {"message": message, "statusCode": status_code},
-    })
+    decision = StepEngine.classify_failover_error(
+        {
+            "name": "APIError",
+            "data": {"message": message, "statusCode": status_code},
+        }
+    )
 
     assert decision.eligible is True
     assert decision.reason == reason
@@ -144,7 +193,7 @@ async def test_auto_runner_uses_standard_retry_policy(
     status_code: int,
     expected_calls: int,
 ):
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session(),
         provider_id="primary",
         model_id="primary-model",
@@ -160,19 +209,21 @@ async def test_auto_runner_uses_standard_retry_policy(
     call_llm = AsyncMock(side_effect=failure)
 
     monkeypatch.setattr(
-        "flocks.session.runner.Agent.get",
-        AsyncMock(return_value=SimpleNamespace(
-            name="rex",
-            steps=None,
-            mode="primary",
-            prompt="",
-            tools=[],
-        )),
+        "flocks.session.runtime.step_engine.Agent.get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="rex",
+                steps=None,
+                mode="primary",
+                prompt="",
+                tools=[],
+            )
+        ),
     )
-    monkeypatch.setattr("flocks.session.runner.Provider.get", lambda _provider_id: provider)
-    monkeypatch.setattr("flocks.session.runner.Provider.apply_config", AsyncMock())
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runner.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -186,7 +237,7 @@ async def test_auto_runner_uses_standard_retry_policy(
     monkeypatch.setattr(Message, "create", AsyncMock(return_value=assistant))
     monkeypatch.setattr(Message, "update", AsyncMock())
     monkeypatch.setattr(runner, "_call_llm", call_llm)
-    monkeypatch.setattr("flocks.session.runner.SessionRetry.sleep", AsyncMock())
+    monkeypatch.setattr("flocks.session.runtime.step_engine.SessionRetry.sleep", AsyncMock())
 
     result = await runner._process_step([last_user], last_user)
 
@@ -208,7 +259,7 @@ async def test_last_auto_candidate_uses_standard_retry_policy(
     expected_calls: int,
 ):
     """The last candidate uses the same retry policy as every other mode."""
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session(),
         provider_id="fallback",
         model_id="fallback-model",
@@ -224,19 +275,21 @@ async def test_last_auto_candidate_uses_standard_retry_policy(
     call_llm = AsyncMock(side_effect=failure)
 
     monkeypatch.setattr(
-        "flocks.session.runner.Agent.get",
-        AsyncMock(return_value=SimpleNamespace(
-            name="rex",
-            steps=None,
-            mode="primary",
-            prompt="",
-            tools=[],
-        )),
+        "flocks.session.runtime.step_engine.Agent.get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="rex",
+                steps=None,
+                mode="primary",
+                prompt="",
+                tools=[],
+            )
+        ),
     )
-    monkeypatch.setattr("flocks.session.runner.Provider.get", lambda _provider_id: provider)
-    monkeypatch.setattr("flocks.session.runner.Provider.apply_config", AsyncMock())
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runner.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -250,7 +303,7 @@ async def test_last_auto_candidate_uses_standard_retry_policy(
     monkeypatch.setattr(Message, "create", AsyncMock(return_value=assistant))
     monkeypatch.setattr(Message, "update", AsyncMock())
     monkeypatch.setattr(runner, "_call_llm", call_llm)
-    monkeypatch.setattr("flocks.session.runner.SessionRetry.sleep", AsyncMock())
+    monkeypatch.setattr("flocks.session.runtime.step_engine.SessionRetry.sleep", AsyncMock())
 
     result = await runner._process_step([last_user], last_user)
 
@@ -262,9 +315,7 @@ async def test_last_auto_candidate_uses_standard_retry_policy(
     ("exception", "status_code", "reason"),
     [
         (
-            type("GoogleSdkError", (RuntimeError,), {"code": 429})(
-                "Resource exhausted"
-            ),
+            type("GoogleSdkError", (RuntimeError,), {"code": 429})("Resource exhausted"),
             429,
             "rate_limit",
         ),
@@ -289,7 +340,7 @@ def test_exception_status_is_normalized_from_sdk_shapes(
     status_code: int,
     reason: str,
 ):
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session(),
         provider_id="primary",
         model_id="primary-model",
@@ -298,16 +349,14 @@ def test_exception_status_is_normalized_from_sdk_shapes(
     error = runner._exception_to_error_dict(exception)
 
     assert error["data"]["statusCode"] == status_code
-    assert SessionRunner.classify_failover_error(error).reason == reason
+    assert StepEngine.classify_failover_error(error).reason == reason
 
 
 def test_exception_status_is_normalized_from_cause_chain():
-    inner = type("GoogleSdkError", (RuntimeError,), {"code": 401})(
-        "Unauthenticated"
-    )
+    inner = type("GoogleSdkError", (RuntimeError,), {"code": 401})("Unauthenticated")
     outer = RuntimeError("Provider wrapper failed")
     outer.__cause__ = inner
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session(),
         provider_id="primary",
         model_id="primary-model",
@@ -316,34 +365,40 @@ def test_exception_status_is_normalized_from_cause_chain():
     error = runner._exception_to_error_dict(outer)
 
     assert error["data"]["statusCode"] == 401
-    assert SessionRunner.classify_failover_error(error).reason == "auth"
+    assert StepEngine.classify_failover_error(error).reason == "auth"
 
 
 def test_local_validation_error_never_fails_over():
-    decision = SessionRunner.classify_failover_error({
-        "name": "ValidationError",
-        "data": {"message": "Local prompt schema validation failed"},
-    })
+    decision = StepEngine.classify_failover_error(
+        {
+            "name": "ValidationError",
+            "data": {"message": "Local prompt schema validation failed"},
+        }
+    )
 
     assert decision.eligible is False
     assert decision.reason == "local_error"
 
 
 def test_model_not_found_without_status_fails_over():
-    decision = SessionRunner.classify_failover_error({
-        "name": "ValueError",
-        "data": {"message": "Model acme-v2 not found for provider custom"},
-    })
+    decision = StepEngine.classify_failover_error(
+        {
+            "name": "ValueError",
+            "data": {"message": "Model acme-v2 not found for provider custom"},
+        }
+    )
 
     assert decision.eligible is True
     assert decision.reason == "model_not_found"
 
 
 def test_content_filter_error_fails_over_immediately():
-    decision = SessionRunner.classify_failover_error({
-        "name": "BadRequestError",
-        "data": {"message": "Response blocked by content_filter"},
-    })
+    decision = StepEngine.classify_failover_error(
+        {
+            "name": "BadRequestError",
+            "data": {"message": "Response blocked by content_filter"},
+        }
+    )
 
     assert decision.eligible is True
     assert decision.reason == "content_policy"
@@ -356,22 +411,24 @@ def test_candidate_switch_keeps_tool_loop_guard_only():
         "signature": "same-tool-call",
         "count": 2,
     }
-    ctx.runner_static_cache.update({
-        "tool_loop_guard": tool_loop_guard,
-        "tool_schema_cache": {"primary": "schema"},
-        "chat_context_cache": {"primary": "context"},
-        "system_prompt": "primary prompt",
-    })
+    ctx.step_static_cache.update(
+        {
+            "tool_loop_guard": tool_loop_guard,
+            "tool_schema_cache": {"primary": "schema"},
+            "chat_context_cache": {"primary": "context"},
+            "system_prompt": "primary prompt",
+        }
+    )
 
-    SessionLoop._select_candidate(ctx, 1)
+    DEFAULT_MODEL_ROUTING_POLICY.select_candidate(ctx, 1)
 
-    assert ctx.runner_static_cache == {"tool_loop_guard": tool_loop_guard}
-    assert ctx.runner_static_cache["tool_loop_guard"] is tool_loop_guard
+    assert ctx.step_static_cache == {"tool_loop_guard": tool_loop_guard}
+    assert ctx.step_static_cache["tool_loop_guard"] is tool_loop_guard
 
 
 @pytest.mark.asyncio
 async def test_reasoning_only_empty_response_is_not_replayed(monkeypatch):
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session(),
         provider_id="primary",
         model_id="primary-model",
@@ -391,19 +448,21 @@ async def test_reasoning_only_empty_response_is_not_replayed(monkeypatch):
         return StepResult(action="stop", content="")
 
     monkeypatch.setattr(
-        "flocks.session.runner.Agent.get",
-        AsyncMock(return_value=SimpleNamespace(
-            name="rex",
-            steps=None,
-            mode="primary",
-            prompt="",
-            tools=[],
-        )),
+        "flocks.session.runtime.step_engine.Agent.get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="rex",
+                steps=None,
+                mode="primary",
+                prompt="",
+                tools=[],
+            )
+        ),
     )
-    monkeypatch.setattr("flocks.session.runner.Provider.get", lambda _provider_id: provider)
-    monkeypatch.setattr("flocks.session.runner.Provider.apply_config", AsyncMock())
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runner.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -418,7 +477,7 @@ async def test_reasoning_only_empty_response_is_not_replayed(monkeypatch):
     monkeypatch.setattr(Message, "update", AsyncMock())
     monkeypatch.setattr(runner, "_call_llm", call_llm)
     sleep = AsyncMock()
-    monkeypatch.setattr("flocks.session.runner.SessionRetry.sleep", sleep)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.SessionRetry.sleep", sleep)
 
     result = await runner._process_step([last_user], last_user)
 
@@ -490,11 +549,13 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
             reasoning=None,
             event_type=None,
             metadata={},
-            tool_calls=[{
-                "index": 0,
-                "id": "call_1",
-                "function": {"name": "example_tool", "arguments": "{}"},
-            }],
+            tool_calls=[
+                {
+                    "index": 0,
+                    "id": "call_1",
+                    "function": {"name": "example_tool", "arguments": "{}"},
+                }
+            ],
             finish_reason=None,
             usage=None,
         )
@@ -518,7 +579,7 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
             return stream()
 
     provider = FailingStreamProvider()
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session(),
         provider_id="primary",
         model_id="primary-model",
@@ -529,19 +590,21 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
     assistant = SimpleNamespace(id="msg_assistant")
 
     monkeypatch.setattr(
-        "flocks.session.runner.Agent.get",
-        AsyncMock(return_value=SimpleNamespace(
-            name="rex",
-            steps=None,
-            mode="primary",
-            prompt="",
-            tools=[],
-        )),
+        "flocks.session.runtime.step_engine.Agent.get",
+        AsyncMock(
+            return_value=SimpleNamespace(
+                name="rex",
+                steps=None,
+                mode="primary",
+                prompt="",
+                tools=[],
+            )
+        ),
     )
-    monkeypatch.setattr("flocks.session.runner.Provider.get", lambda _provider_id: provider)
-    monkeypatch.setattr("flocks.session.runner.Provider.apply_config", AsyncMock())
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runner.SessionPrompt.build_system_prompts",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -555,18 +618,18 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
     monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[]))
     monkeypatch.setattr(Message, "create", AsyncMock(return_value=assistant))
     monkeypatch.setattr(Message, "update", AsyncMock())
-    monkeypatch.setattr("flocks.session.runner.StreamProcessor", FakeStreamProcessor)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.StreamProcessor", FakeStreamProcessor)
     monkeypatch.setattr(
-        "flocks.session.runner.HookPipeline.has_stage_handlers",
+        "flocks.session.runtime.step_engine.HookPipeline.has_stage_handlers",
         AsyncMock(return_value=False),
     )
-    monkeypatch.setattr("flocks.session.runner.langfuse_is_active", lambda: False)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.langfuse_is_active", lambda: False)
     monkeypatch.setattr(
         "flocks.provider.options.build_provider_options",
         lambda _provider_id, _model_id: {},
     )
     sleep = AsyncMock()
-    monkeypatch.setattr("flocks.session.runner.SessionRetry.sleep", sleep)
+    monkeypatch.setattr("flocks.session.runtime.step_engine.SessionRetry.sleep", sleep)
 
     result = await runner._process_step([last_user], last_user)
 
@@ -575,9 +638,7 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
     assert result.failure.allow_fallback is False
     assert result.failure.attempt_state.received_chunk is True
     assert result.failure.attempt_state.observable_output_started is True
-    assert result.failure.attempt_state.tool_execution_started is (
-        chunk_kind == "tool"
-    )
+    assert result.failure.attempt_state.tool_execution_started is (chunk_kind == "tool")
     sleep.assert_not_awaited()
 
 
@@ -592,14 +653,14 @@ async def test_safe_failure_switches_candidate_and_removes_blank_message(monkeyp
             return _failure(assistant_id="msg_failed")
         return StepResult(action="stop", content="recovered")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     delete = AsyncMock(return_value=True)
     monkeypatch.setattr(Message, "delete", delete)
 
     async def publish(event, payload):
         events.append((event, payload))
 
-    result = await SessionLoop._process_step_with_failover(
+    result = await _process_step_with_failover(
         ctx,
         LoopCallbacks(event_publish_callback=publish),
         [last_user],
@@ -614,6 +675,63 @@ async def test_safe_failure_switches_candidate_and_removes_blank_message(monkeyp
 
 
 @pytest.mark.asyncio
+async def test_abort_during_failed_attempt_cleanup_stops_failover(
+    monkeypatch,
+) -> None:
+    ctx = _ctx()
+    last_user = SimpleNamespace(id="msg_user", agent="rex")
+    snapshot = ModelTurnSnapshot(
+        active_model=RuntimeModel(ctx.provider_id, ctx.model_id),
+        trace_step=ctx.trace_step,
+        messages=(last_user,),
+        last_user=last_user,
+    )
+    ctx.prepare_step = AsyncMock(
+        return_value=ModelTurnPreparation(
+            status=TurnPreparationStatus.READY,
+            snapshot=snapshot,
+        )
+    )
+    ctx.commit_step = AsyncMock(return_value=ModelTurnBoundary())
+    attempts: list[str] = []
+    events: list[str] = []
+    delete_started = asyncio.Event()
+    allow_delete = asyncio.Event()
+
+    async def process_step(runner, _messages, _last_user):
+        attempts.append(runner.provider_id)
+        if runner.provider_id == "primary":
+            return _failure(assistant_id="msg_failed")
+        return StepResult(action="stop", content="unexpected fallback")
+
+    async def delete_failed_attempt(*_args):
+        delete_started.set()
+        await allow_delete.wait()
+        return True
+
+    async def publish(event, _payload):
+        events.append(event)
+
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
+    monkeypatch.setattr(Message, "delete", delete_failed_attempt)
+    ctx.callbacks = LoopCallbacks(event_publish_callback=publish)
+    run_task = asyncio.create_task(
+        AgentLoop().run(ctx, StepEngine.from_turn(ctx)),
+    )
+
+    await asyncio.wait_for(delete_started.wait(), timeout=1)
+    ctx.signal_abort()
+    allow_delete.set()
+    outcome = await asyncio.wait_for(run_task, timeout=1)
+
+    assert outcome.status == AgentRunStatus.ABORTED
+    assert attempts == ["primary"]
+    assert ctx.candidate_index == 0
+    assert "session.model.fallback" not in events
+    ctx.commit_step.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_queued_user_is_detected_before_replacement_assistant():
     current_user = SimpleNamespace(id="msg_001", role=MessageRole.USER)
     queued_user = SimpleNamespace(id="msg_002", role=MessageRole.USER)
@@ -622,7 +740,7 @@ async def test_queued_user_is_detected_before_replacement_assistant():
         role=MessageRole.ASSISTANT,
     )
 
-    detected = await SessionLoop._detect_queued_user_message(
+    detected = await DEFAULT_CONTINUATION_POLICY.detect_queued_user_message(
         "ses_auto",
         [current_user, queued_user, replacement_assistant],
         current_user.id,
@@ -655,17 +773,17 @@ async def test_preflight_chain_exhaustion_persists_final_error(monkeypatch):
                 assistant_message_id=None,
                 reason="provider_unavailable",
                 allow_fallback=True,
-                attempt_state=LlmAttemptState(),
+                attempt_state=AttemptEffects(),
                 attempts=0,
             ),
         )
 
     final_assistant = SimpleNamespace(id="msg_final_error")
     create = AsyncMock(return_value=final_assistant)
-    monkeypatch.setattr(SessionRunner, "_process_step", preflight_failure)
+    monkeypatch.setattr(StepEngine, "_process_step", preflight_failure)
     monkeypatch.setattr(Message, "create", create)
 
-    result = await SessionLoop._process_step_with_failover(
+    result = await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
@@ -696,7 +814,7 @@ async def test_failed_blank_message_deletion_stops_switch(monkeypatch):
     ctx = _ctx()
     last_user = SimpleNamespace(id="msg_user", agent="rex")
     monkeypatch.setattr(
-        SessionRunner,
+        StepEngine,
         "_process_step",
         AsyncMock(return_value=_failure(assistant_id="msg_failed")),
     )
@@ -704,7 +822,7 @@ async def test_failed_blank_message_deletion_stops_switch(monkeypatch):
     update = AsyncMock()
     monkeypatch.setattr(Message, "update", update)
 
-    result = await SessionLoop._process_step_with_failover(
+    result = await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
@@ -738,11 +856,11 @@ async def test_fallbacks_are_attempted_in_candidate_order(monkeypatch):
             return _failure(assistant_id=f"msg_{runner.provider_id}")
         return StepResult(action="stop", content="recovered")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     delete = AsyncMock(return_value=True)
     monkeypatch.setattr(Message, "delete", delete)
 
-    result = await SessionLoop._process_step_with_failover(
+    result = await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
@@ -771,13 +889,13 @@ async def test_chain_exhaustion_finalizes_only_last_candidate(monkeypatch):
     async def process_step(runner, _messages, _last_user):
         return _failure(assistant_id=f"msg_{runner.provider_id}")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     delete = AsyncMock(return_value=True)
     update = AsyncMock()
     monkeypatch.setattr(Message, "delete", delete)
     monkeypatch.setattr(Message, "update", update)
 
-    result = await SessionLoop._process_step_with_failover(
+    result = await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
@@ -788,7 +906,7 @@ async def test_chain_exhaustion_finalizes_only_last_candidate(monkeypatch):
     assert delete.await_count == 2
     update.assert_awaited_once()
     assert update.await_args.args[1] == "msg_fallback-2"
-    cooldown = SessionLoop._auto_failover_cooldowns[ctx.session.id]
+    cooldown = DEFAULT_MODEL_ROUTING_POLICY.cooldowns[ctx.session.id]
     assert cooldown.model == RuntimeModel("fallback-2", "model-2")
     assert cooldown.reason == "chain_exhausted"
 
@@ -811,11 +929,13 @@ async def test_full_loop_reports_chain_exhaustion_once(monkeypatch):
         parentID=user.id,
         finish="error",
     )
-    ctx.session_ctx = SimpleNamespace(
-        get_messages=AsyncMock(side_effect=[
-            [user],
-            [user, final_assistant],
-        ])
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, final_assistant],
+            ]
+        )
     )
     attempts = []
 
@@ -823,14 +943,14 @@ async def test_full_loop_reports_chain_exhaustion_once(monkeypatch):
         attempts.append((runner.provider_id, runner.model_id))
         return _failure(assistant_id=f"msg_{runner.provider_id}")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[]))
     monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
     update = AsyncMock()
     monkeypatch.setattr(Message, "update", update)
     on_error = AsyncMock()
 
-    result = await SessionLoop._run_loop(
+    result = await run_logical_turns(
         ctx,
         LoopCallbacks(
             on_error=on_error,
@@ -859,7 +979,7 @@ async def test_observable_failure_is_finalized_without_replay(monkeypatch):
     ctx = _ctx()
     last_user = SimpleNamespace(id="msg_user", agent="rex")
     monkeypatch.setattr(
-        SessionRunner,
+        StepEngine,
         "_process_step",
         AsyncMock(return_value=_failure(assistant_id="msg_partial", safe=False)),
     )
@@ -868,7 +988,7 @@ async def test_observable_failure_is_finalized_without_replay(monkeypatch):
     monkeypatch.setattr(Message, "delete", delete)
     monkeypatch.setattr(Message, "update", update)
 
-    result = await SessionLoop._process_step_with_failover(
+    result = await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
@@ -891,23 +1011,26 @@ async def test_rate_limit_switch_sets_primary_cooldown(monkeypatch):
             return _failure(assistant_id="msg_rate", reason="rate_limit")
         return StepResult(action="stop", content="recovered")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
 
-    await SessionLoop._process_step_with_failover(
+    await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
         last_user,
     )
 
-    cooldown = SessionLoop._auto_failover_cooldowns[ctx.session.id]
+    cooldown = DEFAULT_MODEL_ROUTING_POLICY.cooldowns[ctx.session.id]
     assert cooldown.model == RuntimeModel("fallback", "fallback-model")
     assert cooldown.reason == "rate_limit"
-    assert SessionLoop._cooldown_candidate_index(
-        ctx.session.id,
-        ctx.model_candidates,
-    ) == 1
+    assert (
+        DEFAULT_MODEL_ROUTING_POLICY.cooldown_candidate_index(
+            ctx.session.id,
+            ctx.model_candidates,
+        )
+        == 1
+    )
 
 
 @pytest.mark.asyncio
@@ -921,10 +1044,10 @@ async def test_configured_switch_does_not_set_cross_turn_cooldown(monkeypatch):
             return _failure(assistant_id="msg_rate", reason="rate_limit")
         return StepResult(action="stop", content="recovered")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
 
-    await SessionLoop._process_step_with_failover(
+    await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
@@ -932,15 +1055,17 @@ async def test_configured_switch_does_not_set_cross_turn_cooldown(monkeypatch):
     )
 
     assert (ctx.provider_id, ctx.model_id) == ("fallback", "fallback-model")
-    assert ctx.session.id not in SessionLoop._auto_failover_cooldowns
+    assert ctx.session.id not in DEFAULT_MODEL_ROUTING_POLICY.cooldowns
 
 
 @pytest.mark.asyncio
 async def test_403_quota_failure_sets_primary_cooldown(monkeypatch):
-    decision = SessionRunner.classify_failover_error({
-        "name": "APIError",
-        "data": {"message": "Quota exceeded", "statusCode": 403},
-    })
+    decision = StepEngine.classify_failover_error(
+        {
+            "name": "APIError",
+            "data": {"message": "Quota exceeded", "statusCode": 403},
+        }
+    )
     ctx = _ctx()
     last_user = SimpleNamespace(id="msg_user", agent="rex")
 
@@ -952,17 +1077,17 @@ async def test_403_quota_failure_sets_primary_cooldown(monkeypatch):
             )
         return StepResult(action="stop", content="recovered")
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
 
-    await SessionLoop._process_step_with_failover(
+    await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
         last_user,
     )
 
-    cooldown = SessionLoop._auto_failover_cooldowns[ctx.session.id]
+    cooldown = DEFAULT_MODEL_ROUTING_POLICY.cooldowns[ctx.session.id]
     assert cooldown.reason == "rate_limit"
     assert cooldown.model == RuntimeModel("fallback", "fallback-model")
     assert cooldown.expires_at > time.monotonic() + 50
@@ -980,18 +1105,18 @@ async def test_chain_exhaustion_does_not_shorten_rate_limit_cooldown(monkeypatch
             reason=reason,
         )
 
-    monkeypatch.setattr(SessionRunner, "_process_step", process_step)
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
     monkeypatch.setattr(Message, "delete", AsyncMock(return_value=True))
     monkeypatch.setattr(Message, "update", AsyncMock())
 
-    await SessionLoop._process_step_with_failover(
+    await _process_step_with_failover(
         ctx,
         LoopCallbacks(),
         [last_user],
         last_user,
     )
 
-    cooldown = SessionLoop._auto_failover_cooldowns[ctx.session.id]
+    cooldown = DEFAULT_MODEL_ROUTING_POLICY.cooldowns[ctx.session.id]
     assert cooldown.reason == "rate_limit"
     assert cooldown.model == RuntimeModel("fallback", "fallback-model")
     # A 5s anti-replay window must not replace the primary's 60s cooldown.
@@ -1029,14 +1154,18 @@ async def test_candidate_builder_discovers_one_model_per_tier_with_stable_seed(
         available = provider_id != "missing"
         return available, "available" if available else "provider_not_configured"
 
-    monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+    monkeypatch.setattr(
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "validate_runtime_model",
+        validate,
+    )
     primary = RuntimeModel("primary", "primary-model")
 
-    first = await SessionLoop._build_model_candidates(
+    first = await _build_model_candidates(
         primary,
         route_seed="ses_auto:msg_1",
     )
-    repeated = await SessionLoop._build_model_candidates(
+    repeated = await _build_model_candidates(
         primary,
         route_seed="ses_auto:msg_1",
     )
@@ -1050,10 +1179,12 @@ async def test_candidate_builder_discovers_one_model_per_tier_with_stable_seed(
     assert all(candidate.provider_id != "missing" for candidate in first)
 
     selections = {
-        tuple(await SessionLoop._build_model_candidates(
-            primary,
-            route_seed=f"ses_auto:msg_{index}",
-        ))
+        tuple(
+            await _build_model_candidates(
+                primary,
+                route_seed=f"ses_auto:msg_{index}",
+            )
+        )
         for index in range(12)
     }
     assert len(selections) > 1
@@ -1085,14 +1216,14 @@ async def test_candidate_builder_keeps_active_cooldown_model_in_its_tier(
         lambda: model_manager,
     )
     monkeypatch.setattr(
-        SessionLoop,
+        DEFAULT_MODEL_ROUTING_POLICY,
         "validate_runtime_model",
         AsyncMock(return_value=(True, "available")),
     )
     primary = RuntimeModel("primary", "primary-model")
     cooldown_model = RuntimeModel("other", "other-b")
 
-    candidates = await SessionLoop._build_model_candidates(
+    candidates = await _build_model_candidates(
         primary,
         route_seed="ses_auto:new-turn",
         preferred=cooldown_model,
@@ -1107,21 +1238,19 @@ async def test_candidate_builder_keeps_active_cooldown_model_in_its_tier(
 async def test_auto_configuration_only_requires_available_primary(monkeypatch):
     monkeypatch.setattr(
         "flocks.config.config.Config.resolve_default_llm",
-        AsyncMock(return_value={
-            "provider_id": "primary",
-            "model_id": "primary-model",
-        }),
+        AsyncMock(
+            return_value={
+                "provider_id": "primary",
+                "model_id": "primary-model",
+            }
+        ),
     )
     monkeypatch.setattr(
-        SessionLoop,
+        DEFAULT_MODEL_ROUTING_POLICY,
         "validate_runtime_model",
         AsyncMock(return_value=(True, "available")),
     )
-    build_candidates = AsyncMock()
-    monkeypatch.setattr(SessionLoop, "_build_model_candidates", build_candidates)
-
     assert await SessionLoop.validate_auto_configuration() == (True, "available")
-    build_candidates.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1145,7 +1274,7 @@ async def test_candidate_builder_allows_primary_only_chain(monkeypatch):
 
     primary = RuntimeModel("primary", "primary-model")
 
-    assert await SessionLoop._build_model_candidates(
+    assert await _build_model_candidates(
         primary,
         route_seed="ses_auto:msg_primary_only",
     ) == [primary]
@@ -1155,11 +1284,13 @@ async def test_candidate_builder_allows_primary_only_chain(monkeypatch):
 async def test_candidate_builder_uses_configured_order_without_discovery(
     monkeypatch,
 ):
-    config = SimpleNamespace(fallback_providers=[
-        SimpleNamespace(provider_id="other", model_id="model-b"),
-        SimpleNamespace(provider_id="primary", model_id="model-a"),
-        SimpleNamespace(provider_id="missing", model_id="missing-model"),
-    ])
+    config = SimpleNamespace(
+        fallback_providers=[
+            SimpleNamespace(provider_id="other", model_id="model-b"),
+            SimpleNamespace(provider_id="primary", model_id="model-a"),
+            SimpleNamespace(provider_id="missing", model_id="missing-model"),
+        ]
+    )
     model_manager = MagicMock()
     monkeypatch.setattr(
         "flocks.provider.provider.Provider.apply_config",
@@ -1174,10 +1305,14 @@ async def test_candidate_builder_uses_configured_order_without_discovery(
         available = provider_id != "missing"
         return available, "available" if available else "provider_not_configured"
 
-    monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+    monkeypatch.setattr(
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "validate_runtime_model",
+        validate,
+    )
     primary = RuntimeModel("primary", "primary-model")
 
-    candidates = await SessionLoop._build_model_candidates(
+    candidates = await _build_model_candidates(
         primary,
         route_seed="unused-for-configured",
         preferred=RuntimeModel("other", "model-b"),
@@ -1196,21 +1331,23 @@ async def test_candidate_builder_uses_configured_order_without_discovery(
 async def test_configured_chain_with_no_available_fallbacks_keeps_primary_only(
     monkeypatch,
 ):
-    config = SimpleNamespace(fallback_providers=[
-        SimpleNamespace(provider_id="missing", model_id="missing-model"),
-    ])
+    config = SimpleNamespace(
+        fallback_providers=[
+            SimpleNamespace(provider_id="missing", model_id="missing-model"),
+        ]
+    )
     monkeypatch.setattr(
         "flocks.provider.provider.Provider.apply_config",
         AsyncMock(),
     )
     monkeypatch.setattr(
-        SessionLoop,
+        DEFAULT_MODEL_ROUTING_POLICY,
         "validate_runtime_model",
         AsyncMock(return_value=(False, "provider_not_configured")),
     )
     primary = RuntimeModel("primary", "primary-model")
 
-    assert await SessionLoop._build_model_candidates(
+    assert await _build_model_candidates(
         primary,
         route_seed="unused-for-configured",
         config=config,
@@ -1222,24 +1359,24 @@ def test_cooldown_is_cleared_when_primary_changes():
         RuntimeModel("new-primary", "new-model"),
         RuntimeModel("fallback", "fallback-model"),
     ]
-    SessionLoop._auto_failover_cooldowns["ses_auto"] = AutoFailoverCooldown(
+    DEFAULT_MODEL_ROUTING_POLICY.cooldowns["ses_auto"] = AutoFailoverCooldown(
         model=RuntimeModel("fallback", "fallback-model"),
         primary=RuntimeModel("old-primary", "old-model"),
         expires_at=float("inf"),
         reason="rate_limit",
     )
 
-    assert SessionLoop._cooldown_candidate_index("ses_auto", candidates) == 0
-    assert "ses_auto" not in SessionLoop._auto_failover_cooldowns
+    assert DEFAULT_MODEL_ROUTING_POLICY.cooldown_candidate_index("ses_auto", candidates) == 0
+    assert "ses_auto" not in DEFAULT_MODEL_ROUTING_POLICY.cooldowns
 
 
 @pytest.mark.asyncio
-async def test_synthetic_subtask_continuation_keeps_fallback(monkeypatch):
+async def test_synthetic_continuation_keeps_fallback(monkeypatch):
     ctx = _ctx(index=1)
     ctx.model_candidate_policy = "configured"
     ctx.turn_user_id = "msg_real"
     synthetic_user = SimpleNamespace(
-        id="msg_subtask_continue",
+        id="msg_synthetic_continue",
         model={"providerID": "primary", "modelID": "primary-model"},
     )
     monkeypatch.setattr(
@@ -1248,7 +1385,7 @@ async def test_synthetic_subtask_continuation_keeps_fallback(monkeypatch):
         AsyncMock(return_value=[SimpleNamespace(synthetic=True)]),
     )
 
-    await SessionLoop._prepare_auto_turn(ctx, synthetic_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, synthetic_user)
 
     assert ctx.auto_failover is True
     assert ctx.turn_user_id == "msg_real"
@@ -1275,9 +1412,9 @@ async def test_first_real_turn_builds_stable_chain_from_user_id(monkeypatch):
         AsyncMock(return_value=config),
     )
     build = AsyncMock(return_value=rebuilt)
-    monkeypatch.setattr(SessionLoop, "_build_model_candidates", build)
+    monkeypatch.setattr(DEFAULT_MODEL_ROUTING_POLICY, "build_candidates", build)
 
-    await SessionLoop._prepare_auto_turn(ctx, first_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, first_user)
 
     assert ctx.turn_user_id == "msg_first"
     assert ctx.model_candidates == rebuilt
@@ -1299,14 +1436,16 @@ async def test_configured_first_real_turn_ignores_cooldown_and_starts_primary(
         id="msg_first",
         model={"providerID": "primary", "modelID": "primary-model"},
     )
-    config = SimpleNamespace(fallback_providers=[
-        SimpleNamespace(provider_id="fallback", model_id="fallback-model"),
-    ])
+    config = SimpleNamespace(
+        fallback_providers=[
+            SimpleNamespace(provider_id="fallback", model_id="fallback-model"),
+        ]
+    )
     rebuilt = [
         RuntimeModel("primary", "primary-model"),
         RuntimeModel("fallback", "fallback-model"),
     ]
-    SessionLoop._auto_failover_cooldowns[ctx.session.id] = AutoFailoverCooldown(
+    DEFAULT_MODEL_ROUTING_POLICY.cooldowns[ctx.session.id] = AutoFailoverCooldown(
         model=rebuilt[1],
         primary=rebuilt[0],
         expires_at=float("inf"),
@@ -1317,17 +1456,17 @@ async def test_configured_first_real_turn_ignores_cooldown_and_starts_primary(
         AsyncMock(return_value=config),
     )
     monkeypatch.setattr(
-        SessionLoop,
-        "_build_model_candidates",
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "build_candidates",
         AsyncMock(return_value=rebuilt),
     )
 
-    await SessionLoop._prepare_auto_turn(ctx, first_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, first_user)
 
     assert ctx.model_candidate_policy == "configured"
     assert ctx.candidate_index == 0
     assert (ctx.provider_id, ctx.model_id) == ("primary", "primary-model")
-    assert ctx.session.id not in SessionLoop._auto_failover_cooldowns
+    assert ctx.session.id not in DEFAULT_MODEL_ROUTING_POLICY.cooldowns
 
 
 @pytest.mark.asyncio
@@ -1350,7 +1489,7 @@ async def test_queued_explicit_model_disables_auto(monkeypatch):
         AsyncMock(return_value=persisted),
     )
 
-    await SessionLoop._prepare_auto_turn(ctx, queued_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, queued_user)
 
     assert ctx.auto_failover is False
     assert ctx.model_candidates == [RuntimeModel("explicit", "explicit-model")]
@@ -1372,7 +1511,7 @@ async def test_non_webui_loop_cannot_activate_persisted_auto(monkeypatch):
         AsyncMock(return_value=_session(model_auto=True)),
     )
 
-    await SessionLoop._prepare_auto_turn(ctx, queued_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, queued_user)
 
     assert ctx.auto_failover is False
     assert ctx.auto_failover_allowed is False
@@ -1399,10 +1538,12 @@ async def test_queued_webui_turn_rebuilds_auto_chain(monkeypatch):
     )
     monkeypatch.setattr(
         "flocks.config.config.Config.resolve_default_llm",
-        AsyncMock(return_value={
-            "provider_id": "primary",
-            "model_id": "primary-model",
-        }),
+        AsyncMock(
+            return_value={
+                "provider_id": "primary",
+                "model_id": "primary-model",
+            }
+        ),
     )
     config = SimpleNamespace(fallback_providers=None)
     monkeypatch.setattr(
@@ -1410,9 +1551,9 @@ async def test_queued_webui_turn_rebuilds_auto_chain(monkeypatch):
         AsyncMock(return_value=config),
     )
     build = AsyncMock(return_value=rebuilt)
-    monkeypatch.setattr(SessionLoop, "_build_model_candidates", build)
+    monkeypatch.setattr(DEFAULT_MODEL_ROUTING_POLICY, "build_candidates", build)
 
-    await SessionLoop._prepare_auto_turn(ctx, queued_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, queued_user)
 
     assert ctx.auto_failover is True
     assert ctx.model_candidates == rebuilt
@@ -1438,9 +1579,11 @@ async def test_queued_configured_turn_restarts_from_primary(monkeypatch):
         RuntimeModel("primary", "primary-model"),
         RuntimeModel("fallback", "fallback-model"),
     ]
-    config = SimpleNamespace(fallback_providers=[
-        SimpleNamespace(provider_id="fallback", model_id="fallback-model"),
-    ])
+    config = SimpleNamespace(
+        fallback_providers=[
+            SimpleNamespace(provider_id="fallback", model_id="fallback-model"),
+        ]
+    )
     monkeypatch.setattr(Message, "parts", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         "flocks.session.session.Session.get_by_id",
@@ -1452,18 +1595,20 @@ async def test_queued_configured_turn_restarts_from_primary(monkeypatch):
     )
     monkeypatch.setattr(
         "flocks.config.config.Config.resolve_default_llm",
-        AsyncMock(return_value={
-            "provider_id": "primary",
-            "model_id": "primary-model",
-        }),
+        AsyncMock(
+            return_value={
+                "provider_id": "primary",
+                "model_id": "primary-model",
+            }
+        ),
     )
     monkeypatch.setattr(
-        SessionLoop,
-        "_build_model_candidates",
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "build_candidates",
         AsyncMock(return_value=rebuilt),
     )
 
-    await SessionLoop._prepare_auto_turn(ctx, queued_user)
+    await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, queued_user)
 
     assert ctx.model_candidate_policy == "configured"
     assert ctx.candidate_index == 0
@@ -1474,11 +1619,11 @@ async def test_queued_configured_turn_restarts_from_primary(monkeypatch):
 @pytest.mark.parametrize("category", ["user", "entity-config", "workflow"])
 async def test_queued_webui_auto_authorizes_active_loop(category):
     ctx = _ctx(auto=False, category=category)
-    SessionLoop._active_loops[ctx.session.id] = ctx
+    SessionLoop._active_turns[ctx.session.id] = ctx
     try:
         result = await SessionLoop.run(ctx.session.id, auto_failover=True)
     finally:
-        SessionLoop._active_loops.pop(ctx.session.id, None)
+        SessionLoop._active_turns.pop(ctx.session.id, None)
 
     assert result.action == "queued"
     assert ctx.auto_failover_allowed is True
@@ -1491,19 +1636,29 @@ async def test_unsupported_session_loop_ignores_auto_authorization(
     task_session = _session(category="task")
     captured_ctx = None
 
-    async def run_loop(ctx, _callbacks):
+    async def run_turn(_loop, ctx, _engine):
+        from flocks.session.runtime.contracts import (
+            AgentRunOutcome,
+            AgentRunStatus,
+        )
+
         nonlocal captured_ctx
         captured_ctx = ctx
-        return LoopResult(action="stop")
+        return AgentRunOutcome(
+            status=AgentRunStatus.ABORTED,
+        )
 
     build_candidates = AsyncMock()
     monkeypatch.setattr(
         "flocks.session.session.Session.get_by_id",
         AsyncMock(return_value=task_session),
     )
-    monkeypatch.setattr(SessionLoop, "_build_model_candidates", build_candidates)
-    monkeypatch.setattr(SessionLoop, "_run_loop", run_loop)
-    monkeypatch.setattr(SessionLoop, "_publish_session_status", AsyncMock())
+    monkeypatch.setattr(
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "build_candidates",
+        build_candidates,
+    )
+    monkeypatch.setattr(AgentLoop, "run", run_turn)
     monkeypatch.setattr(Message, "list", AsyncMock(return_value=[]))
     monkeypatch.setattr(
         "flocks.session.orphan_tools.abort_orphan_running_parts",
@@ -1525,20 +1680,18 @@ async def test_unsupported_session_loop_ignores_auto_authorization(
     assert captured_ctx is not None
     assert captured_ctx.auto_failover is False
     assert captured_ctx.auto_failover_allowed is False
-    assert captured_ctx.model_candidates == [
-        RuntimeModel("primary", "primary-model")
-    ]
+    assert captured_ctx.model_candidates == [RuntimeModel("primary", "primary-model")]
     build_candidates.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_active_unsupported_loop_rejects_auto_authorization():
     ctx = _ctx(auto=False, category="task")
-    SessionLoop._active_loops[ctx.session.id] = ctx
+    SessionLoop._active_turns[ctx.session.id] = ctx
     try:
         result = await SessionLoop.run(ctx.session.id, auto_failover=True)
     finally:
-        SessionLoop._active_loops.pop(ctx.session.id, None)
+        SessionLoop._active_turns.pop(ctx.session.id, None)
 
     assert result.action == "queued"
     assert ctx.auto_failover_allowed is False
@@ -1547,7 +1700,7 @@ async def test_active_unsupported_loop_rejects_auto_authorization():
 @pytest.mark.asyncio
 async def test_session_delete_clears_auto_failover_cooldown(monkeypatch):
     session = _session()
-    SessionLoop._auto_failover_cooldowns[session.id] = AutoFailoverCooldown(
+    DEFAULT_MODEL_ROUTING_POLICY.cooldowns[session.id] = AutoFailoverCooldown(
         model=RuntimeModel("fallback", "fallback-model"),
         primary=RuntimeModel("primary", "primary-model"),
         expires_at=float("inf"),
@@ -1564,4 +1717,4 @@ async def test_session_delete_clears_auto_failover_cooldown(monkeypatch):
     monkeypatch.setattr("flocks.bus.bus.Bus.publish", AsyncMock())
 
     assert await Session.delete("project", session.id) is True
-    assert session.id not in SessionLoop._auto_failover_cooldowns
+    assert session.id not in DEFAULT_MODEL_ROUTING_POLICY.cooldowns

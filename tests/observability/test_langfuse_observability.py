@@ -125,7 +125,7 @@ def test_create_trace_forwards_tags(monkeypatch):
     monkeypatch.setattr(lf, "_get_client", lambda: client)
 
     obs = lf.create_trace(
-        name="SessionRunner.step",
+        name="StepEngine.step",
         session_id="s1",
         tags=["session:s1", "step:2", "session_step:s1:2"],
         input={"step": 2},
@@ -141,7 +141,7 @@ def test_create_trace_uses_start_observation_for_new_sdk(monkeypatch):
     monkeypatch.setattr(lf, "_get_client", lambda: client)
 
     obs = lf.create_trace(
-        name="SessionRunner.step",
+        name="StepEngine.step",
         session_id="s1",
         user_id="u1",
         tags=["session:s1", "step:2"],
@@ -157,7 +157,7 @@ def test_create_trace_uses_start_observation_for_new_sdk(monkeypatch):
     assert client.start_observation_payload["metadata"]["session_id"] == "s1"
     assert client.start_observation_payload["metadata"]["user_id"] == "u1"
     assert client.start_observation_payload["metadata"]["tags"] == ["session:s1", "step:2"]
-    assert obs._otel_span.attributes["langfuse.trace.name"] == "SessionRunner.step"
+    assert obs._otel_span.attributes["langfuse.trace.name"] == "StepEngine.step"
     assert obs._otel_span.attributes["session.id"] == "s1"
     assert obs._otel_span.attributes["user.id"] == "u1"
     assert obs._otel_span.attributes["langfuse.trace.tags"] == ["session:s1", "step:2"]
@@ -167,7 +167,7 @@ def test_generation_and_span_inherit_trace_dimensions_from_parent(monkeypatch):
     monkeypatch.setattr(lf, "_get_client", lambda: object())
 
     parent = _TrackingObservation("trace", {"name": "trace"})
-    parent._otel_span.attributes["langfuse.trace.name"] = "SessionRunner.step"
+    parent._otel_span.attributes["langfuse.trace.name"] = "StepEngine.step"
     parent._otel_span.attributes["session.id"] = "s1"
     parent._otel_span.attributes["user.id"] = "u1"
     parent._otel_span.attributes["langfuse.trace.tags"] = ["session:s1", "step:2"]
@@ -175,11 +175,11 @@ def test_generation_and_span_inherit_trace_dimensions_from_parent(monkeypatch):
     gen = lf.create_generation(parent=parent, name="LLM.generate", model="gpt-5", input={"x": 1})
     span = lf.create_span(parent=parent, name="Tool.execute.read", input={"path": "/tmp/a"})
 
-    assert gen._otel_span.attributes["langfuse.trace.name"] == "SessionRunner.step"
+    assert gen._otel_span.attributes["langfuse.trace.name"] == "StepEngine.step"
     assert gen._otel_span.attributes["session.id"] == "s1"
     assert gen._otel_span.attributes["user.id"] == "u1"
     assert gen._otel_span.attributes["langfuse.trace.tags"] == ["session:s1", "step:2"]
-    assert span._otel_span.attributes["langfuse.trace.name"] == "SessionRunner.step"
+    assert span._otel_span.attributes["langfuse.trace.name"] == "StepEngine.step"
     assert span._otel_span.attributes["session.id"] == "s1"
     assert span._otel_span.attributes["user.id"] == "u1"
     assert span._otel_span.attributes["langfuse.trace.tags"] == ["session:s1", "step:2"]

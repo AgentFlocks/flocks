@@ -1,13 +1,13 @@
 """
-Tests for SessionRunner internals in flocks/session/runner.py
+Tests for StepEngine internals in flocks/session/runtime/step_engine.py.
 
 Covers:
 - _agent_declares_tool(): tool declaration filtering
 - _exception_to_error_dict(): exception to error dict conversion
 - _build_callable_tool_schema(): excluded tools filter
-- RunnerCallbacks dataclass
+- LoopCallbacks dataclass
 - ToolCall / StepResult dataclasses
-- SessionRunner construction and abort behavior (from existing tests)
+- StepEngine construction and abort behavior (from existing tests)
 """
 
 import httpcore
@@ -16,7 +16,7 @@ import pytest
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
-import flocks.session.runner as runner_mod
+import flocks.session.runtime.step_engine as runner_mod
 from flocks.provider.sdk.anthropic import AnthropicProvider
 from flocks.session.message import (
     Message,
@@ -27,12 +27,12 @@ from flocks.session.message import (
     ToolStateRunning,
     UserMessageInfo,
 )
-from flocks.session.runner import (
-    RunnerCallbacks,
-    SessionRunner,
+from flocks.session.runtime.step_engine import (
+    StepEngine,
     StepResult,
     ToolCall,
 )
+from flocks.session.runtime.session_turn import LoopCallbacks, LoopContext
 from flocks.session.prompt import SessionPrompt, get_prompt_flocks_config_guard
 from flocks.session.core.defaults import DEFAULT_MAX_TOOL_STEPS
 from flocks.session.session import Session, SessionInfo
@@ -62,7 +62,7 @@ def _make_agent(name="rex", tools=None):
 
 def _make_runner(session_id="ses_runner_test"):
     session = _make_session(session_id)
-    return SessionRunner(session=session)
+    return StepEngine(session=session)
 
 
 def _make_callable_schema_result(*tool_names):
@@ -167,12 +167,12 @@ class TestToolLoopGuard:
 
 
 # ---------------------------------------------------------------------------
-# RunnerCallbacks dataclass
+# LoopCallbacks dataclass
 # ---------------------------------------------------------------------------
 
 class TestRunnerCallbacks:
     def test_all_defaults_none(self):
-        cb = RunnerCallbacks()
+        cb = LoopCallbacks()
         assert cb.on_step_start is None
         assert cb.on_step_end is None
         assert cb.on_text_delta is None
@@ -187,7 +187,7 @@ class TestRunnerCallbacks:
         async def my_callback(x):
             pass
 
-        cb = RunnerCallbacks(on_text_delta=my_callback, on_error=my_callback)
+        cb = LoopCallbacks(on_text_delta=my_callback, on_error=my_callback)
         assert cb.on_text_delta is my_callback
         assert cb.on_error is my_callback
         assert cb.on_step_start is None
@@ -382,7 +382,7 @@ class TestBuildTools:
         )
 
         with patch(
-            "flocks.session.runner.ToolRegistry.list_tools",
+            "flocks.session.runtime.step_engine.ToolRegistry.list_tools",
             return_value=[invalid_tool, bash_tool],
         ):
             tools = await runner._build_callable_tool_schema(agent)
@@ -447,7 +447,7 @@ class TestBuildTools:
         )
 
         with patch(
-            "flocks.session.runner.ToolRegistry.list_tools",
+            "flocks.session.runtime.step_engine.ToolRegistry.list_tools",
             return_value=[noop_tool, real_tool],
         ):
             tools = await runner._build_callable_tool_schema(agent)
@@ -469,7 +469,7 @@ class TestBuildTools:
         )
 
         with patch(
-            "flocks.session.runner.ToolRegistry.list_tools",
+            "flocks.session.runtime.step_engine.ToolRegistry.list_tools",
             return_value=[disabled_tool],
         ):
             tools = await runner._build_callable_tool_schema(agent)
@@ -490,7 +490,7 @@ class TestBuildTools:
         )
 
         with patch(
-            "flocks.session.runner.SessionRunner._list_callable_tool_infos_for_turn",
+            "flocks.session.runtime.step_engine.StepEngine._list_callable_tool_infos_for_turn",
             AsyncMock(return_value=([tool_info], {"enabledToolCount": 1})),
         ):
             tools = await runner._build_callable_tool_schema(agent)
@@ -524,7 +524,7 @@ class TestBuildTools:
             ([tool_v1], {"enabledToolCount": 3}),
             ([tool_v2], {"enabledToolCount": 3}),
         ])
-        with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
+        with patch.object(StepEngine, "_list_callable_tool_infos_for_turn", selector_mock):
             tools1 = await runner._build_callable_tool_schema(agent, [])
             tools2 = await runner._build_callable_tool_schema(agent, [])
 
@@ -549,8 +549,8 @@ class TestBuildTools:
     async def test_build_tools_calls_selector_for_each_runner_instance(self):
         shared_cache = {}
         session = _make_session("ses_tools_runner_instances")
-        runner1 = SessionRunner(session=session, static_cache=shared_cache)
-        runner2 = SessionRunner(session=session, static_cache=shared_cache)
+        runner1 = StepEngine(session=session, static_cache=shared_cache)
+        runner2 = StepEngine(session=session, static_cache=shared_cache)
         agent = _make_agent(name="rex")
 
         selected_tool = ToolInfo(
@@ -562,7 +562,7 @@ class TestBuildTools:
         )
 
         selector_mock = AsyncMock(return_value=([selected_tool], {"enabledToolCount": 3}))
-        with patch.object(SessionRunner, "_list_callable_tool_infos_for_turn", selector_mock):
+        with patch.object(StepEngine, "_list_callable_tool_infos_for_turn", selector_mock):
             tools1 = await runner1._build_callable_tool_schema(agent, [])
             tools2 = await runner2._build_callable_tool_schema(agent, [])
 
@@ -585,7 +585,7 @@ class TestBuildTools:
         )
 
         with patch.object(
-            SessionRunner,
+            StepEngine,
             "_list_callable_tool_infos_for_turn",
             AsyncMock(return_value=(
                 [selected_tool],
@@ -612,7 +612,7 @@ class TestBuildTools:
         )
 
         with patch.object(
-            SessionRunner,
+            StepEngine,
             "_list_callable_tool_infos_for_turn",
             AsyncMock(return_value=([skill_tool], {"enabledToolCount": 3})),
         ), patch(
@@ -633,8 +633,8 @@ class TestBuildSystemPrompts:
     async def test_build_system_prompts_reuses_loop_static_cache(self):
         shared_cache = {}
         session = _make_session("ses_prompts_cache")
-        runner1 = SessionRunner(session=session, static_cache=shared_cache)
-        runner2 = SessionRunner(session=session, static_cache=shared_cache)
+        runner1 = StepEngine(session=session, static_cache=shared_cache)
+        runner2 = StepEngine(session=session, static_cache=shared_cache)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
@@ -693,7 +693,7 @@ class TestBuildSystemPrompts:
     @pytest.mark.asyncio
     async def test_build_system_prompts_orders_stable_prefix_before_runtime_tail(self):
         session = _make_session("ses_prompts_order")
-        runner = SessionRunner(session=session)
+        runner = StepEngine(session=session)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
         memory_bootstrap_data = {
@@ -757,7 +757,7 @@ class TestBuildSystemPrompts:
     async def test_build_system_prompts_rebuilds_when_tool_revision_changes(self):
         shared_cache = {}
         session = _make_session("ses_prompts_revision")
-        runner = SessionRunner(session=session, static_cache=shared_cache)
+        runner = StepEngine(session=session, static_cache=shared_cache)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt v1"
 
@@ -823,7 +823,7 @@ class TestBuildSystemPrompts:
     async def test_build_system_prompts_reuses_static_device_hint_cache(self):
         shared_cache = {}
         session = _make_session("ses_prompts_static_device_hint")
-        runner = SessionRunner(session=session, static_cache=shared_cache)
+        runner = StepEngine(session=session, static_cache=shared_cache)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
@@ -882,7 +882,7 @@ class TestBuildSystemPrompts:
     async def test_build_system_prompts_rebuilds_when_device_revision_changes(self):
         shared_cache = {}
         session = _make_session("ses_prompts_device_revision")
-        runner = SessionRunner(session=session, static_cache=shared_cache)
+        runner = StepEngine(session=session, static_cache=shared_cache)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
@@ -943,7 +943,7 @@ class TestBuildSystemPrompts:
     async def test_build_system_prompts_rebuilds_when_agent_prompt_changes(self):
         shared_cache = {}
         session = _make_session("ses_prompts_agent_prompt")
-        runner = SessionRunner(session=session, static_cache=shared_cache)
+        runner = StepEngine(session=session, static_cache=shared_cache)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt v1"
 
@@ -989,7 +989,7 @@ class TestBuildSystemPrompts:
     @pytest.mark.asyncio
     async def test_build_system_prompts_includes_filesystem_memory_guidance(self):
         session = _make_session("ses_prompts_memory_guidance")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             memory_bootstrap_data={
                 "instructions": "memory guidance",
@@ -1033,7 +1033,7 @@ class TestBuildSystemPrompts:
     @pytest.mark.asyncio
     async def test_build_system_prompts_does_not_add_bash_guidance_prompt_when_bash_loaded(self):
         session = _make_session("ses_prompts_no_bash_guidance")
-        runner = SessionRunner(session=session)
+        runner = StepEngine(session=session)
         agent = _make_agent(name="rex")
         agent.prompt = "agent prompt"
 
@@ -1058,7 +1058,7 @@ class TestBuildSystemPrompts:
     @pytest.mark.asyncio
     async def test_build_system_prompts_skips_memory_guidance_without_management_tools(self):
         session = _make_session("ses_prompts_no_memory_guidance")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             memory_bootstrap_data={
                 "instructions": "memory guidance",
@@ -1094,7 +1094,7 @@ class TestBuildSystemPrompts:
     async def test_filesystem_memory_guidance_depends_on_tool_names(self):
         shared_cache = {}
         session = _make_session("ses_prompts_tool_names")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             static_cache=shared_cache,
             memory_bootstrap_data={
@@ -1158,7 +1158,7 @@ class TestBuildSystemPrompts:
         agent.mode = "primary"
 
         with patch(
-            "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
+            "flocks.session.runtime.step_engine.StepEngine._list_catalog_tool_infos",
             return_value=[ToolInfo(
                 name="plugin_memory",
                 description="Access project memory",
@@ -1170,7 +1170,7 @@ class TestBuildSystemPrompts:
             "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
             return_value=["read", "bash"],
         ), patch(
-            "flocks.session.runner.get_always_load_tool_names",
+            "flocks.session.runtime.step_engine.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
             "flocks.command.direct.format_tools_catalog_summary",
@@ -1205,13 +1205,13 @@ class TestBuildSystemPrompts:
         ]
 
         with patch(
-            "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
+            "flocks.session.runtime.step_engine.StepEngine._list_catalog_tool_infos",
             return_value=catalog_tools,
         ), patch(
             "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
             return_value=["bash", "read"],
         ), patch(
-            "flocks.session.runner.get_always_load_tool_names",
+            "flocks.session.runtime.step_engine.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
             "flocks.command.direct.format_tools_catalog_summary",
@@ -1249,13 +1249,13 @@ class TestBuildSystemPrompts:
         ]
 
         with patch(
-            "flocks.session.runner.SessionRunner._list_catalog_tool_infos",
+            "flocks.session.runtime.step_engine.StepEngine._list_catalog_tool_infos",
             return_value=catalog_tools,
         ), patch(
             "flocks.agent.toolset.get_all_enabled_builtin_tool_names",
             return_value=["bash", "read"],
         ), patch(
-            "flocks.session.runner.get_always_load_tool_names",
+            "flocks.session.runtime.step_engine.get_always_load_tool_names",
             return_value={"question", "tool_search"},
         ), patch(
             "flocks.command.direct.format_tools_catalog_summary",
@@ -1289,7 +1289,7 @@ class TestBuildSystemPrompts:
         )
 
         with patch(
-            "flocks.session.runner.list_tool_catalog_infos",
+            "flocks.session.runtime.step_engine.list_tool_catalog_infos",
             return_value=[shell_tool, helper_tool],
         ):
             infos = runner._list_catalog_tool_infos(agent)
@@ -1307,7 +1307,7 @@ class TestBuildSystemPrompts:
             ToolInfo(name="websearch", description="Search web", category=ToolCategory.BROWSER, native=True, enabled=True),
         ]
 
-        with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+        with patch("flocks.session.runtime.step_engine.list_tool_catalog_infos", return_value=tool_infos):
             infos = runner._list_catalog_tool_infos(agent)
 
         assert [tool.name for tool in infos] == ["read"]
@@ -1324,7 +1324,7 @@ class TestBuildSystemPrompts:
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
         ]
 
-        with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+        with patch("flocks.session.runtime.step_engine.list_tool_catalog_infos", return_value=tool_infos):
             infos = runner._list_catalog_tool_infos(agent)
 
         assert [tool.name for tool in infos] == ["read", "question", "tool_search"]
@@ -1340,7 +1340,7 @@ class TestBuildSystemPrompts:
             ToolInfo(name="bash", description="Run commands", category=ToolCategory.CODE, native=True, enabled=True),
         ]
 
-        with patch("flocks.session.runner.list_tool_catalog_infos", return_value=tool_infos):
+        with patch("flocks.session.runtime.step_engine.list_tool_catalog_infos", return_value=tool_infos):
             infos = runner._list_catalog_tool_infos(agent)
 
         assert [tool.name for tool in infos] == ["question", "tool_search"]
@@ -1349,7 +1349,7 @@ class TestBuildSystemPrompts:
 class TestMiniMaxTextToolMode:
     def test_disabled_for_custom_threatbook_minimax(self):
         session = _make_session("ses_minimax_mode")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="custom-threatbook-internal",
             model_id="minimax:MiniMax-M2.5",
@@ -1358,7 +1358,7 @@ class TestMiniMaxTextToolMode:
 
     def test_disabled_for_custom_tb_inner_minimax(self):
         session = _make_session("ses_minimax_mode_tb_inner")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="custom-tb-inner",
             model_id="minimax:MiniMax-M2.7",
@@ -1367,7 +1367,7 @@ class TestMiniMaxTextToolMode:
 
     def test_disabled_for_threatbook_cn_llm_minimax(self):
         session = _make_session("ses_minimax_threatbook_cn_llm")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="threatbook-cn-llm",
             model_id="minimax-m2.7",
@@ -1376,7 +1376,7 @@ class TestMiniMaxTextToolMode:
 
     def test_disabled_for_threatbook_cn_llm_minimax_case_insensitive(self):
         session = _make_session("ses_minimax_threatbook_cn_llm_case")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="ThreatBook-CN-LLM",
             model_id="MiniMax-M2.5",
@@ -1387,7 +1387,7 @@ class TestMiniMaxTextToolMode:
         # Other models routed through the same gateway (e.g. qwen, GLM) keep
         # the standard OpenAI native function-calling path.
         session = _make_session("ses_threatbook_cn_llm_qwen")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="threatbook-cn-llm",
             model_id="qwen3.6-plus",
@@ -1396,7 +1396,7 @@ class TestMiniMaxTextToolMode:
 
     def test_disabled_for_other_models(self):
         session = _make_session("ses_normal_mode")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="anthropic",
             model_id="claude-sonnet-4-5-20250929",
@@ -1406,7 +1406,7 @@ class TestMiniMaxTextToolMode:
     @pytest.mark.asyncio
     async def test_system_prompts_add_minimax_native_tool_guidance(self):
         session = _make_session("ses_minimax_prompt")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="custom-tb-inner",
             model_id="minimax:MiniMax-M2.5",
@@ -1433,7 +1433,7 @@ class TestMiniMaxTextToolMode:
 
     def test_build_text_tool_call_catalog_prompt(self):
         session = _make_session("ses_minimax_catalog")
-        runner = SessionRunner(
+        runner = StepEngine(
             session=session,
             provider_id="custom-threatbook-internal",
             model_id="minimax:MiniMax-M2.5",
@@ -1466,7 +1466,7 @@ class TestMiniMaxTextToolMode:
 
 @pytest.mark.asyncio
 async def test_to_chat_messages_uses_structured_anthropic_system_blocks(monkeypatch):
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_make_session("ses_anthropic_system_blocks"),
         provider_id="anthropic",
         model_id="claude-sonnet",
@@ -1489,7 +1489,7 @@ async def test_to_chat_messages_uses_structured_anthropic_system_blocks(monkeypa
 
 @pytest.mark.asyncio
 async def test_to_chat_messages_keeps_joined_system_prompt_for_openai(monkeypatch):
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_make_session("ses_openai_system_blocks"),
         provider_id="openai",
         model_id="gpt-5",
@@ -1519,7 +1519,7 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
         role=MessageRole.ASSISTANT,
         content="starting",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
 
     first_messages = await runner._to_chat_messages([assistant_message], [])
 
@@ -1554,6 +1554,30 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
 
 
 @pytest.mark.asyncio
+async def test_to_chat_messages_only_projects_appended_history(monkeypatch):
+    runner = StepEngine(
+        session=_make_session("ses_incremental_chat_projection"),
+        static_cache={},
+    )
+    first = SimpleNamespace(id="msg_first", role="user", content="first")
+    second = SimpleNamespace(id="msg_second", role="assistant", content="second")
+    parts = AsyncMock(return_value=[])
+    text_content = AsyncMock(
+        side_effect=lambda message: message.content,
+    )
+    monkeypatch.setattr(runner_mod.Message, "parts", parts)
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", text_content)
+
+    first_projection = await runner._to_chat_messages([first], [])
+    parts.reset_mock()
+    second_projection = await runner._to_chat_messages([first, second], [])
+
+    assert [call.args[0] for call in parts.await_args_list] == [second.id]
+    assert first_projection[0] is second_projection[0]
+    assert [message.content for message in second_projection] == ["first", "second"]
+
+
+@pytest.mark.asyncio
 async def test_to_chat_messages_excludes_ignored_assistant_text():
     session = await Session.create(
         project_id="test_runner_ignored_command_output",
@@ -1567,7 +1591,7 @@ async def test_to_chat_messages_excludes_ignored_assistant_text():
         modelID="command",
         ignored=True,
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
 
     chat_messages = await runner._to_chat_messages([assistant_message], [])
 
@@ -1585,7 +1609,7 @@ async def test_to_chat_messages_preserves_assistant_reasoning_for_replay():
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
 
     await Message.add_part(
         session.id,
@@ -1634,7 +1658,7 @@ async def test_to_chat_messages_restores_provider_reasoning_fields_from_metadata
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "alibaba"
     runner.model_id = "qwen3-max"
 
@@ -1701,7 +1725,7 @@ async def test_to_chat_messages_restores_redacted_anthropic_thinking_blocks(monk
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "anthropic"
     runner.model_id = "claude-sonnet-4-6"
 
@@ -1763,7 +1787,7 @@ async def test_to_chat_messages_restores_signed_anthropic_thinking_blocks(monkey
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "anthropic"
     runner.model_id = "claude-sonnet-4-6"
 
@@ -1829,7 +1853,7 @@ async def test_to_chat_messages_restores_unsigned_anthropic_thinking_blocks(monk
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "anthropic"
     runner.model_id = "claude-sonnet-4-6"
 
@@ -1893,7 +1917,7 @@ async def test_runner_history_round_trip_formats_anthropic_payload(monkeypatch):
         role=MessageRole.ASSISTANT,
         content="Done",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "anthropic"
     runner.model_id = "claude-sonnet-4-6"
 
@@ -1958,7 +1982,7 @@ async def test_to_chat_messages_prefers_provider_specific_interleaved_resolution
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "deepseek"
     runner.model_id = "shared-model"
 
@@ -2038,7 +2062,7 @@ async def test_to_chat_messages_keeps_reasoning_only_assistant_message(monkeypat
         role=MessageRole.ASSISTANT,
         content="",
     )
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner.provider_id = "alibaba"
     runner.model_id = "qwen3-max"
 
@@ -2113,7 +2137,7 @@ async def test_to_chat_messages_wraps_only_queued_user_messages():
         content="What version is installed?",
     )
 
-    runner = SessionRunner(session=session, static_cache={})
+    runner = StepEngine(session=session, static_cache={})
     runner._step = 3
     runner._queued_user_message_ids = {queued_user.id}
 
@@ -2194,7 +2218,7 @@ def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
     runner.provider_id = "deepseek"
     runner.model_id = "deepseek-v4-pro"
 
-    monkeypatch.setattr(SessionRunner, "_model_supports_vision", lambda self: False)
+    monkeypatch.setattr(StepEngine, "_model_supports_vision", lambda self: False)
     monkeypatch.setattr(
         runner_mod.Provider,
         "resolve_model",
@@ -2220,7 +2244,7 @@ def test_provider_capability_key_includes_interleaved_policy(monkeypatch):
 @pytest.mark.asyncio
 async def test_process_step_creates_assistant_message_with_provider_and_model(monkeypatch):
     runner = _make_runner("ses_runner_provider_model")
-    runner.callbacks = RunnerCallbacks(
+    runner.callbacks = LoopCallbacks(
         on_text_delta=AsyncMock(),
         on_error=AsyncMock(),
     )
@@ -2274,7 +2298,7 @@ async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypat
             "chat_messages": [{"role": "user", "content": "stale"}],
         }
     }
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     root_user = SimpleNamespace(id="msg_200", role="user")
     last_user = UserMessageInfo(
@@ -2325,7 +2349,7 @@ async def test_process_step_invalidates_chat_cache_for_queued_messages(monkeypat
 @pytest.mark.asyncio
 async def test_process_step_limits_connection_error_retries(monkeypatch):
     runner = _make_runner("ses_runner_connection_error")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_connection_error",
@@ -2372,7 +2396,7 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
     assert call_count == 6
     assert result.action == "stop"
     assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
-    runner.callbacks.on_error.assert_awaited_with(runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE)
+    runner.callbacks.on_error.assert_not_awaited()
 
     final_update = update_mock.await_args_list[-1].kwargs
     assert final_update["finish"] == "error"
@@ -2398,7 +2422,7 @@ async def test_process_step_limits_connection_error_retries(monkeypatch):
 @pytest.mark.asyncio
 async def test_process_step_marks_aborted_llm_message_as_error(monkeypatch):
     runner = _make_runner("ses_runner_aborted_result")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_aborted_result",
@@ -2461,7 +2485,7 @@ async def test_process_step_marks_aborted_llm_message_as_error(monkeypatch):
 @pytest.mark.asyncio
 async def test_call_llm_skips_observability_when_langfuse_inactive(monkeypatch):
     runner = _make_runner("ses_runner_langfuse_inactive")
-    runner.callbacks = RunnerCallbacks()
+    runner.callbacks = LoopCallbacks()
 
     agent = SimpleNamespace(name="rex")
     assistant_msg = SimpleNamespace(id="msg_assistant_langfuse")
@@ -2491,7 +2515,7 @@ async def test_call_llm_skips_observability_when_langfuse_inactive(monkeypatch):
 @pytest.mark.asyncio
 async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monkeypatch):
     runner = _make_runner("ses_runner_no_llm_hooks")
-    runner.callbacks = RunnerCallbacks()
+    runner.callbacks = LoopCallbacks()
 
     class _ProviderStub:
         async def chat_stream(self, **kwargs):  # noqa: ANN003
@@ -2530,7 +2554,7 @@ async def test_call_llm_skips_llm_hook_payload_preparation_without_handlers(monk
 
 
 @pytest.mark.asyncio
-async def test_process_step_persists_visible_error_when_provider_missing(monkeypatch):
+async def test_step_boundary_reports_provider_missing_once(monkeypatch):
     runner = _make_runner("ses_runner_missing_provider_error")
     user = await Message.create(
         runner.session.id,
@@ -2555,12 +2579,25 @@ async def test_process_step_persists_visible_error_when_provider_missing(monkeyp
 
     runner.provider_id = "missing-provider"
     runner.model_id = "missing-model"
-    runner.callbacks = RunnerCallbacks(
+    runner.callbacks = LoopCallbacks(
         on_error=on_error,
         event_publish_callback=publish_event,
     )
 
     result = await runner._process_step(messages, user)
+    turn = LoopContext(
+        session=runner.session,
+        provider_id=runner.provider_id,
+        model_id=runner.model_id,
+        agent_name="rex",
+        callbacks=runner.callbacks,
+        session_store=SimpleNamespace(
+            get_messages=AsyncMock(
+                return_value=await Message.list(runner.session.id),
+            ),
+        ),
+    )
+    await turn.commit_step(result)
     messages_with_parts = await Message.list_with_parts(runner.session.id)
     assistant = next(item for item in messages_with_parts if item.info.role == MessageRole.ASSISTANT)
     visible_text_parts = [
@@ -2609,7 +2646,7 @@ async def test_process_step_persists_visible_error_when_provider_not_configured(
 
     runner.provider_id = "unconfigured-provider"
     runner.model_id = "unconfigured-model"
-    runner.callbacks = RunnerCallbacks(
+    runner.callbacks = LoopCallbacks(
         on_error=on_error,
         event_publish_callback=publish_event,
     )
@@ -2624,7 +2661,7 @@ async def test_process_step_persists_visible_error_when_provider_not_configured(
 
     assert result.action == "stop"
     assert result.error == runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE
-    assert callback_errors == [runner_mod.CONNECTION_ERROR_DISPLAY_MESSAGE]
+    assert callback_errors == []
     assert assistant.info.finish == "error"
     assert assistant.info.error["name"] == "ProviderConfigurationError"
     assert visible_text_parts
@@ -2662,12 +2699,12 @@ async def test_process_step_persists_visible_error_when_model_returns_empty_stre
     monkeypatch.setattr(runner_mod.Provider, "get", staticmethod(lambda _provider_id: EmptyProvider()))
     monkeypatch.setattr(runner_mod.Provider, "apply_config", AsyncMock(return_value=None))
     monkeypatch.setattr(runner_mod.SessionPrompt, "build_system_prompts", AsyncMock(return_value=[]))
-    monkeypatch.setattr(SessionRunner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
+    monkeypatch.setattr(StepEngine, "_build_callable_tool_schema", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner_mod.SessionRetry, "sleep", AsyncMock(return_value=None))
 
     runner.provider_id = "empty-provider"
     runner.model_id = "empty-model"
-    runner.callbacks = RunnerCallbacks(event_publish_callback=publish_event)
+    runner.callbacks = LoopCallbacks(event_publish_callback=publish_event)
 
     result = await runner._process_step(messages, user)
     messages_with_parts = await Message.list_with_parts(runner.session.id)
@@ -2693,7 +2730,7 @@ async def test_process_step_persists_visible_error_when_model_returns_empty_stre
 @pytest.mark.asyncio
 async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(monkeypatch):
     runner = _make_runner("ses_runner_prompt_guidance_tool_names")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_prompt_guidance",
@@ -2744,7 +2781,7 @@ async def test_process_step_uses_loaded_tool_schema_names_for_prompt_guidance(mo
 @pytest.mark.asyncio
 async def test_process_step_records_usage_after_success(monkeypatch):
     runner = _make_runner("ses_runner_usage_success")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_usage_success",
@@ -2793,7 +2830,7 @@ async def test_process_step_records_usage_after_success(monkeypatch):
 @pytest.mark.asyncio
 async def test_process_step_passes_device_hint_factory_into_build_system_prompts(monkeypatch):
     runner = _make_runner("ses_runner_device_hint_order")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_device_hint_order",
@@ -2848,7 +2885,7 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
     """Each empty-response attempt records its own usage so that provider
     charges are not lost when the model returns tokens but no content."""
     runner = _make_runner("ses_runner_usage_retry")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_usage_retry",
@@ -2908,7 +2945,7 @@ async def test_process_step_empty_retry_records_usage_per_attempt(monkeypatch):
 @pytest.mark.asyncio
 async def test_process_step_retries_empty_transport_exception(monkeypatch):
     runner = _make_runner("ses_runner_transport_retry")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_transport_retry",
@@ -2957,7 +2994,7 @@ async def test_process_step_retries_empty_transport_exception(monkeypatch):
 @pytest.mark.asyncio
 async def test_process_step_does_not_retry_after_tool_execution_started(monkeypatch):
     runner = _make_runner("ses_runner_tool_side_effect_no_retry")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
 
     last_user = UserMessageInfo(
         id="msg_user_tool_side_effect_no_retry",
@@ -3011,7 +3048,7 @@ async def test_process_step_does_not_retry_after_tool_execution_started(monkeypa
 @pytest.mark.asyncio
 async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monkeypatch):
     runner = _make_runner("ses_runner_default_max_steps")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
     runner._step = DEFAULT_MAX_TOOL_STEPS
 
     last_user = UserMessageInfo(
@@ -3049,7 +3086,7 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
         captured["tools"] = tools
         return StepResult(action="stop", content="done")
 
-    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(StepEngine, "_call_llm", fake_call_llm)
 
     result = await runner._process_step([last_user], last_user)
 
@@ -3060,7 +3097,7 @@ async def test_process_step_uses_default_max_steps_when_agent_steps_missing(monk
 @pytest.mark.asyncio
 async def test_process_step_respects_explicit_agent_steps_over_default(monkeypatch):
     runner = _make_runner("ses_runner_explicit_max_steps")
-    runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+    runner.callbacks = LoopCallbacks(on_error=AsyncMock())
     runner._step = DEFAULT_MAX_TOOL_STEPS
 
     last_user = UserMessageInfo(
@@ -3098,7 +3135,7 @@ async def test_process_step_respects_explicit_agent_steps_over_default(monkeypat
         captured["tools"] = tools
         return StepResult(action="stop", content="done")
 
-    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(StepEngine, "_call_llm", fake_call_llm)
 
     result = await runner._process_step([last_user], last_user)
 
@@ -3141,7 +3178,7 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
     monkeypatch.setattr(runner_mod.Message, "parts", AsyncMock(return_value=[]))
     monkeypatch.setattr(runner_mod.Message, "create", create_mock)
     monkeypatch.setattr(runner_mod.Message, "update", update_mock)
-    monkeypatch.setattr(SessionRunner, "_call_llm", fake_call_llm)
+    monkeypatch.setattr(StepEngine, "_call_llm", fake_call_llm)
 
     last_user = UserMessageInfo(
         id="msg_user_tool_loop_guard",
@@ -3153,8 +3190,8 @@ async def test_process_step_halts_after_third_exact_tool_only_turn(monkeypatch):
     )
 
     for idx in range(1, 4):
-        runner = SessionRunner(session=_make_session("ses_runner_tool_loop_guard"), static_cache=shared_cache)
-        runner.callbacks = RunnerCallbacks(on_error=AsyncMock())
+        runner = StepEngine(session=_make_session("ses_runner_tool_loop_guard"), static_cache=shared_cache)
+        runner.callbacks = LoopCallbacks(on_error=AsyncMock())
         monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[
             {"type": "function", "function": {"name": "echo_tool", "description": "", "parameters": {}}}
         ]))

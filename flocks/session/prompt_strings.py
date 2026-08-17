@@ -181,7 +181,7 @@ Remember: The agents you create should be autonomous experts capable of handling
 """
 
 # =============================================================================
-# Runner prompt snippets (used by SessionRunner._process_step)
+# Step prompt snippets (used by StepEngine._process_step)
 # =============================================================================
 
 PROMPT_TOOL_RESULTS_AVAILABLE = (

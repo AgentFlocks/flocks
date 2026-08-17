@@ -1,5 +1,5 @@
 """
-Tests for ``flocks.session.runner._annotate_with_provider_version``.
+Tests for ``StepEngine`` provider-version annotations.
 
 Ensures that when a tool's ``ToolInfo`` carries a ``provider_version`` (sourced
 from ``_provider.yaml``), the description handed to the LLM in the function
@@ -15,7 +15,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from flocks.session.runner import _annotate_with_provider_version
+from flocks.session.runtime.step_engine import _annotate_with_provider_version
 
 
 @dataclass

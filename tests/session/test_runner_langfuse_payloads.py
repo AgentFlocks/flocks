@@ -1,5 +1,5 @@
 from flocks.provider.provider import ChatMessage
-from flocks.session.runner import SessionRunner, ToolCall
+from flocks.session.runtime.step_engine import StepEngine, ToolCall
 
 
 def test_build_langfuse_request_payload_keeps_full_messages_and_system_prompt() -> None:
@@ -31,7 +31,7 @@ def test_build_langfuse_request_payload_keeps_full_messages_and_system_prompt() 
         ),
     ]
 
-    payload = SessionRunner._build_langfuse_request_payload(
+    payload = StepEngine._build_langfuse_request_payload(
         step=3,
         messages=messages,
         request_tools=tools,
@@ -60,7 +60,7 @@ def test_build_langfuse_response_payload_keeps_full_content_reasoning_and_tool_a
         )
     ]
 
-    payload = SessionRunner._build_langfuse_response_payload(
+    payload = StepEngine._build_langfuse_response_payload(
         action="continue",
         content=full_content,
         reasoning=full_reasoning,

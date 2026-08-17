@@ -5,16 +5,12 @@ Verifies that:
 1. SessionContext protocol is properly defined
 2. DefaultSessionContext implements all methods
 3. DefaultSessionContext delegates to underlying session modules
-4. LoopContext carries session_ctx
-5. SessionRunner accepts session_ctx
 """
 
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from flocks.session.core.context import SessionContext, DefaultSessionContext
-from flocks.session.session_loop import LoopContext
-from flocks.session.runner import SessionRunner
 
 
 class TestSessionContextProtocol:
@@ -135,84 +131,3 @@ class TestDefaultSessionContext:
         with patch("flocks.session.session.Session.touch", new_callable=AsyncMock) as mock_touch:
             await ctx.touch()
             mock_touch.assert_called_once_with("proj-1", "ses-123")
-
-
-class TestLoopContextSessionCtx:
-    """LoopContext should carry session_ctx."""
-
-    def test_loop_context_has_session_ctx_field(self):
-        import asyncio
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        ctx = LoopContext(
-            session=session,
-            provider_id="anthropic",
-            model_id="claude-sonnet-4",
-            agent_name="rex",
-        )
-        assert ctx.session_ctx is None
-
-    def test_loop_context_with_session_ctx(self):
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        session_ctx = DefaultSessionContext(session)
-        ctx = LoopContext(
-            session=session,
-            provider_id="anthropic",
-            model_id="claude-sonnet-4",
-            agent_name="rex",
-            session_ctx=session_ctx,
-        )
-        assert ctx.session_ctx is session_ctx
-        assert ctx.session_ctx.session_id == "test"
-
-    def test_loop_context_tracks_observed_prompt_tokens(self):
-        # B3 — LoopContext must expose ``last_observed_prompt_tokens`` so
-        # the overflow decision can prefer the provider's reported usage
-        # over our synthetic estimate.
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-
-        ctx = LoopContext(
-            session=session,
-            provider_id="anthropic",
-            model_id="claude-sonnet-4",
-            agent_name="rex",
-        )
-        assert ctx.last_observed_prompt_tokens == 0
-        ctx.last_observed_prompt_tokens = 123_456
-        assert ctx.last_observed_prompt_tokens == 123_456
-
-
-class TestRunnerSessionCtx:
-    """SessionRunner should accept session_ctx."""
-
-    def test_runner_accepts_session_ctx(self):
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        session_ctx = DefaultSessionContext(session)
-        runner = SessionRunner(
-            session=session,
-            session_ctx=session_ctx,
-        )
-        assert runner.session_ctx is session_ctx
-
-    def test_runner_session_ctx_defaults_to_none(self):
-        session = MagicMock()
-        session.id = "test"
-        session.directory = "/test"
-        session.project_id = "proj"
-        
-        runner = SessionRunner(session=session)
-        assert runner.session_ctx is None

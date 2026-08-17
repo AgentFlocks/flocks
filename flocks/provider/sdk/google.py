@@ -81,7 +81,7 @@ class GoogleProvider(BaseProvider):
         Rewrites history as text to bypass binary thought_signature requirements.
 
         ``session_id`` is forwarded by the runner via kwargs (see
-        ``SessionRunner._call_llm``).  When provided, we attempt to reconstruct
+        ``StepEngine._call_llm``).  When provided, we attempt to reconstruct
         the conversation directly from persisted session messages – including
         reasoning parts – which gives Gemini perfect context.  As a defensive
         fallback we also honour ``messages[0].sessionID`` / ``session_id``

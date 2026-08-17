@@ -3,7 +3,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from flocks.session.runner import SessionRunner
+from flocks.session.runtime.step_engine import StepEngine
 from flocks.tool.registry import ToolCategory, ToolInfo
 
 
@@ -26,7 +26,7 @@ async def test_device_asset_hint_stays_short_and_strategy_only() -> None:
         ]),
     )
     monkeypatch.setattr(
-        "flocks.session.runner.ToolRegistry.list_tools",
+        "flocks.session.runtime.step_engine.ToolRegistry.list_tools",
         lambda: [
             ToolInfo(
                 name="tdp_event_list",
@@ -49,8 +49,8 @@ async def test_device_asset_hint_stays_short_and_strategy_only() -> None:
         ],
     )
 
-    runner = SessionRunner.__new__(SessionRunner)
-    hint = await SessionRunner._build_device_asset_hint(runner)
+    runner = StepEngine.__new__(StepEngine)
+    hint = await StepEngine._build_device_asset_hint(runner)
     monkeypatch.undo()
 
     assert hint is not None

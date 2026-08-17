@@ -1,16 +1,24 @@
-"""Focused tests for session lifecycle hook integration."""
+"""Focused tests for the Python lifecycle-hook seams."""
 
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from flocks.hooks.pipeline import HookContext, HookStage
-from flocks.session.runner import SessionRunner
+from flocks.session.runtime.continuation_policy import DEFAULT_CONTINUATION_POLICY
+from flocks.session.goal import GoalDecision
+from flocks.session.runtime.model_policy import DEFAULT_MODEL_ROUTING_POLICY
+from flocks.session.runtime.step_engine import StepEngine, StepResult
 from flocks.session.session import SessionInfo
-from flocks.session.session_loop import LoopCallbacks, LoopContext, SessionLoop
+from flocks.session.session_loop import (
+    LoopCallbacks,
+    LoopContext,
+)
+from tests.session_runtime_testkit import run_logical_turns
 
 
 def _session(session_id: str = "ses_lifecycle_hooks") -> SessionInfo:
@@ -25,12 +33,13 @@ def _session(session_id: str = "ses_lifecycle_hooks") -> SessionInfo:
 
 
 def _loop_context(session_id: str = "ses_lifecycle_hooks") -> LoopContext:
-    return LoopContext(
+    context = LoopContext(
         session=_session(session_id),
         provider_id="test-provider",
         model_id="test-model",
         agent_name="rex",
     )
+    return context
 
 
 @pytest.mark.asyncio
@@ -41,7 +50,7 @@ async def test_real_user_turn_is_detected_once_and_synthetic_is_ignored() -> Non
 
     with (
         patch(
-            "flocks.session.session_loop.Message.parts",
+            "flocks.session.runtime.session_turn.Message.parts",
             AsyncMock(
                 side_effect=[
                     [],
@@ -50,26 +59,61 @@ async def test_real_user_turn_is_detected_once_and_synthetic_is_ignored() -> Non
             ),
         ),
         patch.object(
-            SessionLoop,
-            "_run_user_prompt_before_hook",
+            DEFAULT_CONTINUATION_POLICY,
+            "run_user_prompt_submit",
             AsyncMock(),
-        ) as prompt_hook,
+        ) as submit_hook,
     ):
         for user in (first_user, first_user, synthetic_user):
-            if await SessionLoop._prepare_auto_turn(ctx, user):
-                await SessionLoop._run_user_prompt_before_hook(ctx, user)
+            if await DEFAULT_MODEL_ROUTING_POLICY.prepare_turn(ctx, user):
+                await DEFAULT_CONTINUATION_POLICY.run_user_prompt_submit(ctx, user)
 
     assert ctx.turn_user_id == first_user.id
-    prompt_hook.assert_awaited_once_with(ctx, first_user)
+    submit_hook.assert_awaited_once_with(ctx, first_user)
 
 
 @pytest.mark.asyncio
-async def test_user_prompt_before_adds_ephemeral_turn_context() -> None:
+async def test_settled_history_skips_user_prompt_submit() -> None:
+    ctx = _loop_context("ses_settled_history_hook")
+    user = _message("msg_user", "user")
+    assistant = _message("msg_assistant", "assistant", finish="stop")
+    assistant.parentID = user.id
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(return_value=[user, assistant]),
+    )
+    prepare_turn = AsyncMock(return_value=True)
+    submit_hook = AsyncMock()
+
+    with (
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY._model_policy,
+            "prepare_turn",
+            prepare_turn,
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_user_prompt_submit",
+            submit_hook,
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+    ):
+        await DEFAULT_CONTINUATION_POLICY.prepare_logical_turn(ctx)
+
+    assert ctx.prepared_user_id == user.id
+    prepare_turn.assert_not_awaited()
+    submit_hook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_user_prompt_submit_adds_ephemeral_turn_context() -> None:
     ctx = _loop_context()
     user = SimpleNamespace(id="msg_user", agent="rex")
     run_hook = AsyncMock(
         return_value=HookContext(
-            stage=HookStage.USER_PROMPT_BEFORE,
+            stage=HookStage.USER_PROMPT_SUBMIT,
             input={},
             output={"additionalContext": "  current sprint context  "},
         )
@@ -77,25 +121,30 @@ async def test_user_prompt_before_adds_ephemeral_turn_context() -> None:
 
     with (
         patch(
-            "flocks.session.session_loop.Message.get_text_content",
+            "flocks.session.runtime.session_turn.Message.get_text_content",
             AsyncMock(return_value="implement hooks"),
         ),
         patch(
-            "flocks.hooks.pipeline.HookPipeline.run_user_prompt_before",
+            "flocks.hooks.pipeline.HookPipeline.run_user_prompt_submit",
             run_hook,
         ),
     ):
-        await SessionLoop._run_user_prompt_before_hook(ctx, user)
+        await DEFAULT_CONTINUATION_POLICY.run_user_prompt_submit(ctx, user)
 
     assert ctx.turn_additional_context == "current sprint context"
     payload = run_hook.await_args.args[0]
     assert payload["messageID"] == user.id
     assert payload["prompt"] == "implement hooks"
+    assert payload["sessionCategory"] == "user"
+    assert payload["model"] == {
+        "providerID": "test-provider",
+        "modelID": "test-model",
+    }
 
 
 @pytest.mark.asyncio
 async def test_session_start_runs_only_when_pending() -> None:
-    runner = SessionRunner(
+    runner = StepEngine(
         session=_session("ses_session_start"),
         provider_id="test-provider",
         model_id="test-model",
@@ -104,7 +153,7 @@ async def test_session_start_runs_only_when_pending() -> None:
     run_hook = AsyncMock()
 
     with patch(
-        "flocks.session.runner.HookPipeline.run_session_start",
+        "flocks.session.runtime.step_engine.HookPipeline.run_session_start",
         run_hook,
     ):
         await runner._run_session_start_hook(SimpleNamespace(name="rex"))
@@ -112,39 +161,687 @@ async def test_session_start_runs_only_when_pending() -> None:
 
     run_hook.assert_awaited_once()
     assert runner._session_start_fired is True
+    assert run_hook.await_args.args[0]["sessionID"] == "ses_session_start"
 
 
 @pytest.mark.asyncio
-async def test_turn_after_observes_terminal_outcome_without_continuation() -> None:
-    ctx = _loop_context("ses_turn_after")
+async def test_goal_waiting_cannot_be_overridden_by_turn_after_output() -> None:
+    ctx = _loop_context("ses_turn_after_goal_waiting")
     ctx.turn_user_id = "msg_user"
-    user = SimpleNamespace(id="msg_user", agent="rex")
-    assistant = SimpleNamespace(id="msg_assistant", agent="rex", finish="stop")
+    user = SimpleNamespace(
+        id="msg_user",
+        agent="rex",
+        role="user",
+        model={"providerID": "test-provider", "modelID": "test-model"},
+    )
+    assistant = SimpleNamespace(
+        id="msg_assistant",
+        agent="rex",
+        role="assistant",
+        finish="stop",
+    )
+    continuation = SimpleNamespace(id="msg_continuation")
     callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
-    run_hook = AsyncMock(return_value=HookContext(stage=HookStage.TURN_AFTER, input={}, output={}))
+    ctx.callbacks = callbacks
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(return_value=[user, assistant]),
+    )
+    create_message = AsyncMock(return_value=continuation)
+    run_hook = AsyncMock(
+        return_value=HookContext(
+            stage=HookStage.TURN_AFTER,
+            input={},
+            output={
+                "decision": "block",
+                "reason": "Run the test suite before finishing.",
+            },
+        )
+    )
 
     with (
         patch(
-            "flocks.session.session_loop.Message.get",
+            "flocks.session.runtime.continuation_policy.Message.get",
             AsyncMock(return_value=user),
         ),
         patch(
-            "flocks.session.session_loop.Message.get_text_content",
-            AsyncMock(side_effect=["prompt", "response"]),
+            "flocks.session.runtime.continuation_policy.Message.get_text_content",
+            AsyncMock(
+                side_effect=lambda message: (
+                    "implement hooks"
+                    if message.id == user.id
+                    else "Please provide the missing input."
+                )
+            ),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.create",
+            create_message,
         ),
         patch(
             "flocks.hooks.pipeline.HookPipeline.run_turn_after",
             run_hook,
         ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="active",
+                    verdict="waiting",
+                    should_continue=False,
+                    reason="Waiting for user input.",
+                )
+            ),
+        ),
     ):
-        continued = await SessionLoop._run_turn_after_hook(
+        decision = await DEFAULT_CONTINUATION_POLICY.resolve(
             ctx,
-            callbacks,
-            user,
-            assistant,
+            SimpleNamespace(last_user=user, last_message=assistant),
+    )
+
+    assert decision.should_continue is False
+    create_message.assert_not_awaited()
+    hook_payload = run_hook.await_args.args[0]
+    assert hook_payload["sessionCategory"] == "user"
+    assert hook_payload["terminalOutcome"] == {
+        "status": "success",
+        "finish_reason": "stop",
+    }
+    callbacks.event_publish_callback.assert_awaited_once()
+    assert callbacks.event_publish_callback.await_args.args[0] == "turn.stopped"
+
+
+@pytest.mark.asyncio
+async def test_queued_prompt_arriving_during_turn_after_wins() -> None:
+    ctx = _loop_context("ses_turn_after_queue_race")
+    ctx.turn_user_id = "msg_001"
+    user = SimpleNamespace(id="msg_001", agent="rex", role="user")
+    assistant = SimpleNamespace(
+        id="msg_002",
+        agent="rex",
+        role="assistant",
+        finish="stop",
+    )
+    queued_user = SimpleNamespace(id="msg_003", agent="rex", role="user")
+    messages = [user, assistant]
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(side_effect=lambda: messages),
+    )
+    callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
+    ctx.callbacks = callbacks
+    run_turn_after = AsyncMock(side_effect=lambda *_args: messages.append(queued_user))
+
+    with (
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.get_text_content",
+            AsyncMock(return_value="response"),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status=None,
+                    verdict="inactive",
+                )
+            ),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+            create=True,
+        ),
+    ):
+        decision = await DEFAULT_CONTINUATION_POLICY.resolve(
+            ctx,
+            SimpleNamespace(last_user=user, last_message=assistant),
         )
 
-    assert continued is False
-    payload = run_hook.await_args.args[0]
-    assert payload["terminalOutcome"]["status"] == "success"
-    callbacks.event_publish_callback.assert_not_awaited()
+    assert decision.should_continue is True
+    run_turn_after.assert_awaited_once_with(ctx, user, assistant)
+    callbacks.event_publish_callback.assert_awaited_once()
+    event_name, payload = callbacks.event_publish_callback.await_args.args
+    assert event_name == "turn.continued"
+    assert payload["queuedUserMessageID"] == queued_user.id
+
+
+@pytest.mark.asyncio
+async def test_real_user_arriving_during_goal_evaluation_wins() -> None:
+    ctx = _loop_context("ses_goal_queue_race")
+    user = SimpleNamespace(
+        id="msg_001",
+        agent="rex",
+        role="user",
+        model={"providerID": "test-provider", "modelID": "test-model"},
+        provider="test-provider",
+    )
+    assistant = SimpleNamespace(
+        id="msg_002",
+        agent="rex",
+        role="assistant",
+        finish="stop",
+    )
+    queued_user = SimpleNamespace(
+        id="msg_003",
+        agent="rex",
+        role="user",
+    )
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user, assistant],
+                [user, assistant, queued_user],
+            ]
+        )
+    )
+    ctx.callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
+    create_message = AsyncMock()
+    outcome = SimpleNamespace(
+        last_user=user,
+        last_message=assistant,
+    )
+
+    with (
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.get_text_content",
+            AsyncMock(return_value="one failure remains"),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.create",
+            create_message,
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="active",
+                    verdict="continue",
+                    should_continue=True,
+                    continuation_prompt="continue fixing failures",
+                )
+            ),
+        ),
+        patch(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(steps=10)),
+        ),
+    ):
+        decision = await DEFAULT_CONTINUATION_POLICY.resolve(ctx, outcome)
+
+    assert decision.reason == "queued_message"
+    assert decision.messages == (queued_user,)
+    create_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_goal_continuation_persistence_failure_is_terminal() -> None:
+    ctx = _loop_context("ses_goal_persistence_failure")
+    user = SimpleNamespace(
+        id="msg_user",
+        agent="rex",
+        role="user",
+        model={"providerID": "test-provider", "modelID": "test-model"},
+        provider="test-provider",
+    )
+    assistant = SimpleNamespace(
+        id="msg_assistant",
+        agent="rex",
+        role="assistant",
+        finish="stop",
+        parentID=user.id,
+    )
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(return_value=[user, assistant]),
+    )
+    ctx.callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
+
+    with (
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.get_text_content",
+            AsyncMock(return_value="work remains"),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.create",
+            AsyncMock(side_effect=OSError("continuation store unavailable")),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="active",
+                    verdict="continue",
+                    should_continue=True,
+                    continuation_prompt="continue the goal",
+                )
+            ),
+        ),
+        patch(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(steps=10)),
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="continuation store unavailable",
+        ):
+            await DEFAULT_CONTINUATION_POLICY.resolve(
+                ctx,
+                SimpleNamespace(last_user=user, last_message=assistant),
+            )
+
+    event_names = [
+        call.args[0]
+        for call in ctx.callbacks.event_publish_callback.await_args_list
+    ]
+    assert "turn.stopped" not in event_names
+
+
+def _message(
+    message_id: str,
+    role: str,
+    *,
+    finish: str | None = None,
+    parent_id: str | None = None,
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        id=message_id,
+        role=role,
+        finish=finish,
+        parentID=parent_id,
+        tokens=None,
+        summary=False,
+        agent="rex",
+        model={"providerID": "test-provider", "modelID": "test-model"},
+    )
+
+
+@pytest.mark.asyncio
+async def test_turn_after_runs_only_after_persisted_stop() -> None:
+    ctx = _loop_context("ses_turn_after_integration")
+    user = _message("msg_001", "user")
+    assistant = _message(
+        "msg_002",
+        "assistant",
+        finish="stop",
+        parent_id=user.id,
+    )
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, assistant],
+                [user, assistant],
+                [user, assistant],
+                [user, assistant],
+            ]
+        )
+    )
+    run_turn_after = AsyncMock()
+
+    with (
+        patch(
+            "flocks.session.runtime.session_turn.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Message.get_text_content",
+            AsyncMock(return_value="final response"),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="inactive",
+                    verdict="inactive",
+                )
+            ),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.ContinuationPolicy.run_user_prompt_submit",
+            AsyncMock(),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+        ),
+        patch(
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        result = await run_logical_turns(ctx, LoopCallbacks())
+
+    assert result.action == "stop"
+    run_turn_after.assert_awaited_once_with(
+        ctx,
+        user,
+        assistant,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("step_result", "assistant_finish"),
+    [
+        (StepResult(action="stop", error="provider failed"), "error"),
+        (StepResult(action="continue"), "tool-calls"),
+    ],
+)
+async def test_turn_after_skips_errors_and_tool_calls(
+    step_result: StepResult,
+    assistant_finish: str,
+) -> None:
+    ctx = _loop_context(f"ses_turn_after_{assistant_finish}")
+    user = _message("msg_001", "user")
+    assistant = _message("msg_002", "assistant", finish=assistant_finish)
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, assistant],
+            ]
+        )
+    )
+    run_turn_after = AsyncMock()
+
+    async def process_step(*_args, **_kwargs):
+        if step_result.action == "continue":
+            ctx.signal_abort()
+        return step_result
+
+    with (
+        patch(
+            "flocks.session.runtime.session_turn.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.ContinuationPolicy.run_user_prompt_submit",
+            AsyncMock(),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+        ),
+        patch(
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
+            AsyncMock(side_effect=process_step),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        result = await run_logical_turns(ctx, LoopCallbacks())
+
+    assert result.action == "stop"
+    run_turn_after.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_queued_user_message_takes_priority_over_turn_after() -> None:
+    ctx = _loop_context("ses_turn_after_queue")
+    user = _message("msg_001", "user")
+    assistant = _message("msg_002", "assistant", finish="stop")
+    queued_user = _message("msg_003", "user")
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, assistant, queued_user],
+            ]
+        )
+    )
+    run_turn_after = AsyncMock()
+
+    async def process_step(*_args, **_kwargs):
+        ctx.signal_abort()
+        return StepResult(action="stop")
+
+    with (
+        patch(
+            "flocks.session.runtime.session_turn.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.ContinuationPolicy.run_user_prompt_submit",
+            AsyncMock(),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+        ),
+        patch(
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
+            AsyncMock(side_effect=process_step),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        await run_logical_turns(ctx, LoopCallbacks())
+
+    run_turn_after.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_goal_continuation_takes_priority_over_turn_after() -> None:
+    ctx = _loop_context("ses_turn_after_goal")
+    user = _message("msg_001", "user")
+    assistant = _message("msg_002", "assistant", finish="stop")
+    goal_user = _message("msg_003", "user")
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, assistant],
+            ]
+        )
+    )
+    run_turn_after = AsyncMock()
+
+    async def process_step(*_args, **_kwargs):
+        ctx.signal_abort()
+        return StepResult(action="stop")
+
+    with (
+        patch(
+            "flocks.session.runtime.session_turn.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Message.get_text_content",
+            AsyncMock(return_value="not done"),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Message.create",
+            AsyncMock(return_value=goal_user),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="active",
+                    verdict="continue",
+                    should_continue=True,
+                    continuation_prompt="continue the goal",
+                )
+            ),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.ContinuationPolicy.run_user_prompt_submit",
+            AsyncMock(),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+        ),
+        patch(
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
+            AsyncMock(side_effect=process_step),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        await run_logical_turns(ctx, LoopCallbacks())
+
+    run_turn_after.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_abort_does_not_trigger_turn_after() -> None:
+    ctx = _loop_context("ses_turn_after_abort")
+    user = _message("msg_001", "user")
+    ctx.session_store = SimpleNamespace(get_messages=AsyncMock(return_value=[user]))
+    run_turn_after = AsyncMock()
+
+    async def cancel_for_user_abort(*_args, **_kwargs):
+        ctx.signal_abort()
+        raise asyncio.CancelledError
+
+    with (
+        patch(
+            "flocks.session.runtime.session_turn.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.ContinuationPolicy.run_user_prompt_submit",
+            AsyncMock(),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+        ),
+        patch(
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
+            AsyncMock(side_effect=cancel_for_user_abort),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        await run_logical_turns(ctx, LoopCallbacks())
+
+    run_turn_after.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_late_abort_after_step_completion_skips_turn_after() -> None:
+    ctx = _loop_context("ses_turn_after_late_abort")
+    user = _message("msg_001", "user")
+    assistant = _message("msg_002", "assistant", finish="stop")
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(
+            side_effect=[
+                [user],
+                [user, assistant],
+            ]
+        )
+    )
+    run_turn_after = AsyncMock()
+
+    async def abort_after_step(_step: int) -> None:
+        ctx.abort_event.set()
+
+    with (
+        patch(
+            "flocks.session.runtime.session_turn.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Message.get_text_content",
+            AsyncMock(return_value="final response"),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="inactive",
+                    verdict="inactive",
+                )
+            ),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.ContinuationPolicy.run_user_prompt_submit",
+            AsyncMock(),
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_turn_after",
+            run_turn_after,
+        ),
+        patch(
+            "flocks.session.runtime.step_engine.StepEngine._process_step",
+            AsyncMock(return_value=StepResult(action="stop")),
+        ),
+        patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ),
+        patch(
+            "flocks.session.runtime.session_turn.fire_and_forget",
+            MagicMock(),
+        ),
+    ):
+        result = await run_logical_turns(
+            ctx,
+            LoopCallbacks(on_step_end=abort_after_step),
+        )
+
+    run_turn_after.assert_not_awaited()
+    assert result.metadata["aborted"] is True

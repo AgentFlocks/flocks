@@ -21,7 +21,6 @@ from fastapi import HTTPException, status
 from httpx import AsyncClient
 from flocks.auth.context import API_TOKEN_SERVICE_USER_ID, AuthUser
 from flocks.hooks.execution import (
-    ExecutionStopped,
     current_execution_context,
     execution_context_scope,
 )
@@ -83,41 +82,6 @@ async def test_missing_session_directory_uses_cwd_and_publishes_notice(
             "fallbackDirectory": str(tmp_path),
         },
     )
-
-
-@pytest.mark.asyncio
-async def test_shell_route_maps_extension_stop_to_forbidden(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A Pro policy stop must not surface as an unhandled server error."""
-
-    monkeypatch.setattr(session_routes, "require_user", lambda _request: object())
-    monkeypatch.setattr(
-        session_routes,
-        "_get_session_by_id_unfiltered",
-        AsyncMock(return_value=object()),
-    )
-    monkeypatch.setattr(
-        session_routes,
-        "_require_session_write_access",
-        lambda _session, _user: None,
-    )
-    monkeypatch.setattr(
-        "flocks.session.runner.SessionRunner.shell",
-        AsyncMock(side_effect=ExecutionStopped("hard_deny_system_delete")),
-    )
-
-    with pytest.raises(HTTPException) as error:
-        await session_routes.run_shell_command(
-            "ses_1",
-            session_routes.ShellRequest(agent="build", command="rm -rf /etc"),
-            SimpleNamespace(),
-        )
-
-    assert error.value.status_code == status.HTTP_403_FORBIDDEN
-    assert error.value.detail == "execution stopped by extension"
-
-
 @pytest.mark.asyncio
 async def test_background_session_task_preserves_execution_context() -> None:
     """Async session work retains opaque ingress context after scheduling."""
@@ -2280,7 +2244,9 @@ class TestSessionMessagesRemaining:
         category: str,
     ):
         from flocks.server.routes import session as session_routes
-        from flocks.session.session_loop import SessionLoop
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
 
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
@@ -2306,7 +2272,11 @@ class TestSessionMessagesRemaining:
             AsyncMock(return_value=SimpleNamespace()),
         )
         validate = AsyncMock(return_value=(False, "provider_not_configured"))
-        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            DEFAULT_MODEL_ROUTING_POLICY,
+            "validate_runtime_model",
+            validate,
+        )
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
         monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
         monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: None)
@@ -2330,7 +2300,9 @@ class TestSessionMessagesRemaining:
         monkeypatch: pytest.MonkeyPatch,
     ):
         from flocks.server.routes import session as session_routes
-        from flocks.session.session_loop import SessionLoop
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
 
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
@@ -2356,7 +2328,11 @@ class TestSessionMessagesRemaining:
             AsyncMock(return_value=SimpleNamespace()),
         )
         validate = AsyncMock()
-        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            DEFAULT_MODEL_ROUTING_POLICY,
+            "validate_runtime_model",
+            validate,
+        )
         monkeypatch.setattr(
             "flocks.provider.provider.Provider._ensure_initialized",
             lambda: None,

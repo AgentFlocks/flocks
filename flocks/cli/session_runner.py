@@ -6,7 +6,7 @@ Handles CLI-specific UI for session execution:
 - Tool execution display
 - Streaming text display
 
-Core logic is in session/runner.py
+Core logic is exposed through SessionLoop.
 """
 
 import asyncio
@@ -26,31 +26,16 @@ from rich.prompt import Prompt, Confirm
 
 from flocks.utils.log import Log
 from flocks.session.session import Session, SessionInfo
-from flocks.session.runner import SessionRunner, RunnerCallbacks, ToolResult
+from flocks.session.session_loop import LoopCallbacks
 from flocks.session.message import Message, MessageRole
 from flocks.agent.registry import Agent
 from flocks.provider.provider import Provider
-from flocks.tool.registry import ToolRegistry
+from flocks.tool.registry import ToolRegistry, ToolResult
 from flocks.project.project import Project
 from dotenv import load_dotenv
 
 
 log = Log.create(service="cli.runner")
-
-
-# Module-level storage for CLI callbacks (used by SessionRunner during loop execution)
-_CLI_CALLBACKS: Optional['RunnerCallbacks'] = None
-
-
-def _set_cli_callbacks(callbacks: Optional['RunnerCallbacks']) -> None:
-    """Set CLI callbacks for current execution"""
-    global _CLI_CALLBACKS
-    _CLI_CALLBACKS = callbacks
-
-
-def _get_cli_callbacks() -> Optional['RunnerCallbacks']:
-    """Get CLI callbacks for current execution"""
-    return _CLI_CALLBACKS
 
 
 # Tool display styles
@@ -71,7 +56,7 @@ DELEGATE_TOOLS = {"delegate_task"}
 
 class CLISessionRunner:
     """
-    CLI wrapper for SessionRunner.
+    CLI wrapper for the public SessionLoop entry point.
     
     Handles all CLI-specific display logic.
     """
@@ -90,7 +75,6 @@ class CLISessionRunner:
         self.agent_name = agent
         self.auto_confirm = auto_confirm
         self._session: Optional[SessionInfo] = None
-        self._runner: Optional[SessionRunner] = None
         self._live: Optional[Live] = None
         self._content_buffer: list[str] = []
         
@@ -299,8 +283,10 @@ class CLISessionRunner:
                 
             except KeyboardInterrupt:
                 self.console.print("\n[dim]Interrupted[/dim]")
-                if self._runner:
-                    self._runner.abort()
+                if self._session:
+                    from flocks.session.session_loop import SessionLoop
+
+                    SessionLoop.abort(self._session.id)
                 break
             except EOFError:
                 break
@@ -348,7 +334,6 @@ class CLISessionRunner:
             from flocks.input.dispatcher import dispatch_user_input
             from flocks.input.events import UserInputEvent
             from flocks.input.output import CliOutputSink
-            from flocks.session.message import Message
 
             event = UserInputEvent(
                 source_type="cli",
@@ -408,29 +393,21 @@ class CLISessionRunner:
             model={"providerID": provider_id, "modelID": model_id},
         )
         
-        # Import SessionLoop and LoopCallbacks
-        from flocks.session.session_loop import SessionLoop, LoopCallbacks
-        from flocks.session.runner import RunnerCallbacks
+        # Import the stable session execution entry point.
+        from flocks.session.session_loop import SessionLoop
         
-        # Create loop callbacks (wrapping runner callbacks)
+        # Pass one explicit callback set through the full runtime.
         loop_callbacks = LoopCallbacks(
             on_step_start=self._on_step_start,
             on_step_end=self._on_step_end,
-            on_error=self._on_error,
-            on_compaction=self._on_compaction,
-        )
-        
-        # Store runner callbacks for tool events
-        # We need to hook into SessionRunner to get tool callbacks
-        # This is done by temporarily storing callbacks in a module-level variable
-        _set_cli_callbacks(RunnerCallbacks(
             on_text_delta=self._on_text_delta,
             on_reasoning_delta=self._on_reasoning_delta,
             on_tool_start=self._on_tool_start,
             on_tool_end=self._on_tool_end,
             on_permission_request=self._on_permission_request,
             on_error=self._on_error,
-        ))
+            on_compaction=self._on_compaction,
+        )
         
         # Start streaming display
         self._content_buffer = []
@@ -485,9 +462,6 @@ class CLISessionRunner:
             # Clear live display before exiting context
             live.update(Text(""))
             self._live = None
-        
-        # Clear callbacks
-        _set_cli_callbacks(None)
         
         # Print any remaining content not yet printed
         if self._content_buffer:
@@ -806,8 +780,6 @@ class CLISessionRunner:
 __all__ = [
     "CLISessionRunner",
     "run_session",
-    "_get_cli_callbacks",
-    "_set_cli_callbacks",
 ]
 
 

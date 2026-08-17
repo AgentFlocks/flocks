@@ -69,15 +69,12 @@ class ActivityForwarder:
                 server layer. Avoids session → server reverse dependency.
         """
         from flocks.session.session_loop import LoopCallbacks
-        from flocks.session.runner import RunnerCallbacks
 
         return LoopCallbacks(
             event_publish_callback=event_publish_callback,
-            runner_callbacks=RunnerCallbacks(
-                on_tool_start=self._on_tool_start,
-                on_tool_end=self._on_tool_end,
-                on_text_delta=self._on_text_delta,
-            ),
+            on_tool_start=self._on_tool_start,
+            on_tool_end=self._on_tool_end,
+            on_text_delta=self._on_text_delta,
         )
 
     # ------------------------------------------------------------------

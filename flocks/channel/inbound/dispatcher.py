@@ -237,14 +237,14 @@ class ChannelDeliveryCallbacks:
             session_id=self.session_id,
         )
 
-    def to_loop_callbacks(self, runner_callbacks=None):
+    def to_loop_callbacks(self, *, on_text_delta=None):
         """Convert to a LoopCallbacks dataclass understood by SessionLoop."""
         from flocks.session.session_loop import LoopCallbacks
         return LoopCallbacks(
             on_step_end=self.on_step_end,
+            on_text_delta=on_text_delta,
             on_error=self.on_error,
             event_publish_callback=self._publish_sse_event,
-            runner_callbacks=runner_callbacks,
         )
 
     @staticmethod
@@ -514,8 +514,8 @@ class InboundDispatcher:
             # what _process_session_message does in the WebUI route. Storing
             # the resolved model on the user message keeps two things aligned
             # between WebUI and channel:
-            #   - Title generation (``SessionLoop._run_loop`` reads
-            #     ``last_user.model``).
+            #   - Title generation and turn preparation read
+            #     ``last_user.model``.
             #   - The provider-specific base prompt template
             #     (``SystemPrompt.provider``) selected on the next loop tick.
             # Without this, channel sessions ended up with the hardcoded
@@ -1223,13 +1223,12 @@ class InboundDispatcher:
             return
 
         try:
-            from flocks.session.runner import RunnerCallbacks
-
             async def _on_text_delta(delta: str) -> None:
                 await card.append(delta)
 
-            runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
-            loop_callbacks = callbacks.to_loop_callbacks(runner_callbacks=runner_cbs)
+            loop_callbacks = callbacks.to_loop_callbacks(
+                on_text_delta=_on_text_delta,
+            )
 
             result = await InboundDispatcher._run_session_loop(
                 binding,

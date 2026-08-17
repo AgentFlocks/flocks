@@ -1,4 +1,4 @@
-"""Tests for LLM lifecycle hooks in SessionRunner and HookPipeline."""
+"""Tests for LLM lifecycle hooks in StepEngine and HookPipeline."""
 
 from __future__ import annotations
 
@@ -8,11 +8,12 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-import flocks.session.runner as runner_mod
+import flocks.session.runtime.step_engine as runner_mod
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.provider.provider import ChatMessage
+from flocks.session.runtime.contracts import ActiveModelAttempt, ModelRequest
 from flocks.session.streaming.stream_processor import StreamProcessor
-from flocks.session.runner import SessionRunner
+from flocks.session.runtime.step_engine import StepEngine
 from flocks.session.session import SessionInfo
 from flocks.tool.registry import ToolResult
 
@@ -27,8 +28,8 @@ def _make_session(session_id: str = "ses_runner_llm_hooks") -> SessionInfo:
     )
 
 
-def _make_runner(session_id: str = "ses_runner_llm_hooks") -> SessionRunner:
-    return SessionRunner(
+def _make_runner(session_id: str = "ses_runner_llm_hooks") -> StepEngine:
+    return StepEngine(
         session=_make_session(session_id),
         provider_id="anthropic",
         model_id="claude-sonnet",
@@ -39,6 +40,7 @@ class _FakeProcessor:
     def __init__(self, **_: object):
         self._text_parts: list[str] = []
         self._reasoning_parts: list[str] = []
+        self.reasoning_metadata: list[dict[str, object]] = []
         self.finish_reason = "stop"
         self.tool_calls = {}
         self._langfuse_generation = None
@@ -49,6 +51,7 @@ class _FakeProcessor:
             self._text_parts.append(event.text)
         elif event_name == "ReasoningDeltaEvent":
             self._reasoning_parts.append(event.text)
+            self.reasoning_metadata.append(event.metadata)
         elif event_name == "FinishEvent":
             self.finish_reason = event.finish_reason
 
@@ -184,7 +187,12 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
         AsyncMock(side_effect=_after),
     )
     monkeypatch.setattr(
-        runner_mod.SessionRunner,
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        runner_mod.StepEngine,
         "_end_observability",
         staticmethod(lambda *args, **kwargs: None),
     )
@@ -418,6 +426,202 @@ async def test_call_llm_initializes_langfuse_after_llm_before_redaction(monkeypa
 
 
 @pytest.mark.asyncio
+async def test_call_llm_restores_stream_replacements_across_chunks_and_retries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _make_runner("ses_runner_stream_replacements")
+    assistant_msg = SimpleNamespace(id="msg_assistant_stream_replacements")
+    agent = SimpleNamespace(name="rex")
+    processors: list[_FakeProcessor] = []
+
+    async def _before(payload):
+        return SimpleNamespace(
+            output={
+                "request": {
+                    **payload["request"],
+                    "messages": [
+                        {"role": "user", "content": "email [[V_EMAIL_1]]"}
+                    ],
+                    "providerOptions": {},
+                },
+                "redaction": {
+                    "streamTextReplacements": [
+                        {
+                            "placeholder": "[[V_EMAIL_1]]",
+                            "value": "alice@example.com",
+                        }
+                    ],
+                },
+            }
+        )
+
+    class _RecordingProcessor(_FakeProcessor):
+        def __init__(self, **kwargs: object):
+            super().__init__(**kwargs)
+            processors.append(self)
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _RecordingProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(
+            side_effect=lambda stage, _metadata=None: (
+                stage == runner_mod.HookStage.LLM_BEFORE
+            )
+        ),
+    )
+    run_before = AsyncMock(side_effect=_before)
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_before", run_before)
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
+        _FakeToolAccumulator,
+    )
+    monkeypatch.setattr(runner_mod.Message, "update", AsyncMock(return_value=None))
+
+    class _Provider:
+        def chat_stream(self, **kwargs):
+            assert kwargs["messages"][0].content == "email [[V_EMAIL_1]]"
+
+            async def _gen():
+                yield SimpleNamespace(
+                    delta="",
+                    reasoning="Contact [[V_EM",
+                    metadata={"reasoningContent": "Contact [[V_EMAIL_1]]"},
+                    event_type="reasoning",
+                    tool_calls=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    delta="",
+                    reasoning="AIL_1]]",
+                    metadata={},
+                    event_type="reasoning",
+                    tool_calls=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    delta="Reply to [[V_EM",
+                    reasoning=None,
+                    metadata={},
+                    event_type=None,
+                    tool_calls=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                yield SimpleNamespace(
+                    delta="AIL_1]]",
+                    reasoning=None,
+                    metadata={},
+                    event_type=None,
+                    tool_calls=None,
+                    finish_reason="stop",
+                    usage=None,
+                )
+
+            return _gen()
+
+    results = []
+    for _ in range(2):
+        results.append(
+            await runner._call_llm(
+                provider=_Provider(),
+                messages=[
+                    ChatMessage(role="user", content="email alice@example.com")
+                ],
+                tools=[],
+                agent=agent,
+                assistant_msg=assistant_msg,
+            )
+        )
+
+    assert [result.content for result in results] == [
+        "Reply to alice@example.com",
+        "Reply to alice@example.com",
+    ]
+    assert [processor.get_reasoning_content() for processor in processors] == [
+        "Contact alice@example.com",
+        "Contact alice@example.com",
+    ]
+    assert all(
+        "alice@example.com" in str(processor.reasoning_metadata)
+        and "[[V_EMAIL_1]]" not in str(processor.reasoning_metadata)
+        for processor in processors
+    )
+    run_before.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_llm_after_aggregates_same_model_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _make_runner("ses_runner_llm_hook_retry_pair")
+    runner._llm_retry_scope_active = True
+    run_after = AsyncMock()
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", run_after)
+    metadata = {"messageID": "msg_assistant_hook_retry_pair"}
+    request = ModelRequest(
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        messages=(ChatMessage(role="user", content="retry request"),),
+        tools=(),
+        options={},
+    )
+    runner._active_model_attempt = ActiveModelAttempt(
+        message_id=metadata["messageID"],
+        request=request,
+        hook_metadata=metadata,
+        llm_after_enabled=True,
+    )
+    await runner._record_llm_after_attempt(
+        message_id=metadata["messageID"],
+        output={"error": {"message": "first attempt failed"}},
+    )
+    await runner._record_llm_after_attempt(
+        message_id=metadata["messageID"],
+        output={"action": "stop"},
+    )
+    run_after.assert_not_awaited()
+    await runner._emit_pending_llm_after(metadata["messageID"])
+
+    run_after.assert_awaited_once()
+    after_payload = run_after.await_args.args[1]
+    assert after_payload["attemptCount"] == 2
+    assert after_payload["failedAttempts"] == [
+        {"error": {"message": "first attempt failed"}}
+    ]
+
+
+@pytest.mark.asyncio
+async def test_terminal_llm_after_releases_frozen_request() -> None:
+    runner = _make_runner("ses_runner_llm_request_cleanup")
+    message_id = "msg_assistant_request_cleanup"
+    request = ModelRequest(
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        messages=(ChatMessage(role="user", content="large request"),),
+        tools=(),
+        options={},
+    )
+    runner._active_model_attempt = ActiveModelAttempt(
+        message_id=message_id,
+        request=request,
+        hook_metadata={"messageID": message_id},
+        llm_after_enabled=False,
+    )
+
+    await runner._emit_pending_llm_after(message_id)
+
+    assert runner._active_model_attempt is None
+
+
+@pytest.mark.asyncio
 async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_error")
     assistant_msg = SimpleNamespace(id="msg_assistant_error")
@@ -452,7 +656,12 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         AsyncMock(side_effect=_after),
     )
     monkeypatch.setattr(
-        runner_mod.SessionRunner,
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        runner_mod.StepEngine,
         "_end_observability",
         staticmethod(lambda *args, **kwargs: None),
     )
@@ -538,6 +747,10 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
     monkeypatch.setattr(
         "flocks.session.streaming.stream_processor.ToolRegistry.execute",
         _execute_delegate,
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolRegistry.get_schema",
+        lambda _tool_name: None,
     )
     monkeypatch.setattr(
         StreamProcessor,

@@ -423,7 +423,6 @@ class BackgroundManager:
     def _build_activity_callbacks(self, task: BackgroundTask):
         """构建带活跃时间更新的 LoopCallbacks，用于不活跃超时检测。"""
         from flocks.session.session_loop import LoopCallbacks
-        from flocks.session.runner import RunnerCallbacks
         from flocks.server.routes.event import publish_event
 
         def _touch() -> None:
@@ -435,10 +434,9 @@ class BackgroundManager:
         async def _on_text_delta(_text: str) -> None:
             _touch()
 
-        runner_cbs = RunnerCallbacks(on_text_delta=_on_text_delta)
         return LoopCallbacks(
             on_step_start=_on_step_start,
-            runner_callbacks=runner_cbs,
+            on_text_delta=_on_text_delta,
             event_publish_callback=publish_event,
         )
 

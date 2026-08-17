@@ -1,11 +1,7 @@
 """
 Tests for Phase 1: Unified UI entry via SessionLoop.
 
-Verifies that:
-1. RunnerCallbacks.event_publish_callback is passed through to StreamProcessor
-2. LoopCallbacks carries runner_callbacks and event_publish_callback
-3. SessionRunner uses explicit callbacks (doesn't override with CLI fallback)
-4. _resolve_model implements 5-level priority correctly
+Verifies that _resolve_model implements its model-selection priority.
 """
 
 import asyncio
@@ -14,77 +10,27 @@ import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 from dataclasses import dataclass
 
-from flocks.session.runner import RunnerCallbacks
-from flocks.session.session_loop import LoopCallbacks
-
-
-class TestRunnerCallbacksEventPublish:
-    """RunnerCallbacks should carry event_publish_callback."""
-
-    def test_event_publish_callback_field_exists(self):
-        cb = RunnerCallbacks()
-        assert hasattr(cb, 'event_publish_callback')
-        assert cb.event_publish_callback is None
-
-    def test_event_publish_callback_can_be_set(self):
-        publish = AsyncMock()
-        cb = RunnerCallbacks(event_publish_callback=publish)
-        assert cb.event_publish_callback is publish
-
-
-class TestLoopCallbacksFields:
-    """LoopCallbacks should carry event_publish_callback and runner_callbacks."""
-
-    def test_event_publish_callback_field(self):
-        cb = LoopCallbacks()
-        assert hasattr(cb, 'event_publish_callback')
-        assert cb.event_publish_callback is None
-
-    def test_runner_callbacks_field(self):
-        cb = LoopCallbacks()
-        assert hasattr(cb, 'runner_callbacks')
-        assert cb.runner_callbacks is None
-
-    def test_pass_runner_callbacks(self):
-        runner_cb = RunnerCallbacks(on_error=AsyncMock())
-        loop_cb = LoopCallbacks(runner_callbacks=runner_cb)
-        assert loop_cb.runner_callbacks is runner_cb
-        assert loop_cb.runner_callbacks.on_error is not None
-
-
-class TestCallbackPrecedence:
-    """SessionRunner should not override explicit callbacks with CLI fallback."""
-
-    def test_explicit_callbacks_not_overridden(self):
-        """When event_publish_callback is set, CLI fallback should NOT be used."""
-        publish = AsyncMock()
-        cb = RunnerCallbacks(event_publish_callback=publish)
-        
-        # Verify the check that _process_step uses
-        has_explicit = any([
-            cb.on_text_delta,
-            cb.on_tool_start,
-            cb.on_tool_end,
-            cb.on_error,
-            cb.event_publish_callback,
-        ])
-        assert has_explicit is True
-
-    def test_empty_callbacks_allows_cli_fallback(self):
-        """When no callbacks are set, CLI fallback should be used."""
-        cb = RunnerCallbacks()
-        has_explicit = any([
-            cb.on_text_delta,
-            cb.on_tool_start,
-            cb.on_tool_end,
-            cb.on_error,
-            cb.event_publish_callback,
-        ])
-        assert has_explicit is False
-
-
 class TestResolveModel:
     """Test the _resolve_model 5-level priority."""
+
+    @pytest.fixture(autouse=True)
+    def _active_write_passthrough(self, monkeypatch):
+        """Persist mocked route messages without requiring stored sessions."""
+        from flocks.session.session import Session
+
+        async def run_active_write(
+            _cls,
+            _session_id,
+            operation,
+            **_kwargs,
+        ):
+            return await operation()
+
+        monkeypatch.setattr(
+            Session,
+            "run_active_write",
+            classmethod(run_active_write),
+        )
 
     @pytest.mark.asyncio
     async def test_priority_1_request_model(self):
@@ -295,6 +241,9 @@ class TestResolveModel:
         from types import SimpleNamespace
 
         from flocks.server.routes import session as session_routes
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
         from flocks.session.session_loop import LoopResult, SessionLoop
 
         request = session_routes.PromptRequest(
@@ -350,7 +299,7 @@ class TestResolveModel:
             AsyncMock(return_value=SimpleNamespace()),
         )
         monkeypatch.setattr(
-            SessionLoop,
+            DEFAULT_MODEL_ROUTING_POLICY,
             "validate_runtime_model",
             AsyncMock(return_value=(True, "available")),
         )
@@ -407,7 +356,9 @@ class TestResolveModel:
         from types import SimpleNamespace
 
         from flocks.server.routes import session as session_routes
-        from flocks.session.session_loop import SessionLoop
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
 
         request = session_routes.PromptRequest(
             parts=[{"type": "text", "text": "task input"}],
@@ -452,7 +403,11 @@ class TestResolveModel:
             "flocks.config.config.Config.get",
             AsyncMock(return_value=SimpleNamespace()),
         )
-        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            DEFAULT_MODEL_ROUTING_POLICY,
+            "validate_runtime_model",
+            validate,
+        )
         monkeypatch.setattr(
             "flocks.provider.provider.Provider._ensure_initialized",
             lambda: None,

@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from flocks.hooks.pipeline import HookBase, HookPipeline
-from flocks.session.runner import SessionRunner
+from flocks.session.actions import run_session_shell
 from flocks.session.tool_execution import build_session_tool_execution_payload
 
 
@@ -38,11 +38,11 @@ async def test_session_shell_uses_tool_execute_hook_pipeline(
     )
     create_process = AsyncMock(return_value=process)
     monkeypatch.setattr(
-        "flocks.session.runner.Session.get_by_id",
+        "flocks.session.actions.Session.get_by_id",
         AsyncMock(return_value=SimpleNamespace(directory=str(tmp_path))),
     )
     monkeypatch.setattr(
-        "flocks.session.runner.Message.create",
+        "flocks.session.actions.Message.create",
         AsyncMock(
             side_effect=[
                 SimpleNamespace(id="msg_user"),
@@ -51,12 +51,12 @@ async def test_session_shell_uses_tool_execute_hook_pipeline(
         ),
     )
     monkeypatch.setattr(
-        "flocks.session.runner.asyncio.create_subprocess_shell",
+        "flocks.session.actions.asyncio.create_subprocess_shell",
         create_process,
     )
     HookPipeline.register("capture.action", CaptureAction())
 
-    result = await SessionRunner.shell(
+    result = await run_session_shell(
         session_id="ses_1",
         agent="build",
         command="echo ok",
