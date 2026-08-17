@@ -2043,8 +2043,9 @@ class SessionLoop:
                             
                             # Continuation user message is now created inside
                             # SessionCompaction.process() (matching Flocks).
-                            # Just continue — the new user message flips the
-                            # ID ordering so _should_exit() won't trigger.
+                            # Just continue — the completed assistant belongs
+                            # to the preceding user turn, so _should_exit()
+                            # won't trigger for the continuation message.
                             continue
                     except Exception as e:
                         log.error("loop.compaction_overflow_check_error", {"error": str(e)})
@@ -2309,7 +2310,7 @@ class SessionLoop:
         
         Ported from original exit logic:
         - Exit if assistant has responded with finish != tool-calls
-        - Exit if assistant message is after user message
+        - Exit if assistant is a response to the latest user message
         """
         if not last_assistant:
             return False
@@ -2324,8 +2325,8 @@ class SessionLoop:
         if last_assistant.finish:
             if last_assistant.finish not in ("tool-calls", "unknown", "summary"):
                 # Assistant finished with stop/error/etc
-                if last_user.id < last_assistant.id:
-                    # Assistant responded after user
+                if getattr(last_assistant, "parentID", None) == last_user.id:
+                    # Assistant responded to this user turn
                     return True
         
         return False
