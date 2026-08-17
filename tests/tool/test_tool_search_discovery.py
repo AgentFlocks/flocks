@@ -26,9 +26,14 @@ async def test_tool_search_adds_matches_to_session_callable_tools_and_emits_even
         _tool("read", ToolCategory.FILE),
         _tool("plugin_only", ToolCategory.CUSTOM, native=False),
     ]
+    add_callable = AsyncMock(return_value={"websearch"})
     event_callback = AsyncMock()
 
     monkeypatch.setattr("flocks.tool.system.tool_search.ToolRegistry.list_tools", lambda: tools)
+    monkeypatch.setattr(
+        "flocks.tool.system.tool_search.add_session_callable_tools",
+        add_callable,
+    )
 
     ctx = SimpleNamespace(session_id="session-3", event_publish_callback=event_callback)
     result = await tool_search(ctx, query="web", limit=5)
@@ -37,6 +42,7 @@ async def test_tool_search_adds_matches_to_session_callable_tools_and_emits_even
     assert result.output["callableToolNames"] == ["websearch"]
     assert result.output["callableToolCount"] == 1
     assert result.output["matches"][0]["name"] == "websearch"
+    add_callable.assert_awaited_once_with("session-3", ["websearch"])
     event_callback.assert_awaited()
 
 

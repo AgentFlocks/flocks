@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
+from flocks.session.callable_state import add_session_callable_tools
 from flocks.tool.catalog import normalize_tool_search_query, search_tool_catalog
 from flocks.tool.registry import (
     ParameterType,
@@ -129,6 +130,7 @@ async def tool_search(
         enriched_matches.append(enriched)
     normalized_query = normalize_tool_search_query(query or "")
     discovered_tool_names = sorted({str(match["name"]) for match in enriched_matches})
+    await add_session_callable_tools(ctx.session_id, discovered_tool_names)
     if ctx.event_publish_callback:
         await ctx.event_publish_callback("runtime.tool_discovery", {
             "sessionID": ctx.session_id,
