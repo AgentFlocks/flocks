@@ -72,7 +72,7 @@ async def dispatch_product_prompt(
         ):
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="Production report tasks only support the configured DeepSeek V4 Pro/Flash models",
+                detail="Production report tasks only support the configured report-generation models",
             )
     if is_running(session_id) or is_chain_active(session_id):
         raise HTTPException(

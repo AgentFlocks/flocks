@@ -19,7 +19,7 @@ class TestBuildProviderOptions:
             resolve_max_tokens=False,
         )
 
-        assert "thinking" not in options
+        assert options["thinking"] == {"type": "disabled"}
 
     def test_threatbook_qwen_enables_thinking_by_default(self):
         options = provider_options.build_provider_options(

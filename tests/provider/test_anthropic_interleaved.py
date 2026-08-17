@@ -129,6 +129,69 @@ def test_anthropic_formatter_preserves_unsigned_thinking_for_deepseek_compatible
 
 
 @pytest.mark.asyncio
+async def test_anthropic_chat_forwards_disabled_thinking_and_temperature_without_beta():
+    provider = AnthropicProvider()
+    messages_api = SimpleNamespace(
+        create=AsyncMock(
+            return_value=SimpleNamespace(
+                id="msg_1",
+                model="claude-opus-4-8",
+                content=[SimpleNamespace(type="text", text="OK")],
+                stop_reason="end_turn",
+                usage=SimpleNamespace(input_tokens=2, output_tokens=1),
+            )
+        )
+    )
+    beta_messages_api = SimpleNamespace(create=AsyncMock())
+    provider._client = SimpleNamespace(
+        messages=messages_api,
+        beta=SimpleNamespace(messages=beta_messages_api),
+    )
+
+    await provider.chat(
+        "claude-opus-4-8",
+        [ChatMessage(role="user", content="hello")],
+        thinking={"type": "disabled"},
+        temperature=0.2,
+    )
+
+    kwargs = messages_api.create.await_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert kwargs["temperature"] == 0.2
+    beta_messages_api.create.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_anthropic_stream_forwards_disabled_thinking_and_temperature_without_beta():
+    provider = AnthropicProvider()
+    messages_api = MagicMock()
+    messages_api.stream.return_value = _FakeAsyncStream(
+        [SimpleNamespace(type="message_stop")]
+    )
+    beta_messages_api = MagicMock()
+    provider._client = SimpleNamespace(
+        messages=messages_api,
+        beta=SimpleNamespace(messages=beta_messages_api),
+    )
+
+    chunks = [
+        chunk
+        async for chunk in provider.chat_stream(
+            "claude-opus-4-8",
+            [ChatMessage(role="user", content="hello")],
+            thinking={"type": "disabled"},
+            temperature=0.2,
+        )
+    ]
+
+    kwargs = messages_api.stream.call_args.kwargs
+    assert kwargs["thinking"] == {"type": "disabled"}
+    assert kwargs["temperature"] == 0.2
+    beta_messages_api.stream.assert_not_called()
+    assert chunks[-1].finish_reason == "stop"
+
+
+@pytest.mark.asyncio
 async def test_anthropic_stream_uses_beta_interleaved_and_yields_tools_on_block_stop():
     provider = AnthropicProvider()
     beta_stream = MagicMock()

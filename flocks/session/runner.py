@@ -3159,6 +3159,8 @@ class SessionRunner:
         # Build provider options (thinking / reasoning / max_tokens)
         from flocks.provider.options import build_provider_options
         provider_options = build_provider_options(self.provider_id, self.model_id)
+        if getattr(agent, "temperature", None) is not None:
+            provider_options["temperature"] = agent.temperature
         provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
 
         # Clean up any leftover reasoning state from a previous (failed) call

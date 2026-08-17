@@ -66,6 +66,13 @@ class AnthropicProvider(BaseProvider):
             except ImportError:
                 raise ImportError("anthropic package not installed. Install with: pip install anthropic")
         return self._client
+
+    @staticmethod
+    def _thinking_is_enabled(thinking: Any) -> bool:
+        """Return whether an Anthropic thinking payload enables reasoning."""
+        if isinstance(thinking, dict):
+            return thinking.get("type") != "disabled"
+        return bool(thinking)
     
     def get_models(self) -> List[ModelInfo]:
         """Return models from flocks.json (_config_models) only.
@@ -349,11 +356,13 @@ class AnthropicProvider(BaseProvider):
         # Add thinking mode support
         # https://docs.anthropic.com/en/docs/build-with-claude/extended-thinking
         # When thinking is enabled, temperature MUST NOT be set
-        if kwargs.get("thinking"):
-            request_params["thinking"] = kwargs["thinking"]
+        thinking = kwargs.get("thinking")
+        thinking_enabled = self._thinking_is_enabled(thinking)
+        if thinking:
+            request_params["thinking"] = thinking
             if "max_tokens" in kwargs:
                 request_params["max_tokens"] = kwargs["max_tokens"]
-        else:
+        if not thinking_enabled:
             request_params["temperature"] = kwargs.get("temperature", 0.7)
         
         if system_message:
@@ -362,7 +371,7 @@ class AnthropicProvider(BaseProvider):
             request_params["tools"] = tools
 
         betas = self._beta_flags_for_request(
-            thinking_enabled=bool(kwargs.get("thinking")),
+            thinking_enabled=thinking_enabled,
             has_tools=bool(tools),
         )
         if betas and hasattr(client, "beta") and hasattr(client.beta, "messages"):
@@ -447,14 +456,16 @@ class AnthropicProvider(BaseProvider):
         # When thinking is enabled:
         #   - temperature MUST NOT be set (API rejects it)
         #   - max_tokens must be > budget_tokens
-        if kwargs.get("thinking"):
-            request_params["thinking"] = kwargs["thinking"]
+        thinking = kwargs.get("thinking")
+        thinking_enabled = self._thinking_is_enabled(thinking)
+        if thinking:
+            request_params["thinking"] = thinking
             # Override max_tokens if provided in kwargs
             if "max_tokens" in kwargs:
                 request_params["max_tokens"] = kwargs["max_tokens"]
-            # Do NOT set temperature when thinking is enabled
-        else:
-            # Only set temperature when thinking is NOT enabled
+        if not thinking_enabled:
+            # Disabled thinking is an explicit payload, but temperature remains
+            # valid and must still be forwarded to compatible gateways.
             request_params["temperature"] = kwargs.get("temperature", 0.7)
         
         if system_message:
@@ -463,7 +474,7 @@ class AnthropicProvider(BaseProvider):
             request_params["tools"] = tools
 
         betas = self._beta_flags_for_request(
-            thinking_enabled=bool(kwargs.get("thinking")),
+            thinking_enabled=thinking_enabled,
             has_tools=bool(tools),
         )
 

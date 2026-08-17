@@ -145,7 +145,7 @@ async def test_hook_pipeline_timeout_can_propagate():
 async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_success")
     assistant_msg = SimpleNamespace(id="msg_assistant_success")
-    agent = SimpleNamespace(name="rex")
+    agent = SimpleNamespace(name="rex", temperature=0.2)
     usage = {"prompt_tokens": 7, "completion_tokens": 11, "total_tokens": 18}
     order: list[str] = []
 
@@ -168,6 +168,11 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
     monkeypatch.setattr(
         runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
         "run_llm_before",
         AsyncMock(side_effect=_before),
     )
@@ -183,7 +188,7 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
     )
     monkeypatch.setattr(
         "flocks.provider.options.build_provider_options",
-        lambda provider_id, model_id: {"temperature": 0.2},
+        lambda provider_id, model_id: {"temperature": 0.7},
     )
     monkeypatch.setattr(
         "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
@@ -205,6 +210,7 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
         def chat_stream(self, **kwargs):
             assert kwargs["model_id"] == runner.model_id
             assert kwargs["session_id"] == runner.session.id
+            assert kwargs["temperature"] == 0.2
 
             async def _gen():
                 order.append("provider")
@@ -261,6 +267,11 @@ async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatc
         assert "provider boom" in result["error"]["message"]
 
     monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
     monkeypatch.setattr(
         runner_mod.HookPipeline,
         "run_llm_before",

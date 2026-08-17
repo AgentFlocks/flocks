@@ -358,7 +358,13 @@ def build_provider_options(
         # the catalog entry (catalog takes priority over flocks.json overrides
         # per anthropic.py get_model_definitions), so api_limit reflects the
         # real Anthropic limit (e.g. 64 000 for claude-sonnet-4-20250514).
-        if reasoning_enabled is not False:
+        if reasoning_enabled is False:
+            # Anthropic-compatible gateways may not share Anthropic's default.
+            # Preserve an explicit opt-out so callers such as Cloudwise can
+            # guarantee that report generation does not consume thinking
+            # tokens or leak reasoning blocks into the output stream.
+            options["thinking"] = {"type": "disabled"}
+        else:
             api_limit = _get_catalog_model_max_tokens(model_id)
             effective_budget = min(thinking_budget, api_limit // 2) if api_limit else thinking_budget
             options["thinking"] = {
