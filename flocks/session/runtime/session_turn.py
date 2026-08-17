@@ -53,6 +53,29 @@ MAX_OVERFLOW_COMPACTION_ATTEMPTS = 3
 POST_COMPACTION_COOLDOWN_STEPS = 2
 
 
+def is_terminal_assistant_reply(
+    last_user: MessageInfo,
+    last_assistant: Optional[MessageInfo],
+    last_assistant_parts: Optional[List[Any]] = None,
+) -> bool:
+    """Return whether the latest user already has a completed reply."""
+    if last_assistant is None:
+        return False
+    if any(
+        getattr(part, "type", None) == "tool"
+        for part in (last_assistant_parts or [])
+    ):
+        return False
+    if getattr(last_assistant, "finish", None) not in {
+        "tool-calls",
+        "unknown",
+        "summary",
+        None,
+    }:
+        return getattr(last_assistant, "parentID", None) == last_user.id
+    return False
+
+
 @dataclass
 class LoopCallbacks:
     """Callbacks for loop events"""
@@ -1004,21 +1027,11 @@ class LoopContext:
         - Exit if assistant has responded with finish != tool-calls
         - Exit if assistant message is after user message
         """
-        if not last_assistant:
-            return False
-
-        if any(getattr(part, "type", None) == "tool" for part in (last_assistant_parts or [])):
-            return False
-
-        # Check finish reason
-        if last_assistant.finish:
-            if last_assistant.finish not in ("tool-calls", "unknown", "summary"):
-                # Assistant finished with stop/error/etc
-                if last_user.id < last_assistant.id:
-                    # Assistant responded after user
-                    return True
-
-        return False
+        return is_terminal_assistant_reply(
+            last_user,
+            last_assistant,
+            last_assistant_parts,
+        )
 
     async def _check_reminders(
         self,

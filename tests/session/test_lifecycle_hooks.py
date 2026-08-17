@@ -73,6 +73,41 @@ async def test_real_user_turn_is_detected_once_and_synthetic_is_ignored() -> Non
 
 
 @pytest.mark.asyncio
+async def test_settled_history_skips_user_prompt_submit() -> None:
+    ctx = _loop_context("ses_settled_history_hook")
+    user = _message("msg_user", "user")
+    assistant = _message("msg_assistant", "assistant", finish="stop")
+    assistant.parentID = user.id
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(return_value=[user, assistant]),
+    )
+    prepare_turn = AsyncMock(return_value=True)
+    submit_hook = AsyncMock()
+
+    with (
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY._model_policy,
+            "prepare_turn",
+            prepare_turn,
+        ),
+        patch.object(
+            DEFAULT_CONTINUATION_POLICY,
+            "run_user_prompt_submit",
+            submit_hook,
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.parts",
+            AsyncMock(return_value=[]),
+        ),
+    ):
+        await DEFAULT_CONTINUATION_POLICY.prepare_logical_turn(ctx)
+
+    assert ctx.prepared_user_id == user.id
+    prepare_turn.assert_not_awaited()
+    submit_hook.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_user_prompt_submit_adds_ephemeral_turn_context() -> None:
     ctx = _loop_context()
     user = SimpleNamespace(id="msg_user", agent="rex")
@@ -337,16 +372,81 @@ async def test_real_user_arriving_during_goal_evaluation_wins() -> None:
     create_message.assert_not_awaited()
 
 
+@pytest.mark.asyncio
+async def test_goal_continuation_persistence_failure_is_terminal() -> None:
+    ctx = _loop_context("ses_goal_persistence_failure")
+    user = SimpleNamespace(
+        id="msg_user",
+        agent="rex",
+        role="user",
+        model={"providerID": "test-provider", "modelID": "test-model"},
+        provider="test-provider",
+    )
+    assistant = SimpleNamespace(
+        id="msg_assistant",
+        agent="rex",
+        role="assistant",
+        finish="stop",
+        parentID=user.id,
+    )
+    ctx.session_store = SimpleNamespace(
+        get_messages=AsyncMock(return_value=[user, assistant]),
+    )
+    ctx.callbacks = LoopCallbacks(event_publish_callback=AsyncMock())
+
+    with (
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.get_text_content",
+            AsyncMock(return_value="work remains"),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.Message.create",
+            AsyncMock(side_effect=OSError("continuation store unavailable")),
+        ),
+        patch(
+            "flocks.session.runtime.continuation_policy.GoalManager.evaluate_after_turn",
+            AsyncMock(
+                return_value=GoalDecision(
+                    status="active",
+                    verdict="continue",
+                    should_continue=True,
+                    continuation_prompt="continue the goal",
+                )
+            ),
+        ),
+        patch(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=SimpleNamespace(steps=10)),
+        ),
+    ):
+        with pytest.raises(
+            RuntimeError,
+            match="continuation store unavailable",
+        ):
+            await DEFAULT_CONTINUATION_POLICY.resolve(
+                ctx,
+                SimpleNamespace(last_user=user, last_message=assistant),
+            )
+
+    event_names = [
+        call.args[0]
+        for call in ctx.callbacks.event_publish_callback.await_args_list
+    ]
+    assert "turn.stopped" not in event_names
+
+
 def _message(
     message_id: str,
     role: str,
     *,
     finish: str | None = None,
+    parent_id: str | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
         id=message_id,
         role=role,
         finish=finish,
+        parentID=parent_id,
         tokens=None,
         summary=False,
         agent="rex",
@@ -358,11 +458,19 @@ def _message(
 async def test_turn_after_runs_only_after_persisted_stop() -> None:
     ctx = _loop_context("ses_turn_after_integration")
     user = _message("msg_001", "user")
-    assistant = _message("msg_002", "assistant", finish="stop")
+    assistant = _message(
+        "msg_002",
+        "assistant",
+        finish="stop",
+        parent_id=user.id,
+    )
     ctx.session_store = SimpleNamespace(
         get_messages=AsyncMock(
             side_effect=[
                 [user],
+                [user, assistant],
+                [user, assistant],
+                [user, assistant],
                 [user, assistant],
             ]
         )

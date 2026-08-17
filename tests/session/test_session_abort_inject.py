@@ -249,20 +249,31 @@ class TestShouldExitWithInject:
     """Test that _should_exit correctly handles injected user messages."""
 
     @staticmethod
-    def _make_msg(msg_id: str, role: str, finish: str = None):
+    def _make_msg(
+        msg_id: str,
+        role: str,
+        finish: str = None,
+        *,
+        parent_id: str | None = None,
+    ):
         """Create a minimal message-like object for testing."""
         msg = type("Msg", (), {})()
         msg.id = msg_id
         msg.role = role
         msg.finish = finish
+        msg.parentID = parent_id
         return msg
 
     def test_exit_when_assistant_after_user_and_finished(self):
         """Should exit if last assistant finished after last user."""
         last_user = self._make_msg("msg_001", "user")
-        last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        last_assistant = self._make_msg(
+            "msg_002",
+            "assistant",
+            finish="stop",
+            parent_id=last_user.id,
+        )
 
-        # assistant.id > user.id → user.id < assistant.id → True → should exit
         assert RuntimeLoopContext._should_exit(last_user, last_assistant) is True
 
     def test_no_exit_when_user_injected_after_assistant(self):
@@ -272,9 +283,13 @@ class TestShouldExitWithInject:
         higher ID than the last assistant message, so the loop should continue.
         """
         last_user = self._make_msg("msg_003", "user")  # injected message
-        last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        last_assistant = self._make_msg(
+            "msg_002",
+            "assistant",
+            finish="stop",
+            parent_id="msg_001",
+        )
 
-        # user.id > assistant.id → user.id < assistant.id → False → don't exit
         assert RuntimeLoopContext._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_has_tool_calls(self):
@@ -355,13 +370,22 @@ class TestQueuedUserDetection:
 
 class TestTurnLifecycle:
     @staticmethod
-    def _make_msg(msg_id: str, role: str, finish: str = None, *, tokens=None, summary: bool = False):
+    def _make_msg(
+        msg_id: str,
+        role: str,
+        finish: str = None,
+        *,
+        tokens=None,
+        summary: bool = False,
+        parent_id: str | None = None,
+    ):
         msg = type("Msg", (), {})()
         msg.id = msg_id
         msg.role = role
         msg.finish = finish
         msg.tokens = tokens
         msg.summary = summary
+        msg.parentID = parent_id
         return msg
 
     @pytest.mark.asyncio
@@ -432,9 +456,19 @@ class TestTurnLifecycle:
             agent_name="rex",
         )
         user = self._make_msg("msg_001", "user")
-        assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        assistant = self._make_msg(
+            "msg_002",
+            "assistant",
+            finish="stop",
+            parent_id=user.id,
+        )
         goal_user = self._make_msg("msg_003", "user")
-        assistant_after_goal = self._make_msg("msg_004", "assistant", finish="stop")
+        assistant_after_goal = self._make_msg(
+            "msg_004",
+            "assistant",
+            finish="stop",
+            parent_id=goal_user.id,
+        )
         ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
@@ -442,6 +476,7 @@ class TestTurnLifecycle:
                 [user, assistant],
                 [user, assistant],
                 [user, assistant, goal_user],
+                [user, assistant, goal_user, assistant_after_goal],
                 [user, assistant, goal_user, assistant_after_goal],
                 [user, assistant, goal_user, assistant_after_goal],
                 [user, assistant, goal_user, assistant_after_goal],
@@ -512,10 +547,18 @@ class TestTurnLifecycle:
             agent_name="rex",
         )
         user = self._make_msg("msg_001", "user")
-        assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        assistant = self._make_msg(
+            "msg_002",
+            "assistant",
+            finish="stop",
+            parent_id=user.id,
+        )
         ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
+                [user, assistant],
+                [user, assistant],
+                [user, assistant],
                 [user, assistant],
             ])
         )
@@ -568,10 +611,18 @@ class TestTurnLifecycle:
             agent_name="rex",
         )
         user = self._make_msg("msg_001", "user")
-        assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        assistant = self._make_msg(
+            "msg_002",
+            "assistant",
+            finish="stop",
+            parent_id=user.id,
+        )
         ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(side_effect=[
                 [user],
+                [user, assistant],
+                [user, assistant],
+                [user, assistant],
                 [user, assistant],
             ])
         )
@@ -630,10 +681,23 @@ class TestTurnLifecycle:
         )
         messages = [
             self._make_msg("msg_001", "user"),
-            self._make_msg("msg_002", "assistant", finish="stop"),
+            self._make_msg(
+                "msg_002",
+                "assistant",
+                finish="stop",
+                parent_id="msg_001",
+            ),
         ]
         ctx.session_store = SimpleNamespace(
-            get_messages=AsyncMock(side_effect=[[messages[0]], messages])
+            get_messages=AsyncMock(
+                side_effect=[
+                    [messages[0]],
+                    messages,
+                    messages,
+                    messages,
+                    messages,
+                ]
+            )
         )
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
@@ -705,7 +769,16 @@ class TestTurnLifecycle:
             ),
         ]
         ctx.session_store = SimpleNamespace(
-            get_messages=AsyncMock(side_effect=[overflow_messages, normal_messages, normal_messages])
+            get_messages=AsyncMock(
+                side_effect=[
+                    overflow_messages,
+                    normal_messages,
+                    normal_messages,
+                    normal_messages,
+                    normal_messages,
+                    normal_messages,
+                ]
+            )
         )
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
@@ -810,10 +883,17 @@ class TestTurnLifecycle:
         )
         messages = [
             self._make_msg("msg_001", "user"),
-            self._make_msg("msg_002", "assistant", finish="stop"),
+            self._make_msg(
+                "msg_002",
+                "assistant",
+                finish="stop",
+                parent_id="msg_001",
+            ),
         ]
         ctx.session_store = SimpleNamespace(
-            get_messages=AsyncMock(side_effect=[messages, messages])
+            get_messages=AsyncMock(
+                side_effect=[messages, messages, messages, messages, messages]
+            )
         )
         event_callback = AsyncMock()
         callbacks = LoopCallbacks(event_publish_callback=event_callback)
@@ -864,7 +944,12 @@ class TestTurnLifecycle:
         )
         messages = [
             self._make_msg("msg_001", "user"),
-            self._make_msg("msg_002", "assistant", finish="stop"),
+            self._make_msg(
+                "msg_002",
+                "assistant",
+                finish="stop",
+                parent_id="msg_001",
+            ),
         ]
         ctx.session_store = SimpleNamespace(
             get_messages=AsyncMock(return_value=messages)

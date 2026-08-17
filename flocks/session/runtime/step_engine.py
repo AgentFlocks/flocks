@@ -278,6 +278,7 @@ class StepEngine:
             str,
             Tuple[Dict[str, Any], List[Dict[str, Any]]],
         ] = {}
+        self._active_model_request: Optional[ModelRequest[ChatMessage]] = None
         self._llm_retry_scope_active = False
         self._turn: Optional[Any] = None
         self._model_policy: ModelRoutingPolicy = DEFAULT_MODEL_ROUTING_POLICY
@@ -325,10 +326,14 @@ class StepEngine:
         self._step_agent = None
         self._frozen_tool_request = None
         while True:
+            if turn.aborted:
+                raise StepCancelled
             active_model = RuntimeModel(turn.provider_id, turn.model_id)
             result = await self._run_candidate(
                 replace(snapshot, active_model=active_model),
             )
+            if turn.aborted:
+                raise StepCancelled
             failure = result.failure
             if not turn.auto_failover or failure is None:
                 return result
@@ -344,10 +349,14 @@ class StepEngine:
                 await turn.finalize_failure(failure, snapshot.last_user)
                 return result
 
+            if turn.aborted:
+                raise StepCancelled
             if not await self._remove_failed_attempt(failure):
                 await turn.finalize_failure(failure, snapshot.last_user)
                 return result
 
+            if turn.aborted:
+                raise StepCancelled
             await self._switch_candidate(next_index, failure.reason)
 
     def _require_turn(self) -> Any:
@@ -375,13 +384,12 @@ class StepEngine:
         self._session_start_pending = turn.session_start_pending
         self._memory_bootstrap_data = turn.memory_bootstrap_data
 
-        task = asyncio.create_task(
-            self._process_step(list(snapshot.messages), snapshot.last_user),
-        )
-        turn._current_step_task = task
         started_at = asyncio.get_running_loop().time()
         try:
-            result = await task
+            result = await self._process_step(
+                list(snapshot.messages),
+                snapshot.last_user,
+            )
             if self._session_start_fired:
                 turn.session_start_pending = False
             return result
@@ -390,7 +398,7 @@ class StepEngine:
                 raise StepCancelled from exc
             raise
         finally:
-            turn._current_step_task = None
+            self._clear_model_request_state()
             log.debug(
                 "session.step.complete",
                 {
@@ -405,6 +413,13 @@ class StepEngine:
                     ),
                 },
             )
+
+    def _clear_model_request_state(self) -> None:
+        """Release request snapshots owned by the completed candidate."""
+        self._hooked_model_requests.clear()
+        self._pending_llm_after.clear()
+        self._active_model_request = None
+        self._llm_retry_scope_active = False
 
     def _record_chain_exhaustion(
         self,
@@ -464,6 +479,8 @@ class StepEngine:
 
     async def _switch_candidate(self, next_index: int, reason: str) -> None:
         turn = self._require_turn()
+        if turn.aborted:
+            raise StepCancelled
         previous = turn.model_candidates[turn.candidate_index]
         next_candidate = turn.model_candidates[next_index]
         if turn.model_candidate_policy == "automatic":
@@ -3984,6 +4001,12 @@ class StepEngine:
     async def _emit_pending_llm_after(self, message_id: str) -> None:
         """Emit one terminal after-hook for a logical model request."""
         self._llm_retry_scope_active = False
+        cached = self._hooked_model_requests.pop(message_id, None)
+        if (
+            cached is not None
+            and self._active_model_request is cached[0]
+        ):
+            self._active_model_request = None
         pending = self._pending_llm_after.pop(message_id, None)
         if pending is None:
             return

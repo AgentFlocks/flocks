@@ -11,6 +11,7 @@ import pytest
 import flocks.session.runtime.step_engine as runner_mod
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.provider.provider import ChatMessage
+from flocks.session.runtime.contracts import ModelRequest
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.runtime.step_engine import StepEngine
 from flocks.session.session import SessionInfo
@@ -589,6 +590,26 @@ async def test_llm_after_aggregates_same_model_retry(
 
 
 @pytest.mark.asyncio
+async def test_terminal_llm_after_releases_frozen_request() -> None:
+    runner = _make_runner("ses_runner_llm_request_cleanup")
+    message_id = "msg_assistant_request_cleanup"
+    request = ModelRequest(
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        messages=(ChatMessage(role="user", content="large request"),),
+        tools=(),
+        options={},
+    )
+    runner._hooked_model_requests[message_id] = (request, False)
+    runner._active_model_request = request
+
+    await runner._emit_pending_llm_after(message_id)
+
+    assert runner._hooked_model_requests == {}
+    assert runner._active_model_request is None
+
+
+@pytest.mark.asyncio
 async def test_call_llm_emits_after_hook_on_error(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_hooks_error")
     assistant_msg = SimpleNamespace(id="msg_assistant_error")
@@ -714,6 +735,10 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
     monkeypatch.setattr(
         "flocks.session.streaming.stream_processor.ToolRegistry.execute",
         _execute_delegate,
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolRegistry.get_schema",
+        lambda _tool_name: None,
     )
     monkeypatch.setattr(
         StreamProcessor,

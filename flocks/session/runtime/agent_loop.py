@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 from flocks.session.message import MessageInfo
 from flocks.session.runtime.contracts import (
     AgentRunOutcome,
@@ -55,7 +57,17 @@ class AgentLoop:
             last_user = snapshot.last_user
 
             try:
-                step_result = await engine.run(snapshot)
+                step_task = asyncio.create_task(engine.run(snapshot))
+                turn._current_step_task = step_task
+                try:
+                    step_result = await step_task
+                except asyncio.CancelledError as exc:
+                    if turn.aborted:
+                        raise StepCancelled from exc
+                    raise
+                finally:
+                    if turn._current_step_task is step_task:
+                        turn._current_step_task = None
             except StepCancelled:
                 log.info(
                     "session.step.cancelled",

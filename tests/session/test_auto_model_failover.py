@@ -1,5 +1,6 @@
 """Focused tests for WebUI Auto runtime model failover."""
 
+import asyncio
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -9,9 +10,13 @@ import pytest
 from flocks.session.runtime.continuation_policy import DEFAULT_CONTINUATION_POLICY
 from flocks.session.runtime.agent_loop import AgentLoop
 from flocks.session.runtime.contracts import (
+    AgentRunStatus,
     AttemptEffects,
+    ModelTurnBoundary,
+    ModelTurnPreparation,
     ModelTurnSnapshot,
     RuntimeModel,
+    TurnPreparationStatus,
 )
 from flocks.session.message import Message, MessageRole
 from flocks.session.runtime.model_policy import (
@@ -667,6 +672,63 @@ async def test_safe_failure_switches_candidate_and_removes_blank_message(monkeyp
     delete.assert_awaited_once_with("ses_auto", "msg_failed")
     assert any(event == "message.removed" for event, _ in events)
     assert any(event == "session.model.fallback" for event, _ in events)
+
+
+@pytest.mark.asyncio
+async def test_abort_during_failed_attempt_cleanup_stops_failover(
+    monkeypatch,
+) -> None:
+    ctx = _ctx()
+    last_user = SimpleNamespace(id="msg_user", agent="rex")
+    snapshot = ModelTurnSnapshot(
+        active_model=RuntimeModel(ctx.provider_id, ctx.model_id),
+        trace_step=ctx.trace_step,
+        messages=(last_user,),
+        last_user=last_user,
+    )
+    ctx.prepare_step = AsyncMock(
+        return_value=ModelTurnPreparation(
+            status=TurnPreparationStatus.READY,
+            snapshot=snapshot,
+        )
+    )
+    ctx.commit_step = AsyncMock(return_value=ModelTurnBoundary())
+    attempts: list[str] = []
+    events: list[str] = []
+    delete_started = asyncio.Event()
+    allow_delete = asyncio.Event()
+
+    async def process_step(runner, _messages, _last_user):
+        attempts.append(runner.provider_id)
+        if runner.provider_id == "primary":
+            return _failure(assistant_id="msg_failed")
+        return StepResult(action="stop", content="unexpected fallback")
+
+    async def delete_failed_attempt(*_args):
+        delete_started.set()
+        await allow_delete.wait()
+        return True
+
+    async def publish(event, _payload):
+        events.append(event)
+
+    monkeypatch.setattr(StepEngine, "_process_step", process_step)
+    monkeypatch.setattr(Message, "delete", delete_failed_attempt)
+    ctx.callbacks = LoopCallbacks(event_publish_callback=publish)
+    run_task = asyncio.create_task(
+        AgentLoop().run(ctx, StepEngine.from_turn(ctx)),
+    )
+
+    await asyncio.wait_for(delete_started.wait(), timeout=1)
+    ctx.signal_abort()
+    allow_delete.set()
+    outcome = await asyncio.wait_for(run_task, timeout=1)
+
+    assert outcome.status == AgentRunStatus.ABORTED
+    assert attempts == ["primary"]
+    assert ctx.candidate_index == 0
+    assert "session.model.fallback" not in events
+    ctx.commit_step.assert_not_awaited()
 
 
 @pytest.mark.asyncio

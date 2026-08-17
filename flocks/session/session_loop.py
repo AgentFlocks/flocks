@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import MutableMapping
 from dataclasses import dataclass
 from typing import Any, ClassVar, Optional
@@ -90,6 +91,9 @@ class SessionLoop:
     _continuation_policy: ClassVar[ContinuationPolicy] = (
         DEFAULT_CONTINUATION_POLICY
     )
+    _release_tasks: ClassVar[
+        dict[tuple[str, int], asyncio.Task[bool]]
+    ] = {}
 
     @classmethod
     async def run(
@@ -210,6 +214,7 @@ class SessionLoop:
                     lease,
                     runtime_callbacks,
                     processed_user_id,
+                    allow_late_input=not outcome.unhandled_error,
                 ):
                     continue
 
@@ -613,9 +618,48 @@ class SessionLoop:
         lease: _SessionLease,
         callbacks: LoopCallbacks,
     ) -> None:
-        async with Session.lifecycle_lock(lease.session_id):
-            cls._finalize_release_state_locked(lease)
-        await cls._publish_released(lease.turn, callbacks)
+        release_task = cls._critical_release_task(lease)
+        interrupted: Optional[asyncio.CancelledError] = None
+        while True:
+            try:
+                released = await asyncio.shield(release_task)
+                break
+            except asyncio.CancelledError as exc:
+                if release_task.cancelled():
+                    raise
+                interrupted = exc
+
+        if interrupted is not None:
+            raise interrupted
+        if released:
+            await cls._publish_released(lease.turn, callbacks)
+
+    @classmethod
+    def _critical_release_task(
+        cls,
+        lease: _SessionLease,
+    ) -> asyncio.Task[bool]:
+        key = (lease.session_id, id(lease.turn))
+        existing = cls._release_tasks.get(key)
+        if existing is not None:
+            return existing
+
+        async def release() -> bool:
+            async with Session.lifecycle_lock(lease.session_id):
+                if not cls._leases.owns(lease):
+                    return False
+                cls._finalize_release_state_locked(lease)
+                return True
+
+        task = asyncio.create_task(release())
+        cls._release_tasks[key] = task
+
+        def discard(completed: asyncio.Task[bool]) -> None:
+            if cls._release_tasks.get(key) is completed:
+                cls._release_tasks.pop(key, None)
+
+        task.add_done_callback(discard)
+        return task
 
     @classmethod
     async def _settle_or_continue(
@@ -623,10 +667,14 @@ class SessionLoop:
         lease: _SessionLease,
         callbacks: LoopCallbacks,
         processed_user_id: Optional[str],
+        *,
+        allow_late_input: bool = True,
     ) -> bool:
         """Atomically keep ownership for late input or settle idle."""
         async with Session.lifecycle_lock(lease.session_id):
-            if await lease.turn.has_late_input(processed_user_id):
+            if allow_late_input and await lease.turn.has_late_input(
+                processed_user_id,
+            ):
                 log.info(
                     "session.continuing_for_late_input",
                     {

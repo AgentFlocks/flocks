@@ -24,6 +24,10 @@ from flocks.utils.log import Log
 log = Log.create(service="session.continuation_policy")
 
 
+class ContinuationMaterializationError(RuntimeError):
+    """Raised when a selected continuation cannot be read or persisted."""
+
+
 class ContinuationPolicy:
     """Own boundaries between durable logical user turns."""
 
@@ -73,6 +77,31 @@ class ContinuationPolicy:
         )
         if last_user is None or last_user.id == context.prepared_user_id:
             return
+
+        last_assistant = next(
+            (
+                message
+                for message in reversed(messages)
+                if message.role == MessageRole.ASSISTANT
+            ),
+            None,
+        )
+        if last_assistant is not None:
+            from flocks.session.runtime.session_turn import (
+                is_terminal_assistant_reply,
+            )
+
+            assistant_parts = await Message.parts(
+                last_assistant.id,
+                context.session.id,
+            )
+            if is_terminal_assistant_reply(
+                last_user,
+                last_assistant,
+                assistant_parts,
+            ):
+                context.prepared_user_id = last_user.id
+                return
 
         is_real_user_turn = await self._model_policy.prepare_turn(
             context,
@@ -394,7 +423,10 @@ class ContinuationPolicy:
                 "session.continuation.materialize_error",
                 {"session_id": context.session.id, "error": str(exc)},
             )
-            return ContinuationDecision()
+            raise ContinuationMaterializationError(
+                "Failed to materialize continuation for "
+                f"session {context.session.id}: {exc}"
+            ) from exc
 
         if selected.should_continue:
             await self._publish_continuation(
