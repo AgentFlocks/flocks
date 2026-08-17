@@ -35,8 +35,7 @@ if TYPE_CHECKING:
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
 SystemPromptCache = Dict[str, Any]
-AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
-StringPromptFactory = Callable[[], Optional[str]]
+AsyncPromptLoader = Callable[[], Awaitable[Optional[str]]]
 
 
 # Prompt template directory (same structure as Flocks)
@@ -139,13 +138,30 @@ class ContextInfo(BaseModel):
 
 @dataclass(frozen=True)
 class SystemPromptBlock:
-    """Internal system prompt layer with cache metadata."""
+    """Assembled system prompt layer."""
 
     name: str
     content: str
     cache_scope: str
-    digest_inputs: Dict[str, Any]
-    cache_key: str
+
+
+@dataclass(frozen=True)
+class TurnPromptContext:
+    """Runtime prompt values collected once before deterministic assembly."""
+
+    tool_catalog: Optional[str] = None
+    device_asset_hint: Optional[str] = None
+    sandbox_context: Optional[str] = None
+    channel_context: Optional[str] = None
+    additional_context: Optional[str] = None
+    text_tool_catalog: Optional[str] = None
+    tool_results_reminder: Optional[str] = None
+    repeated_tool_calls_reminder: Optional[str] = None
+    worktree: Optional[str] = None
+    config_instructions: tuple[str, ...] = ()
+    tool_revision: Optional[int] = None
+    device_revision: Optional[int] = None
+    minimal_prompt: Optional[bool] = None
 
 
 class SystemPrompt:
@@ -805,49 +821,6 @@ class SessionPrompt:
         return f"system_prompt_block:{name}:{cls._system_prompt_cache_digest(digest_inputs)}"
 
     @classmethod
-    def _system_prompt_cache_key(
-        cls,
-        *,
-        session_id: str,
-        agent_name: str,
-        provider_id: str,
-        model_id: str,
-        block_keys: Iterable[str],
-    ) -> str:
-        """Build the cache key for the composed system prompt snapshot."""
-        cache_digest = cls._system_prompt_cache_digest({
-            "block_keys": tuple(block_keys),
-        })
-        return f"system_prompts:{session_id}:{agent_name}:{provider_id}:{model_id}:{cache_digest}"
-
-    @classmethod
-    def _read_system_prompt_cache(
-        cls,
-        static_cache: Optional[SystemPromptCache],
-        cache_key: Optional[str],
-    ) -> Optional[List[str]]:
-        """Return a defensive copy of cached prompt blocks when available."""
-        if static_cache is None or cache_key is None:
-            return None
-
-        cached = static_cache.get(cache_key)
-        if cached is None:
-            return None
-        return list(cached)
-
-    @classmethod
-    def _write_system_prompt_cache(
-        cls,
-        static_cache: Optional[SystemPromptCache],
-        cache_key: Optional[str],
-        prompts: List[str],
-    ) -> None:
-        """Store a defensive copy of prompt blocks in the session cache."""
-        if static_cache is None or cache_key is None:
-            return
-        static_cache[cache_key] = list(prompts)
-
-    @classmethod
     def _read_cached_prompt_block(
         cls,
         static_cache: Optional[SystemPromptCache],
@@ -909,8 +882,6 @@ class SessionPrompt:
             name=name,
             content=content,
             cache_scope=cache_scope,
-            digest_inputs=digest_inputs,
-            cache_key=cache_key,
         )
 
     @classmethod
@@ -921,22 +892,21 @@ class SessionPrompt:
         name: str,
         cache_scope: str,
         digest_inputs: Dict[str, Any],
-        builder: AsyncPromptFactory,
+        loader: AsyncPromptLoader,
     ) -> Optional[SystemPromptBlock]:
         """Build or reuse a cached async prompt block."""
         cache_key = cls._layer_cache_key(name=name, digest_inputs=digest_inputs)
         content = cls._read_cached_prompt_block(static_cache, cache_key)
         if content is None:
-            content = cls._normalize_prompt_text(await builder())
-            cls._write_cached_prompt_block(static_cache, cache_key, content)
+            content = cls._normalize_prompt_text(await loader())
+            if content:
+                cls._write_cached_prompt_block(static_cache, cache_key, content)
         if not content:
             return None
         return SystemPromptBlock(
             name=name,
             content=content,
             cache_scope=cache_scope,
-            digest_inputs=digest_inputs,
-            cache_key=cache_key,
         )
 
     @classmethod
@@ -1045,26 +1015,6 @@ class SessionPrompt:
         ]
 
     @classmethod
-    async def _build_optional_async_prompt(
-        cls,
-        prompt_factory: Optional[AsyncPromptFactory],
-    ) -> Optional[str]:
-        """Run an optional async prompt factory."""
-        if not prompt_factory:
-            return None
-        return await prompt_factory()
-
-    @classmethod
-    def _build_optional_prompt(
-        cls,
-        prompt_factory: Optional[StringPromptFactory],
-    ) -> Optional[str]:
-        """Run an optional synchronous prompt factory."""
-        if not prompt_factory:
-            return None
-        return prompt_factory()
-
-    @classmethod
     def _print_system_prompts_for_debug(
         cls,
         *,
@@ -1072,7 +1022,7 @@ class SessionPrompt:
         agent_name: str,
         provider_id: str,
         model_id: str,
-        prompts: List[str],
+        blocks: Iterable[SystemPromptBlock],
     ) -> None:
         """Print prompt blocks when FLOCKS_PRINT_SYSTEM_PROMPT is enabled."""
         if os.getenv("FLOCKS_PRINT_SYSTEM_PROMPT", "").lower() not in ("1", "true", "yes"):
@@ -1083,8 +1033,12 @@ class SessionPrompt:
             f"agent={agent_name} model={provider_id}/{model_id} ==="
         )
         print(header, file=sys.stderr)
-        for idx, prompt in enumerate(prompts):
-            print(f"\n--- prompt[{idx}] ---\n{prompt}\n", file=sys.stderr)
+        for idx, block in enumerate(blocks):
+            print(
+                f"\n--- prompt[{idx}] {block.name} scope={block.cache_scope} "
+                f"---\n{block.content}\n",
+                file=sys.stderr,
+            )
         print("=== end system_prompt ===\n", file=sys.stderr)
 
     @classmethod
@@ -1141,22 +1095,92 @@ class SessionPrompt:
             return False
 
     @classmethod
-    async def _build_subagent_minimal_prompts(
+    def _append_turn_tail_blocks(
         cls,
         *,
-        session_directory: Optional[str],
-        agent_prompt: Optional[str],
-    ) -> List[str]:
-        """Build minimal system prompts for built-in system subagents."""
-        prompts = [
-            get_prompt_flocks_config_guard().strip(),
-            cls._normalize_prompt_text(agent_prompt),
-            cls._build_minimal_environment(session_directory),
+        blocks: List[SystemPromptBlock],
+        turn_context: TurnPromptContext,
+        static_cache: Optional[SystemPromptCache],
+        session_id: str,
+    ) -> None:
+        """Append per-turn values in the exact order sent to the model."""
+        tail_values = [
+            ("turn_additional_context", turn_context.additional_context),
+            ("text_tool_catalog", turn_context.text_tool_catalog),
+            ("tool_results_reminder", turn_context.tool_results_reminder),
+            (
+                "repeated_tool_calls_reminder",
+                turn_context.repeated_tool_calls_reminder,
+            ),
         ]
-        return [prompt for prompt in prompts if prompt]
+        for name, content in tail_values:
+            normalized_content = cls._normalize_prompt_text(content)
+            block = cls._build_cached_prompt_block(
+                static_cache=static_cache,
+                name=name,
+                cache_scope="runtime_tail",
+                digest_inputs={"session_id": session_id, "content": content or ""},
+                builder=lambda: normalized_content,
+            )
+            if block is not None:
+                blocks.append(block)
 
     @classmethod
-    async def build_system_prompts(
+    def _build_subagent_minimal_blocks(
+        cls,
+        *,
+        session_id: str,
+        session_directory: Optional[str],
+        agent_prompt: Optional[str],
+        turn_context: TurnPromptContext,
+        static_cache: Optional[SystemPromptCache],
+    ) -> List[SystemPromptBlock]:
+        """Build minimal prompt blocks for built-in system subagents."""
+        blocks: List[SystemPromptBlock] = []
+        guard_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="flocks_config_guard",
+            cache_scope="global",
+            digest_inputs={"prompt": get_prompt_flocks_config_guard()},
+            builder=lambda: get_prompt_flocks_config_guard().strip(),
+        )
+        if guard_block is not None:
+            blocks.append(guard_block)
+
+        agent_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="agent_identity",
+            cache_scope="agent",
+            digest_inputs={"agent_prompt": agent_prompt or ""},
+            builder=lambda: cls._normalize_prompt_text(agent_prompt),
+        )
+        if agent_block is not None:
+            blocks.append(agent_block)
+
+        environment_block = cls._build_cached_prompt_block(
+            static_cache=static_cache,
+            name="minimal_environment",
+            cache_scope="runtime_tail",
+            digest_inputs={
+                "directory": session_directory,
+                "runtime_day": datetime.now().strftime("%Y-%m-%d"),
+                "platform": platform.system().lower(),
+            },
+            builder=lambda: cls._build_minimal_environment(session_directory),
+        )
+        if environment_block is not None:
+            blocks.append(environment_block)
+
+        cls._append_turn_tail_blocks(
+            blocks=blocks,
+            turn_context=turn_context,
+            static_cache=static_cache,
+            session_id=session_id,
+        )
+        return blocks
+
+    @classmethod
+    async def build_system_prompt_blocks(
         cls,
         *,
         session_id: str,
@@ -1167,45 +1191,51 @@ class SessionPrompt:
         model_id: str,
         execution_mode_prompt: Optional[str] = None,
         prompt_tool_names: Iterable[str] = (),
-        tool_revision: Optional[int] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
         static_cache: Optional[SystemPromptCache] = None,
-        sandbox_prompt_factory: Optional[AsyncPromptFactory] = None,
-        channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
-        tool_catalog_prompt_factory: Optional[StringPromptFactory] = None,
-        device_asset_prompt_factory: Optional[AsyncPromptFactory] = None,
-        device_revision: Optional[int] = None,
+        turn_context: Optional[TurnPromptContext] = None,
         use_text_tool_call_mode: bool = False,
-    ) -> List[str]:
-        """Build the runtime system prompt blocks for a session turn.
+    ) -> List[SystemPromptBlock]:
+        """Build the ordered system prompt blocks for a session turn.
 
         Stable identity and execution guidance come first, followed by
         session/workspace context, with runtime-only metadata kept at the
-        prompt tail. Cache mechanics are intentionally kept out of the block
-        construction below so this method reads as an ordered list of prompt
-        layers.
+        prompt tail. Runtime I/O is collected before this method so assembly is
+        deterministic and every downstream consumer sees the same blocks.
         """
+        turn_context = turn_context or TurnPromptContext()
         vcs = "git" if session_directory else None
-        if await cls._is_builtin_system_subagent_session(
-            session_id=session_id,
-            agent_name=agent_name,
-        ):
-            prompts = await cls._build_subagent_minimal_prompts(
+        minimal_prompt = turn_context.minimal_prompt
+        if minimal_prompt is None:
+            minimal_prompt = await cls._is_builtin_system_subagent_session(
+                session_id=session_id,
+                agent_name=agent_name,
+            )
+        if minimal_prompt:
+            minimal_blocks = cls._build_subagent_minimal_blocks(
+                session_id=session_id,
                 session_directory=session_directory,
                 agent_prompt=agent_prompt,
+                turn_context=turn_context,
+                static_cache=static_cache,
             )
             cls._print_system_prompts_for_debug(
                 session_id=session_id,
                 agent_name=agent_name,
                 provider_id=provider_id,
                 model_id=model_id,
-                prompts=prompts,
+                blocks=minimal_blocks,
             )
-            return prompts
+            return minimal_blocks
 
         normalized_tool_names = tuple(sorted(prompt_tool_names))
         runtime_day = datetime.now().strftime("%Y-%m-%d")
-        custom_signature = SystemPrompt.custom_signature(directory=session_directory)
+        config_instructions = list(turn_context.config_instructions)
+        custom_signature = SystemPrompt.custom_signature(
+            directory=session_directory,
+            worktree=turn_context.worktree,
+            config_instructions=config_instructions,
+        )
         memory_guidance = cls._build_memory_guidance_prompt(
             normalized_tool_names,
             memory_bootstrap_data,
@@ -1217,7 +1247,11 @@ class SessionPrompt:
 
         async def build_custom_context() -> Optional[str]:
             return cls._join_prompt_parts(
-                await SystemPrompt.custom(directory=session_directory),
+                await SystemPrompt.custom(
+                    directory=session_directory,
+                    worktree=turn_context.worktree,
+                    config_instructions=config_instructions,
+                ),
             )
 
         blocks: List[Optional[SystemPromptBlock]] = [
@@ -1281,23 +1315,32 @@ class SessionPrompt:
                 cache_scope="catalog",
                 digest_inputs={
                     "agent_name": agent_name,
-                    "tool_revision": tool_revision,
+                    "tool_revision": turn_context.tool_revision,
+                    "content": turn_context.tool_catalog or "",
                 },
-                builder=lambda: cls._build_optional_prompt(tool_catalog_prompt_factory) or "",
+                builder=lambda: cls._normalize_prompt_text(
+                    turn_context.tool_catalog,
+                ),
             ),
         ]
 
-        if device_asset_prompt_factory:
-            blocks.append(await cls._build_cached_async_prompt_block(
-                static_cache=static_cache,
-                name="device_asset_hint",
-                cache_scope="runtime",
-                digest_inputs={
-                    "session_id": session_id,
-                    "device_revision": device_revision,
-                },
-                builder=device_asset_prompt_factory,
-            ))
+        if turn_context.device_asset_hint:
+            blocks.append(
+                cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name="device_asset_hint",
+                    cache_scope="runtime",
+                    digest_inputs={
+                        "session_id": session_id,
+                        "device_revision": turn_context.device_revision,
+                        "tool_revision": turn_context.tool_revision,
+                        "content": turn_context.device_asset_hint,
+                    },
+                    builder=lambda: cls._normalize_prompt_text(
+                        turn_context.device_asset_hint,
+                    ),
+                )
+            )
 
         blocks.append(
             cls._build_cached_prompt_block(
@@ -1319,33 +1362,52 @@ class SessionPrompt:
             static_cache=static_cache,
             name="context_files",
             cache_scope="workspace",
-            digest_inputs={"directory": session_directory, "signature": custom_signature},
-            builder=build_custom_context,
+            digest_inputs={
+                "directory": session_directory,
+                "worktree": turn_context.worktree,
+                "signature": custom_signature,
+            },
+            loader=build_custom_context,
         )
         blocks.append(custom_block)
 
-        if sandbox_prompt_factory:
-            blocks.append(await cls._build_cached_async_prompt_block(
-                static_cache=static_cache,
-                name="sandbox_context",
-                cache_scope="runtime",
-                digest_inputs={"session_id": session_id, "agent_name": agent_name},
-                builder=sandbox_prompt_factory,
-            ))
+        if turn_context.sandbox_context:
+            blocks.append(
+                cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name="sandbox_context",
+                    cache_scope="runtime_tail",
+                    digest_inputs={
+                        "session_id": session_id,
+                        "agent_name": agent_name,
+                        "content": turn_context.sandbox_context,
+                    },
+                    builder=lambda: cls._normalize_prompt_text(
+                        turn_context.sandbox_context,
+                    ),
+                )
+            )
 
-        if channel_context_prompt_factory:
-            blocks.append(await cls._build_cached_async_prompt_block(
-                static_cache=static_cache,
-                name="channel_context",
-                cache_scope="runtime",
-                digest_inputs={"session_id": session_id},
-                builder=channel_context_prompt_factory,
-            ))
+        if turn_context.channel_context:
+            blocks.append(
+                cls._build_cached_prompt_block(
+                    static_cache=static_cache,
+                    name="channel_context",
+                    cache_scope="runtime_tail",
+                    digest_inputs={
+                        "session_id": session_id,
+                        "content": turn_context.channel_context,
+                    },
+                    builder=lambda: cls._normalize_prompt_text(
+                        turn_context.channel_context,
+                    ),
+                )
+            )
 
         blocks.append(cls._build_cached_prompt_block(
             static_cache=static_cache,
             name="runtime_metadata",
-            cache_scope="runtime",
+            cache_scope="runtime_tail",
             digest_inputs={
                 "session_id": session_id,
                 "directory": session_directory,
@@ -1364,28 +1426,55 @@ class SessionPrompt:
             ),
         ))
 
-        cache_key = cls._system_prompt_cache_key(
+        resolved_blocks = [block for block in blocks if block is not None]
+        cls._append_turn_tail_blocks(
+            blocks=resolved_blocks,
+            turn_context=turn_context,
+            static_cache=static_cache,
             session_id=session_id,
-            agent_name=agent_name,
-            provider_id=provider_id,
-            model_id=model_id,
-            block_keys=[block.cache_key for block in blocks if block is not None],
         )
-        cached_prompts = cls._read_system_prompt_cache(static_cache, cache_key)
-        if cached_prompts is not None:
-            return cached_prompts
-
-        prompts = cls._prompt_blocks_to_list(blocks)
         cls._print_system_prompts_for_debug(
             session_id=session_id,
             agent_name=agent_name,
             provider_id=provider_id,
             model_id=model_id,
-            prompts=prompts,
+            blocks=resolved_blocks,
         )
+        return resolved_blocks
 
-        cls._write_system_prompt_cache(static_cache, cache_key, prompts)
-        return list(prompts)
+    @classmethod
+    async def build_system_prompts(
+        cls,
+        *,
+        session_id: str,
+        session_directory: Optional[str],
+        agent_name: str,
+        agent_prompt: Optional[str],
+        provider_id: str,
+        model_id: str,
+        execution_mode_prompt: Optional[str] = None,
+        prompt_tool_names: Iterable[str] = (),
+        memory_bootstrap_data: Optional[Dict[str, Any]] = None,
+        static_cache: Optional[SystemPromptCache] = None,
+        turn_context: Optional[TurnPromptContext] = None,
+        use_text_tool_call_mode: bool = False,
+    ) -> List[str]:
+        """Compatibility API returning only the assembled prompt text."""
+        blocks = await cls.build_system_prompt_blocks(
+            session_id=session_id,
+            session_directory=session_directory,
+            agent_name=agent_name,
+            agent_prompt=agent_prompt,
+            provider_id=provider_id,
+            model_id=model_id,
+            execution_mode_prompt=execution_mode_prompt,
+            prompt_tool_names=prompt_tool_names,
+            memory_bootstrap_data=memory_bootstrap_data,
+            static_cache=static_cache,
+            turn_context=turn_context,
+            use_text_tool_call_mode=use_text_tool_call_mode,
+        )
+        return cls._prompt_blocks_to_list(blocks)
 
     @classmethod
     def _build_context_section(cls, context: ContextInfo) -> str:
