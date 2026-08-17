@@ -23,7 +23,7 @@ from flocks.utils.log import Log
 log = Log.create(service="context-usage")
 
 UsageSource = Literal["observed", "estimated"]
-DELEGATION_TOOLS = {"delegate_task"}
+DELEGATION_TOOLS = {"delegate_task", "task"}
 ZERO_VISIBLE_SEGMENTS = {"agentDelegation"}
 
 
@@ -457,8 +457,8 @@ async def _estimate_message_breakdown(session_id: str, messages: List[Any]) -> t
             if part_type in {"reasoning", "thinking"}:
                 tokens_by_key["reasoning"] += SessionPrompt.count_tokens(_field_value(part, "text", "") or "")
                 continue
-            if part_type == "agent":
-                tokens_by_key["agentDelegation"] += _estimate_agent_part_tokens(part)
+            if part_type in {"agent", "subtask"}:
+                tokens_by_key["agentDelegation"] += _estimate_subtask_part_tokens(part)
                 continue
             if part_type != "tool":
                 continue
@@ -515,7 +515,7 @@ def _context_key_for_tool(tool_name: str) -> str:
     return "tools"
 
 
-def _estimate_agent_part_tokens(part: Any) -> int:
+def _estimate_subtask_part_tokens(part: Any) -> int:
     total = 0
     for field in ("prompt", "description", "name"):
         value = _field_value(part, field, "")

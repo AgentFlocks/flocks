@@ -51,14 +51,14 @@
 
 ### 3. 单台巡检（`inspect_host`）
 
-- 工具/模型：Python + `ssh_host_cmd` 预检 + `delegate_task`（`subagent_type=host-forensics-fast`）
+- 工具/模型：Python + `ssh_host_cmd` 预检 + `task`（`subagent_type=host-forensics-fast`）
 - 输入：`hosts`、`host_idx`、`ssh_user`、`per_host_dir`、`batch_report_path`、`triage_results`
 - 处理逻辑：
   - 取当前 `hosts[host_idx]`，计算 `ssh_target`，并归一化出 `ssh_host` / `ssh_user`。
   - 先用 `ssh_host_cmd("echo FLOCKS_SSH_OK")` 做轻量 SSH 预检。
   - 若预检失败：按错误文本归类（如 `auth_failed`、`connect_timeout`、`connection_refused` 等），直接写入索引与单机报告。
   - 若预检通过：构造 prompt，明确要求子 Agent 调用 SSH 工具时分别传 `host` 和 `username`。
-  - 调用 `tool.run_safe('delegate_task', ...)` 执行巡检；若仅因超时失败，则自动重试 1 次。
+  - 调用 `tool.run_safe('task', ...)` 执行巡检；若仅因超时失败，则自动重试 1 次。
   - 将本轮完整输出立即写入 `host_triage/NNNN_slug.md`。
   - 从子 Agent 输出中提取 `Verdict`，未识别时回退为 `UNKNOWN`。
   - 向 `triage_results` 仅追加轻量字段：`{host, ssh_user, ssh_target, ssh_host, success, verdict, failure_category, inspect_attempts, error, per_host_md}`。

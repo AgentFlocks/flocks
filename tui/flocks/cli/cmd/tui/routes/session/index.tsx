@@ -40,7 +40,7 @@ import type { GrepTool } from "@/tool/grep"
 import type { EditTool } from "@/tool/edit"
 import type { ApplyPatchTool } from "@/tool/apply_patch"
 import type { WebFetchTool } from "@/tool/webfetch"
-import type { DelegateTaskTool } from "@/tool/delegate-task"
+import type { TaskTool } from "@/tool/task"
 import type { QuestionTool } from "@/tool/question"
 import { useKeyboard, useRenderer, useTerminalDimensions, type JSX } from "@opentui/solid"
 import { useSDK } from "@tui/context/sdk"
@@ -1861,7 +1861,7 @@ function SubagentActivity(props: {
   )
 }
 
-function Task(props: ToolProps<typeof DelegateTaskTool>) {
+function Task(props: ToolProps<typeof TaskTool>) {
   const { theme } = useTheme()
   const keybind = useKeybind()
   const { navigate } = useRoute()
@@ -1977,7 +1977,7 @@ function DelegateTask(props: ToolProps<any>) {
     <Switch>
       <Match when={hasActivity()}>
         <BlockTool
-          title={"⤷ " + agentName() + " · \"" + (delegateInput.description || "delegated task") + "\"" + (elapsed() ? " · " + elapsed() + "s" : "")}
+          title={"⤷ " + agentName() + " · \"" + (delegateInput.description || "subtask") + "\"" + (elapsed() ? " · " + elapsed() + "s" : "")}
           onClick={sessionId() ? () => navigate({ type: "session", sessionID: sessionId()! }) : undefined}
           part={props.part}
         >
@@ -1997,7 +1997,7 @@ function DelegateTask(props: ToolProps<any>) {
         >
           <box>
             <text style={{ fg: theme.textMuted }}>
-              {delegateInput.description || "delegated task"}
+              {delegateInput.description || "subtask"}
               {isBackground() ? " (background)" : ""}
             </text>
             <text style={{ fg: statusColor() }}>{statusText()}</text>
@@ -2016,7 +2016,7 @@ function DelegateTask(props: ToolProps<any>) {
           part={props.part}
         >
           <span style={{ fg: theme.text }}>{agentName()}</span>{" "}
-          "{delegateInput.description || "delegated task"}"
+          "{delegateInput.description || "subtask"}"
           {isBackground() ? " (bg)" : ""}
         </InlineTool>
       </Match>

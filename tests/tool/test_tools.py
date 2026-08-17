@@ -156,7 +156,7 @@ class TestToolRegistry:
             # P1 tools
             "webfetch", "todo", "question",
             # P2 tools
-            "delegate_task", "lsp", "skill_load",
+            "task", "lsp", "skill_load",
             # P3 tools (2)
             "websearch", "apply_patch",
         ]
@@ -801,13 +801,13 @@ class TestWebFetchTool:
 # P2 Tools Tests
 # =============================================================================
 
-class TestDelegateTaskTool:
-    """Test the delegate_task tool"""
+class TestTaskTool:
+    """Test the task tool"""
     
     @pytest.mark.asyncio
-    async def test_delegate_task_exists(self):
-        """Test that delegate_task tool is registered"""
-        tool = ToolRegistry.get("delegate_task")
+    async def test_task_exists(self):
+        """Test that task tool is registered"""
+        tool = ToolRegistry.get("task")
         assert tool is not None
 
 

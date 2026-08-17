@@ -217,7 +217,7 @@ Usage notes:
 - Background subagent execution is disabled. Do not set run_in_background=true.
 - Foreground execution is always used: the tool waits for completion and returns results inline.
 - For independent parallel work needed this turn, emit multiple sibling
-  foreground delegate_task tool calls in the same assistant response.
+  foreground delegate_task/task tool calls in the same assistant response.
   The runtime executes them concurrently and the webui renders each as its
   own DelegateTaskCard.
 
@@ -231,7 +231,6 @@ SUBAGENT_TYPE is required for new tasks. Omit it only when session_id continues 
     name="delegate_task",
     description=DESCRIPTION,
     category=ToolCategory.SYSTEM,
-    native=True,
     parameters=[
         ToolParameter(
             name="load_skills",
@@ -284,8 +283,9 @@ async def delegate_task_tool(
     load_skills: Optional[List[str]] = None,
     description: Optional[str] = None,
     # Internal-only: not exposed in the public schema. The registry rejects
-    # `run_in_background=True` at the schema layer for any caller. This guard
-    # also protects direct in-process callers that bypass the registry.
+    # `run_in_background=True` at the schema layer for any caller, but legacy
+    # in-process call paths (e.g. `task.py` alias) may still pass it through.
+    # This guard is the second line of defense.
     run_in_background: bool = False,
     subagent_type: Optional[str] = None,
     session_id: Optional[str] = None,
@@ -297,7 +297,7 @@ async def delegate_task_tool(
             success=False,
             error=(
                 "Background subagent execution is disabled. "
-                "Use foreground delegate_task calls; emit multiple sibling calls "
+                "Use foreground delegate_task/task calls; emit multiple sibling calls "
                 "in the same assistant turn for parallel work."
             ),
         )

@@ -39,6 +39,7 @@ export interface Command {
   template: string;
   agent?: string;
   model?: string;
+  subtask?: boolean;
   hidden: boolean;
   aliases: string[];
   visible_surfaces: string[];

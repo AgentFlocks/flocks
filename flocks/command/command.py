@@ -24,6 +24,7 @@ class CommandDef:
     template: str
     agent: Optional[str] = None
     model: Optional[str] = None
+    subtask: Optional[bool] = None
     hidden: bool = False
     aliases: Tuple[str, ...] = field(default_factory=tuple)
     visible_surfaces: Tuple[CommandSurface, ...] = ("webui", "tui", "acp", "cli")

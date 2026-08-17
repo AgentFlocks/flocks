@@ -25,6 +25,7 @@ IdPrefix = Literal[
     "call",       # cal
     "step",       # stp
     "agent",      # agt
+    "subtask",    # stk
     "event",      # evt
     "tqref",      # tqr
     "chbind",     # chb  (channel session binding)
@@ -53,6 +54,7 @@ class Identifier:
         "call": "cal",
         "step": "stp",
         "agent": "agt",
+        "subtask": "stk",
         "event": "evt",
         "tqref": "tqr",
         "task": "tsk",

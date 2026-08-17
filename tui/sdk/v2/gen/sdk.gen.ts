@@ -134,6 +134,7 @@ import type {
   SessionUnshareResponses,
   SessionUpdateErrors,
   SessionUpdateResponses,
+  SubtaskPartInput,
   TextPartInput,
   ToolIdsErrors,
   ToolIdsResponses,
@@ -1363,7 +1364,7 @@ export class Session extends HeyApiClient {
       }
       system?: string
       variant?: string
-      parts?: Array<TextPartInput | FilePartInput | AgentPartInput>
+      parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
     options?: Options<never, ThrowOnError>,
   ) {
@@ -1451,7 +1452,7 @@ export class Session extends HeyApiClient {
       }
       system?: string
       variant?: string
-      parts?: Array<TextPartInput | FilePartInput | AgentPartInput>
+      parts?: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
     },
     options?: Options<never, ThrowOnError>,
   ) {

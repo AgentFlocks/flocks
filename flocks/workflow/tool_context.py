@@ -35,7 +35,7 @@ async def build_workflow_tool_context(
 
     Prefer the caller-provided session/message. When absent, create a temporary
     parent session and synthetic user message so workflow-internal tools such as
-    ``delegate_task`` can resolve a valid parent session.
+    ``task`` / ``delegate_task`` can resolve a valid parent session.
     """
 
     effective_session_id = str(session_id or "").strip()

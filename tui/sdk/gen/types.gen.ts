@@ -383,6 +383,15 @@ export type CompactionPart = {
 
 export type Part =
   | TextPart
+  | {
+      id: string
+      sessionID: string
+      messageID: string
+      type: "subtask"
+      prompt: string
+      description: string
+      agent: string
+    }
   | ReasoningPart
   | FilePart
   | ToolPart
@@ -1208,6 +1217,7 @@ export type Config = {
       description?: string
       agent?: string
       model?: string
+      subtask?: boolean
     }
   }
   watcher?: {
@@ -1422,12 +1432,21 @@ export type AgentPartInput = {
   }
 }
 
+export type SubtaskPartInput = {
+  id?: string
+  type: "subtask"
+  prompt: string
+  description: string
+  agent: string
+}
+
 export type Command = {
   name: string
   description?: string
   agent?: string
   model?: string
   template: string
+  subtask?: boolean
 }
 
 export type Model = {
@@ -2572,7 +2591,7 @@ export type SessionPromptData = {
     tools?: {
       [key: string]: boolean
     }
-    parts: Array<TextPartInput | FilePartInput | AgentPartInput>
+    parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
     /**
@@ -2667,7 +2686,7 @@ export type SessionPromptAsyncData = {
     tools?: {
       [key: string]: boolean
     }
-    parts: Array<TextPartInput | FilePartInput | AgentPartInput>
+    parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
     /**

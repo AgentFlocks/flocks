@@ -1,5 +1,5 @@
 import { Tool } from "./tool"
-import DESCRIPTION from "./delegate-task.txt"
+import DESCRIPTION from "./task.txt"
 import z from "zod"
 import { Session } from "../session"
 import { Bus } from "../bus"
@@ -20,13 +20,13 @@ const parameters = z.object({
   command: z.string().describe("The command that triggered this task").optional(),
 })
 
-export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
+export const TaskTool = Tool.define("task", async (ctx) => {
   const agents = await Agent.list().then((x) => x.filter((a) => a.mode !== "primary"))
 
   // Filter agents by permissions if agent provided
   const caller = ctx?.agent
   const accessibleAgents = caller
-    ? agents.filter((a) => PermissionNext.evaluate("delegate_task", a.name, caller.permission).action !== "deny")
+    ? agents.filter((a) => PermissionNext.evaluate("task", a.name, caller.permission).action !== "deny")
     : agents
 
   const description = DESCRIPTION.replace(
@@ -41,9 +41,10 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
     async execute(params: z.infer<typeof parameters>, ctx) {
       const config = await Config.get()
 
+      // Skip permission check when user explicitly invoked via @ or command subtask
       if (!ctx.extra?.bypassAgentCheck) {
         await ctx.ask({
-          permission: "delegate_task",
+          permission: "task",
           patterns: [params.subagent_type],
           always: ["*"],
           metadata: {
@@ -56,7 +57,7 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
       const agent = await Agent.get(params.subagent_type)
       if (!agent) throw new Error(`Unknown agent type: ${params.subagent_type} is not a valid agent type`)
 
-      const hasDelegatePermission = agent.permission.some((rule) => rule.permission === "delegate_task")
+      const hasTaskPermission = agent.permission.some((rule) => rule.permission === "task")
 
       const session = await iife(async () => {
         if (params.session_id) {
@@ -73,11 +74,11 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
               pattern: "*",
               action: "deny",
             },
-            ...(hasDelegatePermission
+            ...(hasTaskPermission
               ? []
               : [
                   {
-                    permission: "delegate_task" as const,
+                    permission: "task" as const,
                     pattern: "*" as const,
                     action: "deny" as const,
                   },
@@ -146,7 +147,7 @@ export const DelegateTaskTool = Tool.define("delegate_task", async (ctx) => {
         agent: agent.name,
         tools: {
           todo: false,
-          ...(hasDelegatePermission ? {} : { delegate_task: false }),
+          ...(hasTaskPermission ? {} : { task: false }),
           ...Object.fromEntries((config.experimental?.primary_tools ?? []).map((t) => [t, false])),
         },
         parts: promptParts,

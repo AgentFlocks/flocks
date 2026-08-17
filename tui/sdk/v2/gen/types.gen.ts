@@ -429,6 +429,20 @@ export type CompactionPart = {
 
 export type Part =
   | TextPart
+  | {
+      id: string
+      sessionID: string
+      messageID: string
+      type: "subtask"
+      prompt: string
+      description: string
+      agent: string
+      model?: {
+        providerID: string
+        modelID: string
+      }
+      command?: string
+    }
   | ReasoningPart
   | FilePart
   | ToolPart
@@ -1603,6 +1617,7 @@ export type Config = {
       description?: string
       agent?: string
       model?: string
+      subtask?: boolean
     }
   }
   watcher?: {
@@ -1938,6 +1953,19 @@ export type AgentPartInput = {
   }
 }
 
+export type SubtaskPartInput = {
+  id?: string
+  type: "subtask"
+  prompt: string
+  description: string
+  agent: string
+  model?: {
+    providerID: string
+    modelID: string
+  }
+  command?: string
+}
+
 export type ProviderAuthMethod = {
   type: "oauth" | "api"
   label: string
@@ -2043,6 +2071,7 @@ export type Command = {
   model?: string
   mcp?: boolean
   template: string
+  subtask?: boolean
   hints: Array<string>
 }
 
@@ -3197,7 +3226,7 @@ export type SessionPromptData = {
     }
     system?: string
     variant?: string
-    parts: Array<TextPartInput | FilePartInput | AgentPartInput>
+    parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
     /**
@@ -3384,7 +3413,7 @@ export type SessionPromptAsyncData = {
     }
     system?: string
     variant?: string
-    parts: Array<TextPartInput | FilePartInput | AgentPartInput>
+    parts: Array<TextPartInput | FilePartInput | AgentPartInput | SubtaskPartInput>
   }
   path: {
     /**

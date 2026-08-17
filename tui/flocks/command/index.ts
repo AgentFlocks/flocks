@@ -30,6 +30,7 @@ export namespace Command {
       // workaround for zod not supporting async functions natively so we use getters
       // https://zod.dev/v4/changelog?id=zfunction
       template: z.promise(z.string()).or(z.string()),
+      subtask: z.boolean().optional(),
       hints: z.array(z.string()),
     })
     .meta({
@@ -72,6 +73,7 @@ export namespace Command {
         get template() {
           return PROMPT_REVIEW.replace("${path}", Instance.worktree)
         },
+        subtask: true,
         hints: hints(PROMPT_REVIEW),
       },
     }
@@ -85,6 +87,7 @@ export namespace Command {
         get template() {
           return command.template
         },
+        subtask: command.subtask,
         hints: hints(command.template),
       }
     }

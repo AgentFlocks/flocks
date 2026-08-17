@@ -30,6 +30,7 @@ from flocks.session.message import (
     ReasoningPart,
     PatchPart,
     AgentPart,
+    SubtaskPart,
 )
 from flocks.session.prompt import SessionPrompt, SystemPrompt, ContextInfo
 from flocks.session.lifecycle.compaction import SessionCompaction, CompactionResult, CompactionPolicy, ContextTier
@@ -44,6 +45,11 @@ from flocks.session.features.reminders import (
     SessionReminders,
     ReminderConfig,
     ReminderContext,
+)
+from flocks.session.features.subtask import (
+    SessionSubtask,
+    SubtaskInfo,
+    SubtaskResult,
 )
 from flocks.session.lifecycle.revert import (
     SessionRevertManager,
@@ -80,6 +86,7 @@ __all__ = [
     "ReasoningPart",
     "PatchPart",
     "AgentPart",
+    "SubtaskPart",
     # Prompt
     "SessionPrompt",
     "SystemPrompt",
@@ -99,6 +106,10 @@ __all__ = [
     "SessionReminders",
     "ReminderConfig",
     "ReminderContext",
+    # Subtask
+    "SessionSubtask",
+    "SubtaskInfo",
+    "SubtaskResult",
     # Revert
     "SessionRevertManager",
     "RevertInput",

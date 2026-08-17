@@ -27,6 +27,7 @@ from flocks.session.message import (
     SnapshotPart,
     StepFinishPart,
     StepStartPart,
+    SubtaskPart,
     TextPart,
     TokenCache,
     TokenUsage,
@@ -312,8 +313,20 @@ class TestRetryPart:
 
 
 # ---------------------------------------------------------------------------
-# AgentPart
+# SubtaskPart / AgentPart
 # ---------------------------------------------------------------------------
+
+class TestSubtaskPart:
+    def test_creation(self):
+        part = SubtaskPart(
+            sessionID=SID,
+            messageID=MID,
+            prompt="Summarize findings",
+            description="Summarize",
+            agent="rex",
+        )
+        assert part.type == "subtask"
+        assert part.agent == "rex"
 
 
 class TestAgentPart:
@@ -402,24 +415,6 @@ class TestDeserializePart:
         deserialized = Message.deserialize_part(serialized)
         assert deserialized is not None
         assert deserialized.type == "reasoning"
-
-    def test_deserialize_legacy_subtask_as_ignored_text(self):
-        deserialized = Message.deserialize_part(
-            {
-                "id": "part_legacy_subtask",
-                "sessionID": SID,
-                "messageID": MID,
-                "type": "subtask",
-                "prompt": "old delegated command",
-                "description": "legacy",
-                "agent": "rex",
-            }
-        )
-
-        assert deserialized.type == "text"
-        assert deserialized.text == ""
-        assert deserialized.ignored is True
-        assert deserialized.metadata == {"legacyPartType": "subtask"}
 
     def test_deserialize_unknown_type_falls_back_to_text(self):
         # Unknown type falls back to TextPart; missing required fields raise exception
@@ -542,11 +537,11 @@ class TestMessageStoreAndParts:
             sessionID=sid,
             messageID=msg.id,
             callID="call_terminal_guard",
-            tool="delegate_task",
+            tool="task",
             state=ToolStateCompleted(
                 input={"prompt": "run"},
                 output="done",
-                title="delegate_task",
+                title="task",
                 metadata={"sessionId": "ses_child_done"},
                 time={"start": 1000, "end": 2000},
             ),
@@ -556,10 +551,10 @@ class TestMessageStoreAndParts:
             sessionID=sid,
             messageID=msg.id,
             callID="call_terminal_guard",
-            tool="delegate_task",
+            tool="task",
             state=ToolStateRunning(
                 input={"prompt": "run"},
-                title="delegate_task",
+                title="task",
                 metadata={"sessionId": "ses_child_done", "status": "running"},
                 time={"start": 1000},
             ),
