@@ -501,12 +501,16 @@ export namespace Config {
 
   const canonicalPermissionToolName = (tool: string) => {
     if (tool === "todowrite" || tool === "todoread") return "todo"
+    if (tool === "task") return "delegate_task"
     return tool
   }
 
   const assignPermission = (target: Record<string, PermissionRule>, tool: string, action: PermissionRule) => {
     const canonical = canonicalPermissionToolName(tool)
-    if (target[canonical] === "deny" || action === "deny") {
+    const containsDeny = (value: PermissionRule): boolean =>
+      value === "deny" ||
+      (typeof value === "object" && value !== null && Object.values(value).some((item) => containsDeny(item)))
+    if ((canonical in target && containsDeny(target[canonical])) || containsDeny(action)) {
       target[canonical] = "deny"
       return
     }
@@ -536,7 +540,7 @@ export namespace Config {
           glob: PermissionRule.optional(),
           grep: PermissionRule.optional(),
           bash: PermissionRule.optional(),
-          task: PermissionRule.optional(),
+          delegate_task: PermissionRule.optional(),
           external_directory: PermissionRule.optional(),
           todo: PermissionAction.optional(),
           question: PermissionAction.optional(),
@@ -559,7 +563,6 @@ export namespace Config {
     description: z.string().optional(),
     agent: z.string().optional(),
     model: z.string().optional(),
-    subtask: z.boolean().optional(),
   })
   export type Command = z.infer<typeof Command>
 

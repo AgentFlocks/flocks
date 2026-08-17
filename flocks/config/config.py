@@ -30,20 +30,38 @@ PermissionRule = Union[PermissionAction, Dict[str, Union[PermissionAction, Dict[
 
 
 _LEGACY_TODO_TOOL_NAMES = {"todowrite", "todoread"}
+_LEGACY_PERMISSION_TOOL_NAMES = {
+    **{name: "todo" for name in _LEGACY_TODO_TOOL_NAMES},
+    "task": "delegate_task",
+}
 
 
 def _canonical_permission_tool_name(tool: str) -> str:
-    if tool in _LEGACY_TODO_TOOL_NAMES:
-        return "todo"
-    return tool
+    return _LEGACY_PERMISSION_TOOL_NAMES.get(tool, tool)
 
 
 def _merge_permission_action(existing: Any, incoming: Any) -> Any:
     """Merge duplicate legacy permission names conservatively."""
-    existing_value = existing.value if hasattr(existing, "value") else existing
-    incoming_value = incoming.value if hasattr(incoming, "value") else incoming
-    if existing_value == PermissionAction.DENY.value or incoming_value == PermissionAction.DENY.value:
+    def contains_deny(value: Any) -> bool:
+        raw_value = value.value if hasattr(value, "value") else value
+        if raw_value == PermissionAction.DENY.value:
+            return True
+        if isinstance(raw_value, dict):
+            return any(contains_deny(item) for item in raw_value.values())
+        return False
+
+    if contains_deny(existing) or contains_deny(incoming):
         return PermissionAction.DENY
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        merged = dict(existing)
+        for pattern, action in incoming.items():
+            if pattern in merged:
+                merged[pattern] = _merge_permission_action(
+                    merged[pattern], action,
+                )
+            else:
+                merged[pattern] = action
+        return merged
     return existing if existing is not None else incoming
 
 
@@ -79,11 +97,11 @@ class PermissionConfig(BaseModel):
 
     @model_validator(mode="before")
     @classmethod
-    def migrate_legacy_todo_permissions(cls, data):
+    def migrate_legacy_permissions(cls, data):
         if not isinstance(data, dict):
             return data
         migrated = dict(data)
-        for legacy_name in _LEGACY_TODO_TOOL_NAMES:
+        for legacy_name in _LEGACY_PERMISSION_TOOL_NAMES:
             if legacy_name in migrated:
                 _assign_permission(migrated, legacy_name, migrated.pop(legacy_name))
         return migrated
@@ -158,7 +176,6 @@ class CommandConfig(BaseModel):
     description: Optional[str] = None
     agent: Optional[str] = None
     model: Optional[str] = None
-    subtask: Optional[bool] = None
 
 
 # ==================== Provider Configuration ====================
