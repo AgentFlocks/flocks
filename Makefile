@@ -7,10 +7,10 @@ help:
 	@echo "  make test-all     - 运行所有测试（包括可能失败的）"
 
 test:
-	@python3 scripts/run-tests.py
+	@uv run pytest tests/ --tb=short
 
 test-verbose:
-	@python3 scripts/run-tests.py --verbose
+	@uv run pytest tests/ -vv --tb=long
 
 test-core: test
 

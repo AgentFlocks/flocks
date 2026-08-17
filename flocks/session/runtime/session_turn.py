@@ -376,11 +376,8 @@ class LoopContext:
                 message
                 for message in reversed(post_messages)
                 if message.role == MessageRole.ASSISTANT
-                and (
-                    not self.auto_failover
-                    or last_user is None
-                    or getattr(message, "parentID", None) == last_user.id
-                )
+                and last_user is not None
+                and getattr(message, "parentID", None) == last_user.id
             ),
             None,
         )

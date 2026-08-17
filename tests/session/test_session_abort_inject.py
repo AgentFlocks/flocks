@@ -210,11 +210,11 @@ class TestShouldExitWithInject:
         msg.parentID = parent_id
         return msg
 
-    def test_exit_when_assistant_after_user_and_finished(self):
-        """Should exit if last assistant finished after last user."""
-        last_user = self._make_msg("msg_001", "user")
+    def test_exit_when_assistant_replies_to_user_with_non_monotonic_ids(self):
+        """Should use parent linkage instead of ordering generated IDs."""
+        last_user = self._make_msg("msg_002", "user")
         last_assistant = self._make_msg(
-            "msg_002",
+            "msg_001",
             "assistant",
             finish="stop",
             parent_id=last_user.id,
@@ -923,6 +923,39 @@ class TestTurnLifecycle:
         assert any(call.args and call.args[0] == "loop.exit_condition" for call in log_info.call_args_list)
         event_names = [call.args[0] for call in event_callback.await_args_list]
         assert event_names == ["turn.started"]
+
+    @pytest.mark.asyncio
+    async def test_commit_step_does_not_reuse_previous_assistant_reply(self):
+        """A failed current step must not surface an older assistant reply."""
+        session = SimpleNamespace(id="stale_reply_session")
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        previous_user = self._make_msg("msg_previous_user", "user")
+        previous_assistant = self._make_msg(
+            "msg_previous_assistant",
+            "assistant",
+            finish="stop",
+            parent_id=previous_user.id,
+        )
+        current_user = self._make_msg("msg_current_user", "user")
+        ctx.prepared_user_id = current_user.id
+        ctx.session_store = SimpleNamespace(
+            get_messages=AsyncMock(
+                return_value=[
+                    previous_user,
+                    previous_assistant,
+                    current_user,
+                ]
+            )
+        )
+
+        boundary = await ctx.commit_step(StepResult(action="stop"))
+
+        assert boundary.last_message is None
 
 
 # ---------------------------------------------------------------------------

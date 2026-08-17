@@ -10,7 +10,7 @@ import time
 from datetime import datetime, timedelta
 from http.cookiejar import CookieJar
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Callable, Optional
 from urllib.parse import urljoin, urlparse
 
 import requests
@@ -27,6 +27,7 @@ TOKEN_BUNDLE_SECRET_ID = "sangfor_edr_token_bundle"
 DEFAULT_AUTH_STATE_PATH = "~/.flocks/browser/sangfor-edr/auth-state.json"
 DEFAULT_LOGIN_PATH = "/ui/login.php"
 DEFAULT_TIMEOUT = 25
+MAX_HTTP_LOGIN_ATTEMPTS = 3
 PUBLIC_EXPONENT = 0x10001
 CONFIG_KEYS = (
     "base_url",
@@ -35,6 +36,9 @@ CONFIG_KEYS = (
     "max_captcha_retry",
     "login_path",
 )
+
+BrowserLoginFallback = Callable[["RuntimeConfig", str], dict[str, Any]]
+_browser_login_fallback: Optional[BrowserLoginFallback] = None
 
 
 class RuntimeConfig:
@@ -64,6 +68,11 @@ def _get_secret_manager():
     from flocks.security import get_secret_manager
 
     return get_secret_manager()
+
+
+def register_browser_login_fallback(callback: Optional[BrowserLoginFallback]) -> None:
+    global _browser_login_fallback
+    _browser_login_fallback = callback
 
 
 def _resolve_ref(value: Any) -> Optional[str]:
@@ -471,14 +480,96 @@ def ensure_http_auth_pair(cfg: RuntimeConfig, captcha_code: str = "") -> dict[st
     probe = probe_auth_pair(cfg)
     if probe.get("valid"):
         return {"success": True, "valid": True, "status": "http_auth_pair_reused", "login_skipped": True, "probe": probe}
-    result = _http_login(cfg, captcha_code=captcha_code)
-    result["previous_probe"] = probe
-    if result.get("success"):
+
+    attempts: list[dict[str, Any]] = []
+    last_result: dict[str, Any] = {
+        "success": False,
+        "valid": False,
+        "status": "http_login_failed",
+        "reason": "http_login_failed",
+    }
+    for attempt in range(1, MAX_HTTP_LOGIN_ATTEMPTS + 1):
+        result = _http_login(cfg, captcha_code=captcha_code)
+        result["http_login_attempt"] = attempt
+        if result.get("success"):
+            confirmation = probe_auth_pair(cfg)
+            result["probe"] = confirmation
+            if confirmation.get("valid"):
+                result.update(
+                    {
+                        "success": True,
+                        "valid": True,
+                        "previous_probe": probe,
+                        "http_login_attempts": attempts,
+                    }
+                )
+                return result
+            result.update(
+                {
+                    "success": False,
+                    "valid": False,
+                    "status": "http_login_probe_failed",
+                    "reason": str(confirmation.get("reason") or "http_login_probe_failed"),
+                }
+            )
+
+        attempts.append(
+            {
+                key: result.get(key)
+                for key in ("http_login_attempt", "status", "reason", "phase", "error")
+                if result.get(key) not in (None, "")
+            }
+        )
+        last_result = result
+        if result.get("status") in {"http_login_credentials_required", "http_login_captcha_required"}:
+            last_result.update({"previous_probe": probe, "http_login_attempts": attempts})
+            return last_result
+
+    if _browser_login_fallback is None:
+        last_result.update(
+            {
+                "previous_probe": probe,
+                "http_login_attempts": attempts,
+                "browser_fallback_attempted": False,
+                "browser_fallback_unavailable": True,
+            }
+        )
+        return last_result
+
+    try:
+        fallback = _browser_login_fallback(cfg, captcha_code)
+    except Exception as exc:
+        fallback = {
+            "success": False,
+            "valid": False,
+            "status": "browser_cdp_login_failed",
+            "reason": "browser_cdp_login_failed",
+            "error": _safe_error(exc, cfg.username, cfg.password),
+        }
+    fallback.update(
+        {
+            "previous_probe": probe,
+            "http_login_attempts": attempts,
+            "browser_fallback_attempted": True,
+        }
+    )
+    if fallback.get("success"):
         confirmation = probe_auth_pair(cfg)
-        result["probe"] = confirmation
-        if not confirmation.get("valid"):
-            result.update({"success": False, "valid": False, "status": "http_login_probe_failed", "reason": str(confirmation.get("reason") or "http_login_probe_failed")})
-    return result
+        fallback["probe"] = confirmation
+        if confirmation.get("valid"):
+            fallback.update({"valid": True, "login_skipped": False})
+            return fallback
+        fallback.update(
+            {
+                "success": False,
+                "valid": False,
+                "status": "manual_login_required",
+                "reason": str(confirmation.get("reason") or "browser_cdp_login_probe_failed"),
+                "browser_left_open": True,
+                "next_action": "complete the login in the open browser, then call complete_manual_login",
+            }
+        )
+    return fallback
 
 
 def status_auth_state(params: dict[str, Any]) -> dict[str, Any]:

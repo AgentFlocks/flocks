@@ -29,6 +29,7 @@ import sangfor_edr_dashboard_api as _dashboard_api_module  # noqa: E402
 import sangfor_edr_http_login as _http_login_module  # noqa: E402
 import sangfor_edr_threat_assets_api as _threat_assets_api_module  # noqa: E402
 import sangfor_edr_asset_inventory_api as _asset_inventory_api_module  # noqa: E402
+import sangfor_edr_advanced_threat_api as _advanced_threat_api_module  # noqa: E402
 
 SERVICE_ID = "sangfor_edr_v1_0_0"
 LEGACY_SERVICE_ID = "sangfor_edr"
@@ -1222,6 +1223,30 @@ def _complete_manual_login(cfg: RuntimeConfig) -> dict[str, Any]:
         }
 
 
+def _http_auth_browser_fallback(
+    http_cfg: _http_login_module.RuntimeConfig,
+    captcha_code: str = "",
+) -> dict[str, Any]:
+    """Adapt the standalone HTTP auth config to the existing CDP login flow."""
+    cfg = _resolve_runtime_config(
+        {
+            "base_url": http_cfg.base_url,
+            "auth_state_path": str(http_cfg.auth_state_path),
+            "username": http_cfg.username,
+            "password": http_cfg.password,
+            "login_path": http_cfg.login_path,
+            "auto_ocr_code": http_cfg.auto_ocr_code,
+            "max_captcha_retry": http_cfg.max_captcha_retry,
+            "persist_credentials": False,
+        }
+    )
+    cfg.timeout = http_cfg.timeout
+    return _refresh_auth_state_with_cdp_login(cfg, captcha_code=captcha_code)
+
+
+_http_login_module.register_browser_login_fallback(_http_auth_browser_fallback)
+
+
 def _dashboard_session(cfg: RuntimeConfig, state: dict[str, Any]) -> requests.Session:
     session = requests.Session()
     session.verify = False
@@ -1444,6 +1469,19 @@ async def handle_asset_inventory(ctx: ToolContext) -> ToolResult:
             success=bool(result.get("success")),
             output=result,
             error=None if result.get("success") else "asset_inventory_api_partial_failure",
+        )
+    except Exception as exc:
+        return ToolResult(success=False, error=str(exc))
+
+
+async def handle_advanced_threat(ctx: ToolContext, **_kwargs: Any) -> ToolResult:
+    params = dict(ctx.params)
+    try:
+        result = _advanced_threat_api_module.run_advanced_threat(params)
+        return ToolResult(
+            success=bool(result.get("success")),
+            output=result,
+            error=None if result.get("success") else "advanced_threat_api_partial_failure",
         )
     except Exception as exc:
         return ToolResult(success=False, error=str(exc))

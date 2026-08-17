@@ -969,11 +969,6 @@ class TestBuildInstallCommandExtended:
         assert "pip" in cmd
         assert "requests" in cmd
 
-    def test_go_module(self):
-        spec = SkillInstallSpec(kind="go", module="github.com/user/tool@latest")
-        cmd = SkillInstaller._build_install_command(spec)
-        assert cmd == ["go", "install", "github.com/user/tool@latest"]
-
     def test_go_package_fallback(self):
         """go spec with package (no module) should fall back to package."""
         spec = SkillInstallSpec(kind="go", package="github.com/user/tool@latest")

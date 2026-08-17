@@ -17,10 +17,12 @@ Stats:      GET /stats
 from __future__ import annotations
 
 import io
+import zipfile
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
+from tests.utils.file_type_samples import ALL_SUPPORTED_UPLOAD_FILENAMES, create_sample_file
 
 
 # ─── Fixtures ────────────────────────────────────────────────────────────────
@@ -242,6 +244,28 @@ class TestUpload:
         result = r.json()["uploaded"][0]
         assert "Unsupported file type" in result["error"]
         assert not (_ws(workspace_client) / "archive.zip").exists()
+
+    @pytest.mark.parametrize("filename", ALL_SUPPORTED_UPLOAD_FILENAMES)
+    def test_chat_upload_accepts_all_supported_file_types(
+        self,
+        workspace_client,
+        filename: str,
+    ):
+        client = _client(workspace_client)
+        source = _ws(workspace_client) / "fixtures" / filename
+        source.parent.mkdir(parents=True, exist_ok=True)
+        create_sample_file(source)
+
+        response = client.post(
+            "/api/workspace/upload?purpose=chat",
+            files=[("files", (filename, source.read_bytes(), "application/octet-stream"))],
+        )
+
+        assert response.status_code == 200
+        result = response.json()["uploaded"][0]
+        assert result.get("error") is None
+        assert result["name"] == filename
+        assert (_ws(workspace_client) / filename).exists()
 
     def test_upload_multiple_files(self, workspace_client):
         client = _client(workspace_client)
@@ -471,7 +495,6 @@ class TestDownload:
         )
         assert r.status_code == 200
         assert r.headers["content-type"] == "application/zip"
-        import zipfile, io
         zf = zipfile.ZipFile(io.BytesIO(r.content))
         names = zf.namelist()
         assert "outputs/a.txt" in names
@@ -484,7 +507,6 @@ class TestDownload:
             json={"paths": ["../../etc/passwd", "nonexistent.txt"]},
         )
         assert r.status_code == 200
-        import zipfile, io
         zf = zipfile.ZipFile(io.BytesIO(r.content))
         assert zf.namelist() == []
 

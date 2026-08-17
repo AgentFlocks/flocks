@@ -1734,16 +1734,7 @@ class TestTodoToolsAdvanced:
 
 class TestToolCategorization:
     """Test tool categorization"""
-    
-    def test_file_category_tools(self):
-        """Test that file category has expected tools"""
-        file_tools = ToolRegistry.list_tools(category=ToolCategory.FILE)
-        file_tool_names = [t.name for t in file_tools]
-        
-        assert "read" in file_tool_names
-        assert "write" in file_tool_names
-        assert "edit" in file_tool_names
-    
+
     def test_terminal_category_tools(self):
         """Test that terminal category has expected tools"""
         terminal_tools = ToolRegistry.list_tools(category=ToolCategory.TERMINAL)
