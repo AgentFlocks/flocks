@@ -249,26 +249,27 @@ class TestShouldExitWithInject:
         msg.id = msg_id
         msg.role = role
         msg.finish = finish
+        msg.parentID = None
         return msg
 
-    def test_exit_when_assistant_after_user_and_finished(self):
-        """Should exit if last assistant finished after last user."""
-        last_user = self._make_msg("msg_001", "user")
-        last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+    def test_exit_when_assistant_replies_to_user_and_finished(self):
+        """Should exit if last assistant is a finished reply to last user."""
+        last_user = self._make_msg("msg_002", "user")
+        last_assistant = self._make_msg("msg_001", "assistant", finish="stop")
+        last_assistant.parentID = last_user.id
 
-        # assistant.id > user.id → user.id < assistant.id → True → should exit
         assert SessionLoop._should_exit(last_user, last_assistant) is True
 
-    def test_no_exit_when_user_injected_after_assistant(self):
-        """Should NOT exit when a new user message appears after the assistant.
+    def test_no_exit_when_assistant_belongs_to_previous_user(self):
+        """Should NOT exit when a new user message follows the assistant.
 
-        This is the core inject scenario: the injected user message has a
-        higher ID than the last assistant message, so the loop should continue.
+        This is the core inject scenario: the last assistant belongs to the
+        preceding user turn, so the loop should continue regardless of IDs.
         """
-        last_user = self._make_msg("msg_003", "user")  # injected message
+        last_user = self._make_msg("msg_001", "user")
         last_assistant = self._make_msg("msg_002", "assistant", finish="stop")
+        last_assistant.parentID = "msg_previous_user"
 
-        # user.id > assistant.id → user.id < assistant.id → False → don't exit
         assert SessionLoop._should_exit(last_user, last_assistant) is False
 
     def test_no_exit_when_assistant_has_tool_calls(self):
@@ -354,6 +355,7 @@ class TestTurnLifecycle:
         msg.id = msg_id
         msg.role = role
         msg.finish = finish
+        msg.parentID = None
         msg.tokens = tokens
         msg.summary = summary
         return msg
@@ -894,6 +896,7 @@ class TestTurnLifecycle:
             self._make_msg("msg_001", "user"),
             self._make_msg("msg_002", "assistant", finish="stop"),
         ]
+        messages[1].parentID = messages[0].id
         ctx.session_ctx = SimpleNamespace(
             get_messages=AsyncMock(return_value=messages)
         )
@@ -920,6 +923,65 @@ class TestTurnLifecycle:
         assert any(call.args and call.args[0] == "loop.exit_condition" for call in log_info.call_args_list)
         event_names = [call.args[0] for call in event_callback.await_args_list]
         assert event_names == ["turn.started"]
+
+    @pytest.mark.asyncio
+    async def test_run_loop_processes_new_user_when_ids_are_not_monotonic(
+        self,
+    ) -> None:
+        session = SimpleNamespace(
+            id="loop_non_monotonic_id_session",
+            agent="rex",
+            directory="/tmp",
+            memory_enabled=False,
+        )
+        ctx = LoopContext(
+            session=session,
+            provider_id="test-provider",
+            model_id="test-model",
+            agent_name="rex",
+        )
+        previous_user = self._make_msg("msg_previous_user", "user")
+        previous_assistant = self._make_msg(
+            "msg_ffedcf5c6001TWU0fGZXuDeY00", "assistant", finish="stop"
+        )
+        previous_assistant.parentID = previous_user.id
+        current_user = self._make_msg(
+            "msg_ffed09fd1001S0plX81SJ55NUz",
+            "user",
+        )
+        current_assistant = self._make_msg(
+            "msg_current_assistant", "assistant", finish="stop"
+        )
+        current_assistant.parentID = current_user.id
+        messages_before_step = [previous_user, previous_assistant, current_user]
+        messages_after_step = [*messages_before_step, current_assistant]
+        ctx.session_ctx = SimpleNamespace(
+            get_messages=AsyncMock(
+                side_effect=[messages_before_step, messages_after_step]
+            )
+        )
+        process_step = AsyncMock(return_value=StepResult(action="stop"))
+
+        with patch(
+            "flocks.session.session_loop.Message.parts",
+            AsyncMock(return_value=[]),
+        ), patch(
+            "flocks.session.session_loop.Provider.resolve_model_info",
+            return_value=(0, 0, None),
+        ), patch(
+            "flocks.session.lifecycle.title.SessionTitle.ensure_title",
+            MagicMock(return_value=None),
+        ), patch(
+            "flocks.session.session_loop.fire_and_forget",
+            MagicMock(),
+        ), patch(
+            "flocks.session.runner.SessionRunner._process_step",
+            process_step,
+        ):
+            result = await SessionLoop._run_loop(ctx, LoopCallbacks())
+
+        assert result.last_message is current_assistant
+        process_step.assert_awaited_once()
 
 
 class TestExecuteSubtask:
