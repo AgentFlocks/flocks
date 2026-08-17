@@ -74,11 +74,17 @@ async def list_session_callable_tool_infos(
     session_id: str,
     declared_tool_names: Optional[Iterable[str]] = None,
     *,
+    strict_declared_tools: bool = False,
     step: int = 0,
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None,
 ) -> CallableSchemaResult:
     callable_tool_names = await get_session_callable_tools(session_id)
-    always_load_names = get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
+    declared_names = set(declared_tool_names or [])
+    always_load_names = (
+        set()
+        if strict_declared_tools
+        else get_always_load_tool_names() | await _resolve_dynamic_always_load_tool_names()
+    )
 
     if not callable_tool_names:
         base_tools = list(declared_tool_names) if declared_tool_names is not None else []
@@ -89,6 +95,8 @@ async def list_session_callable_tool_infos(
         )
 
     effective_callable_names = set(callable_tool_names) | always_load_names
+    if strict_declared_tools:
+        effective_callable_names &= declared_names
     tool_infos, enabled_count = resolve_callable_tool_infos(effective_callable_names)
 
     metadata = {
@@ -97,6 +105,7 @@ async def list_session_callable_tool_infos(
         "alwaysLoadToolCount": len(always_load_names),
         "callableToolNames": sorted(callable_tool_names),
         "alwaysLoadToolNames": sorted(always_load_names),
+        "strictDeclaredTools": strict_declared_tools,
     }
 
     if event_publish_callback:

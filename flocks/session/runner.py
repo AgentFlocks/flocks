@@ -582,6 +582,9 @@ class SessionRunner:
         result = await list_session_callable_tool_infos(
             session_id=self.session.id,
             declared_tool_names=getattr(agent, "tools", None),
+            strict_declared_tools=bool(
+                (getattr(agent, "options", None) or {}).get("strict_tools")
+            ),
             step=self._step,
             event_publish_callback=self.callbacks.event_publish_callback,
         )
@@ -2338,7 +2341,9 @@ class SessionRunner:
         if tool is None:
             return False
         metadata = get_tool_catalog_metadata(tool_name, tool.info)
-        return agent_declares_tool(agent, tool_name) or metadata.always_load
+        declared = agent_declares_tool(agent, tool_name)
+        strict_tools = bool((getattr(agent, "options", None) or {}).get("strict_tools"))
+        return declared or (metadata.always_load and not strict_tools)
     
     def _exception_to_error_dict(self, exception: Exception) -> Dict[str, Any]:
         """

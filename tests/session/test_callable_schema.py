@@ -117,6 +117,32 @@ async def test_callable_schema_does_not_expand_empty_declared_tools_to_all_enabl
 
 
 @pytest.mark.asyncio
+async def test_callable_schema_strict_mode_exposes_only_declared_tools(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tools = [
+        _tool("report_read", ToolCategory.CUSTOM, native=False),
+        _tool("question", ToolCategory.SYSTEM),
+        _tool("tool_search", ToolCategory.SYSTEM),
+    ]
+    monkeypatch.setattr("flocks.session.callable_schema.ToolRegistry.list_tools", lambda: tools)
+    monkeypatch.setattr(
+        "flocks.session.callable_schema.get_session_callable_tools",
+        AsyncMock(return_value={"report_read", "question", "tool_search"}),
+    )
+
+    result = await list_session_callable_tool_infos(
+        session_id="session-strict-tools",
+        declared_tool_names=["report_read"],
+        strict_declared_tools=True,
+    )
+
+    assert [tool.name for tool in result.tool_infos] == ["report_read"]
+    assert result.metadata["alwaysLoadToolNames"] == []
+    assert result.metadata["strictDeclaredTools"] is True
+
+
+@pytest.mark.asyncio
 async def test_callable_schema_keeps_user_plugin_tools_visible(monkeypatch: pytest.MonkeyPatch) -> None:
     tools = [
         _tool("read", ToolCategory.FILE),

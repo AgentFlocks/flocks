@@ -28,6 +28,9 @@ class AnthropicProvider(BaseProvider):
     _INTERLEAVED_THINKING_BETA = "interleaved-thinking-2025-05-14"
     _FINE_GRAINED_TOOL_STREAMING_BETA = "fine-grained-tool-streaming-2025-05-14"
     _THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+    _SCHEMA_NAMED_MAP_KEYS = frozenset(
+        {"properties", "patternProperties", "$defs", "definitions"}
+    )
 
     def __init__(self):
         super().__init__(provider_id="anthropic", name="Anthropic")
@@ -86,6 +89,27 @@ class AnthropicProvider(BaseProvider):
         """
         return list(getattr(self, "_config_models", []))
     
+    @classmethod
+    def _strip_tool_schema_defaults(cls, value: Any) -> Any:
+        """Remove unsupported default annotations without mutating tool schemas."""
+        if isinstance(value, list):
+            return [cls._strip_tool_schema_defaults(item) for item in value]
+        if not isinstance(value, dict):
+            return value
+
+        cleaned: Dict[str, Any] = {}
+        for key, child in value.items():
+            if key == "default":
+                continue
+            if key in cls._SCHEMA_NAMED_MAP_KEYS and isinstance(child, dict):
+                cleaned[key] = {
+                    name: cls._strip_tool_schema_defaults(schema)
+                    for name, schema in child.items()
+                }
+            else:
+                cleaned[key] = cls._strip_tool_schema_defaults(child)
+        return cleaned
+
     def _convert_tools(self, tools: Optional[List[Dict[str, Any]]]) -> Optional[List[Dict[str, Any]]]:
         """Convert OpenAI-style tools to Anthropic format."""
         if not tools:
@@ -98,7 +122,9 @@ class AnthropicProvider(BaseProvider):
                 anthropic_tool = {
                     "name": func.get("name"),
                     "description": func.get("description", ""),
-                    "input_schema": func.get("parameters", {"type": "object", "properties": {}}),
+                    "input_schema": self._strip_tool_schema_defaults(
+                        func.get("parameters", {"type": "object", "properties": {}})
+                    ),
                 }
                 anthropic_tools.append(anthropic_tool)
         

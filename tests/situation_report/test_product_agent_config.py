@@ -27,6 +27,7 @@ async def test_product_agent_and_skill_have_only_phase_one_a1_capabilities():
 
     assert agent.hidden is True
     assert agent.delegatable is False
+    assert agent.options == {"strict_tools": True}
     assert set(agent.tools or []) == allowed
     assert set(declared["tools"]) == allowed
     assert agent.model.provider_id == "threatbook-cn-llm"

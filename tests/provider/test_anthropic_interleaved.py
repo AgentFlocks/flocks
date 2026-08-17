@@ -128,6 +128,33 @@ def test_anthropic_formatter_preserves_unsigned_thinking_for_deepseek_compatible
     assert all(block.get("signature") != "sig123" for block in formatted[0]["content"])
 
 
+def test_anthropic_tool_conversion_strips_schema_defaults_without_mutating_input():
+    provider = AnthropicProvider()
+    tools = [
+        {
+            "type": "function",
+            "function": {
+                "name": "page",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "offset": {"type": "integer", "default": 0},
+                        "default": {"type": "string", "default": "kept-property"},
+                    },
+                },
+            },
+        }
+    ]
+
+    converted = provider._convert_tools(tools)
+
+    assert converted is not None
+    properties = converted[0]["input_schema"]["properties"]
+    assert properties["offset"] == {"type": "integer"}
+    assert properties["default"] == {"type": "string"}
+    assert tools[0]["function"]["parameters"]["properties"]["offset"]["default"] == 0
+
+
 @pytest.mark.asyncio
 async def test_anthropic_chat_forwards_disabled_thinking_and_temperature_without_beta():
     provider = AnthropicProvider()
