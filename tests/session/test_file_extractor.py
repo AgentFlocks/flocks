@@ -151,14 +151,6 @@ class TestIsTextExtractableMime:
             "text/markdown",
             "text/csv",
             "text/xml",
-        ],
-    )
-    def test_text_prefix_is_extractable(self, mime):
-        assert is_text_extractable_mime(mime) is True
-
-    @pytest.mark.parametrize(
-        "mime",
-        [
             "application/json",
             "application/ld+json",
             "application/xml",
@@ -169,7 +161,7 @@ class TestIsTextExtractableMime:
             "application/x-shellscript",
         ],
     )
-    def test_special_application_mimes_are_extractable(self, mime):
+    def test_textual_mimes_are_extractable(self, mime):
         assert is_text_extractable_mime(mime) is True
 
     @pytest.mark.parametrize(

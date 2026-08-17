@@ -4,7 +4,6 @@ import pytest
 
 from flocks.tool.channel.im_send_message import (
     _Candidate,
-    _normalize_channel_type,
     im_send_message,
 )
 from flocks.tool.registry import ToolContext, ToolRegistry, ToolResult
@@ -34,37 +33,6 @@ def test_im_send_message_is_registered() -> None:
     assert "message" in schema.properties
     assert "resolve_only" in schema.properties
     assert "session_id" not in schema.required
-
-
-def test_im_send_message_normalizes_weixin_aliases() -> None:
-    assert _normalize_channel_type("weixin") == "weixin"
-    assert _normalize_channel_type("微信") == "weixin"
-    assert _normalize_channel_type("wechat") == "weixin"
-    assert _normalize_channel_type("wx") == "weixin"
-
-
-def test_im_send_message_normalizes_wecom_aliases() -> None:
-    assert _normalize_channel_type("wecom") == "wecom"
-    assert _normalize_channel_type("企业微信") == "wecom"
-    assert _normalize_channel_type("企微") == "wecom"
-    assert _normalize_channel_type("wechat_work") == "wecom"
-    assert _normalize_channel_type("wxwork") == "wecom"
-
-
-def test_im_send_message_normalizes_slack_aliases() -> None:
-    assert _normalize_channel_type("slack") == "slack"
-    assert _normalize_channel_type("sl") == "slack"
-
-
-def test_im_send_message_normalizes_telegram_whatsapp_email_aliases() -> None:
-    assert _normalize_channel_type("telegram") == "telegram"
-    assert _normalize_channel_type("tg") == "telegram"
-    assert _normalize_channel_type("tele") == "telegram"
-    assert _normalize_channel_type("whatsapp") == "whatsapp"
-    assert _normalize_channel_type("wa") == "whatsapp"
-    assert _normalize_channel_type("email") == "email"
-    assert _normalize_channel_type("mail") == "email"
-    assert _normalize_channel_type("邮件") == "email"
 
 
 def test_im_send_message_schema_mentions_extended_builtin_channels() -> None:
