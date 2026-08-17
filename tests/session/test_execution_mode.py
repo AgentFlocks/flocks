@@ -89,6 +89,7 @@ def test_plan_uses_read_only_permission_rules() -> None:
     assert is_tool_allowed(SessionExecutionMode.PLAN, "edit")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "write")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "unknown_plugin_tool")
+    assert is_tool_allowed(SessionExecutionMode.PLAN, "task")
     assert is_tool_allowed(SessionExecutionMode.PLAN, "delegate_task")
     assert not is_tool_allowed(SessionExecutionMode.PLAN, "run_slash_command")
 
@@ -101,13 +102,14 @@ def test_plan_uses_read_only_permission_rules() -> None:
     assert execution_mode_prompt("build") == ""
 
 
-def test_plan_delegation_only_allows_explore_and_librarian() -> None:
+@pytest.mark.parametrize("tool_name", ["task", "delegate_task"])
+def test_plan_delegation_only_allows_explore_and_librarian(tool_name) -> None:
     ctx = ToolContext(session_id="session-1", message_id="message-1")
 
     for subagent_type in ("explore", "librarian"):
         assert tool_call_denial_reason(
             SessionExecutionMode.PLAN,
-            "delegate_task",
+            tool_name,
             {"subagent_type": subagent_type},
             ctx,
         ) is None
@@ -119,7 +121,7 @@ def test_plan_delegation_only_allows_explore_and_librarian() -> None:
     ):
         reason = tool_call_denial_reason(
             SessionExecutionMode.PLAN,
-            "delegate_task",
+            tool_name,
             arguments,
             ctx,
         )
@@ -243,7 +245,7 @@ async def test_registry_scopes_plan_delegation_before_handler(monkeypatch) -> No
 
     tool = Tool(
         info=ToolInfo(
-            name="delegate_task",
+            name="task",
             description="Delegation test tool",
             category=ToolCategory.FILE,
         ),
@@ -256,7 +258,7 @@ async def test_registry_scopes_plan_delegation_before_handler(monkeypatch) -> No
     )
 
     explore = await ToolRegistry.execute(
-        "delegate_task",
+        "task",
         ctx=ToolContext(
             session_id="session-1",
             message_id="message-1",
@@ -404,11 +406,13 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
     runner._step = 1
     runner.callbacks = SimpleNamespace(event_publish_callback=None)
     agent = SimpleNamespace(
+        name="rex",
         tools=[
             "read",
             "bash",
             "write",
             "edit",
+            "task",
             "delegate_task",
             "run_slash_command",
         ]
@@ -420,6 +424,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
             SimpleNamespace(name="bash"),
             SimpleNamespace(name="write"),
             SimpleNamespace(name="edit"),
+            SimpleNamespace(name="task"),
             SimpleNamespace(name="delegate_task"),
             SimpleNamespace(name="run_slash_command"),
         ],
@@ -461,6 +466,7 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "bash",
         "write",
         "edit",
+        "task",
         "delegate_task",
         "plan_exit",
     ]
@@ -471,5 +477,6 @@ async def test_runner_filters_tools_with_message_mode(monkeypatch) -> None:
         "edit",
         "plan_exit",
         "read",
+        "task",
         "write",
     ]

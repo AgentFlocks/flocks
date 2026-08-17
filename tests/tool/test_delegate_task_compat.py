@@ -75,6 +75,7 @@ class TestDelegateTaskTolerance:
         permissions = create_session.await_args.kwargs["permission"]
         denied_permissions = {rule.permission for rule in permissions if rule.action == "deny"}
         assert "delegate_task" not in denied_permissions
+        assert "task" not in denied_permissions
 
     @pytest.mark.asyncio
     async def test_delegate_task_explicit_model_override_is_pinned(self):
@@ -114,9 +115,10 @@ class TestDelegateTaskTolerance:
         assert loop_run.await_args.kwargs["model_id"] == "claude-haiku-4-5"
 
     @pytest.mark.asyncio
-    async def test_delegate_task_rejects_removed_category_parameter(self):
+    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
+    async def test_delegate_tools_reject_removed_category_parameter(self, tool_name):
         result = await ToolRegistry.execute(
-            "delegate_task",
+            tool_name,
             ctx=_make_ctx(),
             category="quick",
             prompt="Summarize the diff",
@@ -126,9 +128,10 @@ class TestDelegateTaskTolerance:
         assert "unknown parameters: category" in (result.error or "")
 
     @pytest.mark.asyncio
-    async def test_delegate_task_accepts_deprecated_command_parameter(self):
+    @pytest.mark.parametrize("tool_name", ["delegate_task", "task"])
+    async def test_delegate_tools_accept_deprecated_command_parameter(self, tool_name):
         result = await ToolRegistry.execute(
-            "delegate_task",
+            tool_name,
             ctx=_make_ctx(),
             command="legacy-tracking-command",
             prompt="Summarize the diff",

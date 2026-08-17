@@ -1,4 +1,10 @@
-"""Backward-compatible alias for :mod:`flocks.tool.agent.delegate_task`."""
+"""Compatibility alias for delegate_task.
+
+The runtime keeps ``task`` as a registered tool name for workflow/backward
+compatibility, but all scheduling behavior lives in ``delegate_task``.
+Background subagent execution is disabled; run synchronously and emit
+multiple sibling tool calls in one assistant turn for parallel work.
+"""
 
 from __future__ import annotations
 
@@ -17,9 +23,10 @@ from flocks.tool.registry import (
 
 DESCRIPTION = """Compatibility alias for delegate_task.
 
-Use delegate_task directly for new prompts. Existing workflows may continue
-using task; it accepts the same single-subagent arguments and forwards them to
-delegate_task.
+Use delegate_task directly for new prompts. Workflows may continue using task;
+it accepts the same single-subagent shape and forwards it to delegate_task.
+Background subagent execution is disabled; run synchronously and emit multiple
+sibling tool calls in one assistant turn for parallel work.
 """
 
 
@@ -44,7 +51,7 @@ delegate_task.
         ToolParameter(
             name="subagent_type",
             type=ParameterType.STRING,
-            description=("Delegatable agent name. Required for new tasks; omit when continuing with session_id."),
+            description="Delegatable agent name. Required for new tasks; omit when continuing with session_id.",
             required=False,
         ),
         ToolParameter(
@@ -63,7 +70,7 @@ delegate_task.
         ToolParameter(
             name="command",
             type=ParameterType.STRING,
-            description="Deprecated command name retained for compatibility",
+            description="Deprecated command name retained for caller compatibility",
             required=False,
         ),
         ToolParameter(
@@ -85,7 +92,7 @@ async def task_tool(
     command: Optional[str] = None,
     model: Optional[str] = None,
 ) -> ToolResult:
-    """Forward a legacy ``task`` call to ``delegate_task``."""
+    """Forward legacy task calls to delegate_task."""
     return await delegate_task_tool(
         ctx=ctx,
         prompt=prompt,

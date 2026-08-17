@@ -223,7 +223,7 @@ async def test_auto_runner_uses_standard_retry_policy(
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -289,7 +289,7 @@ async def test_last_auto_candidate_uses_standard_retry_policy(
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -462,7 +462,7 @@ async def test_reasoning_only_empty_response_is_not_replayed(monkeypatch):
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))
@@ -604,7 +604,7 @@ async def test_real_stream_activity_prevents_retry_and_fallback(
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.get", lambda _provider_id: provider)
     monkeypatch.setattr("flocks.session.runtime.step_engine.Provider.apply_config", AsyncMock())
     monkeypatch.setattr(
-        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompt_blocks",
+        "flocks.session.runtime.step_engine.SessionPrompt.build_system_prompts",
         AsyncMock(return_value=[]),
     )
     monkeypatch.setattr(runner, "_build_callable_tool_schema", AsyncMock(return_value=[]))

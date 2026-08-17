@@ -28,7 +28,7 @@ PLAN_DENIED_TOOL_NAMES = frozenset(
         "run_slash_command",
     }
 )
-PLAN_DELEGATION_TOOL_NAMES = frozenset({"delegate_task"})
+PLAN_DELEGATION_TOOL_NAMES = frozenset({"delegate_task", "task"})
 PLAN_DELEGATABLE_AGENT_NAMES = frozenset({"explore", "librarian"})
 PLAN_PATH_SCOPED_TOOL_NAMES = frozenset({"apply_patch", "edit", "write"})
 
