@@ -30,6 +30,7 @@ def inject(
         available_tools=tools,
         available_skills=skills,
         available_workflows=workflows or [],
+        use_task_system=False,
     )
 
 
@@ -38,6 +39,7 @@ def build_dynamic_rex_prompt(
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
     available_workflows: Optional[List["AvailableWorkflow"]] = None,
+    use_task_system: bool = False,
 ) -> str:
     from flocks.agent.prompt_utils import (
         build_agent_selection_table,
@@ -56,8 +58,12 @@ def build_dynamic_rex_prompt(
     im_send_section = _build_im_send_pointer_section()
     anti_patterns = _build_rex_anti_patterns_section()
     command_guidance_section = _build_command_guidance_section()
-    task_management_section = _task_management_section()
-    todo_hook_note = "YOUR TODO CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TODO CONTINUATION])"
+    task_management_section = _task_management_section(use_task_system)
+    todo_hook_note = (
+        "YOUR TASK CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TASK CONTINUATION])"
+        if use_task_system
+        else "YOUR TODO CREATION WOULD BE TRACKED BY HOOK([SYSTEM REMINDER - TODO CONTINUATION])"
+    )
 
     template = """<Role>
 You are "Rex" - Powerful AI orchestrator for security operations.
@@ -137,7 +143,7 @@ Reuse `session_id` when follow-up work belongs to the same delegated thread. Do 
 - Match existing codebase patterns when editing.
 - Fix bugs minimally; do not refactor during a bugfix unless required.
 - Keep search bounded: stop when you have enough context, when results repeat, or when direct evidence already answers the question.
-- For independent parallel branches whose results are needed this turn, emit multiple foreground `delegate_task` tool calls in the same assistant turn. The runtime executes those sibling tool calls concurrently and returns all tool results before you continue.
+- For independent parallel branches whose results are needed this turn, emit multiple foreground `delegate_task` / `task` tool calls in the same assistant turn. The runtime executes those sibling tool calls concurrently and returns all tool results before you continue.
 - Do not use `run_in_background=true`; background subagent execution is disabled.
 
 ## 5. Verify
@@ -272,42 +278,55 @@ Should I proceed with [recommendation], or would you prefer differently?
 ```"""
 
 
-def _task_management_section() -> str:
+def _task_management_section(use_task_system: bool) -> str:
+    title = "Task Management" if use_task_system else "Todo Management"
+    unit = "tasks" if use_task_system else "todos"
+    create_action = "`TaskCreate`" if use_task_system else '`todo(action="write")`'
+    progress_action = (
+        '`TaskUpdate(status="in_progress")`'
+        if use_task_system
+        else "mark `in_progress`"
+    )
+    complete_action = (
+        '`TaskUpdate(status="completed")`'
+        if use_task_system
+        else "mark `completed`"
+    )
     clarification_protocol = _build_clarification_protocol()
 
-    return f"""<Todo_Management>
-## Todo Management
+    return f"""<Task_Management>
+## {title}
 
-Use todos as the primary coordination mechanism for non-trivial execution work.
+Use {unit} as the primary coordination mechanism for non-trivial execution work.
 
 ### When They Are Mandatory
 
 | Trigger | Action |
 |---------|--------|
-| Multi-step work (2+ steps) | Create todos first |
-| Uncertain scope | Create todos to structure the work |
-| User request with multiple items | Create todos first |
-| Complex single task | Break it into todos |
+| Multi-step work (2+ steps) | Create {unit} first |
+| Uncertain scope | Create {unit} to structure the work |
+| User request with multiple items | Create {unit} first |
+| Complex single task | Break it into {unit} |
 
 ### Operating Rules
 
-1. Start with `todo(action="write")` before implementation work begins.
-2. ONLY add todos when the user wants execution, not when they only want analysis or planning.
-3. Before each step, mark it `in_progress`. Keep only one item in progress.
-4. After each step, mark it `completed` immediately. Never batch updates.
-5. If scope changes, update the todos before continuing.
+1. Start with {create_action} before implementation work begins.
+2. ONLY add {unit} when the user wants execution, not when they only want analysis or planning.
+3. Before each step, {progress_action}. Keep only one item in progress.
+4. After each step, {complete_action} immediately. Never batch updates.
+5. If scope changes, update the {unit} before continuing.
 
 ### Failure Modes
 
 | Violation | Why It Breaks the Workflow |
 |-----------|----------------------------|
-| Skipping todos on non-trivial work | The user loses progress visibility and steps get dropped |
-| Batch-completing multiple todos | Real-time tracking becomes meaningless |
+| Skipping {unit} on non-trivial work | The user loses progress visibility and steps get dropped |
+| Batch-completing multiple {unit} | Real-time tracking becomes meaningless |
 | Proceeding without an in-progress item | It is unclear what is being worked on |
 | Finishing without closing items | The work appears incomplete |
 
 {clarification_protocol}
-</Todo_Management>"""
+</Task_Management>"""
 
 
 def _build_security_priority_section(available_agents: List["AvailableAgent"]) -> str:

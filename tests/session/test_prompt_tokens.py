@@ -26,7 +26,6 @@ from flocks.session.prompt import (
     PromptTemplate,
     SessionPrompt,
     SystemPrompt,
-    TurnPromptContext,
 )
 from flocks.session import prompt_strings
 
@@ -266,9 +265,7 @@ class TestBuildSystemPrompts:
                 agent_prompt="You are Rex Junior.",
                 provider_id="anthropic",
                 model_id="claude-sonnet",
-                turn_context=TurnPromptContext(
-                    tool_catalog="SHOULD_NOT_APPEAR",
-                ),
+                tool_catalog_prompt_factory=lambda: "SHOULD_NOT_APPEAR",
             )
 
         assert len(prompts) == 3
@@ -307,38 +304,6 @@ class TestBuildSystemPrompts:
 
         assert len(prompts) > 2
         assert any(PROMPT_DEFAULT.strip() in prompt for prompt in prompts)
-
-    @pytest.mark.asyncio
-    async def test_full_prompt_loads_worktree_and_config_instructions(
-        self,
-        tmp_path: Path,
-    ) -> None:
-        nested = tmp_path / "src" / "package"
-        nested.mkdir(parents=True)
-        (tmp_path / "AGENTS.md").write_text("project rules", encoding="utf-8")
-        (nested / "extra-rules.md").write_text("extra rules", encoding="utf-8")
-
-        with patch.object(
-            SessionPrompt,
-            "_is_builtin_system_subagent_session",
-            AsyncMock(return_value=False),
-        ):
-            prompts = await SessionPrompt.build_system_prompts(
-                session_id="ses-instructions",
-                session_directory=str(nested),
-                agent_name="rex",
-                agent_prompt="agent prompt",
-                provider_id="openai",
-                model_id="gpt-5",
-                turn_context=TurnPromptContext(
-                    worktree=str(tmp_path),
-                    config_instructions=("extra-rules.md",),
-                ),
-            )
-
-        combined = "\n\n".join(prompts)
-        assert "project rules" in combined
-        assert "extra rules" in combined
 
     @pytest.mark.asyncio
     async def test_evolution_subagent_child_uses_full_prompt(self):

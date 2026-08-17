@@ -81,7 +81,7 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
         del self, agent
         return ()
 
-    async def fake_build_system_prompt_blocks(*args, **kwargs):  # noqa: ANN002, ANN003
+    async def fake_build_system_prompts(*args, **kwargs):  # noqa: ANN002, ANN003
         del args, kwargs
         return []
 
@@ -100,11 +100,7 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
     monkeypatch.setattr(Provider, "apply_config", fake_apply_config)
     monkeypatch.setattr(Agent, "get", fake_agent_get)
     monkeypatch.setattr(StepEngine, "_get_prompt_tool_names", fake_get_prompt_tool_names)
-    monkeypatch.setattr(
-        SessionPrompt,
-        "build_system_prompt_blocks",
-        fake_build_system_prompt_blocks,
-    )
+    monkeypatch.setattr(SessionPrompt, "build_system_prompts", fake_build_system_prompts)
     monkeypatch.setattr(StepEngine, "_build_callable_tool_schema", fake_build_callable_tool_schema)
     monkeypatch.setattr(StepEngine, "_to_chat_messages", fake_to_chat_messages)
     monkeypatch.setattr(StepEngine, "_call_llm", fake_call_llm)
@@ -117,4 +113,3 @@ async def test_runner_does_not_disable_tools_after_tool_only_assistant_message(m
 
     # Critical assertion: tools must remain available (not cleared to []).
     assert captured["tools"] == sentinel_tools
-

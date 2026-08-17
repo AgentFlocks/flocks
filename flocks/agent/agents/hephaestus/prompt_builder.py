@@ -29,6 +29,7 @@ def inject(
         available_agents=available_agents,
         available_tools=tools,
         available_skills=skills,
+        use_task_system=False,
     )
 
 
@@ -36,6 +37,7 @@ def build_hephaestus_prompt(
     available_agents: List["AvailableAgent"],
     available_tools: List["AvailableTool"],
     available_skills: List["AvailableSkill"],
+    use_task_system: bool = False,
 ) -> str:
     from flocks.agent.prompt_utils import (
         build_agent_selection_table,
@@ -60,7 +62,7 @@ def build_hephaestus_prompt(
     oracle_section = build_oracle_section(available_agents)
     hard_blocks = build_hard_blocks_section()
     anti_patterns = build_anti_patterns_section()
-    todo_discipline = _todo_discipline_section()
+    todo_discipline = _todo_discipline_section(use_task_system)
 
     template = """You are Hephaestus, an autonomous deep worker for software engineering.
 
@@ -243,7 +245,44 @@ Before final response:
     return prompt
 
 
-def _todo_discipline_section() -> str:
+def _todo_discipline_section(use_task_system: bool) -> str:
+    if use_task_system:
+        return """## Task Discipline (NON-NEGOTIABLE)
+
+**Track ALL multi-step work with tasks. This is your execution backbone.**
+
+### When to Create Tasks (MANDATORY)
+
+| Trigger | Action |
+|---------|--------|
+| 2+ step task | `TaskCreate` FIRST, atomic breakdown |
+| Uncertain scope | `TaskCreate` to clarify thinking |
+| Complex single task | Break down into trackable steps |
+
+### Workflow (STRICT)
+
+1. **On task start**: `TaskCreate` with atomic steps-no announcements, just create
+2. **Before each step**: `TaskUpdate(status="in_progress")` (ONE at a time)
+3. **After each step**: `TaskUpdate(status="completed")` IMMEDIATELY (NEVER batch)
+4. **Scope changes**: Update tasks BEFORE proceeding
+
+### Why This Matters
+
+- **Execution anchor**: Tasks prevent drift from original request
+- **Recovery**: If interrupted, tasks enable seamless continuation
+- **Accountability**: Each task = explicit commitment to deliver
+
+### Anti-Patterns (BLOCKING)
+
+| Violation | Why It Fails |
+|-----------|--------------|
+| Skipping tasks on multi-step work | Steps get forgotten, user has no visibility |
+| Batch-completing multiple tasks | Defeats real-time tracking purpose |
+| Proceeding without `in_progress` | No indication of current work |
+| Finishing without completing tasks | Task appears incomplete |
+
+**NO TASKS ON MULTI-STEP WORK = INCOMPLETE WORK.**"""
+
     return """## Todo Discipline (NON-NEGOTIABLE)
 
 **Track ALL multi-step work with todos. This is your execution backbone.**
