@@ -1554,6 +1554,30 @@ async def test_to_chat_messages_invalidates_shared_cache_when_message_parts_chan
 
 
 @pytest.mark.asyncio
+async def test_to_chat_messages_only_projects_appended_history(monkeypatch):
+    runner = StepEngine(
+        session=_make_session("ses_incremental_chat_projection"),
+        static_cache={},
+    )
+    first = SimpleNamespace(id="msg_first", role="user", content="first")
+    second = SimpleNamespace(id="msg_second", role="assistant", content="second")
+    parts = AsyncMock(return_value=[])
+    text_content = AsyncMock(
+        side_effect=lambda message: message.content,
+    )
+    monkeypatch.setattr(runner_mod.Message, "parts", parts)
+    monkeypatch.setattr(runner_mod.Message, "get_text_content", text_content)
+
+    first_projection = await runner._to_chat_messages([first], [])
+    parts.reset_mock()
+    second_projection = await runner._to_chat_messages([first, second], [])
+
+    assert [call.args[0] for call in parts.await_args_list] == [second.id]
+    assert first_projection[0] is second_projection[0]
+    assert [message.content for message in second_projection] == ["first", "second"]
+
+
+@pytest.mark.asyncio
 async def test_to_chat_messages_excludes_ignored_assistant_text():
     session = await Session.create(
         project_id="test_runner_ignored_command_output",

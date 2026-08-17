@@ -12,7 +12,7 @@ import copy
 from dataclasses import dataclass, field
 from enum import Enum
 from types import MappingProxyType
-from typing import Any, Generic, Mapping, Optional, TypeVar
+from typing import Any, Generic, Mapping, Optional, TypeVar, cast
 
 
 MessageT = TypeVar("MessageT")
@@ -51,12 +51,25 @@ def _thaw(value: Any) -> Any:
     return copy.copy(value)
 
 
-def _clone_provider_message(value: ProviderMessageT) -> ProviderMessageT:
+def _freeze_provider_message(value: ProviderMessageT) -> ProviderMessageT:
+    """Freeze container payloads while retaining owned model messages.
+
+    ``ModelRequest`` owns provider model objects such as ``ChatMessage`` for
+    the lifetime of one logical attempt. Provider adapters treat those
+    objects as read-only, so copying every model object (and its nested
+    content) on request construction would only duplicate the full context.
+    Plain container payloads keep the original isolation contract.
+    """
     if isinstance(value, (Mapping, list, tuple)):
-        return _thaw(_freeze(value))
-    if hasattr(value, "model_copy"):
-        return value.model_copy(deep=True)
-    return copy.copy(value)
+        return cast(ProviderMessageT, _freeze(value))
+    return value
+
+
+def _provider_message_view(value: ProviderMessageT) -> ProviderMessageT:
+    """Return a provider view without cloning owned model messages."""
+    if isinstance(value, (Mapping, list, tuple)):
+        return cast(ProviderMessageT, _thaw(value))
+    return value
 
 
 @dataclass(frozen=True)
@@ -82,7 +95,7 @@ class ModelRequest(Generic[ProviderMessageT]):
         object.__setattr__(
             self,
             "messages",
-            tuple(_clone_provider_message(message) for message in self.messages),
+            tuple(_freeze_provider_message(message) for message in self.messages),
         )
         object.__setattr__(
             self,
@@ -93,8 +106,8 @@ class ModelRequest(Generic[ProviderMessageT]):
         object.__setattr__(self, "metadata", _freeze(self.metadata))
 
     def provider_messages(self) -> list[ProviderMessageT]:
-        """Return an isolated mutable copy for one provider invocation."""
-        return [_clone_provider_message(message) for message in self.messages]
+        """Return a fresh list containing read-only request messages."""
+        return [_provider_message_view(message) for message in self.messages]
 
     def provider_tools(self) -> list[dict[str, Any]]:
         """Return an isolated mutable tool-schema payload."""
@@ -102,7 +115,19 @@ class ModelRequest(Generic[ProviderMessageT]):
 
     def provider_options(self) -> dict[str, Any]:
         """Return isolated provider options for one invocation."""
-        return _thaw(self.options)
+        return cast(dict[str, Any], _thaw(self.options))
+
+
+@dataclass
+class ActiveModelAttempt(Generic[ProviderMessageT]):
+    """Single request and hook state retained across bounded model retries."""
+
+    message_id: str
+    request: ModelRequest[ProviderMessageT]
+    hook_metadata: dict[str, Any]
+    llm_after_enabled: bool
+    outputs: list[dict[str, Any]] = field(default_factory=list)
+    hooks_initialized: bool = False
 
 
 @dataclass

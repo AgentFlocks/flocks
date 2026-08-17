@@ -16,6 +16,7 @@ import httpcore
 import httpx
 
 from flocks.session.runtime.contracts import (
+    ActiveModelAttempt,
     AttemptEffects,
     FailoverDecision,
     ModelRequest,
@@ -269,20 +270,14 @@ class StepEngine:
         self._session_start_pending = session_start_pending
         self._session_start_fired = False
         self._attempt_state = AttemptEffects()
-        self._hooked_model_requests: Dict[
-            str,
-            Tuple[ModelRequest[ChatMessage], bool],
-        ] = {}
-        self._pending_llm_after: Dict[
-            str,
-            Tuple[Dict[str, Any], List[Dict[str, Any]]],
-        ] = {}
-        self._active_model_request: Optional[ModelRequest[ChatMessage]] = None
+        self._active_model_attempt: Optional[
+            ActiveModelAttempt[ChatMessage]
+        ] = None
         self._llm_retry_scope_active = False
         self._turn: Optional[Any] = None
         self._model_policy: ModelRoutingPolicy = DEFAULT_MODEL_ROUTING_POLICY
         self._step_agent: Optional[AgentInfo] = None
-        self._frozen_tool_request: Optional[ModelRequest[ChatMessage]] = None
+        self._frozen_tools: Optional[List[Dict[str, Any]]] = None
 
     @classmethod
     def from_turn(
@@ -323,7 +318,7 @@ class StepEngine:
         """Execute a replay-safe snapshot across the active model chain."""
         turn = self._require_turn()
         self._step_agent = None
-        self._frozen_tool_request = None
+        self._frozen_tools = None
         while True:
             if turn.aborted:
                 raise StepCancelled
@@ -415,9 +410,7 @@ class StepEngine:
 
     def _clear_model_request_state(self) -> None:
         """Release request snapshots owned by the completed candidate."""
-        self._hooked_model_requests.clear()
-        self._pending_llm_after.clear()
-        self._active_model_request = None
+        self._active_model_attempt = None
         self._llm_retry_scope_active = False
 
     def _record_chain_exhaustion(
@@ -1398,9 +1391,8 @@ class StepEngine:
 
         # Build prompts and tools
         tools_started_at = time.perf_counter()
-        frozen_tool_request = self._frozen_tool_request
-        if isinstance(frozen_tool_request, ModelRequest):
-            tools = frozen_tool_request.provider_tools()
+        if self._frozen_tools is not None:
+            tools = copy.deepcopy(self._frozen_tools)
         else:
             tools = await self._build_callable_tool_schema(agent, messages)
         self._log_perf("runner.process_step.tools_ready", tools_started_at, tool_count=len(tools))
@@ -1568,9 +1560,8 @@ class StepEngine:
             tools=tools,
             agent=agent,
         )
-        if self._turn is not None and self._frozen_tool_request is None:
-            self._frozen_tool_request = request
-        self._active_model_request = request
+        if self._turn is not None and self._frozen_tools is None:
+            self._frozen_tools = request.provider_tools()
 
         # Create the persisted assistant attempt after the request is frozen.
         assistant_msg = await Message.create(
@@ -1581,6 +1572,12 @@ class StepEngine:
             model_id=self.model_id,
             provider_id=self.provider_id,
             parent_id=last_user.id,
+        )
+        self._active_model_attempt = ActiveModelAttempt(
+            message_id=assistant_msg.id,
+            request=request,
+            hook_metadata={},
+            llm_after_enabled=False,
         )
         # Publish assistant message SSE event so frontends can show the message card
         if self.callbacks.event_publish_callback:
@@ -2431,12 +2428,11 @@ class StepEngine:
     def _message_conversion_cache_key(
         self,
         msg: MessageInfo,
-        parts: List[Any],
         *,
+        has_file_part: bool,
         is_latest_user_turn: bool,
     ) -> Tuple[Any, ...]:
         role = msg.role if isinstance(msg.role, str) else getattr(msg.role, "value", None)
-        has_file_part = any(getattr(part, "type", None) == "file" for part in parts)
         latest_user_marker = msg.id if (role == "user" and has_file_part and is_latest_user_turn) else (
             "stale-file-user" if role == "user" and has_file_part else None
         )
@@ -2534,10 +2530,6 @@ class StepEngine:
             "text": wrapped_text,
         }
         return wrapped_blocks
-
-    @staticmethod
-    def _clone_cached_chat_messages(payloads: List[Dict[str, Any]]) -> List[ChatMessage]:
-        return [ChatMessage.model_validate(copy.deepcopy(payload)) for payload in payloads]
 
     def _build_tool_output_text(self, part: Any, tool_name: str, ctx_window_tokens: int) -> Tuple[str, bool, bool]:
         state = getattr(part, "state", None)
@@ -2646,18 +2638,8 @@ class StepEngine:
             if _role == "user":
                 last_user_msg_id = _msg.id
 
-        preloaded_parts: List[List[Any]] = []
         message_signatures: List[Tuple[Any, ...]] = []
-        for msg in messages:
-            parts = await Message.parts(msg.id, self.session.id)
-            preloaded_parts.append(parts)
-            message_signatures.append(
-                self._message_conversion_cache_key(
-                    msg,
-                    parts,
-                    is_latest_user_turn=(msg.id == last_user_msg_id),
-                )
-            )
+        message_has_file_parts: List[bool] = []
 
         system_content = self._build_system_message_content(system_prompts) if system_prompts else None
         system_cache_key = json.dumps(system_content, ensure_ascii=False, sort_keys=True, default=str)
@@ -2666,15 +2648,36 @@ class StepEngine:
         resume_message_index = 0
         if cached_context and cached_context.get("system_cache_key") == system_cache_key:
             cached_signatures = list(cached_context.get("message_signatures") or [])
-            if len(cached_signatures) <= len(message_signatures):
+            cached_has_file_parts = list(
+                cached_context.get("message_has_file_parts") or [],
+            )
+            cached_chat_messages = cached_context.get("chat_messages") or ()
+            cached_tool_result_refs = cached_context.get("tool_result_refs") or ()
+            cache_shape_valid = (
+                len(cached_signatures) == len(cached_has_file_parts)
+                and len(cached_signatures) <= len(messages)
+                and all(
+                    isinstance(message, ChatMessage)
+                    for message in cached_chat_messages
+                )
+            )
+            if cache_shape_valid:
                 prefix_matches = True
                 for idx, cached_signature in enumerate(cached_signatures):
-                    if cached_signature != message_signatures[idx]:
+                    current_signature = self._message_conversion_cache_key(
+                        messages[idx],
+                        has_file_part=cached_has_file_parts[idx],
+                        is_latest_user_turn=(messages[idx].id == last_user_msg_id),
+                    )
+                    if cached_signature != current_signature:
                         prefix_matches = False
                         break
                 if prefix_matches:
-                    chat_messages = self._clone_cached_chat_messages(cached_context.get("chat_messages") or [])
+                    chat_messages = list(cached_chat_messages)
+                    tool_result_refs = list(cached_tool_result_refs)
                     resume_message_index = len(cached_signatures)
+                    message_signatures = cached_signatures
+                    message_has_file_parts = cached_has_file_parts
                     turn_index = sum(
                         1
                         for msg in messages[:resume_message_index]
@@ -2703,7 +2706,19 @@ class StepEngine:
                 turn_index += 1
             is_latest_user_turn = msg.id == last_user_msg_id
             # Get message parts
-            parts = preloaded_parts[idx]
+            parts = await Message.parts(msg.id, self.session.id)
+            has_file_part = any(
+                getattr(part, "type", None) == "file"
+                for part in parts
+            )
+            message_has_file_parts.append(has_file_part)
+            message_signatures.append(
+                self._message_conversion_cache_key(
+                    msg,
+                    has_file_part=has_file_part,
+                    is_latest_user_turn=is_latest_user_turn,
+                )
+            )
 
             if not parts:
                 # Fallback: use text content only
@@ -3029,10 +3044,9 @@ class StepEngine:
         context_cache["latest"] = {
             "system_cache_key": system_cache_key,
             "message_signatures": list(message_signatures),
-            "chat_messages": [
-                message.model_dump(exclude_none=True)
-                for message in chat_messages
-            ],
+            "message_has_file_parts": list(message_has_file_parts),
+            "chat_messages": tuple(chat_messages),
+            "tool_result_refs": tuple(tool_result_refs),
         }
         self._log_perf(
             "runner.to_chat_messages.complete",
@@ -3184,13 +3198,26 @@ class StepEngine:
         Uses StreamProcessor to handle events and execute tools synchronously.
         Ported from Flocks' SessionProcessor.process() behavior.
         """
-        request = getattr(self, "_active_model_request", None)
-        if not isinstance(request, ModelRequest):
+        active_attempt = self._active_model_attempt
+        if active_attempt is None:
             request = self._build_model_request(
                 messages=messages,
                 tools=tools,
                 agent=agent,
             )
+            active_attempt = ActiveModelAttempt(
+                message_id=assistant_msg.id,
+                request=request,
+                hook_metadata={},
+                llm_after_enabled=False,
+            )
+            self._active_model_attempt = active_attempt
+        elif active_attempt.message_id != assistant_msg.id:
+            raise RuntimeError(
+                "A different model attempt is already active",
+            )
+        else:
+            request = active_attempt.request
         def _build_llm_response_payload(
             *,
             content: str,
@@ -3222,8 +3249,7 @@ class StepEngine:
                 "modelID": request.model_id,
             },
         }
-        cached_request = self._hooked_model_requests.get(assistant_msg.id)
-        if cached_request is None:
+        if not active_attempt.hooks_initialized:
             llm_before_enabled = False
             llm_after_enabled = False
             try:
@@ -3255,13 +3281,12 @@ class StepEngine:
                     raise RuntimeError(
                         "LLM before-hook failed; request was not sent",
                     ) from exc
-            self._hooked_model_requests[assistant_msg.id] = (
-                request,
-                llm_after_enabled,
-            )
+            active_attempt.request = request
+            active_attempt.hook_metadata = dict(llm_hook_metadata)
+            active_attempt.llm_after_enabled = llm_after_enabled
+            active_attempt.hooks_initialized = True
         else:
-            request, llm_after_enabled = cached_request
-        self._active_model_request = request
+            request = active_attempt.request
         messages = request.provider_messages()
         tools = request.provider_tools()
         replacements = [
@@ -3677,8 +3702,6 @@ class StepEngine:
             )
             await self._record_llm_after_attempt(
                 message_id=assistant_msg.id,
-                metadata=llm_hook_metadata,
-                enabled=llm_after_enabled,
                 output={
                     "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
                     "error": {
@@ -3795,8 +3818,6 @@ class StepEngine:
         )
         await self._record_llm_after_attempt(
             message_id=assistant_msg.id,
-            metadata=llm_hook_metadata,
-            enabled=llm_after_enabled,
             output={
                 "durationMs": int((time.perf_counter() - llm_call_started_at) * 1000),
                 "finishReason": processor.get_finish_reason(),
@@ -3864,36 +3885,30 @@ class StepEngine:
         self,
         *,
         message_id: str,
-        metadata: Dict[str, Any],
-        enabled: bool,
         output: Dict[str, Any],
     ) -> None:
         """Record one provider attempt and close direct calls immediately."""
-        if not enabled:
-            return
-        pending = self._pending_llm_after.get(message_id)
-        if pending is None:
-            attempts: List[Dict[str, Any]] = []
-            self._pending_llm_after[message_id] = (metadata, attempts)
-        else:
-            _, attempts = pending
-        attempts.append(output)
-        if not self._llm_retry_scope_active:
-            await self._emit_pending_llm_after(message_id)
+        active_attempt = self._active_model_attempt
+        if active_attempt is None or active_attempt.message_id != message_id:
+            raise RuntimeError(
+                "LLM output does not match the active model attempt",
+            )
+        if active_attempt.llm_after_enabled:
+            active_attempt.outputs.append(output)
+            if not self._llm_retry_scope_active:
+                await self._emit_pending_llm_after(message_id)
 
     async def _emit_pending_llm_after(self, message_id: str) -> None:
         """Emit one terminal after-hook for a logical model request."""
         self._llm_retry_scope_active = False
-        cached = self._hooked_model_requests.pop(message_id, None)
-        if (
-            cached is not None
-            and self._active_model_request is cached[0]
-        ):
-            self._active_model_request = None
-        pending = self._pending_llm_after.pop(message_id, None)
-        if pending is None:
+        active_attempt = self._active_model_attempt
+        if active_attempt is None or active_attempt.message_id != message_id:
             return
-        metadata, attempts = pending
+        self._active_model_attempt = None
+        if not active_attempt.llm_after_enabled:
+            return
+        metadata = active_attempt.hook_metadata
+        attempts = active_attempt.outputs
         if not attempts:
             return
         output = dict(attempts[-1])

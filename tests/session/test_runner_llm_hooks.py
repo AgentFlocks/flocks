@@ -11,7 +11,7 @@ import pytest
 import flocks.session.runtime.step_engine as runner_mod
 from flocks.hooks.pipeline import HookBase, HookPipeline
 from flocks.provider.provider import ChatMessage
-from flocks.session.runtime.contracts import ModelRequest
+from flocks.session.runtime.contracts import ActiveModelAttempt, ModelRequest
 from flocks.session.streaming.stream_processor import StreamProcessor
 from flocks.session.runtime.step_engine import StepEngine
 from flocks.session.session import SessionInfo
@@ -566,16 +566,25 @@ async def test_llm_after_aggregates_same_model_retry(
     run_after = AsyncMock()
     monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", run_after)
     metadata = {"messageID": "msg_assistant_hook_retry_pair"}
+    request = ModelRequest(
+        provider_id="anthropic",
+        model_id="claude-sonnet",
+        messages=(ChatMessage(role="user", content="retry request"),),
+        tools=(),
+        options={},
+    )
+    runner._active_model_attempt = ActiveModelAttempt(
+        message_id=metadata["messageID"],
+        request=request,
+        hook_metadata=metadata,
+        llm_after_enabled=True,
+    )
     await runner._record_llm_after_attempt(
         message_id=metadata["messageID"],
-        metadata=metadata,
-        enabled=True,
         output={"error": {"message": "first attempt failed"}},
     )
     await runner._record_llm_after_attempt(
         message_id=metadata["messageID"],
-        metadata=metadata,
-        enabled=True,
         output={"action": "stop"},
     )
     run_after.assert_not_awaited()
@@ -600,13 +609,16 @@ async def test_terminal_llm_after_releases_frozen_request() -> None:
         tools=(),
         options={},
     )
-    runner._hooked_model_requests[message_id] = (request, False)
-    runner._active_model_request = request
+    runner._active_model_attempt = ActiveModelAttempt(
+        message_id=message_id,
+        request=request,
+        hook_metadata={"messageID": message_id},
+        llm_after_enabled=False,
+    )
 
     await runner._emit_pending_llm_after(message_id)
 
-    assert runner._hooked_model_requests == {}
-    assert runner._active_model_request is None
+    assert runner._active_model_attempt is None
 
 
 @pytest.mark.asyncio
