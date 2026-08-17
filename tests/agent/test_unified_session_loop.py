@@ -241,6 +241,9 @@ class TestResolveModel:
         from types import SimpleNamespace
 
         from flocks.server.routes import session as session_routes
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
         from flocks.session.session_loop import LoopResult, SessionLoop
 
         request = session_routes.PromptRequest(
@@ -296,7 +299,7 @@ class TestResolveModel:
             AsyncMock(return_value=SimpleNamespace()),
         )
         monkeypatch.setattr(
-            SessionLoop,
+            DEFAULT_MODEL_ROUTING_POLICY,
             "validate_runtime_model",
             AsyncMock(return_value=(True, "available")),
         )
@@ -353,7 +356,9 @@ class TestResolveModel:
         from types import SimpleNamespace
 
         from flocks.server.routes import session as session_routes
-        from flocks.session.session_loop import SessionLoop
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
 
         request = session_routes.PromptRequest(
             parts=[{"type": "text", "text": "task input"}],
@@ -398,7 +403,11 @@ class TestResolveModel:
             "flocks.config.config.Config.get",
             AsyncMock(return_value=SimpleNamespace()),
         )
-        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            DEFAULT_MODEL_ROUTING_POLICY,
+            "validate_runtime_model",
+            validate,
+        )
         monkeypatch.setattr(
             "flocks.provider.provider.Provider._ensure_initialized",
             lambda: None,

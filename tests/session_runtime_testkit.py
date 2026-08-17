@@ -1,5 +1,7 @@
 """Test-only helpers for exercising SessionLoop logical-turn control."""
 
+from unittest.mock import AsyncMock, patch
+
 from flocks.session.session_loop import (
     LoopCallbacks,
     LoopContext,
@@ -12,18 +14,22 @@ async def run_logical_turns(
     turn: LoopContext,
     callbacks: LoopCallbacks,
 ) -> LoopResult:
-    """Run logical turns without acquiring a persisted session lease."""
+    """Run the production owned-loop path with an in-memory test lease."""
     turn.callbacks = callbacks
-    policy = turn.continuation_policy or SessionLoop._continuation_policy
-    while True:
+    lease = SessionLoop._leases.acquire(turn.session.id, turn)
+    if lease is None:
+        raise RuntimeError(f"Session {turn.session.id} already has a test lease")
+
+    with (
+        patch.object(
+            turn,
+            "has_late_input",
+            AsyncMock(return_value=False),
+        ),
+        patch.object(SessionLoop, "_publish_released", AsyncMock()),
+    ):
         try:
-            await policy.prepare_logical_turn(turn)
-            outcome = await SessionLoop._run_logical_input(turn)
-            if await SessionLoop._should_continue(turn, policy, outcome):
-                continue
-        except Exception as exc:
-            outcome = await SessionLoop._handle_execution_error(
-                turn,
-                exc,
-            )
-        return SessionLoop._to_loop_result(turn, outcome)
+            return await SessionLoop._run_owned_loop(lease, callbacks)
+        finally:
+            if SessionLoop._leases.owns(lease):
+                SessionLoop._finalize_release_state_locked(lease)

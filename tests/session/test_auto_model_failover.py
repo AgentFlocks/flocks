@@ -92,7 +92,7 @@ async def _build_model_candidates(
         route_seed=route_seed,
         preferred=preferred,
         config=config,
-        validate_model=SessionLoop.validate_runtime_model,
+        validate_model=DEFAULT_MODEL_ROUTING_POLICY.validate_runtime_model,
     )
 
 
@@ -1154,7 +1154,11 @@ async def test_candidate_builder_discovers_one_model_per_tier_with_stable_seed(
         available = provider_id != "missing"
         return available, "available" if available else "provider_not_configured"
 
-    monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+    monkeypatch.setattr(
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "validate_runtime_model",
+        validate,
+    )
     primary = RuntimeModel("primary", "primary-model")
 
     first = await _build_model_candidates(
@@ -1212,7 +1216,7 @@ async def test_candidate_builder_keeps_active_cooldown_model_in_its_tier(
         lambda: model_manager,
     )
     monkeypatch.setattr(
-        SessionLoop,
+        DEFAULT_MODEL_ROUTING_POLICY,
         "validate_runtime_model",
         AsyncMock(return_value=(True, "available")),
     )
@@ -1242,7 +1246,7 @@ async def test_auto_configuration_only_requires_available_primary(monkeypatch):
         ),
     )
     monkeypatch.setattr(
-        SessionLoop,
+        DEFAULT_MODEL_ROUTING_POLICY,
         "validate_runtime_model",
         AsyncMock(return_value=(True, "available")),
     )
@@ -1301,7 +1305,11 @@ async def test_candidate_builder_uses_configured_order_without_discovery(
         available = provider_id != "missing"
         return available, "available" if available else "provider_not_configured"
 
-    monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+    monkeypatch.setattr(
+        DEFAULT_MODEL_ROUTING_POLICY,
+        "validate_runtime_model",
+        validate,
+    )
     primary = RuntimeModel("primary", "primary-model")
 
     candidates = await _build_model_candidates(
@@ -1333,7 +1341,7 @@ async def test_configured_chain_with_no_available_fallbacks_keeps_primary_only(
         AsyncMock(),
     )
     monkeypatch.setattr(
-        SessionLoop,
+        DEFAULT_MODEL_ROUTING_POLICY,
         "validate_runtime_model",
         AsyncMock(return_value=(False, "provider_not_configured")),
     )

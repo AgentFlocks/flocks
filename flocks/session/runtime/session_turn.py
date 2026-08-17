@@ -4,14 +4,12 @@ Implements model-turn preparation with support for:
 - Message processing
 - Tool execution
 - Compaction
-- Reminders
 """
 
 import asyncio
 import time
 from typing import Optional, List, Dict, Any, Callable, Awaitable, Literal
 from dataclasses import dataclass, field
-from datetime import datetime
 
 from flocks.session.runtime.contracts import (
     ModelTurnBoundary,
@@ -93,7 +91,6 @@ class LoopCallbacks:
     ] = None
     on_compaction: Optional[Callable[[], Awaitable[None]]] = None
     on_error: Optional[Callable[[str], Awaitable[None]]] = None
-    on_reminder: Optional[Callable[[str], Awaitable[None]]] = None
     # SSE event publishing callback (for TUI/WebUI real-time updates)
     event_publish_callback: Optional[Callable[[str, Dict[str, Any]], Awaitable[None]]] = None
 
@@ -117,7 +114,6 @@ class LoopContext:
     Supports:
     - Logical user-turn and message iteration
     - Compaction triggers
-    - Reminder injection
     """
 
     session: SessionInfo
@@ -1032,54 +1028,3 @@ class LoopContext:
             last_assistant,
             last_assistant_parts,
         )
-
-    async def _check_reminders(
-        self,
-        messages: List[MessageInfo],
-    ) -> None:
-        """
-        Check and inject reminders (P1 feature)
-
-        Reminders are system messages injected periodically to:
-        - Remind agent of task goals
-        - Prevent drift from original intent
-        - Nudge towards completion
-        """
-        from flocks.session.features.reminders import SessionReminders, ReminderContext
-
-        # Calculate elapsed time
-        if messages:
-            first_msg = messages[0]
-            if hasattr(first_msg, "time") and hasattr(first_msg.time, "created"):
-                first_time = first_msg.time.created
-                current_time = int(datetime.now().timestamp() * 1000)
-                elapsed_ms = current_time - first_time
-            else:
-                elapsed_ms = 0
-        else:
-            elapsed_ms = 0
-
-        # Extract original task
-        original_task = await SessionReminders.extract_original_task(messages)
-
-        # Create reminder context
-        reminder_ctx = ReminderContext(
-            session_id=self.session.id,
-            step_count=self.step,
-            message_count=len(messages),
-            elapsed_ms=elapsed_ms,
-            original_task=original_task,
-        )
-
-        # Check if reminder should be injected
-        if SessionReminders.should_remind(self.session.id, reminder_ctx):
-            # Create and inject reminder
-            reminder_msg = await SessionReminders.create_reminder(
-                self.session.id,
-                reminder_ctx,
-            )
-
-            if reminder_msg and self.callbacks.on_reminder:
-                await self.callbacks.on_reminder(
-                    await Message.get_text_content(reminder_msg),
-                )

@@ -1,9 +1,9 @@
 """
 Session Reminders data models.
 
-Note: The SessionReminders business logic has been removed as it was dead code.
-The _check_reminders() method in session_loop.py is defined but never wired
-into _run_loop(). These data classes are kept for potential future use.
+The runtime reminder injection path has been removed because it was never
+wired into session execution. These exports remain as legacy import
+compatibility until that public surface is retired separately.
 """
 
 from dataclasses import dataclass
@@ -35,10 +35,8 @@ class ReminderContext:
     current_focus: Optional[str] = None
 
 
-# Minimal stub kept so session_loop._check_reminders() can still import these
-# without error, even though _check_reminders() itself is never called.
 class SessionReminders:
-    """Reminder manager stub — business logic removed (was dead code)."""
+    """Compatibility stub for the removed reminder runtime."""
 
     _last_reminder: dict = {}
     _last_step: dict = {}

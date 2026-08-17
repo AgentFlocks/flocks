@@ -64,63 +64,28 @@ def _make_completed_tool_part(message_id: str) -> ToolPart:
 class TestAbortPropagation:
     """Test that abort_event propagates from SessionLoop to StepEngine."""
 
-    def test_runner_accepts_external_abort_event(self):
-        """StepEngine should accept an optional external abort_event."""
-        external_event = asyncio.Event()
+    def test_runner_uses_supplied_abort_event(self):
+        """StepEngine should share the supplied turn abort event."""
+        abort_event = asyncio.Event()
         session_info = _make_session_info()
 
         runner = StepEngine(
             session=session_info,
-            abort_event=external_event,
+            abort_event=abort_event,
         )
 
-        # Initially not aborted
-        assert runner.is_aborted is False
-
-        # Set external event → runner should report aborted
-        external_event.set()
-        assert runner.is_aborted is True
-
-    def test_runner_internal_abort_still_works(self):
-        """StepEngine's own abort() method should still work."""
-        session_info = _make_session_info()
-        runner = StepEngine(session=session_info)
-
-        assert runner.is_aborted is False
-        runner.abort()
-        assert runner.is_aborted is True
-
-    def test_runner_either_abort_triggers(self):
-        """Either internal or external abort should trigger is_aborted."""
-        external_event = asyncio.Event()
-        session_info = _make_session_info()
-
-        runner = StepEngine(
-            session=session_info,
-            abort_event=external_event,
-        )
-
-        # Neither set → not aborted
-        assert runner.is_aborted is False
-
-        # Only external set
-        external_event.set()
-        assert runner.is_aborted is True
-
-        # Clear external, set internal
-        external_event.clear()
-        runner._abort.clear()
+        assert runner._abort is abort_event
         assert runner.is_aborted is False
 
         runner.abort()
+        assert abort_event.is_set()
         assert runner.is_aborted is True
 
-    def test_runner_without_external_event(self):
-        """Runner created without abort_event should still work normally."""
+    def test_runner_creates_abort_event_when_omitted(self):
+        """Standalone engines should create their own abort event."""
         session_info = _make_session_info()
         runner = StepEngine(session=session_info)
 
-        assert runner._external_abort is None
         assert runner.is_aborted is False
         runner.abort()
         assert runner.is_aborted is True
@@ -221,25 +186,6 @@ class TestSessionLoopAbort:
             assert SessionLoop.is_running("running_test") is True
         finally:
             SessionLoop._active_turns.pop("running_test", None)
-
-    def test_get_context(self):
-        """get_context should return the LoopContext for a running session."""
-        session_info = _make_session_info("ctx_get_test")
-        ctx = LoopContext(
-            session=session_info,
-            provider_id="test",
-            model_id="test",
-            agent_name="test",
-        )
-        SessionLoop._active_turns["ctx_get_test"] = ctx
-
-        try:
-            retrieved = SessionLoop.get_context("ctx_get_test")
-            assert retrieved is ctx
-            assert SessionLoop.get_context("nonexistent") is None
-        finally:
-            SessionLoop._active_turns.pop("ctx_get_test", None)
-
 
 # ---------------------------------------------------------------------------
 # _should_exit logic with injected messages

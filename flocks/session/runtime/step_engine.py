@@ -258,8 +258,7 @@ class StepEngine:
         self.model_id = model_id or fallback_model_id()
         self.agent_name = agent_name or "rex"
         self.callbacks = callbacks or LoopCallbacks()
-        self._abort = asyncio.Event()
-        self._external_abort = abort_event  # External abort event (e.g. from SessionLoop)
+        self._abort = abort_event or asyncio.Event()
         self._step = 0
         self._recent_tool_calls: List[tuple[str, str]] = []  # Track recent (tool_name, args_json) for doom loop
         self._memory_bootstrap_data: Optional[Dict[str, Any]] = memory_bootstrap_data
@@ -1172,12 +1171,8 @@ class StepEngine:
 
     @property
     def is_aborted(self) -> bool:
-        """Check if abort was signaled (internal or external)."""
-        if self._abort.is_set():
-            return True
-        if self._external_abort is not None and self._external_abort.is_set():
-            return True
-        return False
+        """Check if abort was signaled."""
+        return self._abort.is_set()
 
     @staticmethod
     def classify_failover_error(error: Dict[str, Any]) -> FailoverDecision:
@@ -3434,7 +3429,7 @@ class StepEngine:
             session_id=self.session.id,
             assistant_message=assistant_msg,
             agent=agent,
-            abort_event=self._external_abort or self._abort,
+            abort_event=self._abort,
             permission_callback=self._handle_permission,
             text_delta_callback=self.callbacks.on_text_delta,
             reasoning_delta_callback=self.callbacks.on_reasoning_delta,

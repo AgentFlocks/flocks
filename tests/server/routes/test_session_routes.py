@@ -2244,7 +2244,9 @@ class TestSessionMessagesRemaining:
         category: str,
     ):
         from flocks.server.routes import session as session_routes
-        from flocks.session.session_loop import SessionLoop
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
 
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
@@ -2270,7 +2272,11 @@ class TestSessionMessagesRemaining:
             AsyncMock(return_value=SimpleNamespace()),
         )
         validate = AsyncMock(return_value=(False, "provider_not_configured"))
-        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            DEFAULT_MODEL_ROUTING_POLICY,
+            "validate_runtime_model",
+            validate,
+        )
         monkeypatch.setattr("flocks.provider.provider.Provider._ensure_initialized", lambda: None)
         monkeypatch.setattr("flocks.provider.provider.Provider.apply_config", AsyncMock())
         monkeypatch.setattr("flocks.provider.provider.Provider.get", lambda _provider_id: None)
@@ -2294,7 +2300,9 @@ class TestSessionMessagesRemaining:
         monkeypatch: pytest.MonkeyPatch,
     ):
         from flocks.server.routes import session as session_routes
-        from flocks.session.session_loop import SessionLoop
+        from flocks.session.runtime.model_policy import (
+            DEFAULT_MODEL_ROUTING_POLICY,
+        )
 
         user_message = SimpleNamespace(agent="rex")
         monkeypatch.setattr(
@@ -2320,7 +2328,11 @@ class TestSessionMessagesRemaining:
             AsyncMock(return_value=SimpleNamespace()),
         )
         validate = AsyncMock()
-        monkeypatch.setattr(SessionLoop, "validate_runtime_model", validate)
+        monkeypatch.setattr(
+            DEFAULT_MODEL_ROUTING_POLICY,
+            "validate_runtime_model",
+            validate,
+        )
         monkeypatch.setattr(
             "flocks.provider.provider.Provider._ensure_initialized",
             lambda: None,

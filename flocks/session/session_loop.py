@@ -182,58 +182,57 @@ class SessionLoop:
             return lease_or_result
         lease = lease_or_result
 
-        settled = False
-        processed_user_id: Optional[str] = None
         try:
             await cls._mark_busy(session_id, runtime_callbacks)
             await cls._recover_orphan_tools(session_id)
-
-            while True:
-                continuation_policy = (
-                    turn.continuation_policy or cls._continuation_policy
-                )
-                try:
-                    await continuation_policy.prepare_logical_turn(turn)
-                    processed_user_id = (
-                        turn.prepared_user_id or processed_user_id
-                    )
-                    outcome = await cls._run_logical_input(turn)
-                    if await cls._should_continue(
-                        turn,
-                        continuation_policy,
-                        outcome,
-                    ):
-                        continue
-                except Exception as exc:
-                    outcome = await cls._handle_execution_error(
-                        turn,
-                        exc,
-                    )
-
-                if await cls._settle_or_continue(
-                    lease,
-                    runtime_callbacks,
-                    processed_user_id,
-                    allow_late_input=not outcome.unhandled_error,
-                ):
-                    continue
-
-                settled = True
-                return cls._to_loop_result(turn, outcome)
+            return await cls._run_owned_loop(lease, runtime_callbacks)
         finally:
-            if not settled and cls._leases.owns(lease):
+            if cls._leases.owns(lease):
                 await cls._release_session(lease, runtime_callbacks)
 
     @classmethod
-    async def _run_logical_input(
+    async def _run_owned_loop(
         cls,
-        turn: LoopContext,
-    ) -> AgentRunOutcome[Any]:
-        """Execute one prepared logical input through AgentLoop."""
-        return await AgentLoop().run(
-            turn,
-            StepEngine.from_turn(turn),
-        )
+        lease: _SessionLease,
+        callbacks: LoopCallbacks,
+    ) -> LoopResult:
+        """Drive the session while this process owns its lease."""
+        turn = lease.turn
+        processed_user_id: Optional[str] = None
+        while True:
+            continuation_policy = (
+                turn.continuation_policy or cls._continuation_policy
+            )
+            try:
+                await continuation_policy.prepare_logical_turn(turn)
+                processed_user_id = (
+                    turn.prepared_user_id or processed_user_id
+                )
+                outcome = await AgentLoop().run(
+                    turn,
+                    StepEngine.from_turn(turn),
+                )
+                if await cls._should_continue(
+                    turn,
+                    continuation_policy,
+                    outcome,
+                ):
+                    continue
+            except Exception as exc:
+                outcome = await cls._handle_execution_error(
+                    turn,
+                    exc,
+                )
+
+            if await cls._settle_or_continue(
+                lease,
+                callbacks,
+                processed_user_id,
+                allow_late_input=not outcome.unhandled_error,
+            ):
+                continue
+
+            return cls._to_loop_result(turn, outcome)
 
     @staticmethod
     async def _should_continue(
@@ -256,11 +255,6 @@ class SessionLoop:
     def is_running(cls, session_id: str) -> bool:
         """Return whether this process owns the session."""
         return session_id in cls._active_turns
-
-    @classmethod
-    def get_context(cls, session_id: str) -> Optional[LoopContext]:
-        """Return the active turn used by public session controls."""
-        return cls._active_turns.get(session_id)
 
     @classmethod
     def abort(cls, session_id: str) -> bool:
@@ -294,35 +288,9 @@ class SessionLoop:
         cls._model_policy.clear(session_id)
 
     @classmethod
-    async def validate_runtime_model(
-        cls,
-        provider_id: str,
-        model_id: str,
-        *,
-        config: Optional[Any] = None,
-    ) -> tuple[bool, str]:
-        """Validate one provider/model candidate."""
-        return await cls._model_policy.validate_runtime_model(
-            provider_id,
-            model_id,
-            config=config,
-        )
-
-    @classmethod
     async def validate_auto_configuration(cls) -> tuple[bool, str]:
         """Validate that Auto mode has an available primary model."""
-        from flocks.config.config import Config
-
-        default_llm = await Config.resolve_default_llm()
-        if not default_llm:
-            return False, "default_model_missing"
-        available, reason = await cls.validate_runtime_model(
-            default_llm["provider_id"],
-            default_llm["model_id"],
-        )
-        if not available:
-            return False, f"primary_{reason}"
-        return True, "available"
+        return await cls._model_policy.validate_auto_configuration()
 
     @staticmethod
     async def _resolve_model(
