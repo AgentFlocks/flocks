@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
+from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from flocks.input.events import UserInputEvent
@@ -18,9 +20,11 @@ from .events import publish_report_status
 from .files import async_file_lock, atomic_write_json, read_json, session_root, utc_now
 from .output import publish_validated_candidate
 from .policy import ReportPolicyDecision
+from .workspace import file_sha256
 
 
 PRODUCTION_AGENT = "situation-report-product"
+MAX_AGENT_RECOVERY_TURNS = 3
 ALLOWED_PRODUCT_MODELS = frozenset(
     {
         ("threatbook-cn-llm", "bailian:deepseek-v4-pro"),
@@ -35,6 +39,101 @@ _model_slots_limit: Optional[int] = None
 
 class ProductAgentExecutionError(RuntimeError):
     """The production Agent stopped with an explicit persisted model error."""
+
+
+def _build_agent_recovery_event(
+    *,
+    event: UserInputEvent,
+    workspace_dir: Path,
+    generation_id: str,
+    recovery_turn: int,
+) -> Optional[UserInputEvent]:
+    """Return a bounded internal continuation when the Agent stopped too early."""
+
+    candidate_path = workspace_dir / "work" / generation_id / "report.md"
+    validation_path = workspace_dir / "runs" / generation_id / "validation.json"
+    instruction: Optional[str] = None
+    if not candidate_path.is_file():
+        instruction = (
+            "The candidate report has not been written. Continue the required Skill steps now: "
+            "write the complete candidate with situation_product_report_write, then validate it."
+        )
+    elif not validation_path.is_file():
+        instruction = (
+            "The current candidate has not been validated. Call "
+            "situation_product_report_validate now and continue until validation passes."
+        )
+    else:
+        validation = read_json(validation_path)
+        status = validation.get("status")
+        validated_sha = str(validation.get("candidateSHA256") or "")
+        current_sha = file_sha256(candidate_path)
+        attempt = int(validation.get("attempt") or 0)
+        if status == "passed" and validated_sha == current_sha:
+            return None
+        if attempt >= 3:
+            return None
+        if validated_sha != current_sha:
+            instruction = (
+                "The candidate changed after its last validation. Do not rewrite it again yet; "
+                "call situation_product_report_validate for the current candidate now."
+            )
+        else:
+            issues = json.dumps(
+                validation.get("issues") or [],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            instruction = (
+                "Validation returned needs_revision. In this same response, immediately repair only "
+                "the listed issues with situation_product_report_write, passing expected_sha256="
+                f"{current_sha}, then call situation_product_report_validate again. "
+                f"Do not answer with a plan or promise. Issues: {issues}"
+            )
+
+    recovery_text = (
+        "[SITUATION_REPORT_PRODUCT_RECOVERY_V1]\n"
+        f"generationID: {generation_id}\n"
+        f"recoveryTurn: {recovery_turn}\n"
+        f"{instruction}"
+    )
+    return event.model_copy(
+        update={
+            "text": recovery_text,
+            "parts": [{"type": "text", "text": recovery_text}],
+            "display_text": "正在根据校验结果继续完善报告。",
+            "message_id": None,
+        }
+    )
+
+
+async def _run_agent_until_candidate_ready(
+    *,
+    session: SessionInfo,
+    event: UserInputEvent,
+    generation_id: str,
+    workspace_dir: Path,
+    working_directory: str,
+    generic_runner: Callable[[str, SessionInfo, UserInputEvent, str], Awaitable[None]],
+    on_recovery: Callable[[int], Awaitable[None]],
+) -> None:
+    current_event = event
+    for turn_index in range(MAX_AGENT_RECOVERY_TURNS + 1):
+        await generic_runner(session.id, session, current_event, working_directory)
+        await _raise_persisted_agent_error(session.id)
+        recovery_turn = turn_index + 1
+        if recovery_turn > MAX_AGENT_RECOVERY_TURNS:
+            return
+        recovery_event = _build_agent_recovery_event(
+            event=event,
+            workspace_dir=workspace_dir,
+            generation_id=generation_id,
+            recovery_turn=recovery_turn,
+        )
+        if recovery_event is None:
+            return
+        await on_recovery(recovery_turn)
+        current_event = recovery_event
 
 
 async def _raise_persisted_agent_error(session_id: str) -> None:
@@ -271,9 +370,33 @@ async def run_managed_report_turn(
                 backend_synchronizer=backend_synchronizer,
             )
             current_stage = "modifying" if action.operation == "modify" else "generating"
+
+            async def publish_recovery_status(recovery_turn: int) -> None:
+                nonlocal current_stage
+                current_stage = "revising"
+                await publish_status(
+                    {
+                        "requestID": action.request_id,
+                        "operation": action.operation,
+                        "status": "running",
+                        "stage": current_stage,
+                        "progress": 85,
+                        "baseBackendReportVersion": action.base_backend_report_version,
+                        "recoveryTurn": recovery_turn,
+                        "error": None,
+                    }
+                )
+
             async with _global_model_slots():
-                await generic_runner(session.id, session, prepared, working_directory)
-            await _raise_persisted_agent_error(session.id)
+                await _run_agent_until_candidate_ready(
+                    session=session,
+                    event=prepared,
+                    generation_id=action.generation_id,
+                    workspace_dir=workspace_dir,
+                    working_directory=working_directory,
+                    generic_runner=generic_runner,
+                    on_recovery=publish_recovery_status,
+                )
             current_stage = "validating"
             finalization = await publish_validated_candidate(
                 session_id=session.id,

@@ -17,6 +17,7 @@ Treat tool results as the only authoritative business input. Never infer a works
 6. For `generate` and `regenerate`, draft from the template and materials without using an old report.
 7. Write the complete candidate once with `situation_product_report_write`.
 8. Call `situation_product_report_validate`. If it returns `needs_revision`, repair only listed issues, pass the prior candidate SHA-256 to the next write, and validate again. Stop after three validation attempts.
+9. Never end a turn by merely describing or promising the next repair. Until validation passes, perform the next required write or validation tool call in the same response.
 
 ## Evidence
 
