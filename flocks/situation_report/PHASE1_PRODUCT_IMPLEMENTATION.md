@@ -87,6 +87,8 @@
 对 Flocks 核心仅保留：
 
 - `flocks/server/routes/session.py`：原始 Session 创建 Schema 不变；`category=situation-report` 时内部创建一对一 Project。原始 `prompt_async` 中按生产 Agent 名称和 API Token 服务身份进行窄分派；普通路径保持不变。
+- `flocks/session/runner.py`：把 Agent YAML 的 `temperature` 和 `strict_tools` 传入本轮模型运行器；`strict_tools` 仅在该 Agent 上启用，确保运行时只暴露白名单工具。
+- `flocks/provider/options.py`、`flocks/provider/sdk/anthropic.py`：支持显式 `thinking.type=disabled`，并在关闭 thinking 时继续传递温度；发送 Anthropic 工具 Schema 前只在副本上递归移除 Cloudwise 不接受的 `default` 字段，不改变本地参数校验。
 - `pyproject.toml`：打包报告模板。
 
 Auth、Project API、Event 订阅和 File Download 均使用原始对外协议；业务后端不调用 Project API。
@@ -97,6 +99,8 @@ Auth、Project API、Event 订阅和 File Download 均使用原始对外协议�
 ```text
 THREATBOOK_CN_LLM_BASE_URL              办公网使用 https://llm-test.threatbook-inc.cn/api；云端开发服务器使用 http://10.66.96.126:8082
 THREATBOOK_CN_LLM_API_KEY               模型服务凭据，只能由环境或密钥管理注入
+ANTHROPIC_BASE_URL                      Anthropic 兼容 SDK 基址；Cloudwise 使用 https://api.cloudwise.ai/api
+ANTHROPIC_API_KEY                       Anthropic 兼容服务凭据，只能由环境或密钥管理注入
 SITUATION_REPORT_PRODUCT_ROOT          可选；默认位于 Config.get_data_path()；外置时同步配置 allowReadPaths
 SITUATION_REPORT_BACKEND_BASE_URL      后端内部 API 基址
 SITUATION_REPORT_BACKEND_TOKEN         Flocks 调后端的服务凭据
@@ -106,6 +110,10 @@ SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 
 
 禁止重新引入：`SITUATION_REPORT_CALLBACK_TOKEN`、状态 callback/outbox、`X-Flocks-User-Key`。
 
+Cloudwise 的完整 HTTP Messages 地址是 `https://api.cloudwise.ai/api/v1/messages`；Flocks
+使用 Anthropic SDK 时 `ANTHROPIC_BASE_URL` 必须写到 `/api`，由 SDK 追加 `/v1/messages`。
+一期普通报告生成和长报告流式生成都显式关闭 thinking，只把 `text_delta` 作为正文。
+
 ## 开发环境部署
 
 - 生产 Agent、Skill 和受限工具位于项目级 `.flocks/plugins/`，Flocks 进程必须从仓库根目录启动。仓库 Dockerfile 的 `WORKDIR /opt/flocks` 满足该要求。
@@ -113,6 +121,8 @@ SITUATION_REPORT_MODEL_CONCURRENCY     产品 Agent 全局模型并发，默认 
 - 持久化 Flocks 数据目录；Docker 部署应挂载 `/home/flocks/.flocks`，避免 Session、Project registry 和报告版本随容器删除。
 - 启动后先确认 `situation-report-product` Agent、同名 Skill 和五个 `situation_product_*` 工具均可发现，再执行真实后端闭环。
 - 测试密钥不得写入仓库、镜像层、启动日志或普通配置文件。
+- 若云端服务器没有公共 DNS/HTTPS 出口，开发期可使用临时受控代理验证 Cloudwise，但该代理
+  不是部署组成。正式联调前必须由网络侧提供持久、受控的模型访问路径。
 
 ## 开发后端 Mock
 
@@ -157,5 +167,5 @@ SITUATION_REPORT_BACKEND_TOKEN=<与 Mock 相同的开发凭据>
 - 流程测试读取仓库内真实 Markdown 模板和真实 JSONL 测试素材。
 - MockTransport 只模拟后端 HTTP 边界，不使用随意构造的素材冒充真实输入。
 - 确定性候选报告只用于校验发布流程，不代表模型效果。
-- 当前不执行线上模型效果测试。
+- 线上模型只用于验证真实流程、工具调用、结构校验与发布闭环；当前不做主观效果评价或模型横评。
 - 需要覆盖：普通 Session/API 鉴权；报告 Session 内部 Project 1:1；普通 Session 不能误入产品 Agent；单 text 信封；每轮 latest；changed/unchanged；部分失败不切换；regenerate 不下载报告；Event 无用户/Project；原 download 可读取输出；普通 prompt 回归。
