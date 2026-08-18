@@ -159,6 +159,11 @@ def _create_nested_tool_context(
     sandbox/session identity.
     """
     extra = dict(ctx.extra)
+    # The turn-scoped callable set guards the model-emitted run_workflow call.
+    # Workflow node tools are internal/direct calls and must not inherit that
+    # outer model-call gate.
+    extra.pop("enforce_callable_tools", None)
+    extra.pop("turn_callable_tool_names", None)
     profile = (
         dict(extra.get("session_execution_profile"))
         if isinstance(extra.get("session_execution_profile"), dict)

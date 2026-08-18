@@ -572,6 +572,44 @@ class TestRunWorkflowToolExecution:
         assert nested_ctx._metadata_callback is None
 
     @pytest.mark.anyio
+    async def test_run_workflow_does_not_propagate_model_callable_gate(
+        self,
+        tool_context_with_permission,
+        simple_workflow,
+    ):
+        tool_context_with_permission.extra.update({
+            "enforce_callable_tools": True,
+            "turn_callable_tool_names": ["run_workflow"],
+        })
+        fake = FakeRunWorkflowResult(
+            status="SUCCEEDED",
+            run_id="run-callable-boundary",
+            steps=1,
+            last_node_id="node-1",
+            outputs={"ok": True},
+            history=[],
+            error=None,
+        )
+        mock_run = Mock(name="run_workflow", return_value=fake)
+
+        with patch.object(
+            run_workflow_module,
+            "_get_workflow_runtime",
+            return_value=_runtime_tuple(run_fn=mock_run),
+        ):
+            result = await ToolRegistry.execute(
+                "run_workflow",
+                ctx=tool_context_with_permission,
+                workflow=simple_workflow,
+                inputs={},
+            )
+
+        assert result.success is True
+        nested_extra = mock_run.call_args.kwargs["tool_context"].extra
+        assert "enforce_callable_tools" not in nested_extra
+        assert "turn_callable_tool_names" not in nested_extra
+
+    @pytest.mark.anyio
     async def test_run_workflow_with_inputs(self, tool_context_with_permission, workflow_with_inputs):
         """Test workflow execution with input parameters"""
         fake = FakeRunWorkflowResult(

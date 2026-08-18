@@ -641,7 +641,33 @@ class SessionLoop:
                 action="error",
                 error=f"Session {session_id} is {session.status}",
             )
-        if working_directory:
+        effective_agent_name = agent_name or session.agent or "rex"
+        from flocks.session.agent_policy import (
+            AgentSessionPolicyError,
+            prepare_session_for_agent,
+        )
+
+        runtime_agent = None
+        try:
+            from flocks.agent.registry import Agent
+
+            runtime_agent = await Agent.get(effective_agent_name)
+            if (
+                runtime_agent is not None
+                and runtime_agent.require_dedicated_session is True
+            ):
+                session = await prepare_session_for_agent(session, runtime_agent)
+        except AgentSessionPolicyError as exc:
+            log.warning("loop.agent_session_policy_rejected", {
+                "session_id": session_id,
+                "agent": effective_agent_name,
+                "error": str(exc),
+            })
+            return LoopResult(action="error", error=str(exc))
+        if working_directory and not (
+            runtime_agent is not None
+            and runtime_agent.require_dedicated_session is True
+        ):
             session = session.model_copy(update={"directory": working_directory})
         
         # Resolve model when not explicitly provided
@@ -693,7 +719,7 @@ class SessionLoop:
             session=session,
             provider_id=provider_id,
             model_id=model_id,
-            agent_name=agent_name or session.agent or "rex",
+            agent_name=effective_agent_name,
             session_ctx=session_ctx,
             trace_step_offset=trace_offset,
             auto_failover=auto_failover,

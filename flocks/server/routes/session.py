@@ -34,6 +34,7 @@ from flocks.session.background_tasks import (
 )
 from flocks.session.session import (
     Session,
+    SessionAgentMismatchError,
     SessionInactiveError,
     SessionInfo as SessionModel,
     SessionNotFoundError,
@@ -558,6 +559,7 @@ async def _persist_active_session_write(
     operation,
     *,
     expected_generation: Optional[int] = None,
+    expected_agent: Optional[str] = None,
 ):
     """Linearize a durable route write with archive/delete transitions."""
     try:
@@ -565,6 +567,7 @@ async def _persist_active_session_write(
             session_id,
             operation,
             expected_generation=expected_generation,
+            expected_agent=expected_agent,
         )
     except SessionNotFoundError as exc:
         raise HTTPException(
@@ -575,6 +578,11 @@ async def _persist_active_session_write(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail="已归档会话不可修改，请先恢复",
+        ) from exc
+    except SessionAgentMismatchError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
         ) from exc
 
 
@@ -3510,8 +3518,20 @@ async def _process_session_message(
     # 2. Resolve agent and model (5-level priority)
     # ------------------------------------------------------------------
     await _require_agent_usable_for_chat(request.agent)
-    agent_name = request.agent or await Agent.default_agent()
+    agent_name = request.agent or session.agent or await Agent.default_agent()
     agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
+    try:
+        from flocks.session.agent_policy import (
+            AgentSessionPolicyError,
+            prepare_session_for_agent,
+        )
+
+        session = await prepare_session_for_agent(session, agent)
+    except AgentSessionPolicyError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
     
     auto_failover = bool(
         is_model_auto_session_category(getattr(session, "category", "user"))
@@ -3601,6 +3621,7 @@ async def _process_session_message(
             synthetic=True if _is_no_reply else None,
         ),
         expected_generation=lifecycle_generation,
+        expected_agent=agent_name,
     )
     user_message_id = user_message.id
     
@@ -4353,7 +4374,18 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
     from flocks.session.message import Message, MessageRole
     from flocks.utils.id import Identifier
 
-    agent_name = event.agent or "rex"
+    from flocks.agent.registry import Agent
+    from flocks.session.agent_policy import prepare_session_for_agent
+
+    agent_name = (
+        event.agent
+        or getattr(session, "agent", None)
+        or await Agent.default_agent()
+    )
+    agent = await Agent.get(agent_name) or await Agent.get(DEFAULT_AGENT)
+    if agent is None:
+        raise ValueError(f"Agent {agent_name!r} is not available")
+    session = await prepare_session_for_agent(session, agent)
     lifecycle_generation = event.metadata.get("_sessionLifecycleGeneration")
     if not isinstance(lifecycle_generation, int):
         lifecycle_generation = Session.lifecycle_generation(sessionID)
@@ -4384,6 +4416,7 @@ async def _dispatch_sse_input(sessionID: str, session, event, working_directory:
                 part_id=user_part_id,
             ),
             expected_generation=lifecycle_generation,
+            expected_agent=message_agent,
         )
         await publish_event("message.updated", {
             "info": {

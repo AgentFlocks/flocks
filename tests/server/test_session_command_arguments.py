@@ -42,7 +42,10 @@ class TestSessionCommandArguments:
         event = dispatch_mock.await_args.args[2]
         assert event.text == f"/bug {json.dumps(payload, ensure_ascii=False)}"
         assert event.display_text == f"/bug {json.dumps(payload, ensure_ascii=False)}"
-        assert event.metadata == {"commandArgumentsJson": payload}
+        assert event.metadata == {
+            "_sessionLifecycleGeneration": 0,
+            "commandArgumentsJson": payload,
+        }
 
     @pytest.mark.asyncio
     async def test_command_route_keeps_legacy_string_arguments_unchanged(self, monkeypatch):
@@ -76,7 +79,7 @@ class TestSessionCommandArguments:
         event = dispatch_mock.await_args.args[2]
         assert event.text == "/bug investigate routing"
         assert event.display_text == "/bug investigate routing"
-        assert event.metadata == {}
+        assert event.metadata == {"_sessionLifecycleGeneration": 0}
 
     @pytest.mark.asyncio
     async def test_command_route_prefers_explicit_string_for_display_when_json_also_present(self, monkeypatch):
@@ -115,7 +118,10 @@ class TestSessionCommandArguments:
         event = dispatch_mock.await_args.args[2]
         assert event.text == "/bug use this exact text"
         assert event.display_text == "/bug use this exact text"
-        assert event.metadata == {"commandArgumentsJson": payload}
+        assert event.metadata == {
+            "_sessionLifecycleGeneration": 0,
+            "commandArgumentsJson": payload,
+        }
 
     def test_build_prompt_request_from_event_attaches_metadata_to_text_part(self):
         from flocks.server.routes import session as session_routes

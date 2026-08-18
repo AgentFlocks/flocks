@@ -15,6 +15,7 @@ async def test_foreground_subagent_tool_calls_start_in_parallel():
         session_id="ses-parent",
         assistant_message=SimpleNamespace(id="msg-assistant"),
         agent=SimpleNamespace(name="rex"),
+        allowed_tool_names=["delegate_task"],
     )
     release = asyncio.Event()
     both_started = asyncio.Event()

@@ -10,7 +10,7 @@ import re
 import asyncio
 import time as _time
 from datetime import datetime
-from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable
+from typing import Dict, Any, Optional, List, AsyncIterator, Callable, Awaitable, Iterable
 from dataclasses import dataclass, field
 
 from flocks.utils.log import Log
@@ -39,7 +39,12 @@ from flocks.session.streaming.stream_events import (
     TextEndEvent,
     ToolInputStartEvent,
 )
-from flocks.tool.registry import ToolRegistry, ToolContext, ToolResult
+from flocks.tool.registry import (
+    ToolRegistry,
+    ToolContext,
+    ToolResult,
+    callable_tool_denial_reason,
+)
 from flocks.permission import PermissionNext
 from flocks.agent.agent import AgentInfo
 from flocks.utils.langfuse import span_scope
@@ -101,6 +106,10 @@ class StreamProcessor:
     Handles streaming events and executes tools synchronously.
     Ported from Flocks' SessionProcessor behavior.
     """
+
+    def set_allowed_tool_names(self, allowed_tool_names: Iterable[str]) -> None:
+        """Set the tools the model may call for this turn."""
+        self._allowed_tool_names = sorted(set(allowed_tool_names))
     
     def __init__(
         self,
@@ -124,6 +133,7 @@ class StreamProcessor:
         plan_file_path: Optional[str] = None,
         plan_relative_path: Optional[str] = None,
         plan_permission_path: Optional[str] = None,
+        allowed_tool_names: Optional[Iterable[str]] = None,
     ):
         self.session_id = session_id
         self.assistant_message = assistant_message
@@ -145,6 +155,9 @@ class StreamProcessor:
         self._plan_file_path = plan_file_path
         self._plan_relative_path = plan_relative_path
         self._plan_permission_path = plan_permission_path
+        self._allowed_tool_names: Optional[List[str]] = None
+        if allowed_tool_names is not None:
+            self.set_allowed_tool_names(allowed_tool_names)
         self._sandbox_runtime_cache = None
         self._sandbox_config_cache = None
         self._sandbox_context_cache = None
@@ -577,6 +590,60 @@ class StreamProcessor:
             })
             return
 
+        denial_reason = callable_tool_denial_reason(
+            tool_name,
+            self._allowed_tool_names,
+        )
+        if denial_reason:
+            tool_state.status = "error"
+            tool_state.error = denial_reason
+            tool_error_time = int(datetime.now().timestamp() * 1000)
+            error_state = ToolStateError(
+                status="error",
+                input=tool_input,
+                error=denial_reason,
+                time={"start": tool_error_time, "end": tool_error_time},
+            )
+            error_part = ToolPart(
+                id=tool_state.part_id,
+                sessionID=self.session_id,
+                messageID=self.assistant_message.id,
+                type="tool",
+                callID=tool_call_id,
+                tool=tool_name,
+                state=error_state,
+            )
+            await Message.store_part(
+                self.session_id,
+                self.assistant_message.id,
+                error_part,
+            )
+            if self.event_publish_callback:
+                await self.event_publish_callback("message.part.updated", {
+                    "part": {
+                        "id": tool_state.part_id,
+                        "messageID": self.assistant_message.id,
+                        "sessionID": self.session_id,
+                        "type": "tool",
+                        "callID": tool_call_id,
+                        "tool": tool_name,
+                        "state": {
+                            "status": "error",
+                            "input": tool_input,
+                            "error": denial_reason,
+                            "time": {
+                                "start": tool_error_time,
+                                "end": tool_error_time,
+                            },
+                        },
+                    },
+                })
+            log.warn("stream.tool_call.not_callable", {
+                "tool_call_id": tool_call_id,
+                "tool_name": tool_name,
+            })
+            return
+
         # Hook pipeline: tool.execute.before
         # Apply any input rewrite before publishing the running state so UI
         # surfaces show the actual tool input that will be executed.
@@ -847,6 +914,12 @@ class StreamProcessor:
                 tool_extra = {
                     **sandbox_meta["extra"],
                     "agent_execution_session": True,
+                    "enforce_callable_tools": True,
+                    "turn_callable_tool_names": (
+                        list(self._allowed_tool_names)
+                        if self._allowed_tool_names is not None
+                        else None
+                    ),
                     "execution_mode": self._execution_mode,
                     "workspace_dir": self._workspace_dir,
                     "model": {
@@ -1778,7 +1851,7 @@ class StreamProcessor:
             re.DOTALL | re.IGNORECASE,
         ):
             body = match.group(1).strip()
-            if not body or not body[:1] in "{[":
+            if not body or body[:1] not in "{[":
                 continue
 
             try:

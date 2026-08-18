@@ -10,6 +10,7 @@ import contextvars
 import re
 import weakref
 from contextlib import AsyncExitStack, asynccontextmanager
+from pathlib import Path
 from typing import AsyncIterator, Awaitable, Callable, List, Dict, Any, Optional, TypeVar
 from datetime import datetime
 from pydantic import BaseModel, Field, ConfigDict
@@ -27,6 +28,7 @@ from flocks.session.message import Message, MessageInfo, MessageRole, AssistantM
 
 # Sentinel for explicitly setting a field to None via Session.update()
 _UNSET = object()
+DEDICATED_AGENT_POLICY_METADATA_KEY = "_dedicated_agent_policy"
 
 log = Log.create(service="session")
 
@@ -44,6 +46,10 @@ class SessionNotFoundError(ValueError):
 
 class SessionInactiveError(RuntimeError):
     """Raised when a lifecycle-aware write targets a non-active session."""
+
+
+class SessionAgentMismatchError(RuntimeError):
+    """Raised when a write targets a session claimed by another agent."""
 
 
 def is_model_auto_session_category(category: Optional[str]) -> bool:
@@ -293,6 +299,7 @@ class Session:
         operation: Callable[[], Awaitable[_WriteResult]],
         *,
         expected_generation: Optional[int] = None,
+        expected_agent: Optional[str] = None,
     ) -> _WriteResult:
         """Run one durable write atomically with lifecycle transitions."""
 
@@ -310,6 +317,22 @@ class Session:
                 or generation_changed
             ):
                 raise SessionInactiveError(f"Session {session_id} is not active")
+            metadata = getattr(session, "metadata", None)
+            policy = (
+                metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+                if isinstance(metadata, dict)
+                else None
+            )
+            if (
+                expected_agent is not None
+                and isinstance(policy, dict)
+                and policy.get("version") == 1
+                and policy.get("agent") != expected_agent
+            ):
+                raise SessionAgentMismatchError(
+                    f"Session {session_id} is dedicated to agent "
+                    f"{policy.get('agent')!r}"
+                )
             return await operation()
 
     @classmethod
@@ -418,16 +441,40 @@ class Session:
         is_child = parent_id is not None
 
         # Ensure sessions default to the configured primary agent (e.g., rex)
+        agent_info = None
         if not kwargs.get("agent"):
             try:
                 from flocks.agent.registry import Agent
                 kwargs["agent"] = await Agent.default_agent()
             except Exception as e:
                 log.warn("session.default_agent.error", {"error": str(e)})
+
+        try:
+            from flocks.agent.registry import Agent
+
+            agent_info = await Agent.get(str(kwargs.get("agent") or ""))
+        except Exception as e:
+            log.warn("session.agent_policy.resolve_error", {"error": str(e)})
+
+        agent_directory = getattr(agent_info, "session_directory", None)
+        if agent_directory:
+            isolated_directory = Path(agent_directory).expanduser()
+            isolated_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+            isolated_directory.chmod(0o700)
+            directory = str(isolated_directory.resolve())
         
-        # Default memory_enabled from config if not explicitly set
-        if "memory_enabled" not in kwargs:
-            kwargs["memory_enabled"] = True
+        # A dedicated agent's memory policy is mandatory. For other agents it
+        # remains a default that an explicit session option may override.
+        agent_memory_enabled = getattr(agent_info, "memory_enabled", None)
+        require_dedicated_session = bool(
+            getattr(agent_info, "require_dedicated_session", False)
+        )
+        if require_dedicated_session and agent_memory_enabled is not None:
+            kwargs["memory_enabled"] = agent_memory_enabled
+        elif "memory_enabled" not in kwargs:
+            kwargs["memory_enabled"] = (
+                agent_memory_enabled if agent_memory_enabled is not None else True
+            )
 
         # Bind root ownership here; children inherit ownership from their parent below.
         if parent_id is None and (
@@ -455,6 +502,11 @@ class Session:
                 "revision": 1,
                 "source": "session.create",
                 "updated_at": datetime.now().astimezone().isoformat(),
+            }
+        if require_dedicated_session:
+            metadata[DEDICATED_AGENT_POLICY_METADATA_KEY] = {
+                "agent": str(kwargs.get("agent") or ""),
+                "version": 1,
             }
         kwargs["metadata"] = metadata
         
@@ -740,60 +792,95 @@ class Session:
             Updated session info or None
         """
         async with cls.lifecycle_lock(session_id):
-            if cls.is_lifecycle_transitioning(session_id):
-                return None
-            session = await cls.get(project_id, session_id)
-            if not session or (session.status != "active" and not allow_inactive):
-                return None
-
-            alias_map = {
-                "project_id": "projectID",
-                "parent_id": "parentID",
-                "owner_user_id": "ownerUserID",
-                "owner_username": "ownerUsername",
-            }
-
-            # Use ``_UNSET`` to explicitly clear a field; ordinary ``None``
-            # remains a no-op for backward compatibility.
-            update_data = session.model_dump(by_alias=True)
-            for key, value in updates.items():
-                if value is _UNSET:
-                    alias_key = alias_map.get(key, key)
-                    if alias_key in update_data:
-                        update_data[alias_key] = None
-                    elif key in update_data:
-                        update_data[key] = None
-                    continue
-
-                if value is not None:
-                    if key == "summary" and isinstance(value, dict):
-                        if update_data.get("summary"):
-                            update_data["summary"].update(value)
-                        else:
-                            update_data["summary"] = value
-                    elif key == "revert" and isinstance(value, dict):
-                        update_data["revert"] = value
-                    else:
-                        alias_key = alias_map.get(key, key)
-                        if alias_key in update_data:
-                            update_data[alias_key] = value
-                        elif key in update_data:
-                            update_data[key] = value
-
-            if "time" not in update_data:
-                update_data["time"] = {}
-            update_data["time"]["updated"] = int(datetime.now().timestamp() * 1000)
-
-            updated_session = SessionInfo(**update_data)
-            await Storage.set(f"session:{project_id}:{session_id}", updated_session, "session")
-            cls._id_index[session_id] = f"session:{project_id}:{session_id}"
-            cls._sync_list_cache(updated_session)
+            updated_session = await cls._update_locked(
+                project_id,
+                session_id,
+                allow_inactive=allow_inactive,
+                **updates,
+            )
+        if updated_session is None:
+            return None
         
         log.info("session.updated", {
             "id": session_id,
             "project_id": project_id,
         })
         
+        return updated_session
+
+    @classmethod
+    async def _update_locked(
+        cls,
+        project_id: str,
+        session_id: str,
+        *,
+        allow_inactive: bool = False,
+        **updates,
+    ) -> Optional[SessionInfo]:
+        """Update a session while its lifecycle lock is already held."""
+        if cls.is_lifecycle_transitioning(session_id):
+            return None
+        session = await cls.get(project_id, session_id)
+        if not session or (session.status != "active" and not allow_inactive):
+            return None
+
+        alias_map = {
+            "project_id": "projectID",
+            "parent_id": "parentID",
+            "owner_user_id": "ownerUserID",
+            "owner_username": "ownerUsername",
+        }
+
+        update_data = session.model_dump(by_alias=True)
+        requested_agent = updates.get("agent")
+        if requested_agent is not None and requested_agent != session.agent:
+            supplied_metadata = updates.get("metadata")
+            supplied_policy = (
+                supplied_metadata.get(DEDICATED_AGENT_POLICY_METADATA_KEY)
+                if isinstance(supplied_metadata, dict)
+                else None
+            )
+            policy_matches_new_agent = (
+                isinstance(supplied_policy, dict)
+                and supplied_policy.get("agent") == requested_agent
+            )
+            if not policy_matches_new_agent:
+                current_metadata = dict(update_data.get("metadata") or {})
+                current_metadata.pop(DEDICATED_AGENT_POLICY_METADATA_KEY, None)
+                update_data["metadata"] = current_metadata
+        for key, value in updates.items():
+            if value is _UNSET:
+                alias_key = alias_map.get(key, key)
+                if alias_key in update_data:
+                    update_data[alias_key] = None
+                elif key in update_data:
+                    update_data[key] = None
+                continue
+
+            if value is not None:
+                if key == "summary" and isinstance(value, dict):
+                    if update_data.get("summary"):
+                        update_data["summary"].update(value)
+                    else:
+                        update_data["summary"] = value
+                elif key == "revert" and isinstance(value, dict):
+                    update_data["revert"] = value
+                else:
+                    alias_key = alias_map.get(key, key)
+                    if alias_key in update_data:
+                        update_data[alias_key] = value
+                    elif key in update_data:
+                        update_data[key] = value
+
+        if "time" not in update_data:
+            update_data["time"] = {}
+        update_data["time"]["updated"] = int(datetime.now().timestamp() * 1000)
+
+        updated_session = SessionInfo(**update_data)
+        storage_key = f"session:{project_id}:{session_id}"
+        await Storage.set(storage_key, updated_session, "session")
+        cls._id_index[session_id] = storage_key
+        cls._sync_list_cache(updated_session)
         return updated_session
 
     @classmethod

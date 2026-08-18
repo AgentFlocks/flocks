@@ -314,6 +314,20 @@ class ToolContext:
             self._metadata_callback(self._metadata)
 
 
+def callable_tool_denial_reason(
+    tool_name: str,
+    allowed_tool_names: Any,
+) -> Optional[str]:
+    """Return a denial reason when a turn-scoped tool set rejects a call."""
+    valid_allowed_tools = (
+        isinstance(allowed_tool_names, list)
+        and all(isinstance(name, str) and bool(name) for name in allowed_tool_names)
+    )
+    if not valid_allowed_tools or tool_name not in allowed_tool_names:
+        return f"Tool is not callable in this turn: {tool_name}"
+    return None
+
+
 # Type for tool handler function
 ToolHandler = Callable[..., Awaitable[ToolResult]]
 
@@ -1049,18 +1063,36 @@ class ToolRegistry:
         **kwargs
     ) -> ToolResult:
         """Execute a tool by name"""
-        tool = cls.get(tool_name)
-        if not tool:
-            return ToolResult(
-                success=False,
-                error=f"Tool not found: {tool_name}"
-            )
-
         # Create default context if not provided
         if ctx is None:
             ctx = ToolContext(
                 session_id="default",
                 message_id="default"
+            )
+
+        # Model-originated session calls are limited to the exact tool schema
+        # sent for this turn. Fail closed when that schema context is absent or
+        # malformed, before registry lookup, governance hooks, or handlers run.
+        if ctx.extra.get("enforce_callable_tools") is True:
+            denial_reason = callable_tool_denial_reason(
+                tool_name,
+                ctx.extra.get("turn_callable_tool_names"),
+            )
+            if denial_reason:
+                log.warn("tool.execute.not_callable", {
+                    "name": tool_name,
+                    "session_id": ctx.session_id,
+                })
+                return ToolResult(
+                    success=False,
+                    error=denial_reason,
+                )
+
+        tool = cls.get(tool_name)
+        if not tool:
+            return ToolResult(
+                success=False,
+                error=f"Tool not found: {tool_name}"
             )
 
         execution_mode = ctx.extra.get("execution_mode")

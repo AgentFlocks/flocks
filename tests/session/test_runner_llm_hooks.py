@@ -574,7 +574,12 @@ async def test_call_llm_drains_started_delegate_before_raising_provider_error(
         runner._call_llm(
             provider=_Provider(),
             messages=[ChatMessage(role="user", content="delegate the investigation")],
-            tools=[],
+            tools=[
+                {
+                    "type": "function",
+                    "function": {"name": "delegate_task"},
+                }
+            ],
             agent=agent,
             assistant_msg=assistant_msg,
         )

@@ -160,6 +160,15 @@ class AgentInfo(BaseModel):
     # which the Web UI uses to decide whether to surface the agent.
     tags: List[str] = Field(default_factory=list)
 
+    # Optional session isolation policy for agents that must not inherit the
+    # caller's workspace instructions, memory, or callable-tool state.
+    session_directory: Optional[str] = Field(default=None, alias="sessionDirectory")
+    memory_enabled: Optional[bool] = Field(default=None, alias="memoryEnabled")
+    require_dedicated_session: bool = Field(
+        default=False,
+        alias="requireDedicatedSession",
+    )
+
     @model_validator(mode="after")
     def _derive_delegatable(self) -> "AgentInfo":
         if self.delegatable is None:

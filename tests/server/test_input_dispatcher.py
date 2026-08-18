@@ -124,8 +124,9 @@ class TestDispatchUserInput:
             write,
             *,
             expected_generation=None,
+            expected_agent=None,
         ):
-            del expected_generation
+            del expected_generation, expected_agent
             return await write()
 
         async def fake_dispatch(event, sink):
@@ -414,6 +415,45 @@ class TestDispatchUserInput:
 
 
 class TestSessionRoutesUseDispatcher:
+    @pytest.mark.asyncio
+    async def test_dispatch_claims_bound_dedicated_agent_before_input(
+        self,
+        monkeypatch,
+    ):
+        from flocks.server.routes import session as session_routes
+
+        session = SimpleNamespace(id="ses_dedicated", agent="code-security")
+        agent = SimpleNamespace(name="code-security", require_dedicated_session=True)
+        prepare = AsyncMock(return_value=session)
+        dispatch = AsyncMock()
+        monkeypatch.setattr(
+            "flocks.agent.registry.Agent.get",
+            AsyncMock(return_value=agent),
+        )
+        monkeypatch.setattr(
+            "flocks.session.agent_policy.prepare_session_for_agent",
+            prepare,
+        )
+        monkeypatch.setattr(
+            "flocks.input.dispatcher.dispatch_user_input",
+            dispatch,
+        )
+
+        await session_routes._dispatch_sse_input(
+            session.id,
+            session,
+            UserInputEvent(
+                source_type="webui",
+                sessionID=session.id,
+                text="scan this tree",
+                parts=[{"type": "text", "text": "scan this tree"}],
+            ),
+            "/tmp/project",
+        )
+
+        prepare.assert_awaited_once_with(session, agent)
+        dispatch.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_goal_mode_publishes_active_goal_before_llm(self, monkeypatch):
         from flocks.input.events import UserInputEvent

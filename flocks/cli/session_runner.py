@@ -276,10 +276,13 @@ class CLISessionRunner:
                     if not s.parent_id and belongs_to_current_worktree(s):
                         return s
         
-        return await Session.create(
-            project_id=project_id,
-            directory=str(self.directory),
-        )
+        create_kwargs: Dict[str, Any] = {
+            "project_id": project_id,
+            "directory": str(self.directory),
+        }
+        if self.agent_name:
+            create_kwargs["agent"] = self.agent_name
+        return await Session.create(**create_kwargs)
     
     async def _interactive_loop(self) -> None:
         """Run interactive input loop."""
@@ -343,12 +346,16 @@ class CLISessionRunner:
         # Resolve agent
         agent_name = self.agent_name or await Agent.default_agent()
         agent = await Agent.get(agent_name) or await Agent.get("rex")
+        if getattr(agent, "require_dedicated_session", False) is True:
+            from flocks.session.agent_policy import prepare_session_for_agent
+
+            self._session = await prepare_session_for_agent(self._session, agent)
+            Session.set_current(self._session)
 
         if dispatch_commands and stripped.startswith("/"):
             from flocks.input.dispatcher import dispatch_user_input
             from flocks.input.events import UserInputEvent
             from flocks.input.output import CliOutputSink
-            from flocks.session.message import Message
 
             event = UserInputEvent(
                 source_type="cli",

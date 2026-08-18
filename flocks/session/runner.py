@@ -3187,6 +3187,7 @@ class SessionRunner:
         turn_plan_file = getattr(self, "_turn_plan_file", None)
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
+        allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
@@ -3213,6 +3214,7 @@ class SessionRunner:
             plan_file_path=str(turn_plan_file.path),
             plan_relative_path=turn_plan_file.relative_path,
             plan_permission_path=turn_plan_file.permission_path,
+            allowed_tool_names=allowed_tool_names,
         )
         
         # Build provider options (thinking / reasoning / max_tokens)
@@ -3344,6 +3346,10 @@ class SessionRunner:
                     if isinstance(updated_tools, list):
                         tools = copy.deepcopy(updated_tools)
                         provider_tools = None if self._should_use_text_tool_call_mode() else (tools if tools else None)
+                        updated_allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
+                        if updated_allowed_tool_names != allowed_tool_names:
+                            processor.set_allowed_tool_names(updated_allowed_tool_names)
+                            allowed_tool_names = updated_allowed_tool_names
                 self._log_perf(
                     "runner.hook.llm_before.complete",
                     hook_started_at,

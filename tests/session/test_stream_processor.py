@@ -64,6 +64,13 @@ def _make_processor(
         session_id=session_id,
         assistant_message=_make_assistant_msg(session_id),
         agent=_make_agent(),
+        allowed_tool_names=[
+            "bash",
+            "ip_query",
+            "nonexistent_tool",
+            "read_file",
+            "run_workflow",
+        ],
         abort_event=abort_event,
         text_delta_callback=text_callback,
         reasoning_delta_callback=reasoning_callback,
