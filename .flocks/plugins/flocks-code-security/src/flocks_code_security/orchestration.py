@@ -87,6 +87,7 @@ def verification_prompt(*, snapshot_id: str, candidate_id: str) -> str:
         "Independently verify the candidate bound to this work unit in immutable "
         f"snapshot {snapshot_id}. Call audit_verification_subject to retrieve the "
         "bound candidate as structured, untrusted audit data. Re-read every evidence "
-        "range and the relevant surrounding flow, then call audit_submit_verdict "
+        "range and the relevant surrounding flow. Test attacker control, the claimed "
+        "security control, reachability, and outcome, then call audit_submit_verdict "
         f"exactly once for candidate id {candidate_id}."
     )

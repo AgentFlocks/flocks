@@ -51,6 +51,10 @@ class ScanStore:
                     snapshot_id TEXT PRIMARY KEY,
                     repository_identity TEXT NOT NULL,
                     source_revision TEXT,
+                    target_kind TEXT NOT NULL DEFAULT 'directory_snapshot',
+                    display_name TEXT NOT NULL DEFAULT 'snapshot',
+                    include_paths_json TEXT NOT NULL DEFAULT '["."]',
+                    exclude_patterns_json TEXT NOT NULL DEFAULT '[]',
                     tree_digest TEXT NOT NULL,
                     scope_digest TEXT NOT NULL,
                     file_count INTEGER NOT NULL,
@@ -196,6 +200,16 @@ class ScanStore:
                     "ALTER TABLE snapshots ADD COLUMN omitted_file_count "
                     "INTEGER NOT NULL DEFAULT 0"
                 )
+            for column, definition in (
+                ("target_kind", "TEXT NOT NULL DEFAULT 'directory_snapshot'"),
+                ("display_name", "TEXT NOT NULL DEFAULT 'snapshot'"),
+                ("include_paths_json", "TEXT NOT NULL DEFAULT '[\".\"]'"),
+                ("exclude_patterns_json", "TEXT NOT NULL DEFAULT '[]'"),
+            ):
+                if column not in snapshot_columns:
+                    connection.execute(
+                        f"ALTER TABLE snapshots ADD COLUMN {column} {definition}"
+                    )
             evidence_columns = {
                 row["name"]
                 for row in connection.execute("PRAGMA table_info(evidence)").fetchall()
@@ -248,14 +262,20 @@ class ScanStore:
                 """
                 INSERT INTO snapshots (
                     snapshot_id, repository_identity, source_revision,
+                    target_kind, display_name, include_paths_json,
+                    exclude_patterns_json,
                     tree_digest, scope_digest, file_count, total_bytes,
                     created_at, root_path, omitted_file_count
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     snapshot.snapshot_id,
                     snapshot.repository_identity,
                     snapshot.source_revision,
+                    snapshot.target_kind,
+                    snapshot.display_name,
+                    json.dumps(snapshot.include_paths, ensure_ascii=False),
+                    json.dumps(snapshot.exclude_patterns, ensure_ascii=False),
                     snapshot.tree_digest,
                     snapshot.scope_digest,
                     snapshot.file_count,
@@ -300,7 +320,16 @@ class ScanStore:
             row = connection.execute(
                 "SELECT * FROM snapshots WHERE snapshot_id = ?", (snapshot_id,)
             ).fetchone()
-        return SnapshotRef(**dict(row)) if row else None
+        if row is None:
+            return None
+        payload = dict(row)
+        payload["include_paths"] = tuple(
+            json.loads(payload.pop("include_paths_json"))
+        )
+        payload["exclude_patterns"] = tuple(
+            json.loads(payload.pop("exclude_patterns_json"))
+        )
+        return SnapshotRef(**payload)
 
     def list_snapshot_files(self, snapshot_id: str) -> list[SnapshotFile]:
         with self._connect() as connection:
@@ -712,8 +741,31 @@ class ScanStore:
                 "AND status IN ('pending', 'running')",
                 (scan_id,),
             ).fetchone()[0]
+            unverified = connection.execute(
+                "SELECT COUNT(*) FROM candidates c "
+                "LEFT JOIN verifications v ON v.candidate_id = c.candidate_id "
+                "WHERE c.scan_id = ? AND v.candidate_id IS NULL",
+                (scan_id,),
+            ).fetchone()[0]
+            conflicts = connection.execute(
+                "SELECT COUNT(*) FROM verification_conflicts vc "
+                "JOIN candidates c ON c.candidate_id = vc.candidate_id "
+                "WHERE c.scan_id = ?",
+                (scan_id,),
+            ).fetchone()[0]
+            analysis_units = connection.execute(
+                "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
+                "AND role IN ('baseline', 'investigator')",
+                (scan_id,),
+            ).fetchone()[0]
         if active:
             raise ValueError("Cannot finalize while audit workers are still active")
+        if not analysis_units:
+            raise ValueError("At least one baseline analysis work unit is required")
+        if unverified:
+            raise ValueError("Every candidate requires an independent verification verdict")
+        if conflicts:
+            raise ValueError("Verification conflicts must be resolved before finalization")
 
     def get_work_unit(self, work_unit_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1560,7 +1612,7 @@ class ScanStore:
     ) -> None:
         allowed_transitions = {
             "running": {"reducing", "cancelled", "failed"},
-            "reducing": {"completed", "partial", "failed"},
+            "reducing": {"completed", "failed"},
         }
         if not from_statuses:
             raise ValueError("A source scan status is required")

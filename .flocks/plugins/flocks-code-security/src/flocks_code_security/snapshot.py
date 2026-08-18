@@ -8,15 +8,16 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import tempfile
 import uuid
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from typing import Iterable
 
 from flocks_code_security.models import SnapshotFile, SnapshotOmission, SnapshotRef
 from flocks_code_security.store import ScanStore
-
 
 DEFAULT_EXCLUDES = (
     ".git",
@@ -66,6 +67,14 @@ LANGUAGES = {
 
 MAX_SNAPSHOT_FILES = 50_000
 MAX_SNAPSHOT_TOTAL_BYTES = 512 * 1024 * 1024
+
+
+@dataclass(frozen=True)
+class _GitSnapshotState:
+    revision: str
+    clean: bool
+    status_digest: str
+    paths: tuple[str, ...]
 
 
 def normalize_relative_path(value: str, *, allow_root: bool = False) -> str:
@@ -148,6 +157,7 @@ class TargetSnapshotService:
             normalize_relative_path(item, allow_root=True)
             for item in (exclude_patterns or [])
         )
+        git_state = self._git_snapshot_state(target)
         root_descriptor: int | None = self._open_directory(target)
         root_identity = self._stat_signature(os.fstat(root_descriptor))
         temporary: Path | None = None
@@ -157,7 +167,7 @@ class TargetSnapshotService:
         omissions: list[SnapshotOmission] = []
         total_bytes = 0
         try:
-            files = self._enumerate(target, includes, patterns)
+            files = self._enumerate_for_state(target, includes, patterns, git_state)
             self._assert_root_identity(target, root_identity)
             if len(files) > MAX_SNAPSHOT_FILES:
                 raise ValueError(
@@ -214,7 +224,15 @@ class TargetSnapshotService:
                 )
                 total_bytes += len(data)
 
-            final_files = self._enumerate(target, includes, patterns)
+            final_git_state = self._git_snapshot_state(target)
+            if final_git_state != git_state:
+                raise ValueError("Audit target Git state changed during snapshot creation")
+            final_files = self._enumerate_for_state(
+                target,
+                includes,
+                patterns,
+                final_git_state,
+            )
             self._assert_root_identity(target, root_identity)
             if [item[0] for item in final_files] != [item[0] for item in files]:
                 raise ValueError("Audit target file set changed during snapshot creation")
@@ -255,11 +273,15 @@ class TargetSnapshotService:
                     sort_keys=True,
                 ).encode("utf-8")
             ).hexdigest()
-            repository_identity = hashlib.sha256(
-                (
-                    f"{target}\0{root_identity[0]}\0{root_identity[1]}"
-                ).encode("utf-8")
+            repository_identity = "target_sha256_" + hashlib.sha256(
+                f"local-workspace\0{target}".encode("utf-8")
             ).hexdigest()
+            if git_state is None:
+                target_kind = "directory_snapshot"
+                source_revision = None
+            else:
+                target_kind = "git_revision" if git_state.clean else "git_worktree"
+                source_revision = git_state.revision
 
             assert temporary is not None
             os.replace(temporary, final_root)
@@ -270,7 +292,7 @@ class TargetSnapshotService:
             snapshot = SnapshotRef(
                 snapshot_id=snapshot_id,
                 repository_identity=repository_identity,
-                source_revision=None,
+                source_revision=source_revision,
                 tree_digest=tree_digest,
                 scope_digest=scope_digest,
                 file_count=len(records),
@@ -278,6 +300,10 @@ class TargetSnapshotService:
                 created_at=datetime.now(timezone.utc).isoformat(),
                 root_path=str(final_root),
                 omitted_file_count=len(omissions),
+                target_kind=target_kind,
+                display_name=target.name,
+                include_paths=tuple(includes),
+                exclude_patterns=tuple(patterns),
             )
             self.store.save_snapshot(snapshot, records, omissions)
             return snapshot
@@ -350,6 +376,124 @@ class TargetSnapshotService:
                     if path.is_file() and not _matches_exclude(relative, exclude_patterns):
                         selected[relative] = path
         return sorted(selected.items())
+
+    def _enumerate_for_state(
+        self,
+        target: Path,
+        includes: list[str],
+        exclude_patterns: tuple[str, ...],
+        git_state: _GitSnapshotState | None,
+    ) -> list[tuple[str, Path]]:
+        if git_state is None:
+            return self._enumerate(target, includes, exclude_patterns)
+        for include in includes:
+            candidate = target if include == "." else target / include
+            self._reject_symlink_components(target, include)
+            try:
+                resolved = candidate.resolve(strict=True)
+            except FileNotFoundError as exc:
+                raise ValueError(f"Included path does not exist: {include}") from exc
+            if not resolved.is_relative_to(target):
+                raise ValueError("Included path escapes the target root")
+            if not resolved.is_file() and not resolved.is_dir():
+                raise ValueError(f"Unsupported included path: {include}")
+        selected: list[tuple[str, Path]] = []
+        for relative_path in git_state.paths:
+            if not any(
+                include == "."
+                or relative_path == include
+                or relative_path.startswith(f"{include}/")
+                for include in includes
+            ):
+                continue
+            if _matches_exclude(relative_path, exclude_patterns):
+                continue
+            self._reject_symlink_components(target, relative_path)
+            source = target / relative_path
+            # A tracked deletion is part of a valid dirty-worktree snapshot. The
+            # revision plus snapshot digest still binds the resulting target.
+            if not source.exists():
+                continue
+            if source.is_symlink():
+                raise ValueError(f"Symbolic links are not allowed: {relative_path}")
+            if not source.is_file():
+                raise ValueError(
+                    f"Git inventory contains a non-regular path: {relative_path}"
+                )
+            selected.append((relative_path, source))
+        return selected
+
+    @staticmethod
+    def _git_snapshot_state(target: Path) -> _GitSnapshotState | None:
+        marker = target / ".git"
+        if marker.is_symlink():
+            raise ValueError("Symbolic links are not allowed: .git")
+
+        def run(*args: str) -> subprocess.CompletedProcess[bytes]:
+            environment = {
+                name: value
+                for name, value in os.environ.items()
+                if not name.startswith("GIT_")
+            }
+            command = [
+                "git",
+                "-c",
+                "core.fsmonitor=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+                "-C",
+                str(target),
+                *args,
+            ]
+            try:
+                return subprocess.run(
+                    command,
+                    check=False,
+                    capture_output=True,
+                    env=environment,
+                    timeout=15,
+                )
+            except (FileNotFoundError, subprocess.TimeoutExpired):
+                return subprocess.CompletedProcess(command, 127, b"", b"")
+
+        root = run("rev-parse", "--show-toplevel")
+        revision = run("rev-parse", "--verify", "HEAD")
+        if root.returncode != 0 or revision.returncode != 0:
+            return None
+        try:
+            repository_root = Path(os.fsdecode(root.stdout.strip())).resolve(strict=True)
+        except (OSError, UnicodeError):
+            return None
+        if repository_root != target:
+            return None
+
+        status = run(
+            "status",
+            "--porcelain=v1",
+            "-z",
+            "--untracked-files=all",
+            "--ignore-submodules=none",
+        )
+        listed = run("ls-files", "--cached", "--others", "--exclude-standard", "-z")
+        if status.returncode != 0 or listed.returncode != 0:
+            return None
+        try:
+            revision_text = revision.stdout.strip().decode("ascii")
+            paths = tuple(
+                sorted(
+                    normalize_relative_path(os.fsdecode(raw_path))
+                    for raw_path in listed.stdout.split(b"\0")
+                    if raw_path
+                )
+            )
+        except (UnicodeError, ValueError):
+            return None
+        return _GitSnapshotState(
+            revision=revision_text,
+            clean=not status.stdout,
+            status_digest=hashlib.sha256(status.stdout).hexdigest(),
+            paths=paths,
+        )
 
     @staticmethod
     def _reject_symlink_components(target: Path, relative_path: str) -> None:

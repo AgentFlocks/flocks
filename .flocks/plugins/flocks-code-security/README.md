@@ -12,7 +12,8 @@ Current implementation provides:
 - a mandatory source-backed threat-modeling phase with canonical assets, trust boundaries, attacker capabilities, security objectives, and assumptions;
 - SQLite scan, work-unit, session-binding, threat-model, candidate, verdict, coverage, and batch storage;
 - fail-closed work-unit scope, state-transition, omission, source-access, and evidence validation;
-- deterministic JSON, Markdown, and SARIF report generation.
+- Codex Security v1-compatible sealed manifest, findings, and coverage artifacts;
+- deterministic Markdown and SARIF projections of independently verified findings.
 
 Target code is copied into the plugin snapshot store. The plugin never runs target code, build scripts, tests, or Git hooks.
 
@@ -30,9 +31,11 @@ flocks security status <scan_id>
 
 Both commands accept `--json`; `audit` emits newline-delimited progress events suitable for automation. Use `--model provider/model` to pin a model instead of the configured default.
 
-Standard static audits now support the full threat modeling → baseline → verification → reduction workflow through Flocks' existing background-session manager. Baseline workers must consume the persisted threat model before they can submit candidates or coverage. Finalization writes the canonical model to `threat-model.json` and projects it into `scan-manifest.json` and `report.md`.
+Standard static audits now support the full threat modeling → baseline → verification → reduction workflow through Flocks' existing background-session manager. Baseline workers must consume the persisted threat model before they can submit candidates or coverage. Every candidate must receive one independent verifier verdict before finalization. Rejected candidates are omitted, insufficient-evidence candidates become deferred coverage, and only confirmed findings are projected into SARIF.
 
-The threat-model semantics are adapted from the Apache-2.0-licensed OpenAI Codex Security bundled plugin, specifically `skills/threat-model/SKILL.md` and `references/threat-model.md`. This implementation retains Flocks' immutable snapshot, dedicated-session, tool-projection, and persistence boundaries; it does not embed or launch the Codex Security MCP server. Focused investigation, change audits, shared threat-model caching, supplied-model overrides, and dynamic execution remain outside the current version.
+Finalization validates `scan-manifest.json`, `findings.json`, and `coverage.json` against the vendored Codex Security v1 schemas before atomically publishing a sealed `completed` bundle. Findings carry stable finding/occurrence IDs, fingerprints, CWE taxonomy, digest-bound code evidence, root cause, validation, attack path, and remediation. Coverage carries surface dispositions, immutable receipts, explicit exclusions, deferred work, and completeness. Clean Git roots are revision-bound; dirty worktrees add a content snapshot digest. Markdown, SARIF, and `threat-model.json` are readable projections and are not part of the sealed canonical contract.
+
+The threat-model and completed-scan contract semantics are adapted from the Apache-2.0-licensed OpenAI Codex Security bundled plugin. See `THIRD_PARTY_NOTICES.md` for attribution. This implementation retains Flocks' immutable snapshot, dedicated-session, tool-projection, and persistence boundaries; it does not embed or launch the Codex Security MCP server. Focused investigation, change audits, shared threat-model caching, supplied-model overrides, and dynamic execution remain outside the current version.
 
 Run the plugin regression suite from the Flocks checkout with:
 

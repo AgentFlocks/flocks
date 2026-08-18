@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-from importlib import resources
 import json
 import sqlite3
 from collections import Counter
+from importlib import resources
 from typing import Any, Awaitable, Callable
 
 from flocks.tool.registry import (
@@ -21,7 +21,7 @@ from flocks.tool.registry import (
     ToolResult,
 )
 
-from flocks_code_security.reporting import ReportWriter
+from flocks_code_security.contract import SLUG_RE
 from flocks_code_security.orchestration import (
     baseline_prompt,
     plan_baseline_units,
@@ -30,6 +30,7 @@ from flocks_code_security.orchestration import (
     threat_model_prompt,
     verification_prompt,
 )
+from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.runtime import get_runtime
 
 
@@ -42,9 +43,17 @@ def _ruleset_digest() -> str:
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(prompt_root.joinpath(name).read_bytes())
         digest.update(b"\0")
-    digest.update(b"orchestration.py\0")
-    digest.update(package_root.joinpath("orchestration.py").read_bytes())
-    digest.update(b"\0")
+    for name in (
+        "contract.py",
+        "orchestration.py",
+        "reporting.py",
+        "schemas/coverage.schema.json",
+        "schemas/findings.schema.json",
+        "schemas/scan-manifest.schema.json",
+    ):
+        digest.update(name.encode("utf-8") + b"\0")
+        digest.update(package_root.joinpath(*name.split("/")).read_bytes())
+        digest.update(b"\0")
     return digest.hexdigest()
 
 
@@ -54,6 +63,15 @@ THREAT_MODELER_ROLE = {"threat_modeler"}
 SOURCE_SUBMIT_ROLES = {"baseline"}
 THREAT_MODEL_CONSUMER_ROLES = {"baseline"}
 VERIFIER_ROLE = {"verifier"}
+EVIDENCE_ROLES = {
+    "user_input",
+    "entrypoint",
+    "propagation",
+    "root_control",
+    "sink",
+    "outcome",
+    "expected_control",
+}
 ROLE_AGENTS = {
     "coordinator": "code-security",
     "threat_modeler": "code-security-threat-modeler",
@@ -351,41 +369,130 @@ async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) ->
             raise ValueError("candidate must be an object")
         required = (
             "rule_id",
+            "identity_anchor",
             "title",
+            "summary",
             "severity",
+            "severity_rationale",
             "confidence",
+            "confidence_rationale",
+            "category",
+            "cwe",
             "attack_path",
             "dangerous_operation",
+            "root_cause",
             "remediation",
             "evidence",
         )
         missing = [name for name in required if candidate.get(name) in (None, "")]
         if missing:
             raise ValueError("Missing candidate fields: " + ", ".join(missing))
+        rule_id = str(candidate["rule_id"]).strip()
+        anchor = str(candidate["identity_anchor"]).strip()
+        instance = str(candidate.get("identity_instance") or "").strip()
+        if not SLUG_RE.fullmatch(rule_id):
+            raise ValueError("rule_id must be a stable lowercase vulnerability-family slug")
+        if not SLUG_RE.fullmatch(anchor):
+            raise ValueError("identity_anchor must be a stable lowercase semantic slug")
+        if instance and not SLUG_RE.fullmatch(instance):
+            raise ValueError("identity_instance must be a stable lowercase semantic slug")
         severity = str(candidate["severity"]).lower()
-        if severity not in {"critical", "high", "medium", "low", "info"}:
+        if severity not in {"critical", "high", "medium", "low", "informational"}:
             raise ValueError("Unsupported severity")
         confidence = float(candidate["confidence"])
         if not 0 <= confidence <= 1:
             raise ValueError("confidence must be between 0 and 1")
-        for field in required[:-1]:
+        for field in (
+            "title",
+            "summary",
+            "severity_rationale",
+            "confidence_rationale",
+            "category",
+            "dangerous_operation",
+            "root_cause",
+            "remediation",
+        ):
+            if not str(candidate[field]).strip():
+                raise ValueError(f"Candidate field {field} must not be empty")
             if len(str(candidate[field])) > 10_000:
                 raise ValueError(f"Candidate field {field} is too long")
+        cwe = candidate["cwe"]
+        if (
+            not isinstance(cwe, list)
+            or not cwe
+            or len(cwe) > 20
+            or not all(
+                isinstance(item, str) and item.startswith("CWE-") and item[4:].isdigit()
+                for item in cwe
+            )
+        ):
+            raise ValueError("cwe must be an array of at most 20 CWE identifiers")
+        attack_path = candidate["attack_path"]
+        if not isinstance(attack_path, dict):
+            raise ValueError("attack_path must be an object")
+        for field in ("summary", "dataflow", "reachability"):
+            if field not in attack_path:
+                raise ValueError(f"attack_path.{field} is required")
+        if not str(attack_path["summary"]).strip():
+            raise ValueError("attack_path.summary must not be empty")
+        for field in ("dataflow", "reachability"):
+            section = attack_path[field]
+            if (
+                not isinstance(section, dict)
+                or not str(section.get("summary") or "").strip()
+            ):
+                raise ValueError(f"attack_path.{field}.summary is required")
+        if len(json.dumps(attack_path, ensure_ascii=False)) > 30_000:
+            raise ValueError("attack_path may contain at most 30000 characters")
         if not isinstance(candidate["evidence"], list) or len(candidate["evidence"]) > 50:
             raise ValueError("A candidate may contain between 1 and 50 evidence references")
+        evidence_metadata: list[dict[str, str]] = []
+        for index, item in enumerate(candidate["evidence"]):
+            if not isinstance(item, dict):
+                raise ValueError("Each evidence reference must be an object")
+            metadata: dict[str, str] = {}
+            for field in ("label", "role", "explanation"):
+                value = str(item.get(field) or "").strip()
+                if not value or len(value) > 4_000:
+                    raise ValueError(
+                        f"evidence[{index}].{field} must contain 1 to 4000 characters"
+                    )
+                metadata[field] = value
+            if metadata["role"] not in EVIDENCE_ROLES:
+                raise ValueError(
+                    f"evidence[{index}].role must be a canonical code-evidence role"
+                )
+            evidence_metadata.append(metadata)
         evidence = await asyncio.to_thread(
             runtime.source.validate_evidence,
             binding,
             candidate["evidence"],
         )
         payload = {
-            "rule_id": str(candidate["rule_id"]),
-            "title": str(candidate["title"]),
+            "rule_id": rule_id,
+            "identity_anchor": anchor,
+            "identity_instance": instance,
+            "title": str(candidate["title"]).strip(),
+            "summary": str(candidate["summary"]).strip(),
             "severity": severity,
+            "severity_rationale": str(candidate["severity_rationale"]).strip(),
             "confidence": confidence,
-            "attack_path": str(candidate["attack_path"]),
-            "dangerous_operation": str(candidate["dangerous_operation"]),
-            "remediation": str(candidate["remediation"]),
+            "confidence_rationale": str(candidate["confidence_rationale"]).strip(),
+            "category": str(candidate["category"]).strip(),
+            "cwe": list(dict.fromkeys(cwe)),
+            "attack_path": attack_path,
+            "dangerous_operation": str(candidate["dangerous_operation"]).strip(),
+            "root_cause": str(candidate["root_cause"]).strip(),
+            "remediation": str(candidate["remediation"]).strip(),
+            "remediation_tests": _optional_string_list(
+                candidate.get("remediation_tests"),
+                field="remediation_tests",
+            ),
+            "preventive_controls": _optional_string_list(
+                candidate.get("preventive_controls"),
+                field="preventive_controls",
+            ),
+            "evidence_metadata": evidence_metadata,
         }
         candidate_id = await asyncio.to_thread(runtime.store.save_candidate, binding, payload, evidence)
         return ToolResult(
@@ -395,6 +502,21 @@ async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) ->
         )
     except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
         return _error(exc, title="Candidate submission failed")
+
+
+def _optional_string_list(value: Any, *, field: str) -> list[str]:
+    if value is None:
+        return []
+    if (
+        not isinstance(value, list)
+        or len(value) > 50
+        or not all(
+            isinstance(item, str) and 0 < len(item.strip()) <= 4_000
+            for item in value
+        )
+    ):
+        raise ValueError(f"{field} must be an array of at most 50 non-empty strings")
+    return [item.strip() for item in value]
 
 
 async def audit_submit_verdict(
@@ -940,6 +1062,102 @@ def register_tools() -> None:
             )
     string_array = {"type": "array", "items": {"type": "string"}}
     object_array = {"type": "array", "items": {"type": "object", "additionalProperties": True}}
+    evidence_schema = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 50,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "relative_path",
+                "blob_digest",
+                "start_line",
+                "end_line",
+                "label",
+                "role",
+                "explanation",
+            ],
+            "properties": {
+                "relative_path": {"type": "string"},
+                "blob_digest": {"type": "string"},
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+                "label": {"type": "string"},
+                "role": {"type": "string", "enum": sorted(EVIDENCE_ROLES)},
+                "explanation": {"type": "string"},
+            },
+        },
+    }
+    attack_path_schema = {
+        "type": "object",
+        "additionalProperties": True,
+        "required": ["summary", "dataflow", "reachability"],
+        "properties": {
+            "summary": {"type": "string"},
+            "dataflow": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["summary"],
+                "properties": {"summary": {"type": "string"}},
+            },
+            "reachability": {
+                "type": "object",
+                "additionalProperties": True,
+                "required": ["summary"],
+                "properties": {"summary": {"type": "string"}},
+            },
+        },
+    }
+    candidate_schema = {
+        "type": "object",
+        "additionalProperties": False,
+        "required": [
+            "rule_id",
+            "identity_anchor",
+            "title",
+            "summary",
+            "severity",
+            "severity_rationale",
+            "confidence",
+            "confidence_rationale",
+            "category",
+            "cwe",
+            "attack_path",
+            "dangerous_operation",
+            "root_cause",
+            "remediation",
+            "evidence",
+        ],
+        "properties": {
+            "rule_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$"},
+            "identity_anchor": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$"},
+            "identity_instance": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._/-]*$"},
+            "title": {"type": "string"},
+            "summary": {"type": "string"},
+            "severity": {
+                "type": "string",
+                "enum": ["critical", "high", "medium", "low", "informational"],
+            },
+            "severity_rationale": {"type": "string"},
+            "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+            "confidence_rationale": {"type": "string"},
+            "category": {"type": "string"},
+            "cwe": {
+                "type": "array",
+                "minItems": 1,
+                "maxItems": 20,
+                "items": {"type": "string", "pattern": "^CWE-[0-9]+$"},
+            },
+            "attack_path": attack_path_schema,
+            "dangerous_operation": {"type": "string"},
+            "root_cause": {"type": "string"},
+            "remediation": {"type": "string"},
+            "remediation_tests": string_array,
+            "preventive_controls": string_array,
+            "evidence": evidence_schema,
+        },
+    }
     _register(
         "audit_prepare",
         "Create a reproducible read-only snapshot and initialize a standard static code audit. Never executes target code.",
@@ -1030,9 +1248,9 @@ def register_tools() -> None:
     )
     _register(
         "audit_submit_candidate",
-        "Submit a structured vulnerability candidate with digest-bound source evidence.",
+        "Submit canonical vulnerability semantics with stable identity, CWE taxonomy, attack path, root cause, and digest-bound source evidence.",
         audit_submit_candidate,
-        [_parameter("candidate", ParameterType.OBJECT, "Structured candidate and evidence references.", json_schema={"type": "object", "additionalProperties": True})],
+        [_parameter("candidate", ParameterType.OBJECT, "Canonical candidate and source evidence.", json_schema=candidate_schema)],
     )
     _register(
         "audit_submit_verdict",

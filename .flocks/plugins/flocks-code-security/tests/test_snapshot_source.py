@@ -1,11 +1,23 @@
 from __future__ import annotations
 
+import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import pytest
 
 from flocks_code_security.runtime import build_runtime
+
+
+def _git(repository: Path, *arguments: str) -> str:
+    result = subprocess.run(
+        ["git", "-C", str(repository), *arguments],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
 
 
 def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
@@ -45,6 +57,62 @@ def test_snapshot_is_stable_and_source_access_is_bound(tmp_path: Path) -> None:
     assert first_read["text"] == "user = input()\nprint(user)"
     assert runtime.source.search("worker", "input")["matches"][0]["relative_path"] == "app.py"
     assert runtime.source.inventory("worker")["languages"]["python"] == 1
+
+
+@pytest.mark.skipif(shutil.which("git") is None, reason="Git is not installed")
+def test_snapshot_binds_clean_and_dirty_git_targets(tmp_path: Path) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    _git(target, "init", "--quiet")
+    (target / ".gitignore").write_text("ignored.py\n", encoding="utf-8")
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    (target / "ignored.py").write_text("ignored = True\n", encoding="utf-8")
+    _git(target, "add", ".gitignore", "app.py")
+    _git(
+        target,
+        "-c",
+        "user.name=Flocks Test",
+        "-c",
+        "user.email=flocks@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        "fixture",
+    )
+    revision = _git(target, "rev-parse", "HEAD")
+    runtime = build_runtime(tmp_path / "plugin-data")
+
+    with pytest.raises(ValueError, match="does not exist"):
+        runtime.snapshots.create(str(target), include_paths=["missing"])
+
+    clean = runtime.snapshots.create(str(target))
+
+    assert clean.target_kind == "git_revision"
+    assert clean.source_revision == revision
+    assert clean.display_name == "target"
+    assert {
+        item.relative_path
+        for item in runtime.store.list_snapshot_files(clean.snapshot_id)
+    } == {".gitignore", "app.py"}
+
+    (target / "app.py").write_text("safe = False\n", encoding="utf-8")
+    (target / "new.py").write_text("new = True\n", encoding="utf-8")
+    dirty = runtime.snapshots.create(str(target))
+
+    assert dirty.target_kind == "git_worktree"
+    assert dirty.source_revision == revision
+    assert {
+        item.relative_path
+        for item in runtime.store.list_snapshot_files(dirty.snapshot_id)
+    } == {".gitignore", "app.py", "new.py"}
+
+    (target / "app.py").unlink()
+    deleted = runtime.snapshots.create(str(target))
+    assert deleted.target_kind == "git_worktree"
+    assert "app.py" not in {
+        item.relative_path
+        for item in runtime.store.list_snapshot_files(deleted.snapshot_id)
+    }
 
 
 def test_snapshot_rejects_symbolic_links(tmp_path: Path) -> None:

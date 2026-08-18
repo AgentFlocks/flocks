@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
+from flocks.tool.registry import ToolContext
 
 import flocks_code_security.reporting as reporting_module
 import flocks_code_security.runtime as runtime_module
-from flocks.tool.registry import ToolContext
+import flocks_code_security.tools as tools_module
+from flocks_code_security.contract import validate_document
 from flocks_code_security.runtime import build_runtime
 from flocks_code_security.tools import (
     audit_cancel,
@@ -25,7 +28,6 @@ from flocks_code_security.tools import (
     audit_threat_model_context,
     audit_wait_workers,
 )
-import flocks_code_security.tools as tools_module
 
 
 def _agent_context(session_id: str, message_id: str, agent: str) -> ToolContext:
@@ -35,6 +37,51 @@ def _agent_context(session_id: str, message_id: str, agent: str) -> ToolContext:
         agent=agent,
         extra={"agent_execution_session": True},
     )
+
+
+def _candidate_payload(
+    evidence: list[dict],
+    *,
+    title: str = "Untrusted input reaches eval",
+    confidence: float = 0.95,
+) -> dict:
+    enriched_evidence = []
+    for index, item in enumerate(evidence):
+        enriched_evidence.append(
+            {
+                **item,
+                "label": "Dangerous evaluation" if index == 0 else "Supporting code",
+                "role": "root_control" if index == 0 else "propagation",
+                "explanation": (
+                    "The caller-controlled value is evaluated as code."
+                    if index == 0
+                    else "This source supports the independently reviewable path."
+                ),
+            }
+        )
+    return {
+        "rule_id": "code-injection.dynamic-eval",
+        "identity_anchor": "handler-input-to-eval",
+        "title": title,
+        "summary": "Caller-controlled input reaches a dynamic code evaluator.",
+        "severity": "high",
+        "severity_rationale": "Successful exploitation executes code with process authority.",
+        "confidence": confidence,
+        "confidence_rationale": "The source shows a direct, guard-free data flow into eval.",
+        "category": "code-injection",
+        "cwe": ["CWE-95"],
+        "attack_path": {
+            "summary": "A caller supplies text that the handler evaluates as code.",
+            "dataflow": {"summary": "handler input flows directly to eval."},
+            "reachability": {"summary": "The handler is callable with attacker-controlled input."},
+        },
+        "dangerous_operation": "eval(user)",
+        "root_cause": "Untrusted text is interpreted as executable code.",
+        "remediation": "Replace eval with a strict parser.",
+        "remediation_tests": ["Reject code expressions while accepting the intended data format."],
+        "preventive_controls": ["Ban dynamic evaluation of untrusted values."],
+        "evidence": enriched_evidence,
+    }
 
 
 async def _complete_threat_model(
@@ -125,6 +172,35 @@ class _FakeBackgroundManager:
             return 0
         task.status = "cancelled"
         return 1
+
+
+@pytest.mark.asyncio
+async def test_threat_model_without_baseline_cannot_be_finalized(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("safe = True\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    monkeypatch.setattr(
+        reporting_module,
+        "output_dir",
+        lambda scan_id: tmp_path / "outputs" / scan_id,
+    )
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    await _complete_threat_model(
+        runtime,
+        scan_id=prepared.output["scan_id"],
+        snapshot_id=prepared.output["snapshot"]["snapshot_id"],
+    )
+
+    finalized = await audit_finalize(coordinator, prepared.output["scan_id"])
+
+    assert finalized.success is False
+    assert "baseline analysis" in str(finalized.error)
 
 
 @pytest.mark.asyncio
@@ -285,15 +361,8 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     )
     candidate = await audit_submit_candidate(
         baseline,
-        {
-            "rule_id": "PY-EVAL-001",
-            "title": "Untrusted input reaches eval",
-            "severity": "high",
-            "confidence": 0.95,
-            "attack_path": "handler argument reaches eval without validation",
-            "dangerous_operation": "eval(user)",
-            "remediation": "Replace eval with a strict parser.",
-            "evidence": [
+        _candidate_payload(
+            [
                 {
                     "relative_path": "app.py",
                     "blob_digest": source.output["blob_digest"],
@@ -306,8 +375,8 @@ async def test_prepare_candidate_verify_finalize_pipeline(
                     "start_line": 1,
                     "end_line": 2,
                 }
-            ],
-        },
+            ]
+        ),
     )
     assert candidate.success is True
     coverage = await audit_submit_coverage(
@@ -358,12 +427,25 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert finalized.output["status"] == "completed"
     output_path = Path(finalized.output["output_dir"])
     assert (output_path / "report.md").is_file()
-    assert (output_path / "findings.json").read_text(encoding="utf-8").count("PY-EVAL-001") == 1
+    assert (
+        (output_path / "findings.json")
+        .read_text(encoding="utf-8")
+        .count("code-injection.dynamic-eval")
+        == 1
+    )
     assert (output_path / "report.sarif").is_file()
-    findings = json.loads(
+    findings_document = json.loads(
         (output_path / "findings.json").read_text(encoding="utf-8")
-    )["findings"]
-    assert findings[0]["primary_evidence"]["relative_path"] == "app.py"
+    )
+    findings = findings_document["findings"]
+    assert findings_document["documentType"] == "codex-security.findings"
+    assert findings[0]["locations"][0]["path"] == "app.py"
+    assert findings[0]["findingId"].startswith("csf_")
+    assert findings[0]["occurrenceId"].startswith("occ_")
+    assert findings[0]["fingerprints"]["algorithm"] == "codex-security/v1"
+    assert findings[0]["taxonomy"]["cwe"] == ["CWE-95"]
+    assert findings[0]["validation"]["conclusion"] == "confirmed"
+    assert findings[0]["attackPath"]["dataflow"]["summary"]
     sarif = json.loads((output_path / "report.sarif").read_text(encoding="utf-8"))
     assert sarif["runs"][0]["results"][0]["locations"][0]["physicalLocation"][
         "artifactLocation"
@@ -373,22 +455,34 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     manifest = json.loads(
         (output_path / "scan-manifest.json").read_text(encoding="utf-8")
     )
-    assert manifest["status"] == "completed"
-    assert manifest["threat_model_status"] == "completed"
+    coverage_document = json.loads(
+        (output_path / "coverage.json").read_text(encoding="utf-8")
+    )
+    validate_document("manifest", manifest)
+    validate_document("findings", findings_document)
+    validate_document("coverage", coverage_document)
+    assert manifest["documentType"] == "codex-security.scan-manifest"
+    assert manifest["scan"]["status"] == "completed"
+    assert manifest["scan"]["sealedAt"] == manifest["scan"]["completedAt"]
+    assert manifest["scan"]["threatModel"]["trustBoundaries"]
+    assert coverage_document["completeness"] == "complete"
+    for artifact in manifest["scan"]["artifacts"]:
+        contents = (output_path / artifact["path"]).read_bytes()
+        assert hashlib.sha256(contents).hexdigest() == artifact["sha256"]
     threat_model = json.loads(
         (output_path / "threat-model.json").read_text(encoding="utf-8")
     )
-    assert threat_model["threat_model"]["trustBoundaries"]
+    assert threat_model["threatModel"]["trustBoundaries"]
     assert threat_model["evidence"][0]["relative_path"] in {
         "aaa_helper.py",
         "app.py",
     }
-    assert "result_status" not in manifest
+    assert "result_status" not in manifest["scan"]
     assert (output_path / ".scan-manifest.final").exists() is False
 
 
 @pytest.mark.asyncio
-async def test_invalid_or_failed_coverage_never_completes_scan(
+async def test_failed_coverage_is_sealed_as_deferred_work(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -446,20 +540,27 @@ async def test_invalid_or_failed_coverage_never_completes_scan(
 
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
-    assert finalized.output["status"] == "partial"
+    assert finalized.output["status"] == "completed"
     manifest = json.loads(
         (Path(finalized.output["output_dir"]) / "scan-manifest.json").read_text(
             encoding="utf-8"
         )
     )
-    assert manifest["incomplete_details"]["failed_paths"] == ["app.py"]
+    coverage = json.loads(
+        (Path(finalized.output["output_dir"]) / "coverage.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    assert manifest["scan"]["status"] == "completed"
+    assert coverage["completeness"] == "partial"
+    assert any(item.get("paths") == ["app.py"] for item in coverage["deferred"])
     assert (await audit_submit_coverage(baseline, analyzed_paths=["app.py"])).success is False
     assert (await audit_finalize(coordinator, scan_id)).success is False
     assert (await audit_cancel(coordinator, scan_id)).success is False
 
 
 @pytest.mark.asyncio
-async def test_partial_report_preserves_pending_candidate_details(
+async def test_unverified_candidate_blocks_completed_bundle(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -501,15 +602,8 @@ async def test_partial_report_preserves_pending_candidate_details(
     source = await audit_read(baseline, "app.py", start_line=1, end_line=1)
     candidate = await audit_submit_candidate(
         baseline,
-        {
-            "rule_id": "PY-EVAL-001",
-            "title": "Pending eval candidate",
-            "severity": "high",
-            "confidence": 0.8,
-            "attack_path": "user reaches eval",
-            "dangerous_operation": "eval(user)",
-            "remediation": "Use a strict parser.",
-            "evidence": [
+        _candidate_payload(
+            [
                 {
                     "relative_path": "app.py",
                     "blob_digest": source.output["blob_digest"],
@@ -517,7 +611,9 @@ async def test_partial_report_preserves_pending_candidate_details(
                     "end_line": 1,
                 }
             ],
-        },
+            title="Pending eval candidate",
+            confidence=0.8,
+        ),
     )
     assert candidate.success
     assert (
@@ -531,15 +627,10 @@ async def test_partial_report_preserves_pending_candidate_details(
 
     finalized = await audit_finalize(coordinator, scan_id)
 
-    assert finalized.output["status"] == "partial"
-    output_path = Path(finalized.output["output_dir"])
-    manifest = json.loads((output_path / "scan-manifest.json").read_text())
-    findings = json.loads((output_path / "findings.json").read_text())
-    assert manifest["incomplete_details"]["pending_candidate_ids"] == [
-        candidate.output["candidate_id"]
-    ]
-    assert findings["pending_candidates"][0]["payload"]["rule_id"] == "PY-EVAL-001"
-    assert findings["pending_candidates"][0]["evidence"][0]["relative_path"] == "app.py"
+    assert finalized.success is False
+    assert "independent verification verdict" in str(finalized.error)
+    assert runtime.store.scan_status(scan_id)["status"] == "running"
+    assert (tmp_path / "outputs" / scan_id).exists() is False
 
 
 @pytest.mark.asyncio
@@ -653,15 +744,8 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     assert (await audit_threat_model_context(baseline)).success
     assert (await audit_inventory(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
-    candidate_payload = {
-        "rule_id": "PY-EVAL-001",
-        "title": "Unsafe ![remote](https://invalid.example/image)",
-        "severity": "high",
-        "confidence": 0.9,
-        "attack_path": "argument reaches eval",
-        "dangerous_operation": "eval(user)",
-        "remediation": "replace eval",
-        "evidence": [
+    candidate_payload = _candidate_payload(
+        [
             {
                 "relative_path": "app.py",
                 "blob_digest": source.output["blob_digest"],
@@ -669,7 +753,9 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
                 "end_line": 2,
             }
         ],
-    }
+        title="Unsafe ![remote](https://invalid.example/image)",
+        confidence=0.9,
+    )
     first = await audit_submit_candidate(baseline, candidate_payload)
     second = await audit_submit_candidate(baseline, candidate_payload)
     assert first.success and second.success
@@ -722,7 +808,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
         "findings"
     ]
     assert len(findings) == 1
-    assert len(findings[0]["candidate_ids"]) == 2
+    assert len(findings[0]["extensions"]["candidateIds"]) == 2
     report = (output_path / "report.md").read_text(encoding="utf-8")
     assert "\\!\\[remote\\]\\(https://invalid.example/image\\)" in report
 
@@ -847,15 +933,8 @@ async def test_background_worker_orchestration_retries_failed_verification(
     assert (await audit_inventory(baseline)).success
     candidate = await audit_submit_candidate(
         baseline,
-        {
-            "rule_id": "PY-EVAL-001",
-            "title": "Untrusted input reaches eval",
-            "severity": "high",
-            "confidence": 0.95,
-            "attack_path": "handler input reaches eval",
-            "dangerous_operation": "eval(user)",
-            "remediation": "Use a strict parser.",
-            "evidence": [
+        _candidate_payload(
+            [
                 {
                     "relative_path": "app.py",
                     "blob_digest": source.output["blob_digest"],
@@ -863,7 +942,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
                     "end_line": 2,
                 }
             ],
-        },
+        ),
     )
     assert candidate.success is True
     assert (
@@ -925,7 +1004,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
 
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
-    assert finalized.output["status"] == "partial"
+    assert finalized.output["status"] == "completed"
     assert finalized.output["finding_count"] == 1
     assert finalized.output["pending_count"] == 0
 

@@ -35,6 +35,10 @@ class SnapshotRef:
     created_at: str
     root_path: str
     omitted_file_count: int = 0
+    target_kind: str = "directory_snapshot"
+    display_name: str = "snapshot"
+    include_paths: tuple[str, ...] = (".",)
+    exclude_patterns: tuple[str, ...] = ()
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)

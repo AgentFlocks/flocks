@@ -14,7 +14,6 @@ from flocks_code_security.models import SessionBinding, SnapshotFile
 from flocks_code_security.snapshot import TargetSnapshotService, normalize_relative_path
 from flocks_code_security.store import ScanStore
 
-
 SOURCE_ROLES = {"threat_modeler", "baseline", "investigator", "verifier"}
 
 
@@ -260,6 +259,8 @@ class AuditSourceRepository:
                 start_line=start_line,
                 end_line=end_line,
             )
+            if not excerpt["text"].strip():
+                raise ValueError(f"Evidence excerpt is empty: {relative_path}")
             validated.append(
                 {
                     "relative_path": relative_path,
