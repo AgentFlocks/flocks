@@ -3479,6 +3479,30 @@ describe('buildTodoSummary', () => {
 });
 
 describe('ChatToolPart delegate rendering', () => {
+  it('keeps the streaming indicator visible while delegation is running', () => {
+    render(React.createElement(ChatMessageBubble, {
+      message: makeMessage({
+        id: 'assistant-running-delegate',
+        role: 'assistant',
+        parts: [{
+          id: 'delegate-running',
+          type: 'tool',
+          tool: 'delegate_task',
+          state: {
+            status: 'running',
+            input: {
+              subagent_type: 'explore',
+              description: '排查会话页面',
+            },
+          },
+        } as any],
+      }),
+      isActive: true,
+    }));
+
+    expect(screen.getByText('继续输出中...')).toBeInTheDocument();
+  });
+
   it('keeps the specialized delegate view inside a process timeline', () => {
     render(
       React.createElement(ChatToolPart, {

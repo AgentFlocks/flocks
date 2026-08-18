@@ -5448,11 +5448,6 @@ function ChatMessageBubbleInner({
 
       {/* Streaming indicator */}
       {isActive && !isUser && parts.length > 0 && (() => {
-        const lastPart = parts[parts.length - 1];
-        const isDelegating = lastPart?.type === 'tool'
-          && isDelegateTool(lastPart.tool || '')
-          && lastPart.state?.status === 'running';
-        if (isDelegating) return null;
         return (
           <div className="flex items-center gap-2 mt-2.5 pt-2 border-t border-gray-100 text-xs text-gray-400">
             <div className="flex gap-0.5">
