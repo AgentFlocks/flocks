@@ -26,6 +26,17 @@ Submit exactly one object with `audit_submit_threat_model`:
 - `attackerCapabilities`: realistic starting capabilities, absent privileges, and meaningful authority a boundary failure could add.
 - `securityObjectives`: enforceable security invariants and relevant resource limits.
 - `assumptions`: deployment prerequisites, exclusions, discrepancies, and material unknowns.
-- `evidence`: digest-bound source references supporting material code-established facts.
+- `evidence`: one or more digest-bound source references supporting material code-established facts. Every item must use exactly this shape:
+
+```json
+{
+  "relative_path": "repository/relative/path.py",
+  "blob_digest": "64-character lowercase SHA-256 returned by audit_read or audit_search",
+  "start_line": 1,
+  "end_line": 20
+}
+```
+
+Use the exact field names above. Do not use `path`, `digest`, `lines`, combined `path:line` values, or extra fields. Submit only a substantive completed model; never submit `minimal`, one-letter, test, or placeholder content to discover the schema. If validation rejects a submission, correct every field named by the error and retry with the complete model rather than a reduced placeholder.
 
 Never copy secrets into the model; name only the secret reference, storage location, recipients, and enforcing control. Do not execute code, use the network, modify files, submit vulnerability candidates, or claim architecture mapping as completed baseline audit coverage.

@@ -136,6 +136,27 @@ def test_create_trace_forwards_tags(monkeypatch):
     assert client.trace_payload["tags"] == ["session:s1", "step:2", "session_step:s1:2"]
 
 
+def test_resolve_session_trace_context_validates_persisted_values():
+    context = lf.resolve_session_trace_context(
+        {
+            "langfuse": {
+                "session_id": " scan_123 ",
+                "trace_name": "code-security.baseline.model-step",
+                "tags": ["phase:baseline", "phase:baseline", "", 42],
+                "metadata": {"assigned_paths": ["src/"]},
+            }
+        }
+    )
+
+    assert context == {
+        "session_id": "scan_123",
+        "trace_name": "code-security.baseline.model-step",
+        "tags": ["phase:baseline"],
+        "metadata": {"assigned_paths": ["src/"]},
+    }
+    assert lf.resolve_session_trace_context({"langfuse": "invalid"}) == {}
+
+
 def test_create_trace_uses_start_observation_for_new_sdk(monkeypatch):
     client = _NewSdkTraceClient()
     monkeypatch.setattr(lf, "_get_client", lambda: client)
@@ -227,6 +248,7 @@ def test_noop_when_not_configured():
 
         lf.end_observation(gen, output="done", usage={"prompt_tokens": 10})
         lf.end_observation(trace, output="ok")
+        lf.flush()
 
         assert not lf.is_active()
     finally:

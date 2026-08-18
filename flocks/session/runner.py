@@ -77,7 +77,12 @@ from flocks.tool.catalog import (
     list_tool_catalog_infos,
 )
 from flocks.tool.registry import ToolRegistry, ToolResult
-from flocks.utils.langfuse import generation_scope, is_active as langfuse_is_active, trace_scope
+from flocks.utils.langfuse import (
+    generation_scope,
+    is_active as langfuse_is_active,
+    resolve_session_trace_context,
+    trace_scope,
+)
 from flocks.session.utils.file_extractor import (
     read_file_part_bytes,
     is_text_extractable_mime,
@@ -3188,14 +3193,6 @@ class SessionRunner:
         if turn_plan_file is None:
             turn_plan_file = session_plan_file(self.session)
         allowed_tool_names = self._get_prompt_tool_names_from_schema(tools)
-        # The projected tool schema is a hard capability ceiling for this turn.
-        # Hooks may hide tools, but must not add a capability or replace the
-        # trusted schema for an existing tool name.
-        tool_schema_ceiling: dict[str, Dict[str, Any]] = {}
-        for tool_schema in tools:
-            names = self._get_prompt_tool_names_from_schema([tool_schema])
-            if len(names) == 1 and names[0] not in tool_schema_ceiling:
-                tool_schema_ceiling[names[0]] = copy.deepcopy(tool_schema)
         processor = StreamProcessor(
             session_id=self.session.id,
             assistant_message=assistant_msg,
@@ -3324,6 +3321,14 @@ class SessionRunner:
             raise RuntimeError("LLM hook stage probe failed; request was not sent") from exc
 
         if llm_before_enabled:
+            # The projected tool schema is a hard capability ceiling for this
+            # turn. Hooks may hide tools, but must not add a capability or
+            # replace the trusted schema for an existing tool name.
+            tool_schema_ceiling: dict[str, Dict[str, Any]] = {}
+            for tool_schema in tools:
+                names = self._get_prompt_tool_names_from_schema([tool_schema])
+                if len(names) == 1 and names[0] not in tool_schema_ceiling:
+                    tool_schema_ceiling[names[0]] = copy.deepcopy(tool_schema)
             llm_before_hook_input = {
                 **llm_hook_metadata,
                 "request": {
@@ -3388,6 +3393,12 @@ class SessionRunner:
         # the core session flow.
         if langfuse_is_active():
             try:
+                persisted_trace_context = resolve_session_trace_context(
+                    getattr(self.session, "metadata", None)
+                )
+                correlation_session_id = persisted_trace_context.get(
+                    "session_id", self.session.id
+                )
                 trace_tags = [
                     f"session:{self.session.id}",
                     f"step:{self._step}",
@@ -3395,6 +3406,9 @@ class SessionRunner:
                     f"agent:{agent.name}",
                     f"provider:{self.provider_id}",
                 ]
+                trace_tags.extend(persisted_trace_context.get("tags", []))
+                trace_tags = list(dict.fromkeys(trace_tags))
+                correlation_metadata = persisted_trace_context.get("metadata", {})
                 request_payload = self._build_langfuse_request_payload(
                     step=self._step,
                     messages=messages,
@@ -3403,15 +3417,19 @@ class SessionRunner:
                     provider_options=provider_options,
                 )
                 trace_ctx = trace_scope(
-                    name="SessionRunner.step",
-                    session_id=self.session.id,
+                    name=persisted_trace_context.get(
+                        "trace_name", "SessionRunner.step"
+                    ),
+                    session_id=correlation_session_id,
                     tags=trace_tags,
                     input=request_payload,
                     metadata={
+                        **correlation_metadata,
                         "provider_id": self.provider_id,
                         "model_id": self.model_id,
                         "agent": agent.name,
                         "workspace": self.session.directory,
+                        "execution_session_id": self.session.id,
                         "message_count": len(messages),
                         "available_tool_count": len(tools),
                         "request_tool_count": len(provider_tools or []),
@@ -3426,8 +3444,10 @@ class SessionRunner:
                     model=self.model_id,
                     input=request_payload,
                     metadata={
+                        **correlation_metadata,
                         "provider_id": self.provider_id,
                         "session_id": self.session.id,
+                        "correlation_session_id": correlation_session_id,
                         "step": self._step,
                         "agent": agent.name,
                         "workspace": self.session.directory,

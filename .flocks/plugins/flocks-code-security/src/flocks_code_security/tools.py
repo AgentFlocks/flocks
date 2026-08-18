@@ -314,12 +314,13 @@ async def audit_submit_threat_model(
         raw_evidence = threat_model.get("evidence")
         if not isinstance(raw_evidence, list) or len(raw_evidence) > 100:
             raise ValueError("Threat model requires between 1 and 100 evidence references")
+        runtime.store.validate_threat_model_contract(payload, raw_evidence)
         evidence = await asyncio.to_thread(
             runtime.source.validate_evidence,
             binding,
             raw_evidence,
         )
-        await asyncio.to_thread(
+        updated = await asyncio.to_thread(
             runtime.store.save_threat_model,
             binding,
             payload,
@@ -330,6 +331,7 @@ async def audit_submit_threat_model(
             output={
                 "scan_id": binding.scan_id,
                 "status": "submitted",
+                "operation": "updated" if updated else "created",
                 "evidence_count": len(evidence),
             },
             title="Submitted source-backed threat model",
@@ -467,6 +469,7 @@ async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) ->
             runtime.source.validate_evidence,
             binding,
             candidate["evidence"],
+            allowed_extra_fields=frozenset({"label", "role", "explanation"}),
         )
         payload = {
             "rule_id": rule_id,
@@ -835,6 +838,16 @@ async def _launch_worker(
             model=model_id,
             model_pinned=True,
         )
+    correlation_metadata = {
+        "scan_id": scan_id,
+        "snapshot_id": snapshot_id,
+        "phase": phase,
+        "role": unit["role"],
+        "work_unit_id": unit["work_unit_id"],
+        "assigned_paths": list(unit.get("paths", [])),
+    }
+    if candidate is not None:
+        correlation_metadata["candidate_id"] = candidate["candidate_id"]
     child = await Session.create(
         project_id=parent.project_id,
         directory=parent.directory,
@@ -842,6 +855,20 @@ async def _launch_worker(
         parent_id=parent.id,
         agent=agent_name,
         category="task",
+        metadata={
+            "langfuse": {
+                "session_id": scan_id,
+                "trace_name": f"code-security.{phase}.model-step",
+                "tags": [
+                    "feature:code-security",
+                    f"scan:{scan_id}",
+                    f"phase:{phase}",
+                    f"role:{unit['role']}",
+                    f"work-unit:{unit['work_unit_id']}",
+                ],
+                "metadata": correlation_metadata,
+            }
+        },
         **child_kwargs,
     )
     await asyncio.to_thread(
@@ -982,6 +1009,17 @@ async def _public_batch_status(batch_id: str) -> dict[str, Any]:
         "status": batch["status"],
         "worker_count": len(batch["units"]),
         "status_counts": dict(sorted(counts.items())),
+        "workers": [
+            {
+                "work_unit_id": unit["work_unit_id"],
+                "role": unit["role"],
+                "assigned_paths": unit["paths"],
+                "candidate_id": unit.get("subject_id"),
+                "session_id": unit.get("session_id"),
+                "status": unit["status"],
+            }
+            for unit in batch["units"]
+        ],
     }
 
 
@@ -1062,6 +1100,51 @@ def register_tools() -> None:
             )
     string_array = {"type": "array", "items": {"type": "string"}}
     object_array = {"type": "array", "items": {"type": "object", "additionalProperties": True}}
+    threat_model_item = {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 4_000,
+        "pattern": "\\S",
+    }
+    threat_model_required_array = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 100,
+        "items": threat_model_item,
+    }
+    threat_model_assumptions = {
+        "type": "array",
+        "maxItems": 100,
+        "items": threat_model_item,
+    }
+    threat_model_evidence = {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 100,
+        "items": {
+            "type": "object",
+            "additionalProperties": False,
+            "required": [
+                "relative_path",
+                "blob_digest",
+                "start_line",
+                "end_line",
+            ],
+            "properties": {
+                "relative_path": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 1_024,
+                },
+                "blob_digest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$",
+                },
+                "start_line": {"type": "integer", "minimum": 1},
+                "end_line": {"type": "integer", "minimum": 1},
+            },
+        },
+    }
     evidence_schema = {
         "type": "array",
         "minItems": 1,
@@ -1228,13 +1311,18 @@ def register_tools() -> None:
                         "evidence",
                     ],
                     "properties": {
-                        "summary": {"type": "string"},
-                        "assets": string_array,
-                        "trustBoundaries": string_array,
-                        "attackerCapabilities": string_array,
-                        "securityObjectives": string_array,
-                        "assumptions": string_array,
-                        "evidence": object_array,
+                        "summary": {
+                            "type": "string",
+                            "minLength": 1,
+                            "maxLength": 20_000,
+                            "pattern": "\\S",
+                        },
+                        "assets": threat_model_required_array,
+                        "trustBoundaries": threat_model_required_array,
+                        "attackerCapabilities": threat_model_required_array,
+                        "securityObjectives": threat_model_required_array,
+                        "assumptions": threat_model_assumptions,
+                        "evidence": threat_model_evidence,
                     },
                 },
             )

@@ -18,6 +18,14 @@ from flocks_code_security.models import (
 )
 
 
+THREAT_MODEL_REQUIRED_LIST_FIELDS = (
+    "assets",
+    "trustBoundaries",
+    "attackerCapabilities",
+    "securityObjectives",
+)
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -647,7 +655,8 @@ class ScanStore:
         with self._connect() as connection:
             if role == "threat_modeler":
                 row = connection.execute(
-                    "SELECT 1 FROM threat_models WHERE work_unit_id = ?",
+                    "SELECT payload_json, evidence_json FROM threat_models "
+                    "WHERE work_unit_id = ?",
                     (work_unit_id,),
                 ).fetchone()
             elif role in {"baseline", "investigator"}:
@@ -673,7 +682,17 @@ class ScanStore:
                     ).fetchone()
             else:
                 raise ValueError("Unsupported work-unit role")
-        return row is not None
+        if row is None:
+            return False
+        if role == "threat_modeler":
+            try:
+                self.validate_threat_model_contract(
+                    json.loads(row["payload_json"]),
+                    json.loads(row["evidence_json"]),
+                )
+            except (json.JSONDecodeError, TypeError, ValueError):
+                return False
+        return True
 
     def list_unverified_candidates(
         self,
@@ -917,9 +936,10 @@ class ScanStore:
         binding: SessionBinding,
         payload: dict[str, Any],
         evidence: list[dict[str, Any]],
-    ) -> None:
+    ) -> bool:
         if binding.role != "threat_modeler" or binding.work_unit_id is None:
             raise ValueError("Threat models require a threat-modeler work unit")
+        self.validate_threat_model_contract(payload, evidence)
         self.validate_coverage_access(
             binding,
             inventoried_paths=["."],
@@ -929,11 +949,24 @@ class ScanStore:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
             existing = connection.execute(
-                "SELECT 1 FROM threat_models WHERE scan_id = ?",
+                "SELECT work_unit_id FROM threat_models WHERE scan_id = ?",
                 (binding.scan_id,),
             ).fetchone()
             if existing is not None:
-                raise ValueError("Threat model has already been submitted")
+                if existing["work_unit_id"] != binding.work_unit_id:
+                    raise ValueError("Threat model has already been submitted")
+                connection.execute(
+                    "UPDATE threat_models SET payload_json = ?, evidence_json = ?, "
+                    "created_at = ? WHERE scan_id = ? AND work_unit_id = ?",
+                    (
+                        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                        json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                        _now(),
+                        binding.scan_id,
+                        binding.work_unit_id,
+                    ),
+                )
+                return True
             connection.execute(
                 "INSERT INTO threat_models VALUES (?, ?, ?, ?, ?)",
                 (
@@ -944,6 +977,39 @@ class ScanStore:
                     _now(),
                 ),
             )
+        return False
+
+    @staticmethod
+    def validate_threat_model_contract(
+        payload: dict[str, Any],
+        evidence: list[dict[str, Any]],
+    ) -> None:
+        summary = payload.get("summary") if isinstance(payload, dict) else None
+        if not isinstance(summary, str) or not summary.strip():
+            raise ValueError("Threat-model summary must be a non-empty string")
+        for field in THREAT_MODEL_REQUIRED_LIST_FIELDS:
+            values = payload.get(field)
+            if not isinstance(values, list) or not values:
+                raise ValueError(f"Threat-model field {field} must not be empty")
+            if any(
+                not isinstance(item, str)
+                or not item.strip()
+                for item in values
+            ):
+                raise ValueError(
+                    f"Threat-model field {field} must contain non-empty strings"
+                )
+        assumptions = payload.get("assumptions")
+        if not isinstance(assumptions, list) or any(
+            not isinstance(item, str)
+            or not item.strip()
+            for item in assumptions
+        ):
+            raise ValueError(
+                "Threat-model field assumptions must contain only non-empty strings"
+            )
+        if not isinstance(evidence, list) or not evidence:
+            raise ValueError("Threat model requires at least one evidence reference")
 
     def get_threat_model(self, scan_id: str) -> dict[str, Any] | None:
         with self._connect() as connection:
@@ -1017,6 +1083,15 @@ class ScanStore:
         ).fetchone()
         if row is None:
             raise ValueError("A completed source-backed threat model is required")
+        try:
+            ScanStore.validate_threat_model_contract(
+                json.loads(row["payload_json"]),
+                json.loads(row["evidence_json"]),
+            )
+        except (json.JSONDecodeError, TypeError, ValueError) as exc:
+            raise ValueError(
+                f"Completed threat model failed contract validation: {exc}"
+            ) from exc
         return row
 
     @staticmethod
@@ -1479,7 +1554,8 @@ class ScanStore:
                 (scan_id,),
             ).fetchall()
             threat_model_row = connection.execute(
-                "SELECT tm.created_at, wu.status AS work_unit_status "
+                "SELECT tm.created_at, tm.payload_json, tm.evidence_json, "
+                "wu.status AS work_unit_status "
                 "FROM threat_models tm "
                 "JOIN work_units wu ON wu.work_unit_id = tm.work_unit_id "
                 "WHERE tm.scan_id = ?",
@@ -1491,21 +1567,50 @@ class ScanStore:
                 "ORDER BY created_at DESC, batch_id DESC LIMIT 1",
                 (scan_id,),
             ).fetchone()
-        if (
-            threat_model_row is not None
-            and threat_model_row["work_unit_status"] == "completed"
-        ):
-            threat_model_status = "completed"
+        threat_model_validation_error: str | None = None
+        if threat_model_row is not None and threat_model_row["work_unit_status"] == "completed":
+            try:
+                self.validate_threat_model_contract(
+                    json.loads(threat_model_row["payload_json"]),
+                    json.loads(threat_model_row["evidence_json"]),
+                )
+            except (json.JSONDecodeError, TypeError, ValueError) as exc:
+                threat_model_status = "invalid"
+                threat_model_validation_error = str(exc)
+            else:
+                threat_model_status = "completed"
         elif threat_model_batch_row is not None:
             threat_model_status = threat_model_batch_row["status"]
         elif threat_model_row is not None:
             threat_model_status = "submitted"
         else:
             threat_model_status = "missing"
+        integrity_status = "pending"
+        integrity_errors: list[str] = []
+        if threat_model_status == "invalid":
+            integrity_status = "invalid"
+            integrity_errors.append(
+                "Threat model failed contract validation"
+                + (
+                    f": {threat_model_validation_error}"
+                    if threat_model_validation_error
+                    else ""
+                )
+            )
+        elif scan["status"] == "completed":
+            if threat_model_status == "completed":
+                integrity_status = "valid"
+            else:
+                integrity_status = "invalid"
+                integrity_errors.append(
+                    "Completed scan does not have a valid completed threat model"
+                )
         return {
             **scan,
             "counts": counts,
             "threat_model_status": threat_model_status,
+            "integrity_status": integrity_status,
+            "integrity_errors": integrity_errors,
             "worker_batches": [dict(row) for row in batch_rows],
         }
 

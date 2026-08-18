@@ -238,19 +238,54 @@ class AuditSourceRepository:
         self,
         binding: SessionBinding,
         evidence: list[dict[str, Any]],
+        *,
+        allowed_extra_fields: frozenset[str] = frozenset(),
     ) -> list[dict[str, Any]]:
         if not evidence:
             raise ValueError("At least one evidence reference is required")
         validated: list[dict[str, Any]] = []
-        for item in evidence:
+        required_fields = (
+            "relative_path",
+            "blob_digest",
+            "start_line",
+            "end_line",
+        )
+        for index, item in enumerate(evidence):
             if not isinstance(item, dict):
                 raise ValueError("Each evidence reference must be an object")
+            missing = [
+                field
+                for field in required_fields
+                if field not in item or item[field] in (None, "")
+            ]
+            unexpected = sorted(
+                set(item) - set(required_fields) - allowed_extra_fields
+            )
+            field_errors: list[str] = []
+            if missing:
+                field_errors.append("missing " + ", ".join(missing))
+            if unexpected:
+                field_errors.append("unsupported " + ", ".join(unexpected))
+            if field_errors:
+                raise ValueError(
+                    f"evidence[{index}] has invalid fields ({'; '.join(field_errors)}); "
+                    "expected relative_path, "
+                    "blob_digest, start_line, and end_line"
+                )
             relative_path = normalize_relative_path(str(item.get("relative_path") or ""))
             record = self._record(binding.snapshot_id, relative_path)
             if str(item.get("blob_digest") or "") != record.blob_digest:
                 raise ValueError(f"Evidence digest mismatch: {relative_path}")
-            start_line = int(item.get("start_line") or 0)
-            end_line = int(item.get("end_line") or 0)
+            if isinstance(item["start_line"], bool) or not isinstance(
+                item["start_line"], int
+            ):
+                raise ValueError(f"evidence[{index}].start_line must be an integer")
+            if isinstance(item["end_line"], bool) or not isinstance(
+                item["end_line"], int
+            ):
+                raise ValueError(f"evidence[{index}].end_line must be an integer")
+            start_line = item["start_line"]
+            end_line = item["end_line"]
             if start_line < 1 or end_line < start_line or end_line > record.line_count:
                 raise ValueError(f"Invalid evidence line range: {relative_path}")
             excerpt = self.read(

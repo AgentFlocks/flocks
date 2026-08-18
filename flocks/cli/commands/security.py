@@ -13,6 +13,8 @@ import typer
 from rich.console import Console
 from rich.table import Table
 
+from flocks.utils.langfuse import flush as flush_langfuse
+
 
 security_app = typer.Typer(
     name="security",
@@ -82,6 +84,14 @@ def _progress_line(event: str, payload: dict[str, Any]) -> None:
             f"batch_id={payload.get('batch_id')}  "
             f"workers={payload.get('launched_workers', 0)}"
         )
+        for worker in payload.get("workers", []):
+            paths = ", ".join(worker.get("assigned_paths", [])) or "."
+            candidate = worker.get("candidate_id")
+            subject = f"  candidate={candidate}" if candidate else ""
+            console.print(
+                f"           [dim]worker={worker.get('work_unit_id')}  "
+                f"role={worker.get('role')}  scope={paths}{subject}[/dim]"
+            )
         return
     if event == "batch.status":
         counts = payload.get("status_counts", {})
@@ -109,6 +119,15 @@ def _progress_line(event: str, payload: dict[str, Any]) -> None:
             f"findings={payload.get('finding_count', 0)}  "
             f"report={payload.get('report_path')}"
         )
+        for finding in payload.get("finding_summaries", []):
+            locations = finding.get("locations", [])
+            location = locations[0] if locations else {}
+            path = location.get("path", "unknown")
+            line = location.get("startLine", "?")
+            console.print(
+                f"           [{finding.get('severity', 'unknown')}] "
+                f"{finding.get('title', 'Untitled finding')}  {path}:{line}"
+            )
         return
     if event == "scan.cancelled":
         console.print(
@@ -124,6 +143,10 @@ def _render_status(status: dict[str, Any]) -> None:
         f"[bold]Status:[/bold] {status.get('status')}  "
         f"[bold]Threat model:[/bold] {status.get('threat_model_status')}"
     )
+    if status.get("integrity_status") == "invalid":
+        console.print("[bold red]Integrity: invalid — do not use this audit result[/bold red]")
+        for error in status.get("integrity_errors", []):
+            console.print(f"[red]- {error}[/red]")
     console.print(
         f"[bold]Progress:[/bold] candidates={counts.get('candidates', 0)}, "
         f"verified={counts.get('verifications', 0)}, "
@@ -185,6 +208,8 @@ def security_audit(
         else:
             console.print(f"[red]Audit failed:[/red] {exc}")
         raise typer.Exit(1) from None
+    finally:
+        flush_langfuse()
 
     if json_output:
         _json_line("scan.result", result)

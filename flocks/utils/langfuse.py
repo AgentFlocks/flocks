@@ -51,10 +51,41 @@ _TRACE_NAME_ATTR = "langfuse.trace.name"
 _TRACE_USER_ID_ATTR = "user.id"
 _TRACE_SESSION_ID_ATTR = "session.id"
 _TRACE_TAGS_ATTR = "langfuse.trace.tags"
+SESSION_CONTEXT_METADATA_KEY = "langfuse"
 
 
 def _filter_none(values: Dict[str, Any]) -> Dict[str, Any]:
     return {k: v for k, v in values.items() if v is not None}
+
+
+def resolve_session_trace_context(session_metadata: Any) -> Dict[str, Any]:
+    """Return a validated, persisted Langfuse correlation context for a session."""
+    if not isinstance(session_metadata, dict):
+        return {}
+    raw = session_metadata.get(SESSION_CONTEXT_METADATA_KEY)
+    if not isinstance(raw, dict):
+        return {}
+
+    context: Dict[str, Any] = {}
+    for key in ("session_id", "trace_name"):
+        value = raw.get(key)
+        if isinstance(value, str) and value.strip():
+            context[key] = value.strip()
+
+    tags = raw.get("tags")
+    if isinstance(tags, list):
+        context["tags"] = list(
+            dict.fromkeys(
+                tag.strip()
+                for tag in tags
+                if isinstance(tag, str) and tag.strip()
+            )
+        )
+
+    metadata = raw.get("metadata")
+    if isinstance(metadata, dict):
+        context["metadata"] = dict(metadata)
+    return context
 
 
 def _get_capture_mode() -> str:
@@ -415,8 +446,8 @@ def is_active() -> bool:
     return _get_client() is not None
 
 
-def shutdown() -> None:
-    """Flush pending events and shut down the Langfuse client."""
+def flush() -> None:
+    """Flush pending observations without shutting down the shared client."""
     client = _get_client()
     if not client:
         return
@@ -425,6 +456,14 @@ def shutdown() -> None:
             client.flush()
     except Exception as exc:
         log.warn("langfuse.flush_failed", {"error": str(exc)})
+
+
+def shutdown() -> None:
+    """Flush pending events and shut down the Langfuse client."""
+    client = _get_client()
+    if not client:
+        return
+    flush()
     try:
         if hasattr(client, "shutdown"):
             client.shutdown()

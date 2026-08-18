@@ -222,8 +222,20 @@ class ReportWriter:
                 "scan_id": scan_id,
                 "status": "completed",
                 "finding_count": len(findings),
+                "finding_summaries": [
+                    {
+                        "finding_id": finding["findingId"],
+                        "title": finding["title"],
+                        "severity": finding["severity"]["level"],
+                        "rule_id": finding["ruleId"],
+                        "cwe": finding["taxonomy"]["cwe"],
+                        "locations": finding["locations"],
+                    }
+                    for finding in findings
+                ],
                 "pending_count": 0,
                 "deferred_count": len(coverage_document["deferred"]),
+                "coverage_completeness": coverage_document["completeness"],
                 "output_dir": str(target),
                 "report_path": str(target / "report.md"),
                 "sarif_path": str(target / "report.sarif"),

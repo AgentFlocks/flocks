@@ -276,11 +276,84 @@ async def test_threat_model_submission_is_role_bound_and_schema_validated(
     assert missing_inventory.success is False
     assert "audit_inventory access" in str(missing_inventory.error)
     assert (await audit_inventory(modeler)).success
+
+    wrong_evidence_shape = await audit_submit_threat_model(
+        modeler,
+        {
+            **payload,
+            "evidence": [
+                {
+                    "path": "app.py",
+                    "digest": source.output["blob_digest"],
+                    "lines": "1-2",
+                }
+            ],
+        },
+    )
+    assert wrong_evidence_shape.success is False
+    assert (
+        "relative_path, blob_digest, start_line, end_line"
+        in str(wrong_evidence_shape.error)
+    )
+
+    placeholder = await audit_submit_threat_model(
+        modeler,
+        {
+            "summary": "minimal",
+            "assets": ["a"],
+            "trustBoundaries": ["b"],
+            "attackerCapabilities": ["c"],
+            "securityObjectives": ["d"],
+            "assumptions": ["e"],
+            "evidence": payload["evidence"],
+        },
+    )
+    assert placeholder.success is True
+    assert placeholder.output["operation"] == "created"
+
     submitted = await audit_submit_threat_model(modeler, payload)
     assert submitted.success is True
-    duplicate = await audit_submit_threat_model(modeler, payload)
-    assert duplicate.success is False
-    assert "already been submitted" in str(duplicate.error)
+    assert submitted.output["operation"] == "updated"
+    assert (
+        runtime.store.get_threat_model(scan_id)["threat_model"]["summary"]
+        == payload["summary"]
+    )
+
+    runtime.store.update_work_unit_status(work_unit_id, "completed")
+    late_update = await audit_submit_threat_model(modeler, payload)
+    assert late_update.success is False
+    assert "binding is not active" in str(late_update.error)
+
+    with runtime.store._connect() as connection:
+        connection.execute(
+            "UPDATE threat_models SET payload_json = ? WHERE scan_id = ?",
+            (
+                json.dumps(
+                    {
+                        "summary": "",
+                        "assets": ["a"],
+                        "trustBoundaries": ["b"],
+                        "attackerCapabilities": ["c"],
+                        "securityObjectives": ["d"],
+                        "assumptions": ["e"],
+                    }
+                ),
+                scan_id,
+            ),
+        )
+    assert (
+        runtime.store.work_unit_has_required_facts(
+            work_unit_id,
+            role="threat_modeler",
+        )
+        is False
+    )
+    invalid_status = runtime.store.scan_status(scan_id)
+    assert invalid_status["threat_model_status"] == "invalid"
+    assert invalid_status["integrity_status"] == "invalid"
+    assert "non-empty string" in invalid_status["integrity_errors"][0]
+    with pytest.raises(ValueError, match="failed contract validation"):
+        runtime.store.require_threat_model_ready(scan_id)
 
 
 @pytest.mark.asyncio
@@ -425,6 +498,9 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     finalized = await audit_finalize(coordinator, scan_id)
     assert finalized.success is True
     assert finalized.output["status"] == "completed"
+    completed_status = runtime.store.scan_status(scan_id)
+    assert completed_status["integrity_status"] == "valid"
+    assert completed_status["integrity_errors"] == []
     output_path = Path(finalized.output["output_dir"])
     assert (output_path / "report.md").is_file()
     assert (
@@ -847,6 +923,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
         child = SimpleNamespace(
             id=f"worker-{len(children) + 1}",
             agent=kwargs["agent"],
+            creation_kwargs=kwargs,
         )
         children.append(child)
         return child
@@ -914,6 +991,11 @@ async def test_background_worker_orchestration_retries_failed_verification(
     baseline_batch = await audit_run_workers(coordinator, scan_id, "baseline")
     assert baseline_batch.success is True
     assert baseline_batch.output["launched_workers"] == 1
+    baseline_observability = children[1].creation_kwargs["metadata"]["langfuse"]
+    assert baseline_observability["session_id"] == scan_id
+    assert baseline_observability["metadata"]["phase"] == "baseline"
+    assert baseline_observability["metadata"]["assigned_paths"] == ["app.py"]
+    assert baseline_batch.output["workers"][0]["assigned_paths"] == ["app.py"]
     assert manager.calls[1]["parent_session_id"] == "coordinator"
     running_wait = await audit_wait_workers(
         coordinator,
@@ -966,6 +1048,11 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "verification",
     )
     assert verification_batch.success is True
+    verification_observability = children[2].creation_kwargs["metadata"]["langfuse"]
+    assert (
+        verification_observability["metadata"]["candidate_id"]
+        == candidate.output["candidate_id"]
+    )
     manager.tasks["task-3"].status = "error"
     failed_verification = await audit_wait_workers(
         coordinator,
@@ -1006,6 +1093,12 @@ async def test_background_worker_orchestration_retries_failed_verification(
     assert finalized.success is True
     assert finalized.output["status"] == "completed"
     assert finalized.output["finding_count"] == 1
+    assert finalized.output["finding_summaries"][0]["severity"] == "high"
+    assert (
+        finalized.output["finding_summaries"][0]["locations"][0]["path"]
+        == "app.py"
+    )
+    assert finalized.output["coverage_completeness"] == "complete"
     assert finalized.output["pending_count"] == 0
 
 

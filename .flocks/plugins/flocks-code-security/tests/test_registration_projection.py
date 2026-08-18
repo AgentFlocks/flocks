@@ -150,6 +150,26 @@ def test_all_audit_tools_register() -> None:
     )
     assert phase.enum == ["threat_modeling", "baseline", "verification"]
 
+    threat_model_tool = ToolRegistry.get("audit_submit_threat_model").info
+    threat_model_parameter = next(
+        parameter
+        for parameter in threat_model_tool.parameters
+        if parameter.name == "threat_model"
+    )
+    evidence_schema = threat_model_parameter.json_schema["properties"]["evidence"]
+    assert evidence_schema["minItems"] == 1
+    assert evidence_schema["items"]["additionalProperties"] is False
+    assert evidence_schema["items"]["required"] == [
+        "relative_path",
+        "blob_digest",
+        "start_line",
+        "end_line",
+    ]
+    assert (
+        evidence_schema["items"]["properties"]["blob_digest"]["pattern"]
+        == "^[a-f0-9]{64}$"
+    )
+
 
 def test_ruleset_digest_is_derived_from_packaged_rules() -> None:
     assert RULESET_DIGEST == _ruleset_digest()

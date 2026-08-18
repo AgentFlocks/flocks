@@ -15,6 +15,11 @@ from flocks.session.session import Session
 from flocks.session.session_loop import SessionLoop
 from flocks.storage.storage import Storage
 from flocks.tool.registry import ToolContext, ToolResult
+from flocks.utils.langfuse import (
+    is_active as langfuse_is_active,
+    span_scope,
+    trace_scope,
+)
 
 from flocks_code_security.paths import outputs_root, runtime_dir
 from flocks_code_security.runtime import get_runtime
@@ -32,9 +37,51 @@ ProgressCallback = Callable[[str, dict[str, Any]], None]
 TERMINAL_BATCH_STATUSES = {"completed", "partial", "failed", "cancelled"}
 
 
-def _emit(progress: ProgressCallback | None, event: str, payload: dict[str, Any]) -> None:
+def _emit(
+    progress: ProgressCallback | None,
+    event: str,
+    payload: dict[str, Any],
+    *,
+    observation_parent: Any = None,
+) -> None:
     if progress is not None:
         progress(event, payload)
+    if observation_parent is None:
+        return
+    try:
+        observation = span_scope(
+            parent=observation_parent,
+            name=f"code-security.progress.{event}",
+            input=payload,
+            metadata={"event": event},
+        )
+        observation.end(output=payload)
+    except Exception:
+        # Telemetry is best-effort and must never change scan behavior.
+        pass
+
+
+def _start_phase_observation(parent: Any, phase: str) -> Any:
+    if parent is None:
+        return None
+    try:
+        return span_scope(
+            parent=parent,
+            name=f"code-security.phase.{phase}",
+            input={"phase": phase},
+            metadata={"phase": phase},
+        )
+    except Exception:
+        return None
+
+
+def _end_observation(scope: Any, **kwargs: Any) -> None:
+    if scope is None:
+        return
+    try:
+        scope.end(**kwargs)
+    except Exception:
+        pass
 
 
 def _require_success(result: ToolResult) -> dict[str, Any]:
@@ -81,12 +128,18 @@ async def _wait_for_batch(
     ctx: ToolContext,
     batch_id: str,
     progress: ProgressCallback | None,
+    observation_parent: Any = None,
 ) -> dict[str, Any]:
     while True:
         output = _require_success(
             await audit_wait_workers(ctx, batch_id, timeout_seconds=10)
         )
-        _emit(progress, "batch.status", output)
+        _emit(
+            progress,
+            "batch.status",
+            output,
+            observation_parent=observation_parent,
+        )
         if output.get("status") in TERMINAL_BATCH_STATUSES:
             return output
 
@@ -96,13 +149,44 @@ async def _run_phase(
     scan_id: str,
     phase: str,
     progress: ProgressCallback | None,
+    scan_observation: Any = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    batch = _require_success(await audit_run_workers(ctx, scan_id, phase))
-    _emit(progress, "batch.started", batch)
-    terminal = await _wait_for_batch(ctx, batch["batch_id"], progress)
-    status = _require_success(await audit_status(ctx, scan_id))
-    _emit(progress, "scan.status", status)
-    return terminal, status
+    phase_scope = _start_phase_observation(scan_observation, phase)
+    phase_parent = None if phase_scope is None else phase_scope.observation
+    try:
+        batch = _require_success(await audit_run_workers(ctx, scan_id, phase))
+        _emit(
+            progress,
+            "batch.started",
+            batch,
+            observation_parent=phase_parent,
+        )
+        terminal = await _wait_for_batch(
+            ctx,
+            batch["batch_id"],
+            progress,
+            phase_parent,
+        )
+        status = _require_success(await audit_status(ctx, scan_id))
+        _emit(
+            progress,
+            "scan.status",
+            status,
+            observation_parent=phase_parent,
+        )
+        _end_observation(
+            phase_scope,
+            output={"batch": terminal, "scan_status": status},
+        )
+        return terminal, status
+    except BaseException as exc:
+        _end_observation(
+            phase_scope,
+            output={"phase": phase, "error": str(exc)},
+            level="ERROR",
+            status_message=str(exc),
+        )
+        raise
 
 
 async def _run_pipeline(
@@ -111,24 +195,67 @@ async def _run_pipeline(
     progress: ProgressCallback | None,
 ) -> dict[str, Any]:
     scan_id: str | None = None
+    scan_scope = None
     try:
         prepared = _require_success(await audit_prepare(ctx, str(target)))
         scan_id = prepared["scan_id"]
-        _emit(progress, "scan.prepared", prepared)
+        if langfuse_is_active():
+            try:
+                scan_scope = trace_scope(
+                    name="code-security.scan",
+                    session_id=scan_id,
+                    tags=[
+                        "feature:code-security",
+                        f"scan:{scan_id}",
+                        "mode:standard",
+                    ],
+                    input={
+                        "scan_id": scan_id,
+                        "target": str(target),
+                        "mode": "standard",
+                        "snapshot": prepared.get("snapshot", {}),
+                    },
+                    metadata={
+                        "scan_id": scan_id,
+                        "target_name": target.name,
+                        "mode": "standard",
+                    },
+                )
+            except Exception:
+                scan_scope = None
+        scan_observation = None if scan_scope is None else scan_scope.observation
+        _emit(
+            progress,
+            "scan.prepared",
+            prepared,
+            observation_parent=scan_observation,
+        )
 
         _threat_batch, status = await _run_phase(
-            ctx, scan_id, "threat_modeling", progress
+            ctx,
+            scan_id,
+            "threat_modeling",
+            progress,
+            scan_observation,
         )
         if status.get("threat_model_status") != "completed":
             raise RuntimeError("Threat-modeling phase did not produce a trusted model")
 
         _baseline_batch, status = await _run_phase(
-            ctx, scan_id, "baseline", progress
+            ctx,
+            scan_id,
+            "baseline",
+            progress,
+            scan_observation,
         )
         unverified = int(status.get("counts", {}).get("unverified_candidates", 0))
         while unverified > 0:
             _verification_batch, status = await _run_phase(
-                ctx, scan_id, "verification", progress
+                ctx,
+                scan_id,
+                "verification",
+                progress,
+                scan_observation,
             )
             remaining = int(
                 status.get("counts", {}).get("unverified_candidates", 0)
@@ -138,16 +265,41 @@ async def _run_pipeline(
             unverified = remaining
 
         finalized = _require_success(await audit_finalize(ctx, scan_id))
-        _emit(progress, "scan.finalized", finalized)
+        _emit(
+            progress,
+            "scan.finalized",
+            finalized,
+            observation_parent=scan_observation,
+        )
+        _end_observation(scan_scope, output=finalized)
         return finalized
-    except BaseException:
+    except BaseException as exc:
+        cancelled_output: dict[str, Any] | None = None
         if scan_id is not None:
             try:
                 cancelled = await asyncio.shield(audit_cancel(ctx, scan_id))
                 if cancelled.success and isinstance(cancelled.output, dict):
-                    _emit(progress, "scan.cancelled", cancelled.output)
+                    cancelled_output = cancelled.output
+                    _emit(
+                        progress,
+                        "scan.cancelled",
+                        cancelled_output,
+                        observation_parent=(
+                            None if scan_scope is None else scan_scope.observation
+                        ),
+                    )
             except Exception:
                 pass
+        _end_observation(
+            scan_scope,
+            output={
+                "scan_id": scan_id,
+                "error": str(exc),
+                "cancellation": cancelled_output,
+            },
+            level="ERROR",
+            status_message=str(exc),
+        )
         raise
 
 

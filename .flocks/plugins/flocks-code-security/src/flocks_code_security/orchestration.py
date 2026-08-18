@@ -77,7 +77,9 @@ def threat_model_prompt(*, snapshot_id: str) -> str:
         "assets, trust boundaries, realistic attacker capabilities, security "
         "objectives, and explicit assumptions. Use audit_inventory, audit_search, "
         "and audit_read to verify material claims. Submit exactly one canonical "
-        "model with audit_submit_threat_model. Threat scenarios are hypotheses, "
+        "model with audit_submit_threat_model using evidence items with exact "
+        "relative_path, blob_digest, start_line, and end_line fields. Never submit "
+        "placeholder content to probe the schema. Threat scenarios are hypotheses, "
         "not vulnerability findings; do not perform the baseline audit."
     )
 

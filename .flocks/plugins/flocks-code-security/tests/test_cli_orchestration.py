@@ -17,6 +17,7 @@ def _result(output: dict) -> ToolResult:
 async def test_pipeline_runs_all_required_phases_and_emits_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
     phases: list[str] = []
     status_outputs = iter(
         [
@@ -120,6 +121,7 @@ async def test_pipeline_runs_all_required_phases_and_emits_progress(
 async def test_pipeline_cancels_when_verification_makes_no_progress(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: False)
     statuses = iter(
         [
             {"threat_model_status": "completed", "counts": {}},
@@ -167,3 +169,117 @@ async def test_pipeline_cancels_when_verification_makes_no_progress(
 
     assert cancelled == ["scan_stalled"]
     assert events[-1] == "scan.cancelled"
+
+
+@pytest.mark.asyncio
+async def test_pipeline_emits_langfuse_scan_phase_and_progress_tree(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    traces: list[tuple[dict, object]] = []
+    spans: list[tuple[dict, object]] = []
+    ended: list[tuple[object, dict]] = []
+
+    class _Scope:
+        def __init__(self, observation: object):
+            self.observation = observation
+
+        def end(self, **kwargs):
+            ended.append((self.observation, kwargs))
+
+    def start_trace(**kwargs):
+        observation = object()
+        traces.append((kwargs, observation))
+        return _Scope(observation)
+
+    def start_span(**kwargs):
+        observation = object()
+        spans.append((kwargs, observation))
+        return _Scope(observation)
+
+    async def prepare(_ctx, _target_path: str) -> ToolResult:
+        return _result(
+            {
+                "scan_id": "scan_observed",
+                "snapshot": {"file_count": 2, "display_name": "target"},
+            }
+        )
+
+    async def run_workers(_ctx, scan_id: str, phase: str) -> ToolResult:
+        return _result(
+            {
+                "scan_id": scan_id,
+                "batch_id": f"batch_{phase}",
+                "phase": phase,
+                "status": "running",
+                "workers": [
+                    {
+                        "work_unit_id": f"unit_{phase}",
+                        "assigned_paths": ["app.py"],
+                    }
+                ],
+            }
+        )
+
+    async def wait_workers(_ctx, batch_id: str, timeout_seconds: int) -> ToolResult:
+        return _result(
+            {
+                "batch_id": batch_id,
+                "phase": batch_id.removeprefix("batch_"),
+                "status": "completed",
+            }
+        )
+
+    statuses = iter(
+        [
+            {"threat_model_status": "completed", "counts": {}},
+            {
+                "threat_model_status": "completed",
+                "counts": {"unverified_candidates": 0},
+            },
+        ]
+    )
+
+    async def status(_ctx, _scan_id: str) -> ToolResult:
+        return _result(next(statuses))
+
+    async def finalize(_ctx, scan_id: str) -> ToolResult:
+        return _result(
+            {
+                "scan_id": scan_id,
+                "status": "completed",
+                "finding_count": 1,
+                "finding_summaries": [
+                    {"finding_id": "finding_1", "severity": "high"}
+                ],
+            }
+        )
+
+    monkeypatch.setattr(audit_cli, "langfuse_is_active", lambda: True)
+    monkeypatch.setattr(audit_cli, "trace_scope", start_trace)
+    monkeypatch.setattr(audit_cli, "span_scope", start_span)
+    monkeypatch.setattr(audit_cli, "audit_prepare", prepare)
+    monkeypatch.setattr(audit_cli, "audit_run_workers", run_workers)
+    monkeypatch.setattr(audit_cli, "audit_wait_workers", wait_workers)
+    monkeypatch.setattr(audit_cli, "audit_status", status)
+    monkeypatch.setattr(audit_cli, "audit_finalize", finalize)
+
+    result = await audit_cli._run_pipeline(
+        ToolContext("session", "message", agent="code-security"),
+        Path("/target"),
+        None,
+    )
+
+    assert result["finding_count"] == 1
+    assert traces[0][0]["name"] == "code-security.scan"
+    assert traces[0][0]["session_id"] == "scan_observed"
+    span_names = [kwargs["name"] for kwargs, _observation in spans]
+    assert "code-security.phase.threat_modeling" in span_names
+    assert "code-security.phase.baseline" in span_names
+    assert "code-security.progress.batch.started" in span_names
+    assert "code-security.progress.scan.finalized" in span_names
+    root_observation = traces[0][1]
+    assert any(
+        observation is root_observation
+        and output["output"]["status"] == "completed"
+        for observation, output in ended
+    )
