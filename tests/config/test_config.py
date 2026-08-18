@@ -161,7 +161,10 @@ def test_legacy_task_permission_name_migrates_to_delegate_task():
     })
 
     dumped = permission.model_dump(exclude_none=True)
-    assert dumped["delegate_task"] == PermissionAction.DENY
+    assert dumped["delegate_task"] == {
+        "*": PermissionAction.ALLOW,
+        "explore": PermissionAction.DENY,
+    }
     assert "task" not in dumped
 
 
@@ -195,6 +198,36 @@ def test_legacy_task_permission_merge_is_order_independent(raw_permission):
         (rule.permission, rule.pattern, rule.level.value)
         for rule in model_rules
     } == expected
+
+
+def test_config_layers_preserve_legacy_permission_override_priority():
+    low_priority = ConfigInfo.model_validate({
+        "permission": {"delegate_task": "allow"},
+    })
+    high_priority = ConfigInfo.model_validate({
+        "permission": {"task": "ask"},
+    })
+
+    merged = Config.merge_config_concat_arrays(low_priority, high_priority)
+
+    assert merged.model_dump(exclude_none=True)["permission"] == {
+        "delegate_task": "ask",
+    }
+
+
+def test_config_layers_merge_scalar_and_pattern_permission_overrides():
+    low_priority = ConfigInfo.model_validate({
+        "permission": {"delegate_task": "allow"},
+    })
+    high_priority = ConfigInfo.model_validate({
+        "permission": {"task": {"explore": "ask"}},
+    })
+
+    merged = Config.merge_config_concat_arrays(low_priority, high_priority)
+
+    assert merged.model_dump(exclude_none=True)["permission"] == {
+        "delegate_task": {"*": "allow", "explore": "ask"},
+    }
 
 
 def test_legacy_todo_tool_flags_migrate_to_todo_permission():

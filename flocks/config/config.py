@@ -42,6 +42,11 @@ def _canonical_permission_tool_name(tool: str) -> str:
 
 def _merge_permission_action(existing: Any, incoming: Any) -> Any:
     """Merge duplicate legacy permission names conservatively."""
+    if isinstance(existing, dict) and not isinstance(incoming, dict):
+        incoming = {"*": incoming}
+    elif not isinstance(existing, dict) and isinstance(incoming, dict):
+        existing = {"*": existing}
+
     if isinstance(existing, dict) and isinstance(incoming, dict):
         merged = dict(existing)
         for pattern, action in incoming.items():
@@ -53,17 +58,12 @@ def _merge_permission_action(existing: Any, incoming: Any) -> Any:
                 merged[pattern] = action
         return merged
 
-    def contains_deny(value: Any) -> bool:
-        raw_value = value.value if hasattr(value, "value") else value
-        if raw_value == PermissionAction.DENY.value:
-            return True
-        if isinstance(raw_value, dict):
-            return any(contains_deny(item) for item in raw_value.values())
-        return False
-
-    if contains_deny(existing) or contains_deny(incoming):
-        return PermissionAction.DENY
-    return existing if existing is not None else incoming
+    priority = {"allow": 0, "ask": 1, "deny": 2}
+    existing_value = getattr(existing, "value", existing)
+    incoming_value = getattr(incoming, "value", incoming)
+    if priority.get(incoming_value, -1) > priority.get(existing_value, -1):
+        return incoming
+    return existing
 
 
 def _assign_permission(permission_dict: Dict[str, Any], tool: str, action: Any) -> None:
@@ -75,6 +75,31 @@ def _assign_permission(permission_dict: Dict[str, Any], tool: str, action: Any) 
         )
         return
     permission_dict[canonical_tool] = action
+
+
+def _canonicalize_permission_dict(config: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalize legacy permission aliases within one config layer."""
+    canonical: Dict[str, Any] = {}
+    for tool, action in config.items():
+        _assign_permission(canonical, tool, action)
+    return canonical
+
+
+def _merge_permission_layers(target: Dict[str, Any], source: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge normalized permission layers while preserving source priority."""
+    merged = dict(target)
+    for tool, source_action in source.items():
+        if tool not in merged:
+            merged[tool] = source_action
+            continue
+        target_action = merged[tool]
+        if isinstance(target_action, dict) and isinstance(source_action, dict):
+            merged[tool] = {**target_action, **source_action}
+        elif not isinstance(target_action, dict) and isinstance(source_action, dict):
+            merged[tool] = {"*": target_action, **source_action}
+        else:
+            merged[tool] = source_action
+    return merged
 
 
 class PermissionConfig(BaseModel):
@@ -140,6 +165,13 @@ class AgentConfig(BaseModel):
     delegatable: Optional[bool] = Field(None, description="Whether this agent can be called via delegate_task")
     strategy: Optional[Literal["react", "plan_and_execute", "read_only", "explore"]] = None
     tools: Optional[Dict[str, bool]] = Field(None, description="@deprecated Use 'permission'")
+
+    @field_validator("permission", mode="before")
+    @classmethod
+    def normalize_permission_aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _canonicalize_permission_dict(value)
+        return value
     
     @model_validator(mode='after')
     def process_agent(self):
@@ -768,6 +800,13 @@ class ConfigInfo(BaseModel):
             "enter the registry. Unset means all built-in agents are active."
         ),
     )
+
+    @field_validator("permission", mode="before")
+    @classmethod
+    def normalize_permission_aliases(cls, value: Any) -> Any:
+        if isinstance(value, dict):
+            return _canonicalize_permission_dict(value)
+        return value
     agent_logic: Optional[Literal["base", "rex"]] = Field(None, alias="agentLogic")
     flockspro: Optional[FlocksProConfig] = None
     ui: Optional[UIConfig] = None
@@ -1134,6 +1173,14 @@ class Config:
         
         # Deep merge
         merged = cls.merge_deep(target_dict, source_dict)
+
+        target_permission = target_dict.get("permission")
+        source_permission = source_dict.get("permission")
+        if isinstance(target_permission, dict) and isinstance(source_permission, dict):
+            merged["permission"] = _merge_permission_layers(
+                _canonicalize_permission_dict(target_permission),
+                _canonicalize_permission_dict(source_permission),
+            )
         
         # Special handling for arrays - concatenate instead of replace
         if target.plugin and source.plugin:
@@ -1472,7 +1519,10 @@ class Config:
                 if result.permission is None:
                     result.permission = {}
                 if isinstance(result.permission, dict):
-                    result.permission = cls.merge_deep(result.permission, permission_data)
+                    result.permission = _merge_permission_layers(
+                        _canonicalize_permission_dict(result.permission),
+                        _canonicalize_permission_dict(permission_data),
+                    )
             except Exception:
                 pass
         

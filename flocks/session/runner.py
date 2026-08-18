@@ -1418,6 +1418,7 @@ class SessionRunner:
         # Resolve agent
         agent_name = last_user.agent or self.agent_name
         agent = await Agent.get(agent_name) or await Agent.get("rex")
+        self._turn_permission_ruleset = self._permission_ruleset_for_agent(agent)
 
         # Track session agent (Flocks compatibility)
         try:
@@ -3843,13 +3844,50 @@ class SessionRunner:
         except Exception as _tr_err:
             log.debug("runner.observability.trace_end_failed", {"error": str(_tr_err)})
 
+    def _permission_ruleset_for_agent(self, agent: AgentInfo) -> List[Any]:
+        """Combine agent and session rules in effective priority order."""
+        from flocks.permission.helpers import merge
+        from flocks.permission.rule import (
+            PermissionLevel,
+            PermissionRule,
+            PermissionScope,
+        )
+
+        session_rules = []
+        for rule in getattr(self.session, "permission", None) or []:
+            session_rules.append(PermissionRule(
+                permission=rule.permission,
+                level=PermissionLevel(rule.action),
+                scope=PermissionScope.PATTERN,
+                pattern=rule.pattern,
+            ))
+        return merge(list(getattr(agent, "permission", None) or []), session_rules)
+
+    async def _effective_permission_ruleset(self) -> List[Any]:
+        ruleset = getattr(self, "_turn_permission_ruleset", None)
+        if ruleset is not None:
+            return ruleset
+        agent_name = getattr(self.session, "agent", None) or getattr(
+            self,
+            "agent_name",
+            None,
+        )
+        if not agent_name:
+            return []
+        agent = await Agent.get(agent_name) or await Agent.get("rex")
+        return self._permission_ruleset_for_agent(agent)
+
     async def _handle_permission(self, request) -> None:
         """Handle permission request."""
-        if self.callbacks.on_permission_request:
-            allowed = await self.callbacks.on_permission_request(request)
-            if not allowed:
-                raise PermissionError(f"Permission denied: {request.permission}")
-            return
+        from flocks.permission.next import PermissionNext
+
+        patterns = list(getattr(request, "patterns", None) or [])
+        ruleset = await self._effective_permission_ruleset()
+        configured_action = PermissionNext.evaluate_request(
+            request.permission,
+            patterns,
+            ruleset,
+        )
 
         tool_metadata = get_tool_catalog_metadata(str(getattr(request, "permission", "") or ""))
         if self.callbacks.event_publish_callback:
@@ -3858,15 +3896,24 @@ class SessionRunner:
                 "step": self._step,
                 "toolName": getattr(request, "permission", ""),
                 "alwaysLoad": tool_metadata.always_load,
-                "patterns": list(getattr(request, "patterns", None) or []),
+                "patterns": patterns,
             })
+
+        if configured_action == "deny":
+            raise PermissionError(f"Permission denied: {request.permission}")
+        if configured_action == "allow":
+            return
+
+        if self.callbacks.on_permission_request:
+            allowed = await self.callbacks.on_permission_request(request)
+            if not allowed:
+                raise PermissionError(f"Permission denied: {request.permission}")
+            return
 
         from flocks.permission.interactive import legacy_tool_permission_prompt_required
 
-        if not legacy_tool_permission_prompt_required():
+        if configured_action is None and not legacy_tool_permission_prompt_required():
             return
-
-        from flocks.permission.next import PermissionNext
 
         metadata = dict(getattr(request, "metadata", None) or {})
         metadata.setdefault("messageID", getattr(request, "message_id", "") or "")
@@ -3875,13 +3922,13 @@ class SessionRunner:
         reply = await PermissionNext.ask(
             session_id=self.session.id,
             permission=request.permission,
-            patterns=list(getattr(request, "patterns", None) or []),
-            ruleset=[],
+            patterns=patterns,
+            ruleset=ruleset,
             metadata=metadata,
             always=list(getattr(request, "always", None) or []),
             tool={"name": request.permission},
         )
-        if reply in {"deny", "reject", "never"}:
+        if reply in {"deny", "deny_session", "reject", "never"}:
             raise PermissionError(f"Permission denied: {request.permission}")
 
 

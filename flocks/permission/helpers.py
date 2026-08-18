@@ -15,6 +15,11 @@ _LEGACY_PERMISSION_NAMES = {
 
 def _merge_legacy_permission(existing: Any, incoming: Any) -> Any:
     """Merge a legacy alias into an existing canonical permission."""
+    if isinstance(existing, dict) and not isinstance(incoming, dict):
+        incoming = {"*": incoming}
+    elif not isinstance(existing, dict) and isinstance(incoming, dict):
+        existing = {"*": existing}
+
     if isinstance(existing, dict) and isinstance(incoming, dict):
         merged = dict(existing)
         for pattern, action in incoming.items():
@@ -26,16 +31,11 @@ def _merge_legacy_permission(existing: Any, incoming: Any) -> Any:
                 merged[pattern] = action
         return merged
 
-    def contains_deny(value: Any) -> bool:
-        raw_value = getattr(value, "value", value)
-        if raw_value == "deny":
-            return True
-        if isinstance(raw_value, dict):
-            return any(contains_deny(item) for item in raw_value.values())
-        return False
-
-    if contains_deny(existing) or contains_deny(incoming):
-        return "deny"
+    priority = {"allow": 0, "ask": 1, "deny": 2}
+    existing_value = getattr(existing, "value", existing)
+    incoming_value = getattr(incoming, "value", incoming)
+    if priority.get(incoming_value, -1) > priority.get(existing_value, -1):
+        return incoming
     return existing
 
 
