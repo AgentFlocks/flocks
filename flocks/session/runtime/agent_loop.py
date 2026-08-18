@@ -62,6 +62,31 @@ class AgentLoop:
                 try:
                     step_result = await step_task
                 except asyncio.CancelledError as exc:
+                    cleanup_task = asyncio.create_task(
+                        engine.finalize_cancelled_attempt(),
+                        name=(
+                            "step-cancel-cleanup:"
+                            f"{turn.session.id}:{turn.step}"
+                        ),
+                    )
+                    while True:
+                        try:
+                            await asyncio.shield(cleanup_task)
+                            break
+                        except asyncio.CancelledError:
+                            if cleanup_task.cancelled():
+                                break
+                            continue
+                        except Exception as cleanup_error:
+                            log.error(
+                                "session.step.cancel_cleanup_failed",
+                                {
+                                    "session_id": turn.session.id,
+                                    "step": turn.step,
+                                    "error": str(cleanup_error),
+                                },
+                            )
+                            break
                     if turn.aborted:
                         raise StepCancelled from exc
                     raise

@@ -210,6 +210,40 @@ async def test_delete_restores_caches_when_message_persistence_fails(
 
 
 @pytest.mark.asyncio
+async def test_create_restores_caches_when_persistence_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "ses_parts_create_message_failure"
+    await Message.create(
+        session_id,
+        MessageRole.USER,
+        "existing",
+        id="msg_existing",
+        part_id="part_existing",
+    )
+    monkeypatch.setattr(
+        Storage,
+        "mutate_many",
+        AsyncMock(side_effect=RuntimeError("message storage unavailable")),
+    )
+
+    with pytest.raises(RuntimeError, match="message storage unavailable"):
+        await Message.create(
+            session_id,
+            MessageRole.USER,
+            "ghost",
+            id="msg_ghost",
+            part_id="part_ghost",
+        )
+
+    assert await Message.get(session_id, "msg_ghost") is None
+    assert await Message.parts(session_id, "msg_ghost") == []
+    assert [message.id for message in await Message.list(session_id)] == [
+        "msg_existing"
+    ]
+
+
+@pytest.mark.asyncio
 async def test_delete_removes_message_and_parts_atomically() -> None:
     session_id = "ses_parts_delete_parts_failure"
     await Message.create(

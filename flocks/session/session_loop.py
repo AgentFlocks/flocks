@@ -91,9 +91,7 @@ class SessionLoop:
     _continuation_policy: ClassVar[ContinuationPolicy] = (
         DEFAULT_CONTINUATION_POLICY
     )
-    _release_tasks: ClassVar[
-        dict[tuple[str, int], asyncio.Task[bool]]
-    ] = {}
+    _release_tasks: ClassVar[dict[str, asyncio.Task[bool]]] = {}
 
     @classmethod
     async def run(
@@ -107,6 +105,7 @@ class SessionLoop:
         auto_failover: bool = False,
     ) -> LoopResult:
         """Run one session until queued and synthetic continuations settle."""
+        await cls._await_pending_release(session_id)
         active_turn = cls._leases.get(session_id)
         if active_turn is not None:
             log.info("session.already_running", {"session_id": session_id})
@@ -586,7 +585,14 @@ class SessionLoop:
         lease: _SessionLease,
         callbacks: LoopCallbacks,
     ) -> None:
-        release_task = cls._critical_release_task(lease)
+        release_task = cls._critical_release_task(lease, callbacks)
+        await cls._await_release_completion(release_task)
+
+    @staticmethod
+    async def _await_release_completion(
+        release_task: asyncio.Task[bool],
+    ) -> bool:
+        """Finish lease cleanup despite repeated cancellation."""
         interrupted: Optional[asyncio.CancelledError] = None
         while True:
             try:
@@ -599,17 +605,32 @@ class SessionLoop:
 
         if interrupted is not None:
             raise interrupted
-        if released:
-            await cls._publish_released(lease.turn, callbacks)
+        return released
+
+    @classmethod
+    async def _await_pending_release(cls, session_id: str) -> None:
+        """Serialize a new busy event after the previous idle publication."""
+        release_task = cls._release_tasks.get(session_id)
+        if release_task is None or release_task is asyncio.current_task():
+            return
+        try:
+            await asyncio.shield(release_task)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warn(
+                "session.previous_release_failed",
+                {"session_id": session_id, "error": str(exc)},
+            )
 
     @classmethod
     def _critical_release_task(
         cls,
         lease: _SessionLease,
+        callbacks: LoopCallbacks,
     ) -> asyncio.Task[bool]:
-        key = (lease.session_id, id(lease.turn))
-        existing = cls._release_tasks.get(key)
-        if existing is not None:
+        existing = cls._release_tasks.get(lease.session_id)
+        if existing is not None and not existing.done():
             return existing
 
         async def release() -> bool:
@@ -617,14 +638,37 @@ class SessionLoop:
                 if not cls._leases.owns(lease):
                     return False
                 cls._finalize_release_state_locked(lease)
-                return True
+            await cls._publish_released(lease.turn, callbacks)
+            return True
 
         task = asyncio.create_task(release())
-        cls._release_tasks[key] = task
+        cls._release_tasks[lease.session_id] = task
 
         def discard(completed: asyncio.Task[bool]) -> None:
-            if cls._release_tasks.get(key) is completed:
-                cls._release_tasks.pop(key, None)
+            if cls._release_tasks.get(lease.session_id) is completed:
+                cls._release_tasks.pop(lease.session_id, None)
+
+        task.add_done_callback(discard)
+        return task
+
+    @classmethod
+    def _release_publication_task(
+        cls,
+        lease: _SessionLease,
+        callbacks: LoopCallbacks,
+    ) -> asyncio.Task[bool]:
+        """Track idle publication after settlement released the lease."""
+
+        async def publish() -> bool:
+            await cls._publish_released(lease.turn, callbacks)
+            return True
+
+        task = asyncio.create_task(publish())
+        cls._release_tasks[lease.session_id] = task
+
+        def discard(completed: asyncio.Task[bool]) -> None:
+            if cls._release_tasks.get(lease.session_id) is completed:
+                cls._release_tasks.pop(lease.session_id, None)
 
         task.add_done_callback(discard)
         return task
@@ -652,8 +696,9 @@ class SessionLoop:
                 )
                 return True
             cls._finalize_release_state_locked(lease)
+            release_task = cls._release_publication_task(lease, callbacks)
 
-        await cls._publish_released(lease.turn, callbacks)
+        await cls._await_release_completion(release_task)
         return False
 
     @classmethod

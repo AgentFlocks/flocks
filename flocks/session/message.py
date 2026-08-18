@@ -1589,14 +1589,45 @@ class Message:
             if message.id not in cls._parts_cache[session_id]:
                 cls._parts_cache[session_id][message.id] = []
             cls._parts_cache[session_id][message.id].append(part)
-            
-            # Persist to storage
-            await cls._persist_indexed_state(
-                session_id,
-                message.id,
-                include_messages=True,
-                include_parts=True,
+
+            serialized_cache_existed = (
+                session_id in cls._parts_serialized_cache
             )
+            previous_serialized_parts = dict(
+                cls._parts_serialized_cache.get(session_id, {})
+            )
+            persisted_mids_existed = session_id in cls._parts_persisted_mids
+            previous_persisted_mids = set(
+                cls._parts_persisted_mids.get(session_id, set())
+            )
+
+            # Persistence is the commit point. Restore every in-memory index if
+            # the atomic storage mutation fails so callers cannot observe a
+            # message that does not exist in canonical storage.
+            try:
+                await cls._persist_indexed_state(
+                    session_id,
+                    message.id,
+                    include_messages=True,
+                    include_parts=True,
+                )
+            except BaseException:
+                cls._messages_cache[session_id].pop()
+                cls._msg_id_index[session_id].pop(message.id, None)
+                cls._parts_cache[session_id].pop(message.id, None)
+                if serialized_cache_existed:
+                    cls._parts_serialized_cache[session_id] = (
+                        previous_serialized_parts
+                    )
+                else:
+                    cls._parts_serialized_cache.pop(session_id, None)
+                if persisted_mids_existed:
+                    cls._parts_persisted_mids[session_id] = (
+                        previous_persisted_mids
+                    )
+                else:
+                    cls._parts_persisted_mids.pop(session_id, None)
+                raise
             
             log.info("message.created", {
                 "id": message.id,

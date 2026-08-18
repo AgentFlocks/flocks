@@ -284,3 +284,78 @@ async def test_repeated_cancellation_cannot_leak_session_lease(
 
     assert active == {}
     assert SessionStatus.get(session.id).type == "idle"
+    Session.touch.assert_awaited_once_with(session.project_id, session.id)
+    from flocks.bus.bus import Bus
+
+    Bus.publish.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_next_run_waits_for_previous_idle_publication(
+    monkeypatch,
+    loop_io,
+) -> None:
+    session, active = loop_io
+    first_user = _message("msg_001")
+    idle_started = asyncio.Event()
+    allow_idle = asyncio.Event()
+    events: list[str] = []
+
+    async def publish(event_name, payload):
+        status = payload.get("status", {}).get("type")
+        if event_name == "session.status" and status:
+            events.append(status)
+        if status == "idle" and events.count("idle") == 1:
+            idle_started.set()
+            await allow_idle.wait()
+
+    async def prepare(turn):
+        turn.prepared_user_id = first_user.id
+
+    continuation = SimpleNamespace(
+        prepare_logical_turn=AsyncMock(side_effect=prepare),
+        resolve=AsyncMock(return_value=ContinuationDecision()),
+    )
+    monkeypatch.setattr(SessionLoop, "_continuation_policy", continuation)
+    monkeypatch.setattr(
+        "flocks.session.session_loop.Message.list",
+        AsyncMock(return_value=[first_user]),
+    )
+    monkeypatch.setattr(
+        AgentLoop,
+        "run",
+        AsyncMock(return_value=_outcome(first_user, "done")),
+    )
+    callbacks = SimpleNamespace(
+        event_publish_callback=publish,
+        on_error=None,
+    )
+
+    first_run = asyncio.create_task(
+        SessionLoop.run(
+            session.id,
+            provider_id="provider",
+            model_id="model",
+            callbacks=callbacks,
+        )
+    )
+    await asyncio.wait_for(idle_started.wait(), timeout=1)
+    second_run = asyncio.create_task(
+        SessionLoop.run(
+            session.id,
+            provider_id="provider",
+            model_id="model",
+            callbacks=callbacks,
+        )
+    )
+    await asyncio.sleep(0)
+
+    assert events == ["busy", "idle"]
+    assert not second_run.done()
+
+    allow_idle.set()
+    await asyncio.wait_for(first_run, timeout=1)
+    await asyncio.wait_for(second_run, timeout=1)
+
+    assert events == ["busy", "idle", "busy", "idle"]
+    assert active == {}

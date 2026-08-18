@@ -258,6 +258,81 @@ async def test_call_llm_emits_hooks_on_success(monkeypatch: pytest.MonkeyPatch):
 
 
 @pytest.mark.asyncio
+async def test_call_llm_cancellation_closes_persisted_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = _make_runner("ses_runner_llm_cancelled")
+    assistant_msg = SimpleNamespace(id="msg_assistant_cancelled")
+    agent = SimpleNamespace(name="rex")
+    stream_waiting = asyncio.Event()
+
+    monkeypatch.setattr(runner_mod, "StreamProcessor", _FakeProcessor)
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "has_stage_handlers",
+        AsyncMock(return_value=True),
+    )
+    monkeypatch.setattr(
+        runner_mod.HookPipeline,
+        "run_llm_before",
+        AsyncMock(return_value=SimpleNamespace(input={}, output={})),
+    )
+    run_after = AsyncMock()
+    monkeypatch.setattr(runner_mod.HookPipeline, "run_llm_after", run_after)
+    monkeypatch.setattr(runner_mod, "langfuse_is_active", lambda: False)
+    monkeypatch.setattr(
+        "flocks.provider.options.build_provider_options",
+        lambda provider_id, model_id: {},
+    )
+    monkeypatch.setattr(
+        "flocks.session.streaming.tool_accumulator.ToolCallAccumulator",
+        _FakeToolAccumulator,
+    )
+    update = AsyncMock(return_value=None)
+    monkeypatch.setattr(runner_mod.Message, "update", update)
+
+    class _Provider:
+        def chat_stream(self, **_kwargs):
+            async def _gen():
+                yield SimpleNamespace(
+                    delta="partial",
+                    reasoning=None,
+                    tool_calls=None,
+                    event_type=None,
+                    finish_reason=None,
+                    usage=None,
+                )
+                stream_waiting.set()
+                await asyncio.Event().wait()
+
+            return _gen()
+
+    call = asyncio.create_task(
+        runner._call_llm(
+            provider=_Provider(),
+            messages=[ChatMessage(role="user", content="hello")],
+            tools=[],
+            agent=agent,
+            assistant_msg=assistant_msg,
+        )
+    )
+    await asyncio.wait_for(stream_waiting.wait(), timeout=1)
+    call.cancel()
+
+    with pytest.raises(asyncio.CancelledError):
+        await call
+
+    update.assert_awaited_once()
+    assert update.await_args.kwargs["finish"] == "error"
+    assert update.await_args.kwargs["error"]["name"] == "MessageAbortedError"
+    run_after.assert_awaited_once()
+    after_output = run_after.await_args.args[1]
+    assert after_output["error"]["type"] == "CancelledError"
+    assert after_output["response"]["content"] == "partial"
+    assert runner._active_model_attempt is None
+
+
+@pytest.mark.asyncio
 async def test_call_llm_blocks_provider_when_llm_before_hook_fails(monkeypatch: pytest.MonkeyPatch):
     runner = _make_runner("ses_runner_llm_before_fail_closed")
     assistant_msg = SimpleNamespace(id="msg_assistant_before_fail")

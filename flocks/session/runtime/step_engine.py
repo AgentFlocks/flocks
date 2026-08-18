@@ -3686,9 +3686,74 @@ class StepEngine:
                     for tc in chunk_tool_calls:
                         await tool_accumulator.feed_chunk(tc)
         except asyncio.CancelledError:
-            # Foreground delegate tasks own child sessions. Let their
-            # cancellation/finalization finish before unwinding this step.
-            await processor.drain_parallel_tool_calls()
+            # Cancellation is still a terminal provider attempt. Complete the
+            # durable assistant state and the matching after-hook before the
+            # step task unwinds; repeated cancellation must not interrupt this
+            # cleanup and leave an unfinished assistant in history.
+            async def _finalize_cancelled_attempt() -> None:
+                await processor.drain_parallel_tool_calls()
+                partial_response = _build_llm_response_payload(
+                    content=processor.get_text_content(),
+                    reasoning=processor.get_reasoning_content(),
+                    tool_calls=[],
+                )
+                await self._record_llm_after_attempt(
+                    message_id=assistant_msg.id,
+                    output={
+                        "durationMs": int(
+                            (time.perf_counter() - llm_call_started_at) * 1000
+                        ),
+                        "error": {
+                            "type": "CancelledError",
+                            "message": "Model request cancelled",
+                        },
+                        "response": partial_response,
+                        "usage": stream_usage,
+                        "chunkCounts": dict(chunk_counts),
+                    },
+                )
+                await Message.update(
+                    self.session.id,
+                    assistant_msg.id,
+                    error=self._build_message_aborted_error(),
+                    finish="error",
+                )
+                await self._record_usage_if_available(
+                    stream_usage,
+                    message_id=assistant_msg.id,
+                )
+                await self._emit_pending_llm_after(assistant_msg.id)
+                self._end_observability(
+                    generation_ctx,
+                    trace_ctx,
+                    output=partial_response,
+                    usage=stream_usage,
+                    metadata={"status": "cancelled"},
+                    trace_output=partial_response,
+                    level="WARNING",
+                )
+
+            cleanup_task = asyncio.create_task(
+                _finalize_cancelled_attempt(),
+                name=f"llm-cancel-cleanup:{assistant_msg.id}",
+            )
+            while True:
+                try:
+                    await asyncio.shield(cleanup_task)
+                    break
+                except asyncio.CancelledError:
+                    if cleanup_task.cancelled():
+                        break
+                    continue
+                except Exception as cleanup_error:
+                    log.error(
+                        "runner.llm.cancel_cleanup_failed",
+                        {
+                            "message_id": assistant_msg.id,
+                            "error": str(cleanup_error),
+                        },
+                    )
+                    break
             raise
         except Exception as exc:
             # A foreground delegate may already be running when the provider
@@ -3897,6 +3962,37 @@ class StepEngine:
             active_attempt.outputs.append(output)
             if not self._llm_retry_scope_active:
                 await self._emit_pending_llm_after(message_id)
+
+    async def finalize_cancelled_attempt(self) -> None:
+        """Close an active attempt cancelled outside the provider stream."""
+        active_attempt = self._active_model_attempt
+        if active_attempt is None:
+            return
+        message_id = active_attempt.message_id
+        await self._record_llm_after_attempt(
+            message_id=message_id,
+            output={
+                "error": {
+                    "type": "CancelledError",
+                    "message": "Model step cancelled",
+                },
+                "response": {
+                    "role": "assistant",
+                    "content": "",
+                    "reasoning": "",
+                    "toolCalls": [],
+                },
+            },
+        )
+        try:
+            await Message.update(
+                self.session.id,
+                message_id,
+                error=self._build_message_aborted_error(),
+                finish="error",
+            )
+        finally:
+            await self._emit_pending_llm_after(message_id)
 
     async def _emit_pending_llm_after(self, message_id: str) -> None:
         """Emit one terminal after-hook for a logical model request."""

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections import deque
 from dataclasses import dataclass
 
@@ -49,6 +50,8 @@ class FakeTurn:
         self._boundaries = deque(boundaries)
         self.aborted = False
         self.step = 0
+        self._current_step_task = None
+        self.session = type("Session", (), {"id": "ses_agent_loop"})()
 
     async def prepare_step(self) -> ModelTurnPreparation[Message]:
         return self._preparations.popleft()
@@ -133,6 +136,36 @@ async def test_queued_input_precedes_final_step_failure() -> None:
     )
     assert outcome.status == AgentRunStatus.INPUT_AVAILABLE
     assert outcome.step_result.failure is failure
+
+
+@pytest.mark.asyncio
+async def test_cancelled_step_is_finalized_before_abort_returns() -> None:
+    user = Message("user-1", "hello")
+
+    class CancellableEngine:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.finalized = False
+
+        async def run(self, _snapshot) -> StepResult:
+            self.started.set()
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
+
+        async def finalize_cancelled_attempt(self) -> None:
+            self.finalized = True
+
+    engine = CancellableEngine()
+    turn = FakeTurn([_ready((user,))], [])
+    run = asyncio.create_task(AgentLoop().run(turn, engine))
+    await asyncio.wait_for(engine.started.wait(), timeout=1)
+    turn.aborted = True
+    turn._current_step_task.cancel()
+
+    outcome = await asyncio.wait_for(run, timeout=1)
+
+    assert outcome.status == AgentRunStatus.ABORTED
+    assert engine.finalized is True
 
 
 @pytest.mark.asyncio
