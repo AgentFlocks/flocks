@@ -15,7 +15,7 @@ from flocks_code_security.snapshot import TargetSnapshotService, normalize_relat
 from flocks_code_security.store import ScanStore
 
 
-SOURCE_ROLES = {"baseline", "investigator", "verifier"}
+SOURCE_ROLES = {"threat_modeler", "baseline", "investigator", "verifier"}
 
 
 class AuditSourceRepository:

@@ -87,6 +87,10 @@ class ReportWriter:
 
             coverage = [item["payload"] for item in data["coverage"]]
             scan = data["scan"]
+            threat_model_record = data["threat_model"]
+            if threat_model_record is None:
+                raise ValueError("Scan threat model not found")
+            threat_model = threat_model_record["threat_model"]
             snapshot = self.store.get_snapshot(scan["snapshot_id"])
             if snapshot is None:
                 raise ValueError("Scan snapshot not found")
@@ -127,7 +131,8 @@ class ReportWriter:
                 "status": status,
                 "snapshot": snapshot.public_dict(),
                 "ruleset_digest": scan["ruleset_digest"],
-                "threat_model_status": "not_implemented",
+                "threat_model_status": "completed",
+                "threat_model": threat_model,
                 "finding_count": len(findings),
                 "pending_candidate_ids": sorted(pending),
                 "rejected_candidate_ids": sorted(rejected),
@@ -154,10 +159,27 @@ class ReportWriter:
                 staging / "coverage.json",
                 {"coverage": coverage, "omissions": data["omissions"]},
             )
+            self._write_json(
+                staging / "threat-model.json",
+                {
+                    "scan_id": scan_id,
+                    "snapshot_id": snapshot.snapshot_id,
+                    "work_unit_id": threat_model_record["work_unit_id"],
+                    "created_at": threat_model_record["created_at"],
+                    "threat_model": threat_model,
+                    "evidence": threat_model_record["evidence"],
+                },
+            )
             self._write_json(staging / "report.sarif", sarif)
             staging_markdown_path = staging / "report.md"
             staging_markdown_path.write_text(
-                self._markdown(manifest, findings, pending_candidates, coverage),
+                self._markdown(
+                    manifest,
+                    threat_model_record,
+                    findings,
+                    pending_candidates,
+                    coverage,
+                ),
                 encoding="utf-8",
             )
             staging_markdown_path.chmod(0o600)
@@ -366,6 +388,7 @@ class ReportWriter:
     @staticmethod
     def _markdown(
         manifest: dict[str, Any],
+        threat_model_record: dict[str, Any],
         findings: list[dict[str, Any]],
         pending: list[dict[str, Any]],
         coverage: list[dict[str, Any]],
@@ -407,6 +430,44 @@ class ReportWriter:
                 lines.append(f"- {ReportWriter._markdown_text(serialized)}")
             if len(values) > 100:
                 lines.append(f"- … {len(values) - 100} additional entries in scan-manifest.json")
+        threat_model = threat_model_record["threat_model"]
+        lines.extend(
+            [
+                "",
+                "## Threat Model",
+                "",
+                ReportWriter._markdown_text(threat_model["summary"]),
+                "",
+            ]
+        )
+        for heading, field in (
+            ("Assets", "assets"),
+            ("Trust Boundaries", "trustBoundaries"),
+            ("Attacker Capabilities", "attackerCapabilities"),
+            ("Security Objectives", "securityObjectives"),
+            ("Assumptions and Unknowns", "assumptions"),
+        ):
+            lines.extend([f"### {heading}", ""])
+            values = threat_model[field]
+            if values:
+                lines.extend(
+                    f"- {ReportWriter._markdown_text(value)}" for value in values
+                )
+            else:
+                lines.append("- None recorded.")
+            lines.append("")
+        lines.extend(
+            [
+                "### Threat-Model Evidence",
+                "",
+            ]
+        )
+        for evidence in threat_model_record["evidence"]:
+            evidence_path = ReportWriter._markdown_text(evidence["relative_path"])
+            lines.append(
+                f"- `{evidence_path}:{evidence['start_line']}`"
+                f"–`{evidence['end_line']}` (`{evidence['blob_digest']}`)"
+            )
         lines.extend([
             "",
             "## Findings",

@@ -120,6 +120,19 @@ class ScanStore:
                     role TEXT NOT NULL,
                     created_at TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS threat_models (
+                    scan_id TEXT PRIMARY KEY REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    work_unit_id TEXT NOT NULL UNIQUE REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    payload_json TEXT NOT NULL,
+                    evidence_json TEXT NOT NULL,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE IF NOT EXISTS threat_model_access (
+                    scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
+                    work_unit_id TEXT NOT NULL REFERENCES work_units(work_unit_id) ON DELETE CASCADE,
+                    accessed_at TEXT NOT NULL,
+                    PRIMARY KEY (scan_id, work_unit_id)
+                );
                 CREATE TABLE IF NOT EXISTS candidates (
                     candidate_id TEXT PRIMARY KEY,
                     scan_id TEXT NOT NULL REFERENCES scans(scan_id) ON DELETE CASCADE,
@@ -377,7 +390,7 @@ class ScanStore:
         paths: list[str],
         status: str = "pending",
     ) -> str:
-        if role not in {"baseline", "investigator", "verifier"}:
+        if role not in {"threat_modeler", "baseline", "investigator", "verifier"}:
             raise ValueError("Unsupported work-unit role")
         if not paths or not all(isinstance(path, str) and path for path in paths):
             raise ValueError("Work units require at least one path")
@@ -411,7 +424,7 @@ class ScanStore:
         phase: str,
         units: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        if phase not in {"baseline", "investigation", "verification"}:
+        if phase not in {"threat_modeling", "baseline", "investigation", "verification"}:
             raise ValueError("Unsupported worker phase")
         if not units or len(units) > 32:
             raise ValueError("A worker batch must contain between 1 and 32 units")
@@ -427,7 +440,15 @@ class ScanStore:
             ).fetchone()
             if active is not None:
                 raise ValueError(f"A {phase} worker batch is already active")
+            if phase == "threat_modeling":
+                existing_model = connection.execute(
+                    "SELECT 1 FROM threat_models WHERE scan_id = ?",
+                    (scan_id,),
+                ).fetchone()
+                if existing_model is not None:
+                    raise ValueError("Threat model has already been created")
             if phase == "baseline":
+                self._require_threat_model_ready(connection, scan_id)
                 prior = connection.execute(
                     "SELECT 1 FROM worker_batches WHERE scan_id = ? AND phase = 'baseline'",
                     (scan_id,),
@@ -442,9 +463,10 @@ class ScanStore:
                 role = str(unit.get("role") or "")
                 paths = unit.get("paths")
                 subject_id = unit.get("subject_id")
-                if role not in {"baseline", "investigator", "verifier"}:
+                if role not in {"threat_modeler", "baseline", "investigator", "verifier"}:
                     raise ValueError("Unsupported work-unit role")
                 expected_role = {
+                    "threat_modeling": "threat_modeler",
                     "baseline": "baseline",
                     "investigation": "investigator",
                     "verification": "verifier",
@@ -594,7 +616,12 @@ class ScanStore:
         role: str,
     ) -> bool:
         with self._connect() as connection:
-            if role in {"baseline", "investigator"}:
+            if role == "threat_modeler":
+                row = connection.execute(
+                    "SELECT 1 FROM threat_models WHERE work_unit_id = ?",
+                    (work_unit_id,),
+                ).fetchone()
+            elif role in {"baseline", "investigator"}:
                 row = connection.execute(
                     "SELECT 1 FROM coverage WHERE work_unit_id = ?",
                     (work_unit_id,),
@@ -679,6 +706,7 @@ class ScanStore:
     def ensure_ready_to_finalize(self, scan_id: str) -> None:
         with self._connect() as connection:
             self._require_scan_status(connection, scan_id, {"running"})
+            self._require_threat_model_ready(connection, scan_id)
             active = connection.execute(
                 "SELECT COUNT(*) FROM work_units WHERE scan_id = ? "
                 "AND status IN ('pending', 'running')",
@@ -745,7 +773,13 @@ class ScanStore:
         role: str,
         work_unit_id: str | None = None,
     ) -> None:
-        allowed_roles = {"coordinator", "baseline", "investigator", "verifier"}
+        allowed_roles = {
+            "coordinator",
+            "threat_modeler",
+            "baseline",
+            "investigator",
+            "verifier",
+        }
         if role not in allowed_roles:
             raise ValueError("Unsupported session binding role")
         if role == "coordinator" and work_unit_id is not None:
@@ -826,6 +860,129 @@ class ScanStore:
             raise ValueError(f"Session role {binding.role!r} cannot perform this operation")
         return binding
 
+    def save_threat_model(
+        self,
+        binding: SessionBinding,
+        payload: dict[str, Any],
+        evidence: list[dict[str, Any]],
+    ) -> None:
+        if binding.role != "threat_modeler" or binding.work_unit_id is None:
+            raise ValueError("Threat models require a threat-modeler work unit")
+        self.validate_coverage_access(
+            binding,
+            inventoried_paths=["."],
+            analyzed_paths=[],
+        )
+        with self._lock, self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            existing = connection.execute(
+                "SELECT 1 FROM threat_models WHERE scan_id = ?",
+                (binding.scan_id,),
+            ).fetchone()
+            if existing is not None:
+                raise ValueError("Threat model has already been submitted")
+            connection.execute(
+                "INSERT INTO threat_models VALUES (?, ?, ?, ?, ?)",
+                (
+                    binding.scan_id,
+                    binding.work_unit_id,
+                    json.dumps(payload, ensure_ascii=False, sort_keys=True),
+                    json.dumps(evidence, ensure_ascii=False, sort_keys=True),
+                    _now(),
+                ),
+            )
+
+    def get_threat_model(self, scan_id: str) -> dict[str, Any] | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM threat_models WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        output = dict(row)
+        output["threat_model"] = json.loads(output.pop("payload_json"))
+        output["evidence"] = json.loads(output.pop("evidence_json"))
+        return output
+
+    def get_threat_model_for_binding(
+        self,
+        binding: SessionBinding,
+    ) -> dict[str, Any]:
+        if binding.role not in {"baseline", "investigator", "verifier"}:
+            raise ValueError("Session role cannot consume the scan threat model")
+        if binding.work_unit_id is None:
+            raise ValueError("Threat-model access requires a worker work unit")
+        with self._lock, self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            row = self._require_threat_model_ready(connection, binding.scan_id)
+            threat_model = json.loads(row["payload_json"])
+            evidence = json.loads(row["evidence_json"])
+            connection.execute(
+                "INSERT INTO threat_model_access VALUES (?, ?, ?) "
+                "ON CONFLICT(scan_id, work_unit_id) DO UPDATE SET "
+                "accessed_at = excluded.accessed_at",
+                (binding.scan_id, binding.work_unit_id, _now()),
+            )
+        return {
+            "scan_id": binding.scan_id,
+            "threat_model": threat_model,
+            "evidence": evidence,
+        }
+
+    def require_threat_model_ready(self, scan_id: str) -> dict[str, Any]:
+        with self._connect() as connection:
+            row = self._require_threat_model_ready(connection, scan_id)
+        return {
+            "scan_id": row["scan_id"],
+            "work_unit_id": row["work_unit_id"],
+            "threat_model": json.loads(row["payload_json"]),
+            "evidence": json.loads(row["evidence_json"]),
+            "created_at": row["created_at"],
+        }
+
+    def require_threat_model_consumed(self, binding: SessionBinding) -> None:
+        if binding.role not in {"baseline", "investigator"}:
+            raise ValueError("Session role does not consume threat-model context")
+        with self._connect() as connection:
+            self._require_scan_status(connection, binding.scan_id, {"running"})
+            self._require_active_worker_binding(connection, binding)
+            self._require_threat_model_access(connection, binding)
+
+    @staticmethod
+    def _require_threat_model_ready(
+        connection: sqlite3.Connection,
+        scan_id: str,
+    ) -> sqlite3.Row:
+        row = connection.execute(
+            "SELECT tm.* FROM threat_models tm "
+            "JOIN work_units wu ON wu.work_unit_id = tm.work_unit_id "
+            "WHERE tm.scan_id = ? AND wu.scan_id = tm.scan_id "
+            "AND wu.role = 'threat_modeler' AND wu.status = 'completed'",
+            (scan_id,),
+        ).fetchone()
+        if row is None:
+            raise ValueError("A completed source-backed threat model is required")
+        return row
+
+    @staticmethod
+    def _require_threat_model_access(
+        connection: sqlite3.Connection,
+        binding: SessionBinding,
+    ) -> None:
+        if binding.work_unit_id is None:
+            raise ValueError("Threat-model access requires a worker work unit")
+        accessed = connection.execute(
+            "SELECT 1 FROM threat_model_access WHERE scan_id = ? AND work_unit_id = ?",
+            (binding.scan_id, binding.work_unit_id),
+        ).fetchone()
+        if accessed is None:
+            raise ValueError(
+                "Baseline workers must read the stored threat-model context first"
+            )
+
     @staticmethod
     def _require_scan_status(
         connection: sqlite3.Connection,
@@ -875,6 +1032,8 @@ class ScanStore:
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
+            if binding.role in {"baseline", "investigator"}:
+                self._require_threat_model_access(connection, binding)
             connection.execute(
                 "INSERT INTO candidates VALUES (?, ?, ?, ?, ?, ?)",
                 (
@@ -1200,6 +1359,8 @@ class ScanStore:
         with self._lock, self._connect() as connection:
             self._require_scan_status(connection, binding.scan_id, {"running"})
             self._require_active_worker_binding(connection, binding)
+            if binding.role in {"baseline", "investigator"}:
+                self._require_threat_model_access(connection, binding)
             work_unit = connection.execute(
                 "SELECT scan_id, role FROM work_units WHERE work_unit_id = ?",
                 (work_unit_id,),
@@ -1243,6 +1404,9 @@ class ScanStore:
                 "coverage_records": connection.execute(
                     "SELECT COUNT(*) FROM coverage WHERE scan_id = ?", (scan_id,)
                 ).fetchone()[0],
+                "threat_models": connection.execute(
+                    "SELECT COUNT(*) FROM threat_models WHERE scan_id = ?", (scan_id,)
+                ).fetchone()[0],
                 "unverified_candidates": connection.execute(
                     """
                     SELECT COUNT(*) FROM candidates c
@@ -1262,9 +1426,34 @@ class ScanStore:
                 "WHERE scan_id = ? ORDER BY created_at, batch_id",
                 (scan_id,),
             ).fetchall()
+            threat_model_row = connection.execute(
+                "SELECT tm.created_at, wu.status AS work_unit_status "
+                "FROM threat_models tm "
+                "JOIN work_units wu ON wu.work_unit_id = tm.work_unit_id "
+                "WHERE tm.scan_id = ?",
+                (scan_id,),
+            ).fetchone()
+            threat_model_batch_row = connection.execute(
+                "SELECT status FROM worker_batches "
+                "WHERE scan_id = ? AND phase = 'threat_modeling' "
+                "ORDER BY created_at DESC, batch_id DESC LIMIT 1",
+                (scan_id,),
+            ).fetchone()
+        if (
+            threat_model_row is not None
+            and threat_model_row["work_unit_status"] == "completed"
+        ):
+            threat_model_status = "completed"
+        elif threat_model_batch_row is not None:
+            threat_model_status = threat_model_batch_row["status"]
+        elif threat_model_row is not None:
+            threat_model_status = "submitted"
+        else:
+            threat_model_status = "missing"
         return {
             **scan,
             "counts": counts,
+            "threat_model_status": threat_model_status,
             "worker_batches": [dict(row) for row in batch_rows],
         }
 
@@ -1310,6 +1499,10 @@ class ScanStore:
                 """,
                 (scan_id,),
             ).fetchall()
+            threat_model_row = connection.execute(
+                "SELECT * FROM threat_models WHERE scan_id = ?",
+                (scan_id,),
+            ).fetchone()
         candidates = []
         for row in candidate_rows:
             item = dict(row)
@@ -1330,8 +1523,18 @@ class ScanStore:
             item = dict(row)
             item["paths"] = json.loads(item.pop("paths_json"))
             work_units.append(item)
+        threat_model = None
+        if threat_model_row is not None:
+            threat_model = dict(threat_model_row)
+            threat_model["threat_model"] = json.loads(
+                threat_model.pop("payload_json")
+            )
+            threat_model["evidence"] = json.loads(
+                threat_model.pop("evidence_json")
+            )
         return {
             "scan": scan,
+            "threat_model": threat_model,
             "candidates": candidates,
             "evidence": [dict(row) for row in evidence_rows],
             "verifications": verifications,

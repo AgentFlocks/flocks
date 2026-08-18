@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 from importlib import resources
+import json
 import sqlite3
 from collections import Counter
 from typing import Any, Awaitable, Callable
@@ -24,7 +25,9 @@ from flocks_code_security.reporting import ReportWriter
 from flocks_code_security.orchestration import (
     baseline_prompt,
     plan_baseline_units,
+    plan_threat_model_units,
     plan_verification_units,
+    threat_model_prompt,
     verification_prompt,
 )
 from flocks_code_security.runtime import get_runtime
@@ -35,7 +38,7 @@ def _ruleset_digest() -> str:
     digest.update(b"flocks-code-security-rules-v1\0")
     package_root = resources.files("flocks_code_security")
     prompt_root = package_root.joinpath("prompts")
-    for name in ("baseline.md", "coordinator.md", "verifier.md"):
+    for name in ("baseline.md", "coordinator.md", "threat_modeler.md", "verifier.md"):
         digest.update(name.encode("utf-8") + b"\0")
         digest.update(prompt_root.joinpath(name).read_bytes())
         digest.update(b"\0")
@@ -47,10 +50,13 @@ def _ruleset_digest() -> str:
 
 RULESET_DIGEST = _ruleset_digest()
 COORDINATOR_ROLE = {"coordinator"}
+THREAT_MODELER_ROLE = {"threat_modeler"}
 SOURCE_SUBMIT_ROLES = {"baseline"}
+THREAT_MODEL_CONSUMER_ROLES = {"baseline"}
 VERIFIER_ROLE = {"verifier"}
 ROLE_AGENTS = {
     "coordinator": "code-security",
+    "threat_modeler": "code-security-threat-modeler",
     "baseline": "code-security-baseline",
     "verifier": "code-security-verifier",
 }
@@ -66,6 +72,8 @@ AUDIT_TOOL_NAMES = (
     "audit_inventory",
     "audit_read",
     "audit_search",
+    "audit_threat_model_context",
+    "audit_submit_threat_model",
     "audit_verification_subject",
     "audit_submit_candidate",
     "audit_submit_verdict",
@@ -157,7 +165,7 @@ async def audit_inventory(
     limit: int = 500,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"baseline", "verifier"})
+        _require_agent_execution(ctx, {"threat_modeler", "baseline", "verifier"})
         output = await asyncio.to_thread(
             get_runtime().source.inventory,
             ctx.session_id,
@@ -176,7 +184,7 @@ async def audit_read(
     end_line: int | None = None,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"baseline", "verifier"})
+        _require_agent_execution(ctx, {"threat_modeler", "baseline", "verifier"})
         output = await asyncio.to_thread(
             get_runtime().source.read,
             ctx.session_id,
@@ -197,7 +205,7 @@ async def audit_search(
     max_results: int = 100,
 ) -> ToolResult:
     try:
-        _require_agent_execution(ctx, {"baseline", "verifier"})
+        _require_agent_execution(ctx, {"threat_modeler", "baseline", "verifier"})
         output = await asyncio.to_thread(
             get_runtime().source.search,
             ctx.session_id,
@@ -209,6 +217,107 @@ async def audit_search(
         return ToolResult(success=True, output=output, title=f"Search snapshot for {query}")
     except STORE_ERRORS as exc:
         return _error(exc, title="Snapshot search failed")
+
+
+async def audit_threat_model_context(ctx: ToolContext) -> ToolResult:
+    try:
+        _require_agent_execution(ctx, THREAT_MODEL_CONSUMER_ROLES)
+        runtime = get_runtime()
+        binding = runtime.store.require_binding(
+            ctx.session_id,
+            THREAT_MODEL_CONSUMER_ROLES,
+        )
+        output = await asyncio.to_thread(
+            runtime.store.get_threat_model_for_binding,
+            binding,
+        )
+        return ToolResult(
+            success=True,
+            output=output,
+            title="Source-backed threat model",
+        )
+    except STORE_ERRORS as exc:
+        return _error(exc, title="Threat-model context unavailable")
+
+
+async def audit_submit_threat_model(
+    ctx: ToolContext,
+    threat_model: dict[str, Any],
+) -> ToolResult:
+    runtime = get_runtime()
+    try:
+        _require_agent_execution(ctx, THREAT_MODELER_ROLE)
+        binding = runtime.store.require_binding(ctx.session_id, THREAT_MODELER_ROLE)
+        if not isinstance(threat_model, dict):
+            raise ValueError("threat_model must be an object")
+        canonical_fields = (
+            "summary",
+            "assets",
+            "trustBoundaries",
+            "attackerCapabilities",
+            "securityObjectives",
+            "assumptions",
+        )
+        missing = [
+            field
+            for field in canonical_fields
+            if field not in threat_model or threat_model[field] is None
+        ]
+        if missing:
+            raise ValueError("Missing threat-model fields: " + ", ".join(missing))
+        allowed_fields = {*canonical_fields, "evidence"}
+        unknown = sorted(set(threat_model) - allowed_fields)
+        if unknown:
+            raise ValueError("Unsupported threat-model fields: " + ", ".join(unknown))
+        if not isinstance(threat_model["summary"], str):
+            raise ValueError("Threat-model summary must be a string")
+        summary = threat_model["summary"].strip()
+        if not summary or len(summary) > 20_000:
+            raise ValueError("Threat-model summary must contain 1 to 20000 characters")
+        payload: dict[str, Any] = {"summary": summary}
+        for field in canonical_fields[1:]:
+            values = threat_model[field]
+            if (
+                not isinstance(values, list)
+                or len(values) > 100
+                or not all(isinstance(item, str) for item in values)
+            ):
+                raise ValueError(f"Threat-model field {field} must be an array of at most 100 strings")
+            normalized = [item.strip() for item in values]
+            if any(not item or len(item) > 4_000 for item in normalized):
+                raise ValueError(
+                    f"Threat-model field {field} contains an empty or oversized item"
+                )
+            if field != "assumptions" and not normalized:
+                raise ValueError(f"Threat-model field {field} must not be empty")
+            payload[field] = normalized
+        if len(json.dumps(payload, ensure_ascii=False)) > 60_000:
+            raise ValueError("Canonical threat model may contain at most 60000 characters")
+        raw_evidence = threat_model.get("evidence")
+        if not isinstance(raw_evidence, list) or len(raw_evidence) > 100:
+            raise ValueError("Threat model requires between 1 and 100 evidence references")
+        evidence = await asyncio.to_thread(
+            runtime.source.validate_evidence,
+            binding,
+            raw_evidence,
+        )
+        await asyncio.to_thread(
+            runtime.store.save_threat_model,
+            binding,
+            payload,
+            evidence,
+        )
+        return ToolResult(
+            success=True,
+            output={
+                "scan_id": binding.scan_id,
+                "status": "submitted",
+                "evidence_count": len(evidence),
+            },
+            title="Submitted source-backed threat model",
+        )
+    except (OSError, TypeError, ValueError, sqlite3.Error) as exc:
+        return _error(exc, title="Threat-model submission failed")
 
 
 async def audit_verification_subject(ctx: ToolContext) -> ToolResult:
@@ -234,6 +343,10 @@ async def audit_submit_candidate(ctx: ToolContext, candidate: dict[str, Any]) ->
     try:
         _require_agent_execution(ctx, SOURCE_SUBMIT_ROLES)
         binding = runtime.store.require_binding(ctx.session_id, SOURCE_SUBMIT_ROLES)
+        await asyncio.to_thread(
+            runtime.store.require_threat_model_consumed,
+            binding,
+        )
         if not isinstance(candidate, dict):
             raise ValueError("candidate must be an object")
         required = (
@@ -339,6 +452,10 @@ async def audit_submit_coverage(
     try:
         _require_agent_execution(ctx, SOURCE_SUBMIT_ROLES)
         binding = runtime.store.require_binding(ctx.session_id, SOURCE_SUBMIT_ROLES)
+        await asyncio.to_thread(
+            runtime.store.require_threat_model_consumed,
+            binding,
+        )
         path_groups = {
             "inventoried_paths": inventoried_paths or [],
             "analyzed_paths": analyzed_paths or [],
@@ -437,11 +554,18 @@ async def audit_cancel(ctx: ToolContext, scan_id: str) -> ToolResult:
         return _error(exc, title="Audit cancellation failed")
 
 
-async def audit_run_workers(ctx: ToolContext, scan_id: str, phase: str = "baseline") -> ToolResult:
+async def audit_run_workers(
+    ctx: ToolContext,
+    scan_id: str,
+    phase: str = "threat_modeling",
+) -> ToolResult:
     runtime = get_runtime()
     try:
         binding = _coordinator_binding(ctx, scan_id)
-        if phase == "baseline":
+        if phase == "threat_modeling":
+            units = plan_threat_model_units()
+            candidates_by_id = {}
+        elif phase == "baseline":
             files = await asyncio.to_thread(
                 runtime.store.list_snapshot_files,
                 binding.snapshot_id,
@@ -461,9 +585,7 @@ async def audit_run_workers(ctx: ToolContext, scan_id: str, phase: str = "baseli
                 item["candidate_id"]: item for item in candidates
             }
         else:
-            raise ValueError(
-                "Focused investigation workers are not implemented in the standard audit"
-            )
+            raise ValueError("Unsupported standard-audit worker phase")
         batch = await asyncio.to_thread(
             runtime.store.create_worker_batch,
             scan_id=scan_id,
@@ -596,7 +718,9 @@ async def _launch_worker(
         role=unit["role"],
         work_unit_id=unit["work_unit_id"],
     )
-    if phase == "baseline":
+    if phase == "threat_modeling":
+        prompt = threat_model_prompt(snapshot_id=snapshot_id)
+    elif phase == "baseline":
         prompt = baseline_prompt(snapshot_id=snapshot_id, paths=unit["paths"])
     elif phase == "verification" and candidate is not None:
         prompt = verification_prompt(
@@ -670,7 +794,16 @@ async def _refresh_worker_batch(batch_id: str) -> dict[str, Any]:
         elif task.status == "cancelled":
             next_status = "cancelled"
         elif task.status == "error":
-            next_status = "failed"
+            facts_complete = await asyncio.to_thread(
+                runtime.store.work_unit_has_required_facts,
+                unit["work_unit_id"],
+                role=unit["role"],
+            )
+            next_status = (
+                "completed"
+                if unit["role"] == "threat_modeler" and facts_complete
+                else "failed"
+            )
         else:
             continue
         await asyncio.to_thread(
@@ -839,6 +972,46 @@ def register_tools() -> None:
         ],
     )
     _register(
+        "audit_threat_model_context",
+        "Return the completed source-backed threat model bound to this scan and record that the worker consumed it.",
+        audit_threat_model_context,
+        [],
+    )
+    _register(
+        "audit_submit_threat_model",
+        "Submit one canonical source-backed repository threat model for the bound immutable snapshot.",
+        audit_submit_threat_model,
+        [
+            _parameter(
+                "threat_model",
+                ParameterType.OBJECT,
+                "Canonical threat model with summary, assets, trustBoundaries, attackerCapabilities, securityObjectives, assumptions, and evidence.",
+                json_schema={
+                    "type": "object",
+                    "additionalProperties": False,
+                    "required": [
+                        "summary",
+                        "assets",
+                        "trustBoundaries",
+                        "attackerCapabilities",
+                        "securityObjectives",
+                        "assumptions",
+                        "evidence",
+                    ],
+                    "properties": {
+                        "summary": {"type": "string"},
+                        "assets": string_array,
+                        "trustBoundaries": string_array,
+                        "attackerCapabilities": string_array,
+                        "securityObjectives": string_array,
+                        "assumptions": string_array,
+                        "evidence": object_array,
+                    },
+                },
+            )
+        ],
+    )
+    _register(
         "audit_verification_subject",
         "Return the candidate and digest-bound evidence assigned to this verifier work unit.",
         audit_verification_subject,
@@ -880,11 +1053,18 @@ def register_tools() -> None:
         _register(name, description, handler, [_parameter("scan_id", ParameterType.STRING, "Bound scan identifier.")])
     _register(
         "audit_run_workers",
-        "Create and launch isolated baseline or verification worker sessions for the bound scan.",
+        "Create and launch isolated threat-modeling, baseline, or verification worker sessions for the bound scan.",
         audit_run_workers,
         [
             _parameter("scan_id", ParameterType.STRING, "Bound scan identifier."),
-            _parameter("phase", ParameterType.STRING, "Worker phase.", required=False, default="baseline", enum=["baseline", "verification"]),
+            _parameter(
+                "phase",
+                ParameterType.STRING,
+                "Worker phase.",
+                required=False,
+                default="threat_modeling",
+                enum=["threat_modeling", "baseline", "verification"],
+            ),
         ],
     )
     _register(

@@ -20,7 +20,9 @@ from flocks_code_security.tools import (
     audit_run_workers,
     audit_submit_candidate,
     audit_submit_coverage,
+    audit_submit_threat_model,
     audit_submit_verdict,
+    audit_threat_model_context,
     audit_wait_workers,
 )
 import flocks_code_security.tools as tools_module
@@ -33,6 +35,73 @@ def _agent_context(session_id: str, message_id: str, agent: str) -> ToolContext:
         agent=agent,
         extra={"agent_execution_session": True},
     )
+
+
+async def _complete_threat_model(
+    runtime,
+    *,
+    scan_id: str,
+    snapshot_id: str,
+    session_id: str = "threat-modeler",
+) -> str:
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id=session_id,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="threat_modeler",
+        work_unit_id=work_unit_id,
+    )
+    modeler = _agent_context(
+        session_id,
+        f"{session_id}-message",
+        "code-security-threat-modeler",
+    )
+    inventory = await audit_inventory(modeler)
+    assert inventory.success
+    source_file = next(
+        item for item in inventory.output["files"] if not item["is_binary"]
+    )
+    source = await audit_read(
+        modeler,
+        source_file["path"],
+        start_line=1,
+        end_line=max(1, min(source_file["line_count"], 20)),
+    )
+    assert source.success
+    submitted = await audit_submit_threat_model(
+        modeler,
+        {
+            "summary": "A source-backed test application with a callable entry point.",
+            "assets": ["Application integrity and process authority."],
+            "trustBoundaries": [
+                f"Caller input crosses into application code at {source_file['path']}:1."
+            ],
+            "attackerCapabilities": [
+                "A caller may control ordinary application input but not trusted configuration."
+            ],
+            "securityObjectives": [
+                "Untrusted input must not gain process execution authority."
+            ],
+            "assumptions": ["Deployment exposure is not established by this fixture."],
+            "evidence": [
+                {
+                    "relative_path": source_file["path"],
+                    "blob_digest": source.output["blob_digest"],
+                    "start_line": 1,
+                    "end_line": source.output["end_line"],
+                }
+            ],
+        },
+    )
+    assert submitted.success
+    runtime.store.update_work_unit_status(work_unit_id, "completed")
+    return work_unit_id
 
 
 class _FakeBackgroundManager:
@@ -56,6 +125,86 @@ class _FakeBackgroundManager:
             return 0
         task.status = "cancelled"
         return 1
+
+
+@pytest.mark.asyncio
+async def test_threat_model_submission_is_role_bound_and_schema_validated(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    target = tmp_path / "target"
+    target.mkdir()
+    (target / "app.py").write_text("def handler(value):\n    return value\n", encoding="utf-8")
+    runtime = build_runtime(tmp_path / "plugin-data")
+    monkeypatch.setattr(runtime_module, "_runtime", runtime)
+    coordinator = _agent_context("coordinator", "message-1", "code-security")
+    prepared = await audit_prepare(coordinator, str(target))
+    scan_id = prepared.output["scan_id"]
+    snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    work_unit_id = runtime.store.create_work_unit(
+        scan_id=scan_id,
+        phase="threat_modeling",
+        role="threat_modeler",
+        paths=["."],
+    )
+    runtime.store.bind_session(
+        session_id="modeler",
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+        role="threat_modeler",
+        work_unit_id=work_unit_id,
+    )
+    modeler = _agent_context(
+        "modeler",
+        "message-2",
+        "code-security-threat-modeler",
+    )
+    source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
+    incomplete = await audit_submit_threat_model(
+        modeler,
+        {"summary": "Missing canonical fields."},
+    )
+    assert incomplete.success is False
+    assert "Missing threat-model fields" in str(incomplete.error)
+
+    payload = {
+        "summary": "A caller invokes a local application handler.",
+        "assets": ["Application integrity."],
+        "trustBoundaries": ["Caller input enters app.py:1."],
+        "attackerCapabilities": ["The caller controls the value argument."],
+        "securityObjectives": ["Input remains data."],
+        "assumptions": [],
+        "evidence": [
+            {
+                "relative_path": "app.py",
+                "blob_digest": source.output["blob_digest"],
+                "start_line": 1,
+                "end_line": 2,
+            }
+        ],
+    }
+    invalid_type = await audit_submit_threat_model(
+        modeler,
+        {**payload, "assets": [1]},
+    )
+    assert invalid_type.success is False
+    assert "array of at most 100 strings" in str(invalid_type.error)
+    wrong_agent = await audit_submit_threat_model(
+        _agent_context("modeler", "message-3", "code-security-baseline"),
+        payload,
+    )
+    assert wrong_agent.success is False
+    assert "Agent identity" in str(wrong_agent.error)
+
+    missing_inventory = await audit_submit_threat_model(modeler, payload)
+    assert missing_inventory.success is False
+    assert "audit_inventory access" in str(missing_inventory.error)
+    assert (await audit_inventory(modeler)).success
+    submitted = await audit_submit_threat_model(modeler, payload)
+    assert submitted.success is True
+    duplicate = await audit_submit_threat_model(modeler, payload)
+    assert duplicate.success is False
+    assert "already been submitted" in str(duplicate.error)
 
 
 @pytest.mark.asyncio
@@ -83,6 +232,11 @@ async def test_prepare_candidate_verify_finalize_pipeline(
     assert prepared.success is True
     scan_id = prepared.output["scan_id"]
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
 
     baseline_unit = runtime.store.create_work_unit(
         scan_id=scan_id,
@@ -98,6 +252,14 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         work_unit_id=baseline_unit,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    unconsumed_threat_model = await audit_submit_coverage(
+        baseline,
+        inventoried_paths=["app.py"],
+        analyzed_paths=["app.py"],
+    )
+    assert unconsumed_threat_model.success is False
+    assert "threat-model context" in str(unconsumed_threat_model.error)
+    assert (await audit_threat_model_context(baseline)).success
     unbacked_coverage = await audit_submit_coverage(
         baseline,
         inventoried_paths=["app.py"],
@@ -212,7 +374,15 @@ async def test_prepare_candidate_verify_finalize_pipeline(
         (output_path / "scan-manifest.json").read_text(encoding="utf-8")
     )
     assert manifest["status"] == "completed"
-    assert (output_path / "threat-model.json").exists() is False
+    assert manifest["threat_model_status"] == "completed"
+    threat_model = json.loads(
+        (output_path / "threat-model.json").read_text(encoding="utf-8")
+    )
+    assert threat_model["threat_model"]["trustBoundaries"]
+    assert threat_model["evidence"][0]["relative_path"] in {
+        "aaa_helper.py",
+        "app.py",
+    }
     assert "result_status" not in manifest
     assert (output_path / ".scan-manifest.final").exists() is False
 
@@ -236,6 +406,11 @@ async def test_invalid_or_failed_coverage_never_completes_scan(
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
     assert (await audit_prepare(coordinator, str(target))).success is False
     unit_id = runtime.store.create_work_unit(
         scan_id=scan_id,
@@ -251,6 +426,7 @@ async def test_invalid_or_failed_coverage_never_completes_scan(
         work_unit_id=unit_id,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
 
     invalid = await audit_submit_coverage(
         baseline,
@@ -301,6 +477,11 @@ async def test_partial_report_preserves_pending_candidate_details(
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
     unit_id = runtime.store.create_work_unit(
         scan_id=scan_id,
         phase="baseline",
@@ -315,6 +496,7 @@ async def test_partial_report_preserves_pending_candidate_details(
         work_unit_id=unit_id,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
     assert (await audit_inventory(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=1)
     candidate = await audit_submit_candidate(
@@ -380,6 +562,11 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
     unit_id = runtime.store.create_work_unit(
         scan_id=scan_id,
         phase="baseline",
@@ -394,6 +581,7 @@ async def test_report_write_failure_does_not_publish_partial_bundle(
         work_unit_id=unit_id,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
     assert (await audit_inventory(baseline)).success
     assert (await audit_read(baseline, "app.py", start_line=1, end_line=1)).success
     assert (
@@ -443,6 +631,11 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
     snapshot_id = prepared.output["snapshot"]["snapshot_id"]
+    await _complete_threat_model(
+        runtime,
+        scan_id=scan_id,
+        snapshot_id=snapshot_id,
+    )
     baseline_unit = runtime.store.create_work_unit(
         scan_id=scan_id,
         phase="baseline",
@@ -457,6 +650,7 @@ async def test_duplicate_candidates_merge_and_verdict_is_single_assignment(
         work_unit_id=baseline_unit,
     )
     baseline = _agent_context("baseline", "message-2", "code-security-baseline")
+    assert (await audit_threat_model_context(baseline)).success
     assert (await audit_inventory(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
     candidate_payload = {
@@ -581,10 +775,60 @@ async def test_background_worker_orchestration_retries_failed_verification(
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
 
+    blocked_baseline = await audit_run_workers(coordinator, scan_id, "baseline")
+    assert blocked_baseline.success is False
+    assert "threat model" in str(blocked_baseline.error).lower()
+
+    threat_model_batch = await audit_run_workers(
+        coordinator,
+        scan_id,
+        "threat_modeling",
+    )
+    assert threat_model_batch.success is True
+    assert runtime.store.scan_status(scan_id)["threat_model_status"] == "running"
+    threat_model_session = children[0].id
+    modeler = _agent_context(
+        threat_model_session,
+        "threat-model-message",
+        "code-security-threat-modeler",
+    )
+    inventory = await audit_inventory(modeler)
+    assert inventory.success
+    source = await audit_read(modeler, "app.py", start_line=1, end_line=2)
+    assert (
+        await audit_submit_threat_model(
+            modeler,
+            {
+                "summary": "A callable Python handler processes caller input.",
+                "assets": ["Process execution authority."],
+                "trustBoundaries": ["Caller input enters handler at app.py:1."],
+                "attackerCapabilities": ["A caller controls the handler argument."],
+                "securityObjectives": ["Input must not become executable code."],
+                "assumptions": ["Network exposure is not established."],
+                "evidence": [
+                    {
+                        "relative_path": "app.py",
+                        "blob_digest": source.output["blob_digest"],
+                        "start_line": 1,
+                        "end_line": 2,
+                    }
+                ],
+            },
+        )
+    ).success
+    manager.tasks["task-1"].status = "error"
+    threat_model_wait = await audit_wait_workers(
+        coordinator,
+        threat_model_batch.output["batch_id"],
+        timeout_seconds=0,
+    )
+    assert threat_model_wait.output["status"] == "completed"
+    assert runtime.store.scan_status(scan_id)["threat_model_status"] == "completed"
+
     baseline_batch = await audit_run_workers(coordinator, scan_id, "baseline")
     assert baseline_batch.success is True
     assert baseline_batch.output["launched_workers"] == 1
-    assert manager.calls[0]["parent_session_id"] == "coordinator"
+    assert manager.calls[1]["parent_session_id"] == "coordinator"
     running_wait = await audit_wait_workers(
         coordinator,
         baseline_batch.output["batch_id"],
@@ -592,12 +836,13 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     assert running_wait.output["timed_out"] is True
     assert (await audit_finalize(coordinator, scan_id)).success is False
-    baseline_session = children[0].id
+    baseline_session = children[1].id
     baseline = _agent_context(
         baseline_session,
         "baseline-message",
         "code-security-baseline",
     )
+    assert (await audit_threat_model_context(baseline)).success
     source = await audit_read(baseline, "app.py", start_line=1, end_line=2)
     assert (await audit_inventory(baseline)).success
     candidate = await audit_submit_candidate(
@@ -628,7 +873,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
             analyzed_paths=["app.py"],
         )
     ).success
-    manager.tasks["task-1"].status = "completed"
+    manager.tasks["task-2"].status = "completed"
     baseline_wait = await audit_wait_workers(
         coordinator,
         baseline_batch.output["batch_id"],
@@ -642,7 +887,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
         "verification",
     )
     assert verification_batch.success is True
-    manager.tasks["task-2"].status = "error"
+    manager.tasks["task-3"].status = "error"
     failed_verification = await audit_wait_workers(
         coordinator,
         verification_batch.output["batch_id"],
@@ -657,7 +902,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
     )
     assert verification_batch.success is True
     verifier = _agent_context(
-        children[2].id,
+        children[3].id,
         "verifier-message",
         "code-security-verifier",
     )
@@ -670,7 +915,7 @@ async def test_background_worker_orchestration_retries_failed_verification(
             "The input reaches eval without a guard.",
         )
     ).success
-    manager.tasks["task-3"].status = "completed"
+    manager.tasks["task-4"].status = "completed"
     verification_wait = await audit_wait_workers(
         coordinator,
         verification_batch.output["batch_id"],
@@ -712,7 +957,7 @@ async def test_cancel_stops_bound_background_workers(
         AsyncMock(
             return_value=SimpleNamespace(
                 id="worker",
-                agent="code-security-baseline",
+                agent="code-security-threat-modeler",
             )
         ),
     )
@@ -722,7 +967,7 @@ async def test_cancel_stops_bound_background_workers(
     coordinator = _agent_context("coordinator", "message-1", "code-security")
     prepared = await audit_prepare(coordinator, str(target))
     scan_id = prepared.output["scan_id"]
-    launched = await audit_run_workers(coordinator, scan_id, "baseline")
+    launched = await audit_run_workers(coordinator, scan_id, "threat_modeling")
     assert launched.success
 
     cancelled = await audit_cancel(coordinator, scan_id)
@@ -775,7 +1020,7 @@ async def test_worker_launch_cancels_task_when_runtime_binding_fails(
     launched = await audit_run_workers(
         coordinator,
         prepared.output["scan_id"],
-        "baseline",
+        "threat_modeling",
     )
 
     assert launched.success is True

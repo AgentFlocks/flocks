@@ -12,6 +12,17 @@ MAX_WORK_UNITS_PER_BATCH = 32
 MAX_SCOPES_PER_WORK_UNIT = 2_000
 
 
+def plan_threat_model_units() -> list[dict[str, Any]]:
+    """Use one fresh-context worker to model repository-wide boundaries."""
+    return [
+        {
+            "role": "threat_modeler",
+            "paths": ["."],
+            "subject_id": None,
+        }
+    ]
+
+
 def plan_baseline_units(files: list[SnapshotFile]) -> list[dict[str, Any]]:
     """Partition the snapshot by top-level scope without exposing host paths."""
     scopes = sorted({item.relative_path.split("/", 1)[0] for item in files})
@@ -50,10 +61,24 @@ def baseline_prompt(*, snapshot_id: str, paths: list[str]) -> str:
     return (
         "Perform the baseline static audit work unit bound to this session. "
         f"The immutable snapshot id is {snapshot_id}. "
-        "Call audit_inventory repeatedly until next_offset is null, analyze every "
+        "First call audit_threat_model_context and use its hypotheses to prioritize "
+        "review without treating them as findings. Call audit_inventory repeatedly "
+        "until next_offset is null, analyze every "
         "assigned scope using audit_search and audit_read, submit each supported "
         "candidate, then call audit_submit_coverage exactly once. Report omitted "
         "or unreadable paths as failed_paths and unresolved analysis as open_questions."
+    )
+
+
+def threat_model_prompt(*, snapshot_id: str) -> str:
+    return (
+        "Build the source-backed threat model for the work unit bound to this fresh "
+        f"session and immutable snapshot {snapshot_id}. Map actual architecture, "
+        "assets, trust boundaries, realistic attacker capabilities, security "
+        "objectives, and explicit assumptions. Use audit_inventory, audit_search, "
+        "and audit_read to verify material claims. Submit exactly one canonical "
+        "model with audit_submit_threat_model. Threat scenarios are hypotheses, "
+        "not vulnerability findings; do not perform the baseline audit."
     )
 
 
