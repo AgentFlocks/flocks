@@ -635,6 +635,47 @@ class TestBuildTools:
 
 class TestBuildSystemPrompts:
     @pytest.mark.asyncio
+    async def test_build_system_prompts_accepts_legacy_context_factories(self):
+        sandbox_mock = AsyncMock(return_value="legacy sandbox prompt")
+        channel_mock = AsyncMock(return_value="legacy channel prompt")
+        device_mock = AsyncMock(return_value="legacy device prompt")
+
+        with (
+            patch.object(
+                SessionPrompt,
+                "_is_builtin_system_subagent_session",
+                AsyncMock(return_value=False),
+            ),
+            patch(
+                "flocks.session.prompt.SystemPrompt.custom",
+                AsyncMock(return_value=[]),
+            ),
+        ):
+            prompts = await SessionPrompt.build_system_prompts(
+                session_id="ses_legacy_prompt_context",
+                session_directory="/tmp",
+                agent_name="rex",
+                agent_prompt="agent prompt",
+                provider_id="openai",
+                model_id="gpt-5",
+                tool_revision=3,
+                sandbox_prompt_factory=sandbox_mock,
+                channel_context_prompt_factory=channel_mock,
+                tool_catalog_prompt_factory=lambda: "legacy tool catalog",
+                device_asset_prompt_factory=device_mock,
+                device_revision=5,
+            )
+
+        combined = "\n\n".join(prompts)
+        assert "legacy tool catalog" in combined
+        assert "legacy device prompt" in combined
+        assert "legacy sandbox prompt" in combined
+        assert "legacy channel prompt" in combined
+        sandbox_mock.assert_awaited_once()
+        channel_mock.assert_awaited_once()
+        device_mock.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_build_system_prompts_reuses_loop_static_cache(self):
         shared_cache = {}
         session = _make_session("ses_prompts_cache")

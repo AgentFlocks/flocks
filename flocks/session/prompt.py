@@ -6,7 +6,7 @@ Based on Flocks' ported src/session/prompt.ts and src/session/system.ts
 """
 
 from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Awaitable, Callable, Dict, Any, Iterable, List, Optional, TYPE_CHECKING, Union
 from pydantic import BaseModel, Field
 import hashlib
@@ -35,7 +35,9 @@ if TYPE_CHECKING:
 # Output token maximum
 OUTPUT_TOKEN_MAX = int(os.getenv("FLOCKS_OUTPUT_TOKEN_MAX", "32000"))
 SystemPromptCache = Dict[str, Any]
-AsyncPromptLoader = Callable[[], Awaitable[Optional[str]]]
+AsyncPromptFactory = Callable[[], Awaitable[Optional[str]]]
+StringPromptFactory = Callable[[], Optional[str]]
+AsyncPromptLoader = AsyncPromptFactory
 
 
 # Prompt template directory (same structure as Flocks)
@@ -1454,12 +1456,73 @@ class SessionPrompt:
         model_id: str,
         execution_mode_prompt: Optional[str] = None,
         prompt_tool_names: Iterable[str] = (),
+        tool_revision: Optional[int] = None,
         memory_bootstrap_data: Optional[Dict[str, Any]] = None,
         static_cache: Optional[SystemPromptCache] = None,
+        sandbox_prompt_factory: Optional[AsyncPromptFactory] = None,
+        channel_context_prompt_factory: Optional[AsyncPromptFactory] = None,
+        tool_catalog_prompt_factory: Optional[StringPromptFactory] = None,
+        device_asset_prompt_factory: Optional[AsyncPromptFactory] = None,
+        device_revision: Optional[int] = None,
         turn_context: Optional[TurnPromptContext] = None,
         use_text_tool_call_mode: bool = False,
     ) -> List[str]:
-        """Compatibility API returning only the assembled prompt text."""
+        """Compatibility API returning only the assembled prompt text.
+
+        Legacy prompt factories populate missing values in ``turn_context``.
+        Explicit context values take precedence when both APIs are used.
+        """
+        legacy_context_requested = any((
+            tool_revision is not None,
+            sandbox_prompt_factory is not None,
+            channel_context_prompt_factory is not None,
+            tool_catalog_prompt_factory is not None,
+            device_asset_prompt_factory is not None,
+            device_revision is not None,
+        ))
+        if legacy_context_requested:
+            resolved_context = turn_context or TurnPromptContext()
+            minimal_prompt = resolved_context.minimal_prompt
+            if minimal_prompt is None:
+                minimal_prompt = await cls._is_builtin_system_subagent_session(
+                    session_id=session_id,
+                    agent_name=agent_name,
+                )
+
+            context_updates: Dict[str, Any] = {"minimal_prompt": minimal_prompt}
+            if resolved_context.tool_revision is None and tool_revision is not None:
+                context_updates["tool_revision"] = tool_revision
+            if resolved_context.device_revision is None and device_revision is not None:
+                context_updates["device_revision"] = device_revision
+
+            if not minimal_prompt:
+                if (
+                    resolved_context.tool_catalog is None
+                    and tool_catalog_prompt_factory is not None
+                ):
+                    context_updates["tool_catalog"] = tool_catalog_prompt_factory()
+                if (
+                    resolved_context.device_asset_hint is None
+                    and device_asset_prompt_factory is not None
+                ):
+                    context_updates["device_asset_hint"] = (
+                        await device_asset_prompt_factory()
+                    )
+                if (
+                    resolved_context.sandbox_context is None
+                    and sandbox_prompt_factory is not None
+                ):
+                    context_updates["sandbox_context"] = await sandbox_prompt_factory()
+                if (
+                    resolved_context.channel_context is None
+                    and channel_context_prompt_factory is not None
+                ):
+                    context_updates["channel_context"] = (
+                        await channel_context_prompt_factory()
+                    )
+
+            turn_context = replace(resolved_context, **context_updates)
+
         blocks = await cls.build_system_prompt_blocks(
             session_id=session_id,
             session_directory=session_directory,
